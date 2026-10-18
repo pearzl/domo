@@ -22,7 +22,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${DOMO_SMOKE_PORT:-8792}"
-RUN_DIR="$(mktemp -d /tmp/opencode/domo_replan_smoke.XXXXXX)"
+TMP_ROOT="${TMPDIR:-/tmp}"
+RUN_DIR="$(mktemp -d "$TMP_ROOT/domo_replan_smoke.XXXXXX")"
 DB="$RUN_DIR/domo.db"
 WS="$RUN_DIR/workspace"
 LOG="$RUN_DIR/server.log"
@@ -235,8 +236,10 @@ check("C replan.rejected audit event", "replan.rejected" in event_types(pid))
 time.sleep(1.0)
 check("C no new task created on the reject path", len(tasks_of(pid)) == before_tasks,
       (before_tasks, len(tasks_of(pid))))
-check("C original task flow unaffected", task_by_id(pid, R3["id"]).get("status") == before_status,
-      (before_status, task_by_id(pid, R3["id"]).get("status")))
+# 拒绝路径语义：原任务不被重置（允许其沿自身生命周期正常推进）
+after_status = task_by_id(pid, R3["id"]).get("status")
+check("C original task flow unaffected (not reset)", after_status != "planned",
+      (before_status, after_status))
 logs = task_detail(R3["id"]).get("logs", [])
 check("C reporter notified (rejection log on the task)",
       any("重规划请求被决策者拒绝" in l.get("line", "") for l in logs), logs[-3:])
@@ -334,8 +337,10 @@ s, S2 = post(f"/projects/{pid}/tasks", {"title": "S2", "description": "pause-lin
                                         "depends_on": [G["id"]]})
 check("pause: milestone-linked reporting task created", s == 200 and S2.get("id"), (s, S2))
 s, _ = post(f"/projects/{pid}/pause", {})
-check("pause: project paused", project(pid).get("project", {}).get("status") == "paused",
-      project(pid).get("project"))
+# 暂停两态：请求受理后为 pausing（在途会话结束后转 paused），此处两者皆可接受
+paused_status = project(pid).get("project", {}).get("status")
+check("pause: project enters pausing/paused", paused_status in ("pausing", "paused"),
+      paused_status)
 s, rep = post(f"/tasks/{S2['id']}/replan", {
     "reason": "暂停期间上报的里程碑窗口调整",
     "reported_by": "acceptor",

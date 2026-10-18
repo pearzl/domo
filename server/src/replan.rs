@@ -206,7 +206,7 @@ pub fn scan(state: &Arc<App>) {
         // reopen_if_completed 重新拉起（保持原有可恢复行为，避免裁定悬空）。
         match db::get_project(&conn, &d.project_id).map(|p| p.status) {
             None => continue, // project missing
-            Some(s) if s == "paused" || s == "archived" => continue, // 冻结自动流程
+            Some(s) if s == "paused" || s == "pausing" || s == "archived" => continue, // 冻结自动流程（暂停中同样冻结）
             Some(_) => {}
         }
         dispatch(state, &conn, &d);

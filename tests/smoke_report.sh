@@ -15,7 +15,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${DOMO_REPORT_SMOKE_PORT:-8798}"
-RUN_DIR="$(mktemp -d /tmp/opencode/domo_report_smoke.XXXXXX)"
+TMP_ROOT="${TMPDIR:-/tmp}"
+RUN_DIR="$(mktemp -d "$TMP_ROOT/domo_report_smoke.XXXXXX")"
 DB="$RUN_DIR/domo.db"
 WS="$RUN_DIR/workspace"
 LOG="$RUN_DIR/domo.log"

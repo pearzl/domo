@@ -20,7 +20,8 @@ if [[ "${DOMO_E2E_NO_BUILD:-0}" != "1" ]]; then
   echo "building domo-server…"
   cargo build --quiet --manifest-path "$SERVER_DIR/Cargo.toml"
 fi
-WORK="${DOMO_E2E_DIR:-/tmp/opencode/domo-milestone-e2e}"
+TMP_ROOT="${TMPDIR:-/tmp}"
+WORK="${DOMO_E2E_DIR:-$TMP_ROOT/domo-milestone-e2e}"
 PORT="${DOMO_E2E_PORT:-8791}"
 BASE="http://127.0.0.1:$PORT"
 DB="$WORK/domo.db"
