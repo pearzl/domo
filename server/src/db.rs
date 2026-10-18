@@ -1,0 +1,1167 @@
+use crate::models::*;
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde_json::Value;
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+pub fn new_id(prefix: &str) -> String {
+    let u = uuid::Uuid::new_v4().simple().to_string();
+    format!("{prefix}{}", &u[..12])
+}
+
+pub fn open(path: &str) -> Connection {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let conn = Connection::open(path).expect("open sqlite db");
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    migrate(&conn);
+    // M4：启动期三档恢复标记——没有 worker 能跨重启存活，把「中断的执行中任务」
+    // 与「第三档人工重建挂起的任务」置为待恢复（实际派发仍受项目 paused 冻结约束）。
+    crate::recovery::boot_mark(&conn);
+    conn
+}
+
+/// 测试用：在给定连接上执行与 `db::open` 相同的迁移（不含启动期恢复标记）。
+#[cfg(test)]
+pub fn migrate_for_tests(c: &Connection) {
+    migrate(c);
+}
+
+fn migrate(c: &Connection) {
+    c.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL, plan_content TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS milestones (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+            goal TEXT, effect TEXT, task_ids TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, milestone_id TEXT,
+            title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            depends_on TEXT NOT NULL DEFAULT '[]',
+            assignee_role TEXT NOT NULL DEFAULT 'executor',
+            executor_agent_id TEXT, acceptor_agent_id TEXT,
+            acceptance_required INTEGER NOT NULL DEFAULT 1,
+            acceptance_criteria TEXT, negotiation_status TEXT NOT NULL DEFAULT 'agreed',
+            negotiation_round INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'planned',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            rejection_count INTEGER NOT NULL DEFAULT 0,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            artifacts TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, adapter TEXT NOT NULL,
+            roles TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}',
+            capabilities TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'idle',
+            current_task_ids TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS inbox (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+            "type" TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'open', resolution TEXT, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+            project_id TEXT NOT NULL, task_id TEXT, "type" TEXT NOT NULL, payload TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS guidance (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+            ts INTEGER NOT NULL, line TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS decisions (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT,
+            kind TEXT NOT NULL, request TEXT NOT NULL DEFAULT '{}',
+            scope TEXT NOT NULL DEFAULT 'tactical',
+            status TEXT NOT NULL DEFAULT 'pending',
+            ruling TEXT, attempt INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, resolved_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS reports (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            content TEXT, narrative TEXT, error TEXT, path TEXT,
+            facts TEXT NOT NULL DEFAULT '{}',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            generated_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+        CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
+        CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_task ON logs(task_id);
+        CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+        CREATE INDEX IF NOT EXISTS idx_decisions_task ON decisions(task_id);
+        CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project_id);
+        "#,
+    )
+    .expect("migrate");
+
+    // M2: projects.workspace (TEXT JSON, nullable) — idempotent column add
+    add_column_if_missing(c, "projects", "workspace", "TEXT");
+    // M2.5: 项目 agent 池（JSON 数组；NULL=全部 agent）
+    add_column_if_missing(c, "projects", "agent_pool", "TEXT");
+    // M4: 项目工作区内登记的 git 仓库（JSON [{rel,main}]）
+    add_column_if_missing(c, "projects", "repos", "TEXT");
+    // M4: 任务涉及的仓库 scope（JSON rel 数组）
+    add_column_if_missing(c, "tasks", "scope_repos", "TEXT");
+
+    // M3: tasks.milestone_id (TEXT, nullable) — idempotent column add. The base
+    // CREATE TABLE above already includes it for fresh DBs; older DBs get it here.
+    add_column_if_missing(c, "tasks", "milestone_id", "TEXT");
+
+    // M3 协商：tasks.negotiation_round（已完成轮次）— 幂等列添加。
+    add_column_if_missing(c, "tasks", "negotiation_round", "INTEGER NOT NULL DEFAULT 0");
+
+    // M4 三档恢复（DESIGN §10）：中断任务的恢复状态列（幂等列添加）。
+    //   recovery_pending: 1=待走三档恢复流程（启动标记 / 档位切换时保持）
+    //   recovery_tier:    下一个要尝试的档位（native_resume | handoff）
+    //   recovery_manual:  1=第三档人工重建挂起（suspended），下一次重启重新进一轮三档
+    // M4：任务计划（执行者产出）+ 计划审查打回计数
+    add_column_if_missing(c, "tasks", "execution_plan", "TEXT");
+    add_column_if_missing(c, "tasks", "plan_rejection_count", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(c, "tasks", "recovery_pending", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(c, "tasks", "recovery_tier", "TEXT NOT NULL DEFAULT ''");
+    add_column_if_missing(c, "tasks", "recovery_manual", "INTEGER NOT NULL DEFAULT 0");
+
+    // M4：逻辑会话 -> 真实 opencode 会话 id 的持久化映射（原仅存内存，kill -9 即丢）。
+    // 执行派发（phase='execute'）在 CLI 输出里解析到真实 id 就落库，重启后可据此原生 resume。
+    c.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_map (
+            logical TEXT PRIMARY KEY,
+            real TEXT NOT NULL,
+            task_id TEXT, phase TEXT, attempt INTEGER,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_map_task ON session_map(task_id, phase, attempt);
+        "#,
+    )
+    .expect("session_map");
+
+    // M3: indexes for milestone lookups (idempotent).
+    c.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_milestones_project ON milestones(project_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
+        "#,
+    )
+    .expect("milestone indexes");
+
+    // boot recovery: no in-memory worker survives a restart; agent slots must be freed
+    c.execute_batch("UPDATE agents SET current_task_ids='[]', status='idle';")
+        .expect("boot recovery");
+
+    // M3 报告：无内存 worker 能跨重启存活，中断在 pending/generating 的报告统一置为
+    // failed（保留已有内容），由前端/API 手工重试——与「报告生成失败可重试」语义一致。
+    c.execute_batch(
+        "UPDATE reports SET status='failed', \
+         error='报告生成在进程重启时中断，可在前端或 API 手工重试', \
+         updated_at=(strftime('%s','now')*1000) WHERE status IN ('pending','generating');",
+    )
+    .expect("report boot recovery");
+}
+
+/// 数据目录：与 SQLite 同级的目录（默认 `data/`），用于落盘报告等产出。
+/// 由 `DOMO_DB` 的父目录推导，未设置时回退到 `data`。
+pub fn data_dir() -> std::path::PathBuf {
+    std::env::var("DOMO_DB")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("data"))
+}
+
+/// Idempotent column add: only ALTER when PRAGMA reports it missing. Safe to
+/// run on every boot (including against an already-migrated DB).
+fn add_column_if_missing(c: &Connection, table: &str, column: &str, decl: &str) {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut st = match c.prepare(&sql) {
+        Ok(st) => st,
+        Err(_) => return,
+    };
+    let exists = st
+        .query_map([], |r| r.get::<_, String>(1))
+        .map(|rows| rows.filter_map(|x| x.ok()).any(|n| n == column))
+        .unwrap_or(false);
+    drop(st);
+    if !exists {
+        let ddl = format!("ALTER TABLE {table} ADD COLUMN {column} {decl};");
+        c.execute_batch(&ddl)
+            .unwrap_or_else(|e| panic!("add {table}.{column} column: {e}"));
+    }
+}
+
+// ---------- row mapping ----------
+
+fn project_row(r: &Row) -> rusqlite::Result<Project> {
+    let confirmed_at: Option<i64> = r.get("confirmed_at")?;
+    let plan = confirmed_at.map(|t| Plan {
+        confirmed_at: t,
+        content: r.get("plan_content").unwrap_or(None),
+    });
+    let workspace: Option<String> = r.get("workspace")?;
+    let agent_pool: Option<String> = r.get("agent_pool").ok();
+    let agent_pool = agent_pool.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+    let repos: Vec<crate::models::RepoRef> = r
+        .get::<_, Option<String>>("repos")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    Ok(Project {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        brief: r.get("brief")?,
+        status: r.get("status")?,
+        plan,
+        workspace: workspace.and_then(|s| serde_json::from_str(&s).ok()),
+        agent_pool,
+        repos,
+        created_at: r.get("created_at")?,
+    })
+}
+
+fn task_row(r: &Row) -> rusqlite::Result<Task> {
+    let dep_s: String = r.get("depends_on")?;
+    let art_s: String = r.get("artifacts")?;
+    Ok(Task {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        milestone_id: r.get("milestone_id")?,
+        title: r.get("title")?,
+        description: r.get("description")?,
+        depends_on: serde_json::from_str(&dep_s).unwrap_or_default(),
+        assignee_role: r.get("assignee_role")?,
+        executor_agent_id: r.get("executor_agent_id")?,
+        acceptor_agent_id: r.get("acceptor_agent_id")?,
+        acceptance_required: r.get::<_, i64>("acceptance_required")? != 0,
+        acceptance_criteria: r.get("acceptance_criteria")?,
+        negotiation_status: r.get("negotiation_status")?,
+        execution_plan: r.get("execution_plan").ok().flatten(),
+        plan_rejection_count: r.get("plan_rejection_count").ok().unwrap_or(0),
+        scope_repos: r
+            .get::<_, Option<String>>("scope_repos")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default(),
+        negotiation_round: r.get("negotiation_round").unwrap_or(0),
+        status: r.get("status")?,
+        attempt: r.get("attempt")?,
+        rejection_count: r.get("rejection_count")?,
+        failure_count: r.get("failure_count")?,
+        artifacts: serde_json::from_str(&art_s).unwrap_or_default(),
+        created_at: r.get("created_at")?,
+    })
+}
+
+fn milestone_row(r: &Row) -> rusqlite::Result<Milestone> {
+    let task_ids_s: String = r.get("task_ids")?;
+    Ok(Milestone {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        name: r.get("name")?,
+        goal: r.get("goal")?,
+        effect: r.get("effect")?,
+        task_ids: serde_json::from_str(&task_ids_s).unwrap_or_default(),
+        status: r.get("status")?,
+    })
+}
+
+pub fn agent_row(r: &Row) -> rusqlite::Result<Agent> {
+    let roles_s: String = r.get("roles")?;
+    let cfg_s: String = r.get("config")?;
+    let cap_s: String = r.get("capabilities")?;
+    let occ_s: String = r.get("current_task_ids")?;
+    let mut occ: Vec<String> = serde_json::from_str(&occ_s).unwrap_or_default();
+    occ.retain(|t| !t.is_empty());
+    let roles: Vec<String> = serde_json::from_str(&roles_s).unwrap_or_default();
+    let status = if occ.is_empty() { "idle".to_string() } else { "busy".to_string() };
+    Ok(Agent {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        adapter: r.get("adapter")?,
+        roles,
+        config: serde_json::from_str(&cfg_s).unwrap_or_else(|_| serde_json::json!({})),
+        capabilities: serde_json::from_str(&cap_s).unwrap_or_default(),
+        status,
+        current_task_ids: occ,
+    })
+}
+
+fn inbox_row(r: &Row) -> rusqlite::Result<InboxItem> {
+    let res_s: Option<String> = r.get("resolution")?;
+    let payload_s: String = r.get("payload")?;
+    Ok(InboxItem {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        kind: r.get("type")?,
+        payload: serde_json::from_str(&payload_s).unwrap_or_else(|_| serde_json::json!({})),
+        status: r.get("status")?,
+        resolution: res_s.and_then(|s| serde_json::from_str(&s).ok()),
+        created_at: r.get("created_at")?,
+    })
+}
+
+fn event_row(r: &Row) -> rusqlite::Result<Event> {
+    let p: String = r.get("payload")?;
+    Ok(Event {
+        id: r.get("id")?,
+        ts: r.get("ts")?,
+        project_id: r.get("project_id")?,
+        task_id: r.get("task_id")?,
+        kind: r.get("type")?,
+        payload: serde_json::from_str(&p).unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
+fn decision_row(r: &Row) -> rusqlite::Result<Decision> {
+    let req: String = r.get("request")?;
+    let ruling: Option<String> = r.get("ruling")?;
+    Ok(Decision {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        task_id: r.get("task_id")?,
+        kind: r.get("kind")?,
+        request: serde_json::from_str(&req).unwrap_or_else(|_| serde_json::json!({})),
+        scope: r.get("scope")?,
+        status: r.get("status")?,
+        ruling: ruling.and_then(|s| serde_json::from_str(&s).ok()),
+        attempt: r.get("attempt")?,
+        created_at: r.get("created_at")?,
+        resolved_at: r.get("resolved_at")?,
+    })
+}
+
+fn report_row(r: &Row) -> rusqlite::Result<Report> {
+    let facts_s: String = r.get("facts").unwrap_or_else(|_| "{}".into());
+    Ok(Report {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        status: r.get("status")?,
+        content: r.get("content")?,
+        narrative: r.get("narrative")?,
+        error: r.get("error")?,
+        path: r.get("path")?,
+        facts: serde_json::from_str(&facts_s).unwrap_or_else(|_| serde_json::json!({})),
+        attempts: r.get("attempts")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+        generated_at: r.get("generated_at")?,
+    })
+}
+
+// ---------- read ----------
+
+pub fn get_project(c: &Connection, id: &str) -> Option<Project> {
+    c.query_row("SELECT * FROM projects WHERE id=?1", params![id], project_row).optional().ok().flatten()
+}
+pub fn list_projects(c: &Connection) -> Vec<Project> {
+    let mut st = c.prepare("SELECT * FROM projects ORDER BY created_at, id").unwrap();
+    let v = st.query_map([], project_row).unwrap().filter_map(|x| x.ok()).collect();
+    v
+}
+pub fn list_tasks(c: &Connection, project_id: &str) -> Vec<Task> {
+    let mut st = c.prepare("SELECT * FROM tasks WHERE project_id=?1 ORDER BY created_at, id").unwrap();
+    let v = st.query_map(params![project_id], task_row).unwrap().filter_map(|x| x.ok()).collect();
+    v
+}
+pub fn list_milestones(c: &Connection, project_id: &str) -> Vec<Milestone> {
+    let mut st = c.prepare("SELECT * FROM milestones WHERE project_id=?1 ORDER BY rowid").unwrap();
+    let v = st.query_map(params![project_id], milestone_row).unwrap().filter_map(|x| x.ok()).collect();
+    v
+}
+pub fn get_milestone(c: &Connection, id: &str) -> Option<Milestone> {
+    c.query_row("SELECT * FROM milestones WHERE id=?1", params![id], milestone_row).optional().ok().flatten()
+}
+/// Tasks belonging to a milestone (authoritative membership: tasks.milestone_id).
+pub fn tasks_of_milestone(c: &Connection, project_id: &str, milestone_id: &str) -> Vec<Task> {
+    list_tasks(c, project_id)
+        .into_iter()
+        .filter(|t| t.milestone_id.as_deref() == Some(milestone_id))
+        .collect()
+}
+/// An open milestone_gate inbox item for a milestone, if any (recovery/idempotency).
+pub fn open_gate_item(c: &Connection, milestone_id: &str) -> Option<InboxItem> {
+    list_inbox(c)
+        .into_iter()
+        .find(|i| i.kind == "milestone_gate" && i.status == "open"
+            && i.payload.get("milestone_id").and_then(|v| v.as_str()) == Some(milestone_id))
+}
+
+/// M3: an open milestone-window (`replan` kind with payload.kind="milestone_window")
+/// inbox item for a milestone, if any. Used to keep the replanning window item
+/// idempotent across reloads / repeated gate rejections.
+pub fn open_window_item(c: &Connection, milestone_id: &str) -> Option<InboxItem> {
+    list_inbox(c)
+        .into_iter()
+        .find(|i| i.kind == "replan" && i.status == "open"
+            && i.payload.get("kind").and_then(|v| v.as_str()) == Some("milestone_window")
+            && i.payload.get("milestone_id").and_then(|v| v.as_str()) == Some(milestone_id))
+}
+
+/// All open milestone-window inbox items of a project (used when re-arming).
+#[allow(dead_code)]
+pub fn open_window_items(c: &Connection, project_id: &str) -> Vec<InboxItem> {
+    list_inbox(c)
+        .into_iter()
+        .filter(|i| i.kind == "replan" && i.status == "open"
+            && i.project_id == project_id
+            && i.payload.get("kind").and_then(|v| v.as_str()) == Some("milestone_window"))
+        .collect()
+}
+
+/// Whether a milestone ever had a replanning window opened (open *or* resolved),
+/// regardless of inbox status. Used to gate the `failed → awaiting_confirm`
+/// re-entry so a stale `failed` milestone without any window is left frozen.
+pub fn has_window_item(c: &Connection, milestone_id: &str) -> bool {
+    list_inbox(c).into_iter().any(|i| {
+        i.kind == "replan"
+            && i.payload.get("kind").and_then(|v| v.as_str()) == Some("milestone_window")
+            && i.payload.get("milestone_id").and_then(|v| v.as_str()) == Some(milestone_id)
+    })
+}
+pub fn get_task(c: &Connection, id: &str) -> Option<Task> {
+    c.query_row("SELECT * FROM tasks WHERE id=?1", params![id], task_row).optional().ok().flatten()
+}
+pub fn list_agents(c: &Connection) -> Vec<Agent> {
+    // 软删除：status='deleted' 的实例仅在审计快照中可见，不进运行池
+    let mut st = c.prepare("SELECT * FROM agents WHERE status!='deleted' ORDER BY rowid").unwrap();
+    let v = st.query_map([], agent_row).unwrap().filter_map(|x| x.ok()).collect();
+    v
+}
+pub fn get_agent(c: &Connection, id: &str) -> Option<Agent> {
+    c.query_row("SELECT * FROM agents WHERE id=?1", params![id], agent_row).optional().ok().flatten()
+}
+pub fn list_inbox(c: &Connection) -> Vec<InboxItem> {
+    let mut st = c.prepare("SELECT * FROM inbox ORDER BY (status='open') DESC, created_at, id").unwrap();
+    let v = st.query_map([], inbox_row).unwrap().filter_map(|x| x.ok()).collect();
+    v
+}
+pub fn get_inbox(c: &Connection, id: &str) -> Option<InboxItem> {
+    c.query_row("SELECT * FROM inbox WHERE id=?1", params![id], inbox_row).optional().ok().flatten()
+}
+pub fn list_events(c: &Connection, project_id: Option<&str>, task_id: Option<&str>) -> Vec<Event> {
+    let (sql, params_): (String, Vec<String>) = match (project_id, task_id) {
+        (Some(p), Some(t)) => ("SELECT * FROM events WHERE project_id=?1 AND task_id=?2 ORDER BY id".to_string(), vec![p.into(), t.into()]),
+        (Some(p), None) => ("SELECT * FROM events WHERE project_id=?1 ORDER BY id".to_string(), vec![p.into()]),
+        (None, Some(t)) => ("SELECT * FROM events WHERE task_id=?1 ORDER BY id".to_string(), vec![t.into()]),
+        (None, None) => ("SELECT * FROM events ORDER BY id".to_string(), vec![]),
+    };
+    let mut st = c.prepare(&sql).unwrap();
+    let iter = st.query_map(rusqlite::params_from_iter(params_), event_row).unwrap();
+    iter.filter_map(|x| x.ok()).collect()
+}
+
+/// 审计视图专用：排序方向 + 分页 + 时间范围 + 类型过滤，返回 (本页事件, 符合条件的总数)。
+pub fn list_events_paged(
+    c: &Connection,
+    project_id: Option<&str>,
+    type_filter: &[String],
+    type_prefixes: &[String],
+    from: Option<i64>,
+    to: Option<i64>,
+    desc: bool,
+    limit: i64,
+    offset: i64,
+) -> (Vec<Event>, i64) {
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params_: Vec<String> = Vec::new();
+    if let Some(p) = project_id {
+        params_.push(p.into());
+        where_parts.push(format!("project_id=?{}", params_.len()));
+    }
+    if !type_filter.is_empty() {
+        for t in type_filter {
+            params_.push(t.clone());
+        }
+        let idx: Vec<String> = (params_.len() - type_filter.len() + 1..=params_.len())
+            .map(|i| format!("?{i}"))
+            .collect();
+        where_parts.push(format!("type IN ({})", idx.join(",")));
+    }
+    // 类型前缀组内部 OR、与其它条件 AND（如 project. OR agent.）
+    let prefix_sql = {
+        let mut parts: Vec<String> = Vec::new();
+        for pre in type_prefixes {
+            if pre.is_empty() { continue; }
+            params_.push(format!("{pre}%"));
+            parts.push(format!("type LIKE ?{}", params_.len()));
+        }
+        if parts.is_empty() { String::new() } else { format!("({})", parts.join(" OR ")) }
+    };
+    if !prefix_sql.is_empty() {
+        where_parts.push(prefix_sql);
+    }
+    if let Some(f) = from {
+        params_.push(f.to_string());
+        where_parts.push(format!("ts>=?{}", params_.len()));
+    }
+    if let Some(t) = to {
+        params_.push(t.to_string());
+        where_parts.push(format!("ts<=?{}", params_.len()));
+    }
+    let where_sql = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+    let order_sql = if desc { "DESC" } else { "ASC" };
+    let total: i64 = {
+        let sql = format!("SELECT count(*) FROM events{where_sql}");
+        c.query_row(&sql, rusqlite::params_from_iter(&params_), |r| r.get(0)).unwrap_or(0)
+    };
+    let sql = format!(
+        "SELECT * FROM events{where_sql} ORDER BY id {order_sql} LIMIT {limit} OFFSET {offset}"
+    );
+    let mut st = c.prepare(&sql).unwrap();
+    let iter = st.query_map(rusqlite::params_from_iter(&params_), event_row).unwrap();
+    (iter.filter_map(|x| x.ok()).collect(), total)
+}
+pub fn task_logs(c: &Connection, task_id: &str) -> Vec<LogLine> {
+    let mut st = c
+        .prepare("SELECT id, task_id, ts, line FROM logs WHERE task_id=?1 ORDER BY id")
+        .unwrap();
+    st.query_map(params![task_id], |r| {
+        Ok(LogLine { id: r.get(0)?, task_id: r.get(1)?, ts: r.get(2)?, line: r.get(3)? })
+    })
+    .unwrap()
+    .flatten()
+    .collect()
+}
+pub fn list_guidance(c: &Connection, task_id: &str) -> Vec<Guidance> {
+    let mut st = c.prepare("SELECT id, task_id, text, created_at FROM guidance WHERE task_id=?1 ORDER BY id").unwrap();
+    st.query_map(params![task_id], |r| {
+        Ok(Guidance { id: r.get(0)?, task_id: r.get(1)?, text: r.get(2)?, created_at: r.get(3)? })
+    })
+    .unwrap()
+    .flatten()
+    .collect()
+}
+pub fn latest_guidance(c: &Connection, task_id: &str) -> Option<String> {
+    c.query_row(
+        "SELECT text FROM guidance WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+        params![task_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+pub fn inbox_open_count(c: &Connection, project_id: &str) -> i64 {
+    c.query_row(
+        "SELECT COUNT(*) FROM inbox WHERE project_id=?1 AND status='open'",
+        params![project_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+// ---------- reports (M3 项目总结报告) ----------
+
+/// 某项目的总结报告（每项目至多一份）。
+pub fn get_report(c: &Connection, project_id: &str) -> Option<Report> {
+    c.query_row("SELECT * FROM reports WHERE project_id=?1", params![project_id], report_row)
+        .optional()
+        .ok()
+        .flatten()
+}
+
+/// Upsert by `project_id`（报告 id 每项目稳定）。报告内容/事实整行覆盖写。
+pub fn save_report(c: &Connection, rep: &Report) {
+    c.execute(
+        "INSERT INTO reports (id,project_id,status,content,narrative,error,path,facts,attempts,created_at,updated_at,generated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(project_id) DO UPDATE SET
+            status=excluded.status, content=excluded.content, narrative=excluded.narrative,
+            error=excluded.error, path=excluded.path, facts=excluded.facts,
+            attempts=excluded.attempts, updated_at=excluded.updated_at,
+            generated_at=excluded.generated_at",
+        params![
+            rep.id, rep.project_id, rep.status, rep.content, rep.narrative, rep.error,
+            rep.path, jstring(&rep.facts), rep.attempts, rep.created_at, rep.updated_at,
+            rep.generated_at
+        ],
+    )
+    .expect("save report");
+}
+
+pub fn get_decision(c: &Connection, id: &str) -> Option<Decision> {
+    c.query_row("SELECT * FROM decisions WHERE id=?1", params![id], decision_row)
+        .optional()
+        .ok()
+        .flatten()
+}
+pub fn list_decisions(c: &Connection, project_id: Option<&str>) -> Vec<Decision> {
+    match project_id {
+        Some(p) => {
+            let mut st = c
+                .prepare("SELECT * FROM decisions WHERE project_id=?1 ORDER BY created_at, id")
+                .unwrap();
+            st.query_map(params![p], decision_row)
+                .unwrap()
+                .filter_map(|x| x.ok())
+                .collect()
+        }
+        None => {
+            let mut st = c.prepare("SELECT * FROM decisions ORDER BY created_at, id").unwrap();
+            st.query_map([], decision_row).unwrap().filter_map(|x| x.ok()).collect()
+        }
+    }
+}
+/// 某任务某类裁定请求（取最近一条，用于闸门判断与幂等保护）
+pub fn task_decision(c: &Connection, task_id: &str, kind: &str) -> Option<Decision> {
+    c.query_row(
+        "SELECT * FROM decisions WHERE task_id=?1 AND kind=?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+        params![task_id, kind],
+        decision_row,
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+/// 决策者实例解析：全局 agent 池中持有 decision_maker 角色的实例
+pub fn find_decision_maker(c: &Connection) -> Option<Agent> {
+    list_agents(c).into_iter().find(|a| a.roles.iter().any(|r| r == "decision_maker"))
+}
+
+// ---------- write ----------
+
+pub fn jstring(v: &Value) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
+}
+
+// ---------- milestones (M3) ----------
+
+pub fn insert_milestone(c: &Connection, m: &Milestone) {
+    c.execute(
+        "INSERT INTO milestones (id,project_id,name,goal,effect,task_ids,status) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            m.id, m.project_id, m.name, m.goal, m.effect,
+            jstring(&Value::Array(m.task_ids.iter().map(|t| Value::String(t.clone())).collect())),
+            m.status
+        ],
+    )
+    .expect("insert milestone");
+}
+
+pub fn update_milestone(c: &Connection, m: &Milestone) {
+    let _ = c.execute(
+        "UPDATE milestones SET name=?2, goal=?3, effect=?4, task_ids=?5 WHERE id=?1",
+        params![
+            m.id, m.name, m.goal, m.effect,
+            jstring(&Value::Array(m.task_ids.iter().map(|t| Value::String(t.clone())).collect()))
+        ],
+    );
+}
+
+pub fn set_milestone_status(c: &Connection, id: &str, status: &str) {
+    let _ = c.execute("UPDATE milestones SET status=?2 WHERE id=?1", params![id, status]);
+}
+
+/// Point a task at a milestone (or clear it) — the association source of truth.
+pub fn set_task_milestone(c: &Connection, task_id: &str, milestone_id: Option<&str>) {
+    let _ = c.execute("UPDATE tasks SET milestone_id=?2 WHERE id=?1", params![task_id, milestone_id]);
+}
+
+/// M4：写入任务计划（执行者产出）。
+pub fn set_task_plan(c: &Connection, task_id: &str, plan: Option<&str>) {
+    let _ = c.execute("UPDATE tasks SET execution_plan=?2 WHERE id=?1", params![task_id, plan]);
+}
+
+/// M4：计划审查打回计数。
+pub fn set_plan_rejection_count(c: &Connection, task_id: &str, n: i64) {
+    let _ = c.execute("UPDATE tasks SET plan_rejection_count=?2 WHERE id=?1", params![task_id, n]);
+}
+
+/// M3 协商：更新协商状态 / 已完成轮次（可选写入验收标准）。
+#[allow(dead_code)] // M4 协商退场
+pub fn set_task_negotiation(
+    c: &Connection,
+    task_id: &str,
+    status: &str,
+    round: i64,
+    criteria: Option<&str>,
+) {
+    match criteria {
+        Some(v) => {
+            let _ = c.execute(
+                "UPDATE tasks SET negotiation_status=?2, negotiation_round=?3, acceptance_criteria=?4 WHERE id=?1",
+                params![task_id, status, round, v],
+            );
+        }
+        None => {
+            let _ = c.execute(
+                "UPDATE tasks SET negotiation_status=?2, negotiation_round=?3 WHERE id=?1",
+                params![task_id, status, round],
+            );
+        }
+    }
+}
+
+/// Recompute each milestone's stored task_ids from tasks.milestone_id. Keeping
+/// the derived list persisted makes the model self-describing and the migration
+/// idempotent (calling it twice is a no-op).
+pub fn sync_milestone_task_ids(c: &Connection, project_id: &str) {
+    let tasks = list_tasks(c, project_id);
+    for m in list_milestones(c, project_id) {
+        let ids: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.milestone_id.as_deref() == Some(m.id.as_str()))
+            .map(|t| t.id.clone())
+            .collect();
+        if ids != m.task_ids {
+            let _ = c.execute(
+                "UPDATE milestones SET task_ids=?2 WHERE id=?1",
+                params![m.id, jstring(&Value::Array(ids.into_iter().map(Value::String).collect()))],
+            );
+        }
+    }
+}
+
+/// M2: persist the project workspace spec (None clears it).
+#[allow(dead_code)]
+pub fn set_project_workspace(c: &Connection, id: &str, ws: Option<&Value>) {
+    let s = ws.map(|v| v.to_string());
+    let _ = c.execute("UPDATE projects SET workspace=?2 WHERE id=?1", params![id, s]);
+}
+
+/// Effective agent working directory for a project (DESIGN §13):
+/// local → the configured absolute path; git → data/workspaces/<project_id>.
+pub fn project_workdir(_c: &Connection, p: &Project) -> Option<std::path::PathBuf> {
+    let w = p.workspace.as_ref()?;
+    match w.get("kind").and_then(|k| k.as_str())? {
+        "local" => Some(std::path::PathBuf::from(w.get("path")?.as_str()?)),
+        "git" => Some(std::path::PathBuf::from(format!("data/workspaces/{}", p.id))),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+pub fn insert_agent(c: &Connection, a: &Agent) {
+    c.execute(
+        "INSERT INTO agents (id,name,adapter,roles,config,capabilities,status,current_task_ids) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            a.id, a.name, a.adapter,
+            serde_json::to_string(&a.roles).unwrap(),
+            serde_json::to_string(&a.config).unwrap(),
+            serde_json::to_string(&a.capabilities).unwrap(),
+            a.status,
+            serde_json::to_string(&a.current_task_ids).unwrap()
+        ],
+    ).unwrap();
+}
+
+pub fn insert_decision(c: &Connection, d: &Decision) {
+    c.execute(
+        "INSERT INTO decisions (id, project_id, task_id, kind, request, scope, status, ruling, attempt, created_at, resolved_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            d.id, d.project_id, d.task_id, d.kind,
+            d.request.to_string(), d.scope, d.status,
+            d.ruling.as_ref().map(|v| v.to_string()),
+            d.attempt, d.created_at, d.resolved_at
+        ],
+    )
+    .expect("insert decision");
+}
+
+pub fn occupancy_add(c: &Connection, agent_id: &str, task_id: &str) {
+    if let Some(mut a) = get_agent(c, agent_id) {
+        if !a.current_task_ids.iter().any(|t| t == task_id) {
+            a.current_task_ids.push(task_id.to_string());
+            a.status = "busy".into();
+            let _ = c.execute(
+                "UPDATE agents SET current_task_ids=?2, status=?3 WHERE id=?1",
+                params![agent_id, serde_json::to_string(&a.current_task_ids).unwrap(), "busy"],
+            );
+        }
+    }
+}
+
+pub fn occupancy_remove(c: &Connection, agent_id: &str, task_id: &str) {
+    if let Some(mut a) = get_agent(c, agent_id) {
+        a.current_task_ids.retain(|t| t != task_id);
+        let status = if a.current_task_ids.is_empty() { "idle" } else { "busy" };
+        let _ = c.execute(
+            "UPDATE agents SET current_task_ids=?2, status=?3 WHERE id=?1",
+            params![agent_id, serde_json::to_string(&a.current_task_ids).unwrap(), status],
+        );
+    }
+}
+
+#[allow(dead_code)]
+pub fn occupancy_clear_task(c: &Connection, agent_id: &str, task_id: &str) {
+    occupancy_remove(c, agent_id, task_id)
+}
+
+pub fn agent_free(c: &Connection, agent_id: &str) -> bool {
+    match get_agent(c, agent_id) {
+        Some(a) => {
+            let cap = a.capabilities.max_parallel.max(1);
+            (a.current_task_ids.len() as i64) < cap
+        }
+        None => false,
+    }
+}
+
+// ---------- M4 三档恢复（DESIGN §10）：恢复状态 + 真实会话 id 持久化 ----------
+
+/// 任务的三档恢复状态（tasks.recovery_* 列）。
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryState {
+    /// 1=待走三档恢复（启动标记 / 档位切换期间保持）
+    pub pending: bool,
+    /// 下一个要尝试的档位：native_resume（默认）| handoff
+    pub tier: String,
+    /// 1=第三档人工重建挂起（suspended），下次重启重新进一轮三档
+    pub manual: bool,
+}
+
+pub fn recovery_state(c: &Connection, task_id: &str) -> RecoveryState {
+    c.query_row(
+        "SELECT recovery_pending, recovery_tier, recovery_manual FROM tasks WHERE id=?1",
+        params![task_id],
+        |r| {
+            Ok(RecoveryState {
+                pending: r.get::<_, i64>(0)? != 0,
+                tier: r.get::<_, String>(1).unwrap_or_default(),
+                manual: r.get::<_, i64>(2)? != 0,
+            })
+        },
+    )
+    .unwrap_or_default()
+}
+
+/// 更新恢复状态（任一字段为 None 表示不改）。
+pub fn recovery_set(
+    c: &Connection,
+    task_id: &str,
+    pending: Option<bool>,
+    tier: Option<&str>,
+    manual: Option<bool>,
+) {
+    let mut sets: Vec<String> = Vec::new();
+    if let Some(p) = pending {
+        sets.push(format!("recovery_pending={}", p as i64));
+    }
+    if let Some(t) = tier {
+        sets.push(format!("recovery_tier='{}'", t.replace('\'', "\'\'")));
+    }
+    if let Some(m) = manual {
+        sets.push(format!("recovery_manual={}", m as i64));
+    }
+    if sets.is_empty() {
+        return;
+    }
+    let sql = format!("UPDATE tasks SET {} WHERE id=?1", sets.join(", "));
+    let _ = c.execute(&sql, params![task_id]);
+}
+
+/// 逻辑会话 → 真实 opencode 会话 id 持久化（同一 logical 后写覆盖，保留最新一次）。
+pub fn session_put(c: &Connection, logical: &str, real: &str, task_id: Option<&str>, phase: Option<&str>, attempt: Option<i64>) {
+    let _ = c.execute(
+        "INSERT INTO session_map (logical, real, task_id, phase, attempt, updated_at) VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(logical) DO UPDATE SET real=excluded.real, task_id=excluded.task_id,
+            phase=excluded.phase, attempt=excluded.attempt, updated_at=excluded.updated_at",
+        params![logical, real, task_id, phase, attempt, now()],
+    );
+}
+
+/// 逻辑会话对应的真实 opencode 会话 id（内存优先由调用方处理，这里是跨重启的事实源）。
+#[allow(dead_code)]
+pub fn session_get(c: &Connection, logical: &str) -> Option<String> {
+    c.query_row(
+        "SELECT real FROM session_map WHERE logical=?1",
+        params![logical],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// 某任务某次执行尝试最近一次使用的真实会话 id（三档恢复·第一档的 resume 候选）。
+/// handoff 轮次也会写入同一 (task, attempt)，因此取 updated_at 最新的一行。
+pub fn exec_resume_session(c: &Connection, task_id: &str, attempt: i64) -> Option<String> {
+    c.query_row(
+        "SELECT real FROM session_map WHERE task_id=?1 AND phase='execute' AND attempt=?2
+         ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+        params![task_id, attempt],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Cycle check: would `task_id` (existing task being edited, or a brand-new task
+/// id) depending on `new_deps` introduce a cycle?
+///
+/// The edge direction is "dependency must complete before dependent":
+/// `x -> y` means `y.depends_on` contains `x`. Adding `task_id` edges
+/// `new_deps -> task_id` creates a cycle iff `task_id` is reachable from one of
+/// `new_deps` by following each node's own `depends_on` list (i.e. `task_id` is
+/// already a (transitive) dependency of a new dependency). `task_id`'s own
+/// outgoing edges are replaced by `new_deps` for the check.
+pub fn deps_introduce_cycle(c: &Connection, project_id: &str, task_id: Option<&str>, new_deps: &[String]) -> bool {
+    let tasks = list_tasks(c, project_id);
+    let mut deps_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for t in &tasks {
+        if task_id == Some(t.id.as_str()) {
+            continue; // superseded by new_deps below
+        }
+        deps_map.insert(t.id.clone(), t.depends_on.clone());
+    }
+    if let Some(id) = task_id {
+        deps_map.insert(id.to_string(), new_deps.to_vec());
+    }
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut stack: Vec<String> = new_deps.to_vec();
+    while let Some(n) = stack.pop() {
+        if task_id == Some(n.as_str()) {
+            return true;
+        }
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        if let Some(next) = deps_map.get(&n) {
+            stack.extend(next.clone());
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_has_column(c: &Connection, table: &str, column: &str) -> bool {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut st = c.prepare(&sql).unwrap();
+        let rows: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .collect();
+        rows.iter().any(|n| n == column)
+    }
+
+    fn seed_project(c: &Connection, id: &str) {
+        c.execute(
+            "INSERT INTO projects (id,name,brief,status,plan_content,confirmed_at,created_at) VALUES (?1,'p','',?2,NULL,NULL,1)",
+            params![id, "running"],
+        ).unwrap();
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        migrate(&c); // a second boot must not error
+        migrate(&c);
+        assert!(table_has_column(&c, "tasks", "milestone_id"));
+        assert!(table_has_column(&c, "projects", "workspace"));
+    }
+
+    #[test]
+    fn legacy_schema_gains_milestone_column() {
+        let c = Connection::open_in_memory().unwrap();
+        // pre-M3 tasks table without milestone_id
+        c.execute_batch(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL);",
+        ).unwrap();
+        migrate(&c);
+        assert!(table_has_column(&c, "tasks", "milestone_id"));
+        migrate(&c); // idempotent repeat
+        // milestones table exists and is queryable
+        assert!(list_milestones(&c, "prj_x").is_empty());
+    }
+
+    #[test]
+    fn negotiation_round_column_and_persistence() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        migrate(&c); // idempotent: negotiation_round column add must not error twice
+        assert!(table_has_column(&c, "tasks", "negotiation_round"));
+        seed_project(&c, "prj1");
+        c.execute(
+            "INSERT INTO tasks (id,project_id,title,acceptance_required,acceptance_criteria,negotiation_status,negotiation_round,status,created_at)
+             VALUES ('t1','prj1','a',1,'draft criteria','pending',0,'planned',1)",
+            [],
+        ).unwrap();
+        let t = get_task(&c, "t1").unwrap();
+        assert_eq!(t.negotiation_status, "pending");
+        assert_eq!(t.negotiation_round, 0);
+
+        // rounds/status survive a "restart" (state lives in the DB, not memory)
+        set_task_negotiation(&c, "t1", "pending", 2, None);
+        set_task_negotiation(&c, "t1", "agreed", 2, Some("agreed criteria"));
+        let t = get_task(&c, "t1").unwrap();
+        assert_eq!(t.negotiation_status, "agreed");
+        assert_eq!(t.negotiation_round, 2);
+        assert_eq!(t.acceptance_criteria.as_deref(), Some("agreed criteria"));
+    }
+
+    #[test]
+    fn milestone_roundtrip_and_task_sync() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj1");
+        c.execute_batch(
+            "INSERT INTO tasks (id,project_id,milestone_id,title,created_at) VALUES ('t1','prj1','mst1','a',1);
+             INSERT INTO tasks (id,project_id,milestone_id,title,created_at) VALUES ('t2','prj1',NULL,'b',2);
+             INSERT INTO tasks (id,project_id,milestone_id,title,created_at) VALUES ('t3','prj1','mst1','c',3);",
+        ).unwrap();
+        let m = Milestone {
+            id: "mst1".into(),
+            project_id: "prj1".into(),
+            name: "M1".into(),
+            goal: Some("g".into()),
+            effect: Some("e".into()),
+            task_ids: vec![],
+            status: "pending".into(),
+        };
+        insert_milestone(&c, &m);
+
+        sync_milestone_task_ids(&c, "prj1");
+        let got = get_milestone(&c, "mst1").unwrap();
+        assert_eq!(got.task_ids, vec!["t1".to_string(), "t3".to_string()]);
+        assert_eq!(got.goal.as_deref(), Some("g"));
+
+        // sync is idempotent
+        sync_milestone_task_ids(&c, "prj1");
+        assert_eq!(get_milestone(&c, "mst1").unwrap().task_ids.len(), 2);
+
+        // membership is derived from tasks.milestone_id
+        let members = tasks_of_milestone(&c, "prj1", "mst1");
+        assert_eq!(members.len(), 2);
+
+        set_task_milestone(&c, "t2", Some("mst1"));
+        sync_milestone_task_ids(&c, "prj1");
+        assert_eq!(get_milestone(&c, "mst1").unwrap().task_ids.len(), 3);
+    }
+
+    #[test]
+    fn open_gate_item_finds_only_open_milestone_gate() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj1");
+        c.execute(
+            "INSERT INTO inbox (id,project_id,\"type\",payload,status,resolution,created_at) VALUES ('inb1','prj1','milestone_gate','{\"milestone_id\":\"mst1\"}','open',NULL,1)",
+            [],
+        ).unwrap();
+        assert!(open_gate_item(&c, "mst1").is_some());
+        c.execute("UPDATE inbox SET status='resolved' WHERE id='inb1'", []).unwrap();
+        assert!(open_gate_item(&c, "mst1").is_none());
+    }
+
+    fn seed_tasks(c: &Connection, rows: &[(&str, &[&str])]) {
+        for (id, deps) in rows {
+            let deps_json = serde_json::to_string(&deps.to_vec()).unwrap();
+            c.execute(
+                "INSERT INTO tasks (id,project_id,title,depends_on,created_at) VALUES (?1,'prj1',?1,?2,1)",
+                params![id, deps_json],
+            ).unwrap();
+        }
+    }
+
+    #[test]
+    fn cycle_check_detects_direct_two_cycle() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj1");
+        seed_tasks(&c, &[("a", &[]), ("b", &["a"])]);
+        // b depends on a already; making a depend on b closes a 2-cycle
+        assert!(deps_introduce_cycle(&c, "prj1", Some("a"), &["b".into()]));
+        // the same-batch variant (b created in this batch, a edited to depend on b)
+        assert!(deps_introduce_cycle(&c, "prj1", Some("a"), &["c".into(), "b".into()]));
+        // a sensible edge (a depends on nothing new) is not a cycle
+        assert!(!deps_introduce_cycle(&c, "prj1", Some("b"), &[]));
+    }
+
+    #[test]
+    fn cycle_check_detects_transitive_cycle() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj1");
+        seed_tasks(&c, &[("a", &[]), ("b", &["a"]), ("c", &["b"])]);
+        // c -> b -> a; making a depend on c closes the loop
+        assert!(deps_introduce_cycle(&c, "prj1", Some("a"), &["c".into()]));
+        // a brand-new task id can never be depended on yet -> no cycle
+        assert!(!deps_introduce_cycle(&c, "prj1", Some("newid"), &["a".into(), "c".into()]));
+        assert!(!deps_introduce_cycle(&c, "prj1", None, &["a".into()]));
+    }
+
+    #[test]
+    fn open_window_item_matches_only_milestone_window_replan() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj1");
+        c.execute(
+            "INSERT INTO inbox (id,project_id,\"type\",payload,status,resolution,created_at) VALUES
+             ('inb_gate','prj1','milestone_gate','{\"milestone_id\":\"mst1\"}','open',NULL,1),
+             ('inb_plain','prj1','replan','{\"detail\":\"x\"}','open',NULL,2),
+             ('inb_win','prj1','replan','{\"kind\":\"milestone_window\",\"milestone_id\":\"mst1\"}','open',NULL,3)",
+            [],
+        ).unwrap();
+        assert_eq!(open_window_item(&c, "mst1").map(|i| i.id), Some("inb_win".into()));
+        assert_eq!(open_window_items(&c, "prj1").len(), 1);
+        assert!(open_window_item(&c, "mst2").is_none());
+
+        // has_window_item: true for open *and* resolved windows, false otherwise.
+        assert!(has_window_item(&c, "mst1"));
+        assert!(!has_window_item(&c, "mst2"));
+        c.execute("UPDATE inbox SET status='resolved' WHERE id='inb_win'", []).unwrap();
+        assert!(open_window_item(&c, "mst1").is_none(), "resolved window is no longer open");
+        assert!(has_window_item(&c, "mst1"), "resolved window still counts as worked");
+    }
+}
+
+/// M2.5: 设置项目 agent 池（None=全部 agent）。
+pub fn set_project_agent_pool(c: &Connection, id: &str, pool: Option<&[String]>) {
+    let s = pool.map(|p| serde_json::to_string(p).unwrap_or_default());
+    let _ = c.execute("UPDATE projects SET agent_pool=?2 WHERE id=?1", params![id, s]);
+}
+
+/// M4：写入项目工作区登记的仓库列表。
+pub fn set_project_repos(c: &Connection, id: &str, repos: &[crate::models::RepoRef]) {
+    let _ = c.execute(
+        "UPDATE projects SET repos=?2 WHERE id=?1",
+        params![id, serde_json::to_string(repos).unwrap_or_else(|_| "[]".into())],
+    );
+}
+
+/// M4：读取项目登记的仓库列表。
+pub fn project_repos(c: &Connection, id: &str) -> Vec<crate::models::RepoRef> {
+    c.query_row("SELECT repos FROM projects WHERE id=?1", params![id], |r| r.get::<_, Option<String>>(0))
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// M4：任务仓库 scope。
+pub fn set_task_scope_repos(c: &Connection, task_id: &str, scope: &[String]) {
+    let _ = c.execute(
+        "UPDATE tasks SET scope_repos=?2 WHERE id=?1",
+        params![task_id, serde_json::to_string(scope).unwrap_or_else(|_| "[]".into())],
+    );
+}

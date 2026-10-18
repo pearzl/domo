@@ -1,0 +1,21 @@
+[package]
+name = "domo-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+opt-level = 1

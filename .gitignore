@@ -1,0 +1,24 @@
+# ---------- Rust ----------
+/server/target/
+**/*.rs.bk
+
+# ---------- Node / 前端构建产物 ----------
+/web/node_modules/
+/web/dist/
+
+# ---------- 运行时数据（数据库 / 日志 / 工作区 / 归档 / 冒烟产物）----------
+/server/data/
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.out
+
+# ---------- 系统 / 编辑器 ----------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
