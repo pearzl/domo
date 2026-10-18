@@ -120,6 +120,9 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "repos", "TEXT");
     // M4: 任务涉及的仓库 scope（JSON rel 数组）
     add_column_if_missing(c, "tasks", "scope_repos", "TEXT");
+    // M4.5：人类指定 agent（固定）与已尝试 agent 记录（失败换人排除）
+    add_column_if_missing(c, "tasks", "agent_pinned", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(c, "tasks", "tried_agents", "TEXT NOT NULL DEFAULT '{}'");
 
     // M3: tasks.milestone_id (TEXT, nullable) — idempotent column add. The base
     // CREATE TABLE above already includes it for fresh DBs; older DBs get it here.
@@ -262,6 +265,13 @@ fn task_row(r: &Row) -> rusqlite::Result<Task> {
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
             .unwrap_or_default(),
+        agent_pinned: r.get::<_, i64>("agent_pinned").unwrap_or(0) != 0,
+        tried_agents: r
+            .get::<_, Option<String>>("tried_agents")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({})),
         negotiation_round: r.get("negotiation_round").unwrap_or(0),
         status: r.get("status")?,
         attempt: r.get("attempt")?,
@@ -1163,5 +1173,106 @@ pub fn set_task_scope_repos(c: &Connection, task_id: &str, scope: &[String]) {
     let _ = c.execute(
         "UPDATE tasks SET scope_repos=?2 WHERE id=?1",
         params![task_id, serde_json::to_string(scope).unwrap_or_else(|_| "[]".into())],
+    );
+}
+
+/// M4.5：项目 agent 池（角色 → 按优先级升序的 agent id 列表）。
+/// 兼容旧形态（扁平 id 数组）：展开为「这些 agent 各自具备的角色，按登记顺序编号」。
+pub fn project_pool(c: &Connection, project_id: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let raw: Option<String> = c
+        .query_row("SELECT agent_pool FROM projects WHERE id=?1", params![project_id], |r| r.get(0))
+        .ok()
+        .flatten();
+    let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else { return out };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else { return out };
+    match v {
+        // 旧形态：[agent_id...] → 按各 agent 的角色展开
+        Value::Array(arr) => {
+            for id in arr.iter().filter_map(|x| x.as_str()) {
+                if let Some(a) = get_agent(c, id) {
+                    for role in &a.roles {
+                        out.entry(role.clone()).or_default().push(id.to_string());
+                    }
+                }
+            }
+        }
+        // 新形态：{"executor":[{agent_id,priority}...]}
+        Value::Object(map) => {
+            for (role, list) in map {
+                let mut items: Vec<(i64, String)> = list
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|it| {
+                                let id = it.get("agent_id")?.as_str()?.to_string();
+                                let pri = it.get("priority").and_then(|p| p.as_i64()).unwrap_or(0);
+                                Some((pri, id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                items.sort();
+                out.insert(role.clone(), items.into_iter().map(|(_, id)| id).collect());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// M4.5：写入项目池（角色 → 有序 agent id）。
+pub fn set_project_pool(c: &Connection, project_id: &str, pool: &std::collections::HashMap<String, Vec<String>>) {
+    let mut map = serde_json::Map::new();
+    for (role, ids) in pool {
+        let arr: Vec<Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| serde_json::json!({"agent_id": id, "priority": i as i64}))
+            .collect();
+        map.insert(role.clone(), Value::Array(arr));
+    }
+    let _ = c.execute(
+        "UPDATE projects SET agent_pool=?2 WHERE id=?1",
+        params![project_id, Value::Object(map).to_string()],
+    );
+}
+
+/// M4.5：任务已尝试过的 agent 记录（{role: [ids]}）。
+pub fn task_tried(c: &Connection, task_id: &str) -> Value {
+    c.query_row("SELECT tried_agents FROM tasks WHERE id=?1", params![task_id], |r| {
+        r.get::<_, Option<String>>(0)
+    })
+    .ok()
+    .flatten()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .unwrap_or_else(|| serde_json::json!({}))
+}
+
+pub fn task_tried_add(c: &Connection, task_id: &str, role: &str, agent_id: &str) {
+    let mut v = task_tried(c, task_id);
+    let arr = v
+        .as_object_mut()
+        .map(|m| m.entry(role.to_string()).or_insert_with(|| serde_json::json!([])))
+        .and_then(|a| a.as_array_mut());
+    if let Some(arr) = arr {
+        if !arr.iter().any(|x| x.as_str() == Some(agent_id)) {
+            arr.push(Value::String(agent_id.to_string()));
+        }
+    }
+    let _ = c.execute("UPDATE tasks SET tried_agents=?2 WHERE id=?1", params![task_id, v.to_string()]);
+}
+
+/// M4.5：清空已尝试记录（人类指定/恢复重派时重置）。
+pub fn task_tried_clear(c: &Connection, task_id: &str) {
+    let _ = c.execute("UPDATE tasks SET tried_agents='{}' WHERE id=?1", params![task_id]);
+}
+
+/// M4.5：人类固定/解绑任务的执行者或验收者。
+pub fn set_task_agent(c: &Connection, task_id: &str, role: &str, agent_id: Option<&str>, pinned: bool) {
+    let col = if role == "acceptor" { "acceptor_agent_id" } else { "executor_agent_id" };
+    let _ = c.execute(
+        &format!("UPDATE tasks SET {col}=?2, agent_pinned=?3 WHERE id=?1"),
+        params![task_id, agent_id, pinned as i64],
     );
 }

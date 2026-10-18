@@ -75,9 +75,6 @@ pub fn dispatch(state: &Arc<App>, conn: &Connection, t: &Task) -> bool {
     if exec_id == acc_id {
         return false; // 同一实例禁止既执行又验收（创建时已校验；防御性）
     }
-    if decision::is_decision_maker(&executor) || decision::is_decision_maker(&acceptor) {
-        return false; // 角色隔离
-    }
     events::push_event(
         state, conn, &t.project_id, Some(&t.id), "agent.session_started",
         json!({"agent_id": exec_id, "phase": "negotiate", "role": "executor",
@@ -303,6 +300,8 @@ mod tests {
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
+            agent_pinned: false,
+            tried_agents: serde_json::json!({}),
             status: status.into(),
             attempt: 0,
             rejection_count: 0,
@@ -330,6 +329,7 @@ mod tests {
             db: std::sync::Mutex::new(crate::db::open(":memory:")),
             tx: tokio::sync::broadcast::channel(1).0,
             handles: Default::default(),
+            circuits: Default::default(),
             handle_seq: Default::default(),
             wake: Default::default(),
             sessions: Default::default(),

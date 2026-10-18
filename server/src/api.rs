@@ -25,6 +25,7 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project).patch(patch_project))
         .route("/api/projects/{id}/confirm", post(confirm_project))
+        .route("/api/projects/{id}/pool", get(get_project_pool).put(put_project_pool))
         .route("/api/projects/{id}/plan", post(plan_project))
         .route("/api/projects/{id}/intervene", post(intervene_project))
         .route("/api/projects/{id}/intervene/apply", post(intervene_apply))
@@ -633,18 +634,6 @@ fn parse_plan_json(raw: &str) -> Result<(Vec<PlannedTask>, Vec<PlannedMilestone>
 
 /// Round-robin pick among role candidates; `avoid` skips one agent instance
 /// (the same instance may not execute and accept the same task).
-fn pick_by_rotation<'a>(cands: &[&'a Agent], i: usize, avoid: Option<&str>) -> &'a Agent {
-    if cands.len() == 1 {
-        return cands[0];
-    }
-    let mut k = i % cands.len();
-    if let Some(avoid) = avoid {
-        if cands[k].id == avoid {
-            k = (k + 1) % cands.len();
-        }
-    }
-    cands[k]
-}
 
 fn plan_session_end(
     state: &Arc<App>, project_id: &str, agent_id: &str, session: &str,
@@ -654,6 +643,58 @@ fn plan_session_end(
     events::push_event(state, &c, project_id, None, "agent.session_ended",
         serde_json::json!({"agent_id": agent_id, "phase": "plan", "session_id": session,
                            "result": result, "detail": detail.unwrap_or_else(|| "规划会话结束".into())}));
+}
+
+/// M4.5：项目 agent 池视图（表格数据源：agent × 角色 + 熔断状态）。
+async fn get_project_pool(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    if db::get_project(&c, &id).is_none() {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    }
+    ok(crate::pool::pool_view(&st, &c, &id))
+}
+
+/// M4.5：写入项目 agent 池（角色 → 有序 agent id 数组；缺省=自动全量）。
+/// body: {"executor": ["agt_a","agt_b"], "acceptor": [...]} 或 {"agent_pool": {...}}
+async fn put_project_pool(State(st): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    let map = body.get("agent_pool").cloned().unwrap_or(body.clone());
+    let Some(obj) = map.as_object() else {
+        return err(StatusCode::BAD_REQUEST, "pool must be an object: {role: [agent_id...]}");
+    };
+    let mut pool: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for (role, list) in obj {
+        if !ROLES.contains(&role.as_str()) {
+            return err(StatusCode::BAD_REQUEST, format!("unknown role: {role}"));
+        }
+        let ids: Vec<String> = list
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        pool.insert(role.clone(), ids);
+    }
+    {
+        let c = st.db.lock().unwrap();
+        let Some(p) = db::get_project(&c, &id) else { return err(StatusCode::NOT_FOUND, "project not found"); };
+        if p.status == "archived" {
+            return err(StatusCode::CONFLICT, "project is archived (read-only)");
+        }
+        for ids in pool.values() {
+            for aid in ids {
+                let Some(a) = db::get_agent(&c, aid) else {
+                    return err(StatusCode::BAD_REQUEST, format!("unknown agent in pool: {aid}"));
+                };
+                if a.status == "deleted" {
+                    return err(StatusCode::BAD_REQUEST, format!("agent {} is deleted", a.name));
+                }
+            }
+        }
+        db::set_project_pool(&c, &id, &pool);
+        events::push_event(&st, &c, &id, None, "project.pool_updated",
+            json!({"pool": serde_json::to_value(&pool).unwrap_or(json!({}))}));
+    }
+    st.wake();
+    let c = st.db.lock().unwrap();
+    ok(crate::pool::pool_view(&st, &c, &id))
 }
 
 async fn plan_project(
@@ -679,14 +720,13 @@ async fn plan_project(
     };
 
     // M2.5: 指定执行/验收/规划 agent 的提前校验（在派 planner 之前，省一次 LLM 调用）
-    let has_dm = |a: &Agent| a.roles.iter().any(|r| r == "decision_maker");
     // 项目 agent 池：约束本次规划的分配范围（None=全部）
     let pool = project.agent_pool.clone();
     let in_pool = |id: &str| pool.as_ref().map(|p| p.iter().any(|x| x == id)).unwrap_or(true);
     let forced_executor: Option<String> = body["executor_agent_id"].as_str().map(String::from);
     if let Some(fid) = &forced_executor {
         let ok = db::get_agent(&st.db.lock().unwrap(), fid)
-            .map(|a| a.roles.iter().any(|r| r == "executor") && !has_dm(&a) && in_pool(&a.id))
+            .map(|a| a.roles.iter().any(|r| r == "executor") && in_pool(&a.id))
             .unwrap_or(false);
         if !ok {
             return err(StatusCode::BAD_REQUEST, "executor_agent_id is not an executor-capable agent (or is a decision_maker, or not in the project agent pool)");
@@ -695,7 +735,7 @@ async fn plan_project(
     let forced_acceptor: Option<String> = body["acceptor_agent_id"].as_str().map(String::from);
     if let Some(fid) = &forced_acceptor {
         let a = db::get_agent(&st.db.lock().unwrap(), fid);
-        let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "acceptor") && !has_dm(a) && in_pool(&a.id)).unwrap_or(false);
+        let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "acceptor") && in_pool(&a.id)).unwrap_or(false);
         if !ok {
             return err(StatusCode::BAD_REQUEST, "acceptor_agent_id is not an acceptor-capable agent (or is a decision_maker, or not in the project agent pool)");
         }
@@ -707,7 +747,7 @@ async fn plan_project(
     let forced_planner: Option<String> = body["planner_agent_id"].as_str().map(String::from);
     if let Some(fid) = &forced_planner {
         let ok = db::get_agent(&st.db.lock().unwrap(), fid)
-            .map(|a| a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner") && !has_dm(&a))
+            .map(|a| a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner"))
             .unwrap_or(false);
         if !ok {
             return err(StatusCode::BAD_REQUEST, "planner_agent_id is not an opencode agent with the 'planner' role (or is a decision_maker)");
@@ -733,29 +773,23 @@ async fn plan_project(
                                "purpose": "生成项目规划（planner 会话）", "trigger": "human"}));
     }
 
-    // M4：带人工修改意见的重新规划——先清掉上一版 planned 任务与里程碑（仅限未开工）
+    // M4.5：重新规划 = **原子替换**——规划成功解析后才在事务里删除旧 planned 任务/里程碑
+    // 并插入新计划；规划失败则旧计划原封不动（修复此前「先删后规划」导致的丢计划事故）。
     let feedback = body["feedback"].as_str().map(str::trim).filter(|s| !s.is_empty());
-    if let Some(fb) = feedback {
-        {
-            let c = st.db.lock().unwrap();
-            let existing = db::list_tasks(&c, &id);
-            let running = existing.iter().any(|t| {
-                !matches!(t.status.as_str(), "planned" | "ready")
-            });
-            if running {
-                return err(StatusCode::CONFLICT, "cannot replan: some tasks already started; use intervention instead");
-            }
-            for t in &existing {
-                let _ = c.execute("DELETE FROM logs WHERE task_id=?1", rusqlite::params![t.id]);
-                let _ = c.execute("DELETE FROM guidance WHERE task_id=?1", rusqlite::params![t.id]);
-                let _ = c.execute("DELETE FROM tasks WHERE id=?1", rusqlite::params![t.id]);
-            }
-            let _ = c.execute("DELETE FROM milestones WHERE project_id=?1", rusqlite::params![id]);
-            events::push_event(&st, &c, &id, None, "planner.replan_requested",
-                json!({"feedback": fb, "removed_tasks": existing.len()}));
+    let replacing: bool = {
+        let c = st.db.lock().unwrap();
+        let existing = db::list_tasks(&c, &id);
+        let started = existing.iter().any(|t| !matches!(t.status.as_str(), "planned" | "ready"));
+        if started {
+            return err(StatusCode::CONFLICT, "cannot replan: some tasks already started; use intervention instead");
         }
-        tracing::info!(target: "planner", project = %id, "replanning with human feedback");
-    }
+        if feedback.is_some() {
+            events::push_event(&st, &c, &id, None, "planner.replan_requested",
+                json!({"feedback": feedback, "will_replace_tasks": existing.len(),
+                       "note": "规划成功后才替换（原子），失败则保留原计划"}));
+        }
+        !existing.is_empty()
+    };
 
     let mut prompt = opencode::plan_prompt(&project, &agents);
     if let Some(fb) = feedback {
@@ -802,46 +836,15 @@ async fn plan_project(
     // instances; acceptor among acceptor-role instances != the task's executor;
     // decision_maker instances never act as executor/acceptor (DESIGN §6).
     // Missing roles → 400, nothing is written.
-    let has_dm = |a: &Agent| a.roles.iter().any(|r| r == "decision_maker");
-    // 池过滤：项目 agent 池（None=全部）+ 决策者隔离
-    let in_pool = |id: &str| project.agent_pool.as_ref()
-        .map(|p| p.iter().any(|x| x == id))
-        .unwrap_or(true);
-    let execs: Vec<&Agent> = agents.iter()
-        .filter(|a| a.roles.iter().any(|r| r == "executor") && !has_dm(a) && in_pool(&a.id))
+    // M4.5：规划**不绑定 agent**——任务执行时按「角色 + 项目池优先级」动态解析；
+    // 只有人类显式指定（规划台选择 / 任务编辑）才固定（agent_pinned）。
+    let assigned: Vec<(PlannedTask, Option<String>, Option<String>)> = planned
+        .into_iter()
+        .map(|pt| {
+            let acceptor = if pt.acceptance_required { forced_acceptor.clone() } else { None };
+            (pt, forced_executor.clone(), acceptor)
+        })
         .collect();
-    let accs: Vec<&Agent> = agents.iter()
-        .filter(|a| a.roles.iter().any(|r| r == "acceptor") && !has_dm(a) && in_pool(&a.id))
-        .collect();
-    if execs.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "no agent with the 'executor' role is available (decision_maker instances may not act as executor/acceptor)");
-    }
-    if accs.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "no agent with the 'acceptor' role is available (decision_maker instances may not act as executor/acceptor)");
-    }
-    // M2.5: 指定执行/验收 agent（已在派 planner 前校验；缺省走轮转分配）
-    let mut assigned: Vec<(PlannedTask, String, Option<String>)> = Vec::new();
-    for (i, pt) in planned.into_iter().enumerate() {
-        let executor = forced_executor.clone()
-            .unwrap_or_else(|| pick_by_rotation(&execs, i, None).id.clone());
-        let acceptor = if pt.acceptance_required {
-            if let Some(fa) = forced_acceptor.clone() {
-                Some(fa)
-            } else {
-                let pool: Vec<&Agent> = accs.iter().copied().filter(|a| a.id != executor).collect();
-                if pool.is_empty() {
-                    return err(StatusCode::BAD_REQUEST, format!(
-                        "no available acceptor for planned task #{i} ('{}'): acceptor must differ from the executor and decision_maker instances are excluded",
-                        pt.title
-                    ));
-                }
-                Some(pick_by_rotation(&pool, i, None).id.clone())
-            }
-        } else {
-            None
-        };
-        assigned.push((pt, executor, acceptor));
-    }
 
     // Insert inside one transaction so the batch lands atomically: out-of-range
     // deps are rejected up front, cycles fall back to db::deps_introduce_cycle;
@@ -851,6 +854,15 @@ async fn plan_project(
         let run = || -> Result<Vec<Task>, Response> {
             let tx = c.unchecked_transaction()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("begin transaction: {e}")))?;
+            // M4.5：原子替换——旧计划在此事务内删除，与插入同生共死
+            if replacing {
+                for t in db::list_tasks(&tx, &id) {
+                    let _ = tx.execute("DELETE FROM logs WHERE task_id=?1", rusqlite::params![t.id]);
+                    let _ = tx.execute("DELETE FROM guidance WHERE task_id=?1", rusqlite::params![t.id]);
+                    let _ = tx.execute("DELETE FROM tasks WHERE id=?1", rusqlite::params![t.id]);
+                }
+                let _ = tx.execute("DELETE FROM milestones WHERE project_id=?1", rusqlite::params![id]);
+            }
             let mut created: Vec<Task> = Vec::new();
             for (i, (pt, executor, acceptor)) in assigned.iter().enumerate() {
                 let dep_ids: Vec<String> = pt.dep_idx.iter().map(|k| created[*k].id.clone()).collect();
@@ -862,7 +874,7 @@ async fn plan_project(
                     description: pt.description.clone(),
                     depends_on: dep_ids.clone(),
                     assignee_role: "executor".into(),
-                    executor_agent_id: Some(executor.clone()),
+                    executor_agent_id: executor.clone(),
                     acceptor_agent_id: acceptor.clone(),
                     acceptance_required: pt.acceptance_required,
                     acceptance_criteria: pt.criteria.clone(),
@@ -872,6 +884,8 @@ async fn plan_project(
                     execution_plan: None,
                     plan_rejection_count: 0,
                     scope_repos: pt.scope_repos.clone(),
+                    agent_pinned: executor.is_some(),
+                    tried_agents: serde_json::json!({}),
                     status: "planned".into(),
                     attempt: 0,
                     rejection_count: 0,
@@ -1077,15 +1091,8 @@ pub(crate) fn apply_replan_changes(
         let c = st.db.lock().unwrap();
         db::list_agents(&c)
     };
-    let has_dm = |a: &Agent| a.roles.iter().any(|r| r == "decision_maker");
-    // 项目 agent 池（None=全部）+ 决策者隔离
-    let pool = {
-        let c = st.db.lock().unwrap();
-        db::get_project(&c, id).and_then(|p| p.agent_pool)
-    };
-    let in_pool = |aid: &str| pool.as_ref().map(|p| p.iter().any(|x| x == aid)).unwrap_or(true);
-    let execs: Vec<&Agent> = agents.iter().filter(|a| a.roles.iter().any(|r| r == "executor") && !has_dm(a) && in_pool(&a.id)).collect();
-    let accs: Vec<&Agent> = agents.iter().filter(|a| a.roles.iter().any(|r| r == "acceptor") && !has_dm(a) && in_pool(&a.id)).collect();
+    // M4.5：重规划新增任务同样不绑定 agent（动态选人；人类可在任务编辑中固定）。
+    let _ = &mut agents;
 
     let mut title_map: std::collections::HashMap<String, String> = {
         let c = st.db.lock().unwrap();
@@ -1103,10 +1110,7 @@ pub(crate) fn apply_replan_changes(
         let op = ch["op"].as_str().unwrap_or("");
         match op {
             "add" => {
-                if execs.is_empty() || accs.is_empty() {
-                    skipped.push(json!({"index": i, "op": op, "reason": "no executor/acceptor-capable agent in the pool"}));
-                    continue;
-                }
+                // M4.5：动态选人，无需在此检查候选池（执行时按角色+池优先级解析）
                 let task = &ch["task"];
                 let Some(title) = task["title"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                     skipped.push(json!({"index": i, "op": op, "reason": "task.title missing"}));
@@ -1167,17 +1171,8 @@ pub(crate) fn apply_replan_changes(
                     skipped.push(json!({"index": i, "op": op, "title": title, "reason": format!("unknown dependency title: {bad}")}));
                     continue;
                 }
-                let executor = pick_by_rotation(&execs, rot, None).id.clone();
-                let acceptor = if acceptance_required {
-                    let pool: Vec<&Agent> = accs.iter().copied().filter(|a| a.id != executor).collect();
-                    if pool.is_empty() {
-                        skipped.push(json!({"index": i, "op": op, "title": title, "reason": "no acceptor available (must differ from executor)"}));
-                        continue;
-                    }
-                    Some(pick_by_rotation(&pool, rot, None).id.clone())
-                } else {
-                    None
-                };
+                let (executor, acceptor) = (None::<String>, None::<String>);
+                let _ = rot;
                 let t = Task {
                     id: db::new_id("tsk_"),
                     project_id: id.to_string(),
@@ -1186,7 +1181,7 @@ pub(crate) fn apply_replan_changes(
                     description,
                     depends_on: dep_ids.clone(),
                     assignee_role: "executor".into(),
-                    executor_agent_id: Some(executor),
+                    executor_agent_id: executor,
                     acceptor_agent_id: acceptor,
                     acceptance_required,
                     acceptance_criteria: criteria,
@@ -1196,6 +1191,8 @@ pub(crate) fn apply_replan_changes(
                     execution_plan: None,
                     plan_rejection_count: 0,
                     scope_repos: Vec::new(),
+                    agent_pinned: false,
+                    tried_agents: serde_json::json!({}),
                     status: "planned".into(),
                     attempt: 0,
                     rejection_count: 0,
@@ -1705,16 +1702,10 @@ fn validate_agent_roles(c: &rusqlite::Connection, executor: Option<&str>, accept
     // 角色隔离优先报错：决策者实例即使被授予了 executor/acceptor 角色也绝不下场
     if let Some(e) = executor {
         let Some(a) = db::get_agent(c, e) else { return Err("executor agent not found".into()); };
-        if decision::is_decision_maker(&a) && !decision::dm_role_overlap_allowed() {
-            return Err("decision_maker instances may not act as executor (role isolation; set DOMO_DM_ROLE_OVERLAP=1 to override)".into());
-        }
         if !a.roles.iter().any(|r| r == "executor") { return Err("executor agent lacks 'executor' role".into()); }
     }
     if let Some(a) = acceptor {
         let Some(ag) = db::get_agent(c, a) else { return Err("acceptor agent not found".into()); };
-        if decision::is_decision_maker(&ag) && !decision::dm_role_overlap_allowed() {
-            return Err("decision_maker instances may not act as acceptor (role isolation; set DOMO_DM_ROLE_OVERLAP=1 to override)".into());
-        }
         if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
     }
     if let (Some(e), Some(a)) = (executor, acceptor) {
@@ -1733,9 +1724,8 @@ async fn create_task(
     let executor = body["executor_agent_id"].as_str().map(String::from);
     let acceptor = body["acceptor_agent_id"].as_str().map(String::from);
     let accept_required = body["acceptance_required"].as_bool().unwrap_or(true);
-    if accept_required && acceptor.is_none() {
-        return err(StatusCode::BAD_REQUEST, "acceptor_agent_id required when acceptance_required");
-    }
+    // M4.5：不强制在此绑定 agent——执行时按「角色 + 项目池优先级」动态解析；
+    // 人类显式指定时才固定（agent_pinned）。
     {
         let c = st.db.lock().unwrap();
         let Some(p) = db::get_project(&c, &id) else { return err(StatusCode::NOT_FOUND, "project not found"); };
@@ -1784,6 +1774,7 @@ async fn create_task(
                 }
             }
         };
+        let pinned = executor.is_some();
         let t = Task {
             id: db::new_id("tsk_"),
             project_id: id.clone(),
@@ -1801,6 +1792,8 @@ async fn create_task(
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
+            agent_pinned: pinned,
+            tried_agents: serde_json::json!({}),
             status: "planned".into(),
             attempt: 0,
             rejection_count: 0,
@@ -1932,10 +1925,18 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
         }
         let old_executor = t.executor_agent_id.clone().filter(|s| !s.is_empty());
         let old_acceptor = t.acceptor_agent_id.clone().filter(|s| !s.is_empty());
-        if let Some(v) = body["executor_agent_id"].as_str() { t.executor_agent_id = Some(v.to_string()); }
-        if let Some(v) = body["acceptor_agent_id"].as_str() { t.acceptor_agent_id = Some(v.to_string()); }
-        if t.acceptance_required {
-            if t.acceptor_agent_id.is_none() { return err(StatusCode::BAD_REQUEST, "acceptor_agent_id required when acceptance_required"); }
+        // M4.5：人类显式指定 agent → 固定（agent_pinned）；显式传空串 → 解除固定（回到动态）
+        let mut pinned_change: Option<bool> = None;
+        if let Some(v) = body["executor_agent_id"].as_str() {
+            t.executor_agent_id = if v.is_empty() { None } else { Some(v.to_string()) };
+            pinned_change = Some(!v.is_empty());
+        }
+        if let Some(v) = body["acceptor_agent_id"].as_str() {
+            t.acceptor_agent_id = if v.is_empty() { None } else { Some(v.to_string()) };
+            pinned_change = Some(!v.is_empty());
+        }
+        if let Some(p) = pinned_change {
+            t.agent_pinned = p;
         }
         if let Err(e) = validate_agent_roles(&c, t.executor_agent_id.as_deref(), t.acceptor_agent_id.as_deref()) {
             return err(StatusCode::BAD_REQUEST, e);
@@ -1960,12 +1961,12 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
         if let Some(v) = body["description"].as_str() { t.description = v.to_string(); }
         if let Some(v) = body["acceptance_criteria"].as_str() { t.acceptance_criteria = Some(v.to_string()); }
         let _ = c.execute(
-            "UPDATE tasks SET title=?2, description=?3, depends_on=?4, executor_agent_id=?5, acceptor_agent_id=?6, acceptance_criteria=?7, milestone_id=?8, negotiation_status=?9, negotiation_round=?10 WHERE id=?1",
+            "UPDATE tasks SET title=?2, description=?3, depends_on=?4, executor_agent_id=?5, acceptor_agent_id=?6, acceptance_criteria=?7, milestone_id=?8, negotiation_status=?9, negotiation_round=?10, agent_pinned=?11 WHERE id=?1",
             rusqlite::params![
                 t.id, t.title, t.description,
                 db::jstring(&serde_json::to_value(&t.depends_on).unwrap()),
                 t.executor_agent_id, t.acceptor_agent_id, t.acceptance_criteria, t.milestone_id,
-                t.negotiation_status, t.negotiation_round
+                t.negotiation_status, t.negotiation_round, t.agent_pinned as i64
             ],
         );
         if t.negotiation_status == "failed" {
@@ -2418,15 +2419,6 @@ async fn create_agent(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Re
         capabilities.supports_resume = true;
     }
     // 角色隔离：决策者不得同时担任同一项目的 executor 或 acceptor（DOMO_DM_ROLE_OVERLAP=1 可显式打开例外）
-    let roles_set: std::collections::HashSet<String> = roles.iter().cloned().collect();
-    if roles_set.contains("decision_maker") && !decision::dm_role_overlap_allowed() {
-        if roles_set.contains("executor") || roles_set.contains("acceptor") {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "decision_maker 角色不得同时担任 executor 或 acceptor；若确实需要例外，设置 DOMO_DM_ROLE_OVERLAP=1",
-            );
-        }
-    }
     let a = Agent {
         id: db::new_id("agt_"),
         name: name.trim().into(),
@@ -2485,14 +2477,6 @@ async fn patch_agent(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bo
             return err(StatusCode::BAD_REQUEST, format!("roles must be a non-empty subset of {ROLES:?}"));
         }
         let roles_set: std::collections::HashSet<String> = roles.iter().cloned().collect();
-        if roles_set.contains("decision_maker") && !decision::dm_role_overlap_allowed() {
-            if roles_set.contains("executor") || roles_set.contains("acceptor") {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "decision_maker 角色不得同时担任 executor 或 acceptor；若确实需要例外，设置 DOMO_DM_ROLE_OVERLAP=1",
-                );
-            }
-        }
         // 悬空检查：撤销 executor/acceptor 角色时，不得仍有非终态任务以此身份引用该实例
         //（否则任务会卡在「派发被角色守卫拦下」的悬空状态）。
         for (role, col) in [("executor", "executor_agent_id"), ("acceptor", "acceptor_agent_id")] {
@@ -2812,6 +2796,7 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
             "resume" => {
                 // clear counters, re-dispatch original agent
                 let _ = c.execute("UPDATE tasks SET rejection_count=0, failure_count=0 WHERE id=?1", rusqlite::params![t.id]);
+                db::task_tried_clear(&c, &t.id); // M4.5：人工恢复 → 重新给池内所有 agent 机会
                 let fresh = db::get_task(&c, &t.id).unwrap_or(t.clone());
                 events::status_changed(&st, &c, &fresh, "executing", "escalation_resumed");
                 drop(c);
@@ -2825,14 +2810,6 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::NOT_FOUND, "agent not found");
                         }
-                        Some(ag) if decision::is_decision_maker(&ag) && !decision::dm_role_overlap_allowed() => {
-                            // 角色隔离（DESIGN §6）：决策者不得兼任 executor/acceptor
-                            drop(c);
-                            return err(StatusCode::BAD_REQUEST, format!(
-                                "agent '{}' holds the 'decision_maker' role and may not be reassigned as executor (role isolation)",
-                                ag.name
-                            ));
-                        }
                         Some(ag) if ag.roles.iter().any(|r| r == "executor") => Some(ag),
                         Some(ag) => {
                             drop(c);
@@ -2840,11 +2817,10 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                         }
                     },
                     None => {
-                        // auto: pick another idle executor-capable instance（排除决策者，角色隔离）
+                        // auto: pick another idle executor-capable instance
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "executor")
-                                && !(decision::is_decision_maker(&a) && !decision::dm_role_overlap_allowed())
                                 && a.current_task_ids.is_empty()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {
@@ -2891,13 +2867,6 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "candidate agent lacks 'acceptor' role");
                         }
-                        if decision::is_decision_maker(&ag) && !decision::dm_role_overlap_allowed() {
-                            drop(c);
-                            return err(StatusCode::BAD_REQUEST, format!(
-                                "agent '{}' holds the 'decision_maker' role and may not be reassigned as acceptor (role isolation)",
-                                ag.name
-                            ));
-                        }
                         if ag.id == t.executor_agent_id.clone().unwrap_or_default() {
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
@@ -2909,7 +2878,6 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "acceptor")
-                                && !(decision::is_decision_maker(&a) && !decision::dm_role_overlap_allowed())
                                 && a.id != t.acceptor_agent_id.clone().unwrap_or_default()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {

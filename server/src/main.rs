@@ -7,6 +7,7 @@ mod models;
 mod negotiation;
 mod recovery;
 mod replan;
+mod pool;
 mod report;
 mod sandbox;
 mod scheduler;
@@ -66,6 +67,7 @@ async fn main() {
         db: std::sync::Mutex::new(conn),
         tx,
         handles: Default::default(),
+        circuits: Default::default(),
         handle_seq: Default::default(),
         wake: Default::default(),
         sessions: Default::default(),

@@ -454,6 +454,7 @@ mod tests {
             handle_seq: Default::default(),
             wake: Default::default(),
             sessions: Default::default(),
+            circuits: Default::default(),
         });
         // 事件写入独立连接（state.db 与这里不同）：直接用本地连接断言 payload 结构
         let payload = recovered(
@@ -538,6 +539,7 @@ mod tests {
             handle_seq: Default::default(),
             wake: Default::default(),
             sessions: Default::default(),
+            circuits: Default::default(),
         });
         let t = crate::db::get_task(&c, "t1").unwrap();
         // 第一档跳过 + 第二档失败的记录先落

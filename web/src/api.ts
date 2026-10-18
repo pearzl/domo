@@ -6,6 +6,7 @@ import type {
   InboxItem,
   LogLine,
   Milestone,
+  PoolView,
   Project,
   ReplanChange,
   ReplanReportResult,
@@ -124,6 +125,10 @@ export const api = {
     capabilities: { supports_resume: boolean; max_parallel: number };
     config: { duration_ms?: number; model?: string; timeout_ms?: number };
   }) => request<Agent>('/agents', 'POST', body),
+
+  getProjectPool: (id: string) => request<PoolView>(`/projects/${id}/pool`),
+  putProjectPool: (id: string, pool: Record<string, string[]>) =>
+    request<PoolView>(`/projects/${id}/pool`, 'PUT', { agent_pool: pool }),
 
   listAgents: (opts?: { all?: boolean }) =>
     request<Agent[]>(`/agents${opts?.all ? '?all=1' : ''}`),

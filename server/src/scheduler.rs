@@ -70,6 +70,13 @@ fn scan(state: &Arc<App>) {
             continue; // 暂停中不派发任何新工作
         }
 
+        // M4.5：多仓库项目禁止任务并行（保证合入前同步 + 合入后评估的有效性）：
+        // 该项目内已有任一在途会话 → 本轮不派发任何新工作。
+        let multi_repo = db::project_repos(&conn, &project.id).len() > 1;
+        if multi_repo && tasks.iter().any(|t| state.has_live_handle(&t.id)) {
+            continue;
+        }
+
         let mut map: HashMap<String, Task> = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
 
         // planned -> ready：协商一致（criteria_agreed_auto）或豁免已获决策者裁定
@@ -165,14 +172,11 @@ fn scan(state: &Arc<App>) {
                 }
                 // 计划审查阶段：派发验收者审查（占用即视为进行中）
                 "plan_review" if !state.has_live_handle(&t.id) => {
-                    if let Some(acc) = t.acceptor_agent_id.clone() {
-                        if db::agent_free(&conn, &acc) && backoff_elapsed(&conn, t) {
-                            if dispatch_plan_review(state, &conn, t, &acc) {
-                                drop(conn);
-                                state.wake();
-                                return;
-                            }
-                        }
+                    // M4.5：验收者由池优先级动态解析（dispatch 内部解析），无需预绑定
+                    if backoff_elapsed(&conn, t) && dispatch_plan_review(state, &conn, t, "") {
+                        drop(conn);
+                        state.wake();
+                        return;
                     }
                 }
                 // 执行 worker 结束但最终状态没落下：
@@ -213,15 +217,18 @@ fn scan(state: &Arc<App>) {
                     }
                 }
                 "awaiting_acceptance" if !state.has_live_handle(&t.id) => {
-                    if let Some(acc) = t.acceptor_agent_id.clone() {
-                        if db::agent_free(&conn, &acc) && backoff_elapsed(&conn, t) {
-                            dispatch_accept(state, &conn, t, &acc);
-                            drop(conn);
-                            state.wake();
-                            return;
+                    // M4.5：验收者由池优先级动态解析；池内无可用候选 → 等待（人工验收仍可 REST 触发）
+                    if backoff_elapsed(&conn, t) {
+                        let resolved = crate::pool::resolve_role(state, &conn, &t.project_id, t, "acceptor");
+                        if let Some(acc) = resolved {
+                            if db::agent_free(&conn, &acc) {
+                                dispatch_accept(state, &conn, t, &acc);
+                                drop(conn);
+                                state.wake();
+                                return;
+                            }
                         }
                     }
-                    // acceptor None => human-only acceptance via REST
                 }
                 _ => {}
             }
@@ -369,6 +376,33 @@ pub fn agent_summary(conn: &Connection, id: &Option<String>) -> Option<String> {
         })
 }
 
+/// M4.5 失败统一处理：错误分类 → 限流/配置错误熔断该 agent（全局）→ 换下一优先级
+/// agent 重试（不计入失败预算）→ 池内耗尽才返回 false 交给调用方计失败。
+fn handle_agent_failure(
+    state: &Arc<App>,
+    conn: &Connection,
+    t: &Task,
+    role: &str,
+    phase: &str,
+    msg: &str,
+) -> bool {
+    let bound = if role == "acceptor" { t.acceptor_agent_id.clone() } else { t.executor_agent_id.clone() };
+    let (class, disposition, cooldown) = match bound.as_deref().and_then(|id| db::get_agent(conn, id)) {
+        Some(agent) => {
+            let err = crate::pool::classify_error(&agent, msg);
+            if matches!(err.class, crate::pool::ErrorClass::RateLimit | crate::pool::ErrorClass::Config) {
+                crate::pool::circuit_open_for(state, conn, &agent, &err);
+            }
+            (err.class.as_str().to_string(), err.disposition.clone(), err.cooldown_ms)
+        }
+        None => ("unknown".to_string(), "未找到失败 agent 记录".to_string(), None),
+    };
+    events::push_event(state, conn, &t.project_id, Some(&t.id), "agent.error_classified",
+        json!({"role": role, "phase": phase, "class": class, "disposition": disposition,
+               "cooldown_ms": cooldown, "error": msg}));
+    crate::pool::switch_on_failure(state, conn, t, role, &format!("{phase} 失败（{class}）"))
+}
+
 fn suspend(state: &Arc<App>, conn: &Connection, t: &Task, phase: &str) {
     let t = events::status_changed(state, conn, t, "suspended", "failure_limit");
     let (fail_type, last_err) = last_fail_reason(conn, &t.id)
@@ -441,27 +475,47 @@ fn set_counts(state: &Arc<App>, conn: &Connection, task_id: &str, sql_set: &str,
     }
 }
 
-/// 执行者派发守卫（常规派发与三档恢复共用）：实例存在、未软删、持有 executor 角色、
-/// 非决策者（角色隔离，DESIGN §6）、当前有空闲槽位。任一不满足 → None（不派发）。
-fn resolve_executor(conn: &Connection, task_id: &str, agent_id: &str) -> Option<Agent> {
+/// M4.5 派发守卫：实例存在、未软删、持有该角色、未熔断、且有空闲槽位。
+/// **空闲不作为分配依据**（选人阶段已按优先级定人）；此处只判断"此刻能否开工"——
+/// 不满足 → None（任务在该 agent 处排队，下一轮 scan 再试，不降级到低优先级）。
+fn resolve_agent_for_role(
+    state: &Arc<App>,
+    conn: &Connection,
+    task_id: &str,
+    agent_id: &str,
+    role: &str,
+) -> Option<Agent> {
     let agent = db::get_agent(conn, agent_id)?;
-    // 已删除（软删除）或角色悬空的实例不允许派发
     if agent.status == "deleted" {
         return None;
     }
-    // 角色守卫：agent 编辑过角色后，悬空分配不允许派发
-    if !agent.roles.iter().any(|r| r == "executor") {
-        tracing::warn!(task = %task_id, agent = %agent_id, "executor agent lacks 'executor' role (dangling assignment); dispatch skipped");
+    if !agent.roles.iter().any(|r| r == role) {
+        tracing::warn!(task = %task_id, agent = %agent_id, role, "agent lacks required role (dangling assignment); dispatch skipped");
         return None;
     }
-    if decision::is_decision_maker(&agent) && !decision::dm_role_overlap_allowed() {
-        tracing::warn!(task = %task_id, agent = %agent_id, "executor assignment landed on a decision_maker instance; dispatch skipped");
-        return None;
+    if crate::pool::circuit_open(state, agent_id) {
+        return None; // 熔断中：排队等待
     }
     if !db::agent_free(conn, agent_id) {
-        return None;
+        return None; // 忙：排队等待
     }
     Some(agent)
+}
+
+/// M4.5：按角色 + 项目池优先级解析 agent（人类固定优先），解析结果落回任务字段。
+fn resolve_and_bind_role(
+    state: &Arc<App>,
+    conn: &Connection,
+    t: &Task,
+    role: &str,
+) -> Option<(String, Agent)> {
+    let id = crate::pool::resolve_role(state, conn, &t.project_id, t, role)?;
+    let bound = if role == "acceptor" { t.acceptor_agent_id.clone() } else { t.executor_agent_id.clone() };
+    if bound.as_deref() != Some(id.as_str()) {
+        db::set_task_agent(conn, &t.id, role, Some(&id), t.agent_pinned);
+    }
+    let agent = resolve_agent_for_role(state, conn, &t.id, &id, role)?;
+    Some((id, agent))
 }
 
 /// Commit an execution dispatch (status -> executing) and spawn the worker.
@@ -474,14 +528,12 @@ fn dispatch_exec(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
     if fresh.status != "ready" && fresh.status != "executing" {
         return false;
     }
-    let agent_id = match &fresh.executor_agent_id {
-        Some(a) => a.clone(),
-        None => return false,
+    let (agent_id, agent) = match resolve_and_bind_role(state, conn, &fresh, "executor") {
+        Some(v) => v,
+        None => return false, // 池内暂无可派 agent（熔断/排队）→ 下一轮再试
     };
-    let agent = match resolve_executor(conn, &tid, &agent_id) {
-        Some(a) => a,
-        None => return false,
-    };
+    // 绑定结果落库后重取快照，保证 worker 看到解析后的 agent（占用释放依赖它）
+    let fresh = db::get_task(conn, &tid).unwrap_or(fresh);
 
     let attempt = fresh.attempt + 1;
     let _ = conn.execute(
@@ -523,14 +575,11 @@ fn dispatch_plan(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
     if fresh.status != "ready" && fresh.status != "plan_drafting" {
         return false;
     }
-    let agent_id = match &fresh.executor_agent_id {
-        Some(a) => a.clone(),
+    let (agent_id, agent) = match resolve_and_bind_role(state, conn, &fresh, "executor") {
+        Some(v) => v,
         None => return false,
     };
-    let agent = match resolve_executor(conn, &tid, &agent_id) {
-        Some(a) => a,
-        None => return false,
-    };
+    let fresh = db::get_task(conn, &tid).unwrap_or(fresh);
     let attempt = fresh.attempt + 1;
     let _ = conn.execute(
         "UPDATE tasks SET status='plan_drafting', attempt=?2 WHERE id=?1",
@@ -562,18 +611,15 @@ fn dispatch_plan(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
 }
 
 /// 计划阶段：派发验收者审查计划（plan_review 状态，占用验收者）。
-fn dispatch_plan_review(state: &Arc<App>, conn: &Connection, t: &Task, acc_id: &str) -> bool {
+fn dispatch_plan_review(state: &Arc<App>, conn: &Connection, t: &Task, _acc_id: &str) -> bool {
     let tid = t.id.clone();
-    let agent = match db::get_agent(conn, acc_id) {
-        Some(a) => a,
+    let (acc_owned, agent) = match resolve_and_bind_role(state, conn, t, "acceptor") {
+        Some(v) => v,
         None => return false,
     };
-    if agent.status == "deleted" || !agent.roles.iter().any(|r| r == "acceptor") {
-        return false;
-    }
-    if decision::is_decision_maker(&agent) && !decision::dm_role_overlap_allowed() {
-        return false;
-    }
+    let acc_id = acc_owned.as_str();
+    // 绑定结果落库后重取快照（worker 依赖其中的 acceptor_agent_id 释放占用）
+    let t = &db::get_task(conn, &tid).unwrap_or_else(|| t.clone());
     db::occupancy_add(conn, acc_id, &tid);
     events::send_agent(state, &agent);
     events::push_event(
@@ -656,14 +702,19 @@ async fn plan_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                 events::send_task(&state, &f2);
             }
             Err(msg) => {
-                let fc = fresh.failure_count + 1;
-                set_counts(&state, &conn, &fresh.id, "failure_count", fc);
-                let mut f2 = fresh;
-                f2.failure_count = fc;
-                events::push_event(&state, &conn, &f2.project_id, Some(&f2.id), "task.plan_failed",
-                    json!({"error": msg, "attempt": f2.attempt, "failure_count": fc}));
-                if fc >= 3 {
-                    suspend(&state, &conn, &f2, "plan");
+                if handle_agent_failure(&state, &conn, &fresh, "executor", "plan", &msg) {
+                    events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "task.plan_failed",
+                        json!({"error": msg, "attempt": fresh.attempt, "failover": true}));
+                } else {
+                    let fc = fresh.failure_count + 1;
+                    set_counts(&state, &conn, &fresh.id, "failure_count", fc);
+                    let mut f2 = fresh;
+                    f2.failure_count = fc;
+                    events::push_event(&state, &conn, &f2.project_id, Some(&f2.id), "task.plan_failed",
+                        json!({"error": msg, "attempt": f2.attempt, "failure_count": fc}));
+                    if fc >= 3 {
+                        suspend(&state, &conn, &f2, "plan");
+                    }
                 }
             }
         }
@@ -714,15 +765,19 @@ async fn plan_review_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64)
             }
             Err(comment) => {
                 if comment.starts_with(opencode::INFRA_ACCEPT_ERROR_PREFIX) {
-                    // 审查基础设施失败：按 failure 预算处理（同验收基建失败）
-                    let fc = fresh.failure_count + 1;
-                    set_counts(&state, &conn, &fresh.id, "failure_count", fc);
-                    let mut f2 = fresh;
-                    f2.failure_count = fc;
-                    events::push_event(&state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
-                        json!({"error": comment, "attempt": f2.attempt, "failure_count": fc, "phase": "plan_review"}));
-                    if fc >= 3 {
-                        suspend(&state, &conn, &f2, "accept");
+                    if handle_agent_failure(&state, &conn, &fresh, "acceptor", "plan_review", &comment) {
+                        events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "acceptance.run_failed",
+                            json!({"error": comment, "attempt": fresh.attempt, "phase": "plan_review", "failover": true}));
+                    } else {
+                        let fc = fresh.failure_count + 1;
+                        set_counts(&state, &conn, &fresh.id, "failure_count", fc);
+                        let mut f2 = fresh;
+                        f2.failure_count = fc;
+                        events::push_event(&state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
+                            json!({"error": comment, "attempt": f2.attempt, "failure_count": fc, "phase": "plan_review"}));
+                        if fc >= 3 {
+                            suspend(&state, &conn, &f2, "accept");
+                        }
                     }
                 } else {
                     let prc = fresh.plan_rejection_count + 1;
@@ -756,14 +811,11 @@ fn recover_dispatch(state: &Arc<App>, conn: &Connection, t: &Task) -> bool {
         return false;
     }
     let tier = if rec.tier == TIER_HANDOFF { TIER_HANDOFF } else { TIER_NATIVE };
-    let agent_id = match &t.executor_agent_id {
-        Some(a) if !a.is_empty() => a.clone(),
-        _ => return false,
-    };
-    let agent = match resolve_executor(conn, &t.id, &agent_id) {
-        Some(a) => a,
+    let (_, agent) = match resolve_and_bind_role(state, conn, t, "executor") {
+        Some(v) => v,
         None => return false,
     };
+    let t = &db::get_task(conn, &t.id).unwrap_or_else(|| t.clone());
 
     if tier == TIER_NATIVE {
         let stored = db::exec_resume_session(conn, &t.id, t.attempt);
@@ -856,24 +908,14 @@ fn dispatch_recover(
 
 /// Commit an acceptance dispatch and spawn the worker (acceptor agent only;
 /// human-only tasks are accepted/rejected via REST).
-fn dispatch_accept(state: &Arc<App>, conn: &Connection, t: &Task, acc_id: &str) {
+fn dispatch_accept(state: &Arc<App>, conn: &Connection, t: &Task, _acc_id: &str) {
     let tid = t.id.clone();
-    let agent = match db::get_agent(conn, acc_id) {
-        Some(a) => a,
+    let (acc_owned, agent) = match resolve_and_bind_role(state, conn, t, "acceptor") {
+        Some(v) => v,
         None => return,
     };
-    if agent.status == "deleted" {
-        return;
-    }
-    // 角色守卫：agent 编辑过角色后，悬空分配不允许派发
-    if !agent.roles.iter().any(|r| r == "acceptor") {
-        tracing::warn!(task = %tid, agent = %acc_id, "acceptor agent lacks 'acceptor' role (dangling assignment); dispatch skipped");
-        return;
-    }
-    if decision::is_decision_maker(&agent) && !decision::dm_role_overlap_allowed() {
-        tracing::warn!(task = %tid, agent = %acc_id, "acceptor assignment landed on a decision_maker instance; dispatch skipped");
-        return;
-    }
+    let acc_id = acc_owned.as_str();
+    let t = &db::get_task(conn, &tid).unwrap_or_else(|| t.clone());
     db::occupancy_add(conn, acc_id, &tid);
     if let Some(a) = db::get_agent(conn, acc_id) {
         events::send_agent(&state, &a);
@@ -994,16 +1036,24 @@ async fn exec_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64, mode: 
             Err(msg) => match &mode {
                 // 常规派发：真实执行失败 → 失败计数 + 3 次挂起（既有语义不变）
                 ExecMode::Fresh => {
-                    let fc = fresh.failure_count + 1;
-                    set_counts(&state, &conn, &fresh.id, "failure_count", fc);
-                    let mut f2 = fresh;
-                    f2.failure_count = fc;
-                    events::push_event(
-                        &state, &conn, &f2.project_id, Some(&f2.id), "task.execution_failed",
-                        json!({"error": msg, "attempt": f2.attempt, "failure_count": fc}),
-                    );
-                    if fc >= 3 {
-                        suspend(&state, &conn, &f2, "execute");
+                    // M4.5：先分类熔断 + 换下一优先级 agent（不计失败预算）
+                    if handle_agent_failure(&state, &conn, &fresh, "executor", "execute", &msg) {
+                        events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "task.execution_failed",
+                            json!({"error": msg, "attempt": fresh.attempt, "failover": true,
+                                   "note": "已换下一优先级 agent 重试，不计入失败预算"}));
+                    } else {
+                        let fc = fresh.failure_count + 1;
+                        set_counts(&state, &conn, &fresh.id, "failure_count", fc);
+                        let mut f2 = fresh;
+                        f2.failure_count = fc;
+                        events::push_event(
+                            &state, &conn, &f2.project_id, Some(&f2.id), "task.execution_failed",
+                            json!({"error": msg, "attempt": f2.attempt, "failure_count": fc,
+                                   "note": "池内候选已耗尽，计入失败预算"}),
+                        );
+                        if fc >= 3 {
+                            suspend(&state, &conn, &f2, "execute");
+                        }
                     }
                     // otherwise status stays "executing": scan re-dispatches as fresh attempt
                 }
@@ -1144,16 +1194,21 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                 // although no acceptor ever disagreed; those retries should be
                 // handled like execution failures instead.
                 if comment.starts_with(opencode::INFRA_ACCEPT_ERROR_PREFIX) {
-                    let fc = fresh.failure_count + 1;
-                    set_counts(&state, &conn, &fresh.id, "failure_count", fc);
-                    let mut f2 = fresh;
-                    f2.failure_count = fc;
-                    events::push_event(
-                        &state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
-                        json!({"error": comment, "attempt": f2.attempt, "failure_count": fc}),
-                    );
-                    if fc >= 3 {
-                        suspend(&state, &conn, &f2, "accept");
+                    if handle_agent_failure(&state, &conn, &fresh, "acceptor", "accept", &comment) {
+                        events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "acceptance.run_failed",
+                            json!({"error": comment, "attempt": fresh.attempt, "failover": true}));
+                    } else {
+                        let fc = fresh.failure_count + 1;
+                        set_counts(&state, &conn, &fresh.id, "failure_count", fc);
+                        let mut f2 = fresh;
+                        f2.failure_count = fc;
+                        events::push_event(
+                            &state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
+                            json!({"error": comment, "attempt": f2.attempt, "failure_count": fc}),
+                        );
+                        if fc >= 3 {
+                            suspend(&state, &conn, &f2, "accept");
+                        }
                     }
                     // otherwise status stays "awaiting_acceptance": the scan
                     // re-dispatches the acceptor once it is free again,
@@ -1206,6 +1261,8 @@ mod tests {
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
+            agent_pinned: false,
+            tried_agents: serde_json::json!({}),
             status: "ready".into(),
             attempt: 0,
             rejection_count: 0,

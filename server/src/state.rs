@@ -19,6 +19,8 @@ pub struct App {
     /// M2: logical session key (e.g. `tsk_x_a1`, `planner-<prj>`) -> real
     /// opencode session id discovered at runtime (CLI may reject custom ids).
     pub sessions: Mutex<HashMap<String, String>>,
+    /// M4.5 全局 agent 熔断（限流/配置错误临时禁用，跨项目生效）
+    pub circuits: std::sync::Mutex<std::collections::HashMap<String, (i64, String)>>,
 }
 
 impl App {

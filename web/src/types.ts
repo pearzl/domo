@@ -265,3 +265,17 @@ export interface AgentFormValue {
   /** opencode 可选：单次 run 超时（ms） */
   timeout_ms?: number;
 }
+
+/** M4.5 项目 agent 池视图（表格数据源） */
+export interface PoolView {
+  agents: {
+    id: string;
+    name: string;
+    adapter: string;
+    status: string;
+    circuit_open: boolean;
+    roles: Record<string, { enabled: boolean; priority?: number }>;
+  }[];
+  pool: Record<string, string[]>;
+  circuits: { agent_id: string; class: string; remaining_ms: number }[];
+}

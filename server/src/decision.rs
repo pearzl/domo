@@ -8,8 +8,7 @@
 //!   （以及卡死升级）决策者不得自决，直接进决策收件箱等人裁决。
 //! - **决策者故障降级**：实例缺失或连续运行失败 → 待办自动转入收件箱
 //!   （`decision_maker_down`），相关分支挂起，但不阻塞无依赖的其他分支。
-//! - **角色隔离**：决策者不得同时担任 executor/acceptor（api::validate_agent_roles
-//!   与 agent 角色编辑共同校验；DOMO_DM_ROLE_OVERLAP=1 可显式打开例外）。
+//! - **角色可选**：决策者实例也可以兼任执行/验收。
 
 use std::sync::Arc;
 
@@ -26,39 +25,6 @@ use crate::{
 /// 决策者单条请求的最大尝试次数；超过则转 decision_maker_down 收件箱。
 pub const MAX_DECISION_ATTEMPTS: i64 = 2;
 
-/// DESIGN §6 角色隔离例外开关：BYO 池过小时显式允许决策者兼任执行/验收。
-pub fn dm_role_overlap_allowed() -> bool {
-    matches!(std::env::var("DOMO_DM_ROLE_OVERLAP"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"))
-}
-
-pub fn is_decision_maker(a: &Agent) -> bool {
-    a.roles.iter().any(|r| r == "decision_maker")
-}
-
-/// 角色隔离守卫：决策者实例不得持有任何非终态任务的 executor/acceptor 指派。
-/// 返回 Some(违规说明) 表示必须禁止其担任裁决者。
-pub fn dm_role_conflict(conn: &Connection, dm: &Agent) -> Option<String> {
-    const TERMINAL: [&str; 2] = ["done", "cancelled"];
-    for p in db::list_projects(conn) {
-        for t in db::list_tasks(conn, &p.id) {
-            if TERMINAL.contains(&t.status.as_str()) {
-                continue;
-            }
-            let as_executor = t.executor_agent_id.as_deref() == Some(dm.id.as_str());
-            let as_acceptor = t.acceptor_agent_id.as_deref() == Some(dm.id.as_str());
-            if as_executor || as_acceptor {
-                let role = if as_executor { "executor" } else { "acceptor" };
-                return Some(format!(
-                    "role isolation: decision maker '{}' ({}) is assigned as {role} on non-terminal task '{}' — \
-                     unassign the role (inbox adjudication / task edit) before retrying \
-                     (DESIGN §6; set DOMO_DM_ROLE_OVERLAP=1 to override)",
-                    dm.name, dm.id, t.title
-                ));
-            }
-        }
-    }
-    None
-}
 
 /// change_review / replan 请求的战略触发键：request 命中任一键即必须升级到人。
 pub(crate) const STRATEGIC_KEYS: [&str; 9] = [
@@ -641,15 +607,6 @@ pub fn scan(state: &Arc<App>) {
                     "no agent with the decision_maker role is registered (removed or never added)",
                 ),
                 Some(dm) => {
-                    // 角色隔离守卫（DESIGN §6）：决策者实例若正持有任何非终态任务的
-                    // executor/acceptor 指派（历史数据或 DOMO_DM_ROLE_OVERLAP 例外下产生），
-                    // 则不能作为裁决者派发 → 转 decision_maker_down，人工解除违规指派后 retry。
-                    if !dm_role_overlap_allowed() {
-                        if let Some(reason) = dm_role_conflict(&conn, &dm) {
-                            maker_down(state, &conn, &d, &reason);
-                            continue;
-                        }
-                    }
                     if !db::agent_free(&conn, &dm.id) {
                         continue; // 决策者忙碌：下一轮再试
                     }
@@ -785,6 +742,8 @@ mod tests {
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
+            agent_pinned: false,
+            tried_agents: serde_json::json!({}),
             status: "planned".into(),
             attempt: 0,
             rejection_count: 0,
@@ -866,6 +825,7 @@ mod tests {
             db: std::sync::Mutex::new(crate::db::open(":memory:")),
             tx: tokio::sync::broadcast::channel(1).0,
             handles: Default::default(),
+            circuits: Default::default(),
             handle_seq: Default::default(),
             wake: Default::default(),
             sessions: Default::default(),

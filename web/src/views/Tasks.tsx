@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useDomo } from '../store';
 import type { Agent, ApplyResult, AuditEvent, InterveneResult, ReplanReportResult, Task, TaskDetail, TaskFormValue, TaskStatus } from '../types';
-import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, ROLE_LABEL, fmtTime, shortId } from '../ui';
+import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
 import { TaskDag } from './Dag';
+import { PoolTable } from './PoolTable';
 const COLUMNS: TaskStatus[] = [
   'planned',
   'ready',
@@ -43,19 +44,12 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
   // 初始化规划台：目标草稿 + 指定规划者/执行者/验收者 + 项目 agent 池
   const [briefDraft, setBriefDraft] = useState<string | null>(null);
   const [planPlanner, setPlanPlanner] = useState('');
-  const [planExecutor, setPlanExecutor] = useState('');
-  const [planAcceptor, setPlanAcceptor] = useState('');
-  const [poolChecked, setPoolChecked] = useState<Set<string> | null>(null); // null=未初始化(=全部)
   const [planFeedback, setPlanFeedback] = useState('');
 
+  const planElapsed = useElapsed(planning?.startedAt);
   const tasks = selectedProjectId ? (tasksByProject[selectedProjectId] ?? []) : [];
   const milestones = selectedProjectId ? (milestonesByProject[selectedProjectId] ?? []) : [];
   const project = projects.find(p => p.id === selectedProjectId);
-  // 项目 agent 池（未设置=全部）
-  const poolAgents = useMemo(
-    () => (project?.agent_pool?.length ? agents.filter(a => project.agent_pool!.includes(a.id)) : agents),
-    [agents, project?.agent_pool],
-  );
 
   if (!selectedProjectId || !project) {
     return (
@@ -163,58 +157,15 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
                 placeholder="交给团队的目标说明：做什么、做到什么程度、有什么约束……"
               />
             </label>
-            <div>
-              <div className="label-text">项目 agent 池（本项目的分工范围；默认全部已配置 agent）</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-                {agents.map(a => (
-                  <label key={a.id} className="muted" style={{ cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={poolChecked ? poolChecked.has(a.id) : true}
-                      onChange={() =>
-                        setPoolChecked(prev => {
-                          const base = prev ?? new Set(agents.map(x => x.id));
-                          const next = new Set(base);
-                          if (next.has(a.id)) next.delete(a.id);
-                          else next.add(a.id);
-                          return next;
-                        })
-                      }
-                    />{' '}
-                    {a.name}
-                    <span className="muted">（{a.roles.map(r => ROLE_LABEL[r] ?? r).join('/')}）</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+            <PoolTable projectId={project.id} />
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <label className="muted">
-                规划者（生成规划的 LLM 实例）
+                规划者（生成规划的 LLM 实例；任务 agent 不在此绑定，执行时按池优先级动态选择）
                 <select value={planPlanner} onChange={e => setPlanPlanner(e.target.value)} className="select">
                   <option value="">自动选择</option>
                   {agents.filter(a => a.adapter === 'opencode' && a.roles.includes('planner')).map(a => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
-                </select>
-              </label>
-              <label className="muted">
-                执行者（生成规划后所有新任务由此 agent 执行）
-                <select value={planExecutor} onChange={e => setPlanExecutor(e.target.value)} className="select">
-                  <option value="">自动轮转分配</option>
-                  {poolAgents.filter(a => a.roles.includes('executor') && !a.roles.includes('decision_maker')).map(a => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="muted">
-                验收者（须与执行者不同）
-                <select value={planAcceptor} onChange={e => setPlanAcceptor(e.target.value)} className="select">
-                  <option value="">自动轮转分配</option>
-                  {poolAgents
-                    .filter(a => a.roles.includes('acceptor') && !a.roles.includes('decision_maker') && a.id !== planExecutor)
-                    .map(a => (
-                      <option key={a.id} value={a.id}>{a.name}</option>
-                    ))}
                 </select>
               </label>
               <span className="muted" style={{ alignSelf: 'end' }}>
@@ -234,45 +185,37 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
               <button
                 className="btn btn-primary"
                 disabled={!!planning}
+                title={tasks.length > 0
+                  ? '按意见（可留空）重新规划：规划成功后原子替换现有任务与里程碑；失败则原计划保留'
+                  : '由规划者拆解任务与里程碑'}
                 onClick={() => {
                   void (async () => {
                     const brief = (briefDraft ?? project.brief ?? '').trim();
                     if (!brief) return void setError('必须填写项目目标，规划者据此拆解任务。');
                     if (brief !== (project.brief ?? '')) await updateProject(project.id, { brief });
-                    // agent 池：显式选择过（poolChecked 非 null）→ 保存；全选也保存（显式化）
-                    if (poolChecked) {
-                      const ids = [...poolChecked];
-                      await updateProject(project.id, { agent_pool: ids.length === agents.length ? null : ids });
+                    if (tasks.length > 0) {
+                      const okGo = window.confirm(
+                        `将重新规划并替换当前 ${tasks.length} 个任务与 ${milestones.length} 个里程碑。\n` +
+                        `规划失败时原计划会完整保留。继续？`
+                      );
+                      if (!okGo) return;
                     }
                     const added = await planProject(project.id, {
                       planner_agent_id: planPlanner || undefined,
-                      executor_agent_id: planExecutor || undefined,
-                      acceptor_agent_id: planAcceptor || undefined,
+                      feedback: planFeedback.trim() || undefined,
                     });
-                    if (added >= 0) setBriefDraft(null);
+                    if (added >= 0) {
+                      setBriefDraft(null);
+                      setPlanFeedback('');
+                    }
                   })();
                 }}
               >
                 {planning?.projectId === project.id
-                  ? `规划者生成中… ${Math.floor((Date.now() - planning.startedAt) / 1000)}s`
+                  ? `规划者生成中… ${planElapsed}s`
                   : tasks.length > 0
-                    ? '✨ 重新规划（覆盖现有计划）'
+                    ? '✨ 重新规划（替换现有计划）'
                     : '✨ 生成规划'}
-              </button>
-              <button
-                className="btn"
-                disabled={!!planning || !planFeedback.trim()}
-                title="按修改意见要求规划者重做规划（会覆盖现有 planned 任务与里程碑）"
-                onClick={() => {
-                  void (async () => {
-                    const fb = planFeedback.trim();
-                    if (!fb) return;
-                    const added = await planProject(project.id, { feedback: fb });
-                    if (added >= 0) setPlanFeedback('');
-                  })();
-                }}
-              >
-                ↻ 按意见重新规划
               </button>
               <button
                 className="btn btn-primary"

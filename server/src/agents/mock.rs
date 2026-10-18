@@ -34,6 +34,12 @@ pub async fn run_execution(
     agent: Agent,
     mode: super::ExecMode,
 ) -> Result<super::ExecOutcome, String> {
+    // 测试钩子：模拟供应商限流（验证熔断 + 换下一优先级 agent）
+    if task.description.contains("[rate_limit]") {
+        let conn = state.db.lock().unwrap();
+        events::log_line(&state, &conn, &task.id, "[rate_limit] mock 模拟限流错误");
+        return Err("opencode run failed (exit exit status: 1); Rate limit exceeded. Please try again later.".into());
+    }
     {
         let conn = state.db.lock().unwrap();
         let how = match &mode {

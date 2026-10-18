@@ -1724,3 +1724,24 @@ textarea {
   margin: 14px 0;
 }
 
+
+/* M4.5 agent 池表格 */
+.pool-table td.pool-cell {
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  min-width: 64px;
+}
+.pool-pri {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent, #4c8dff) 18%, transparent);
+  color: var(--accent, #4c8dff);
+  font-weight: 600;
+}
+.pool-off {
+  color: var(--danger, #e5534b);
+  font-weight: 600;
+}

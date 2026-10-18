@@ -795,6 +795,8 @@ mod tests {
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
+            agent_pinned: false,
+            tried_agents: serde_json::json!({}),
             status: status.into(),
             attempt: 1,
             rejection_count: 0,

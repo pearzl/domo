@@ -103,6 +103,12 @@ pub struct Task {
     /// M4：任务涉及的仓库（相对工作区路径；空 = 缺省主仓库）
     #[serde(default)]
     pub scope_repos: Vec<String>,
+    /// M4.5：人类显式指定 agent（1=固定不动态解析；0=按角色+池动态选择）
+    #[serde(default)]
+    pub agent_pinned: bool,
+    /// M4.5：本任务已尝试过的 agent（{role: [agent_id]}），用于失败换人时排除
+    #[serde(default)]
+    pub tried_agents: Value,
     pub status: String,
     pub attempt: i64,
     pub rejection_count: i64,

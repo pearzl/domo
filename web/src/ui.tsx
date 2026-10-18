@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useDomo } from './store';
 
@@ -288,4 +289,15 @@ export function Pager({
       </button>
     </div>
   );
+}
+
+/** 长等待计时（秒）：以 startedAt 为基准每秒重渲染一次；切页/重挂载不丢。 */
+export function useElapsed(startedAt: number | undefined | null): number {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!startedAt) return;
+    const t = setInterval(() => tick(x => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [startedAt]);
+  return startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
 }
