@@ -287,10 +287,11 @@ s, Q = mk_task("M4-Q", deps=[P["id"]])
 s, slow = post("/agents", {"name": "slow", "adapter": "mock", "roles": ["executor"],
                            "capabilities": {"max_parallel": 5}, "config": {"duration_ms": 300000}})
 check("slow executor registered for the cycle probe", bool(slow.get("id")), slow)
-# two live (non-terminal) probe tasks: R1 runs long on the slow executor, R2 waits on R1.
+# two live (non-terminal) probe tasks: R1 runs long on the slow executor (pinned → 长执行),
+# R2 waits on R1. 注：任务固定到 slow 实例（agent_pinned），不受池选人影响。
 s, R1 = mk_task("M4-探针1", desc="long running probe", executor=slow)
 s, R2 = mk_task("M4-探针2", deps=[R1["id"]], desc="waits on probe1", executor=slow)
-r1_live = wait_until(lambda: (task_by_id(pid, R1["id"]) or {}).get("status") == "executing", 20)
+r1_live = wait_until(lambda: (task_by_id(pid, R1["id"]) or {}).get("status") in ("plan_drafting", "plan_review", "executing"), 30)
 check("cycle probe task is live (non-terminal)", r1_live is not None,
       (task_by_id(pid, R1["id"]) or {}).get("status"))
 g4 = wait_until(lambda: open_gate(pid, M4["id"]))

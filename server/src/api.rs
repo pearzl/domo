@@ -894,15 +894,15 @@ async fn plan_project(
                     created_at: db::now(),
                 };
                 c.execute(
-                    "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                    "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                     rusqlite::params![
                         t.id, t.project_id, t.milestone_id, t.title, t.description,
                         db::jstring(&Value::Array(t.depends_on.iter().map(|d| Value::String(d.clone())).collect())),
                         t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
                         t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
                         t.status, t.attempt, t.rejection_count, t.failure_count,
-                        db::jstring(&Value::Array(Vec::new())), t.created_at
+                        db::jstring(&Value::Array(Vec::new())), t.created_at, t.agent_pinned as i64
                     ],
                 ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("insert planned task: {e}")))?;
                 if !t.scope_repos.is_empty() {
@@ -1349,15 +1349,15 @@ async fn intervene_apply(
 
 fn insert_task_row(c: &rusqlite::Connection, t: &Task) -> Result<(), String> {
     c.execute(
-        "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         rusqlite::params![
             t.id, t.project_id, t.milestone_id, t.title, t.description,
             db::jstring(&Value::Array(t.depends_on.iter().map(|d| Value::String(d.clone())).collect())),
             t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
             t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
             t.status, t.attempt, t.rejection_count, t.failure_count,
-            db::jstring(&Value::Array(Vec::new())), t.created_at
+            db::jstring(&Value::Array(Vec::new())), t.created_at, t.agent_pinned as i64
         ],
     ).map_err(|e| e.to_string())?;
     Ok(())
@@ -1802,15 +1802,16 @@ async fn create_task(
             created_at: db::now(),
         };
         c.execute(
-            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             rusqlite::params![
                 t.id, t.project_id, t.milestone_id, t.title, t.description,
                 db::jstring(&serde_json::to_value(&t.depends_on).unwrap()),
                 t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
                 t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
                 t.status, t.attempt, t.rejection_count, t.failure_count,
-                db::jstring(&serde_json::to_value(&t.artifacts).unwrap()), t.created_at
+                db::jstring(&serde_json::to_value(&t.artifacts).unwrap()), t.created_at,
+                t.agent_pinned as i64
             ],
         ).unwrap();
         events::push_event(&st, &c, &id, Some(&t.id), "task.created",

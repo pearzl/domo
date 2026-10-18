@@ -104,9 +104,11 @@ def event_types():
     return [e["type"] for e in b] if s == 200 else []
 
 print("[smoke] 1) agents + role isolation")
-s, exec_a = post("/agents", {"name": "exec-1", "adapter": "mock", "roles": ["executor"], "config": {"duration_ms": 50}})
+s, exec_a = post("/agents", {"name": "exec-1", "adapter": "mock", "roles": ["executor"],
+                                   "capabilities": {"max_parallel": 4}, "config": {"duration_ms": 50}})
 check("executor agent registered", s == 200 and exec_a.get("id"), f"{s} {exec_a}")
-s, acc_a = post("/agents", {"name": "acc-1", "adapter": "mock", "roles": ["acceptor"], "config": {"duration_ms": 50}})
+s, acc_a = post("/agents", {"name": "acc-1", "adapter": "mock", "roles": ["acceptor"],
+                                  "capabilities": {"max_parallel": 4}, "config": {"duration_ms": 50}})
 check("acceptor agent registered", s == 200 and acc_a.get("id"), f"{s} {acc_a}")
 s, dm_a = post("/agents", {"name": "judge-1", "adapter": "mock", "roles": ["decision_maker"], "config": {"duration_ms": 50}})
 check("decision_maker agent registered", s == 200 and dm_a.get("id"), f"{s} {dm_a}")
@@ -114,10 +116,14 @@ dm_id = dm_a.get("id")
 s, slow_a = post("/agents", {"name": "exec-slow", "adapter": "mock", "roles": ["executor"], "config": {"duration_ms": 3000}})
 check("slow executor agent registered", s == 200 and slow_a.get("id"), f"{s} {slow_a}")
 
-s, bad = post("/agents", {"name": "judge-exec", "adapter": "mock", "roles": ["decision_maker", "executor"]})
-check("C4 creating decision_maker+executor agent rejected", s == 400, f"{s} {bad}")
-s, bad = post("/agents", {"name": "judge-acc", "adapter": "mock", "roles": ["decision_maker", "acceptor"]})
-check("C4 creating decision_maker+acceptor agent rejected", s == 400, f"{s} {bad}")
+# M4.5：角色是标签，决策者兼任执行/验收已放开（不再强制隔离）
+s, multi_a = post("/agents", {"name": "judge-exec", "adapter": "mock", "roles": ["decision_maker", "executor"],
+                              "config": {"duration_ms": 50}})
+check("C4 decision_maker+executor agent accepted", s == 200 and multi_a.get("id"), f"{s} {multi_a}")
+s, multi_b = post("/agents", {"name": "judge-acc", "adapter": "mock", "roles": ["decision_maker", "acceptor"],
+                              "config": {"duration_ms": 50}})
+check("C4 decision_maker+acceptor agent accepted", s == 200 and multi_b.get("id"), f"{s} {multi_b}")
+# 多角色实例保留到 C4 指派断言之后（见第 6 节末尾清理）
 
 print("[smoke] 2) project bootstrap")
 s, proj = post("/projects", {"name": "决策通道冒烟", "brief": "M3 decision maker smoke"})
@@ -143,7 +149,8 @@ if d_ex:
     check("C1 rationale present", bool(ruling.get("rationale")), ruling)
 check("C1 decision.requested event", "decision.requested" in event_types())
 check("C1 decision.ruled event", "decision.ruled" in event_types())
-t = wait_until(lambda: (task_of(ex_id) or {}).get("status") == "done" and task_of(ex_id), 25)
+# 新语义：任务在高优先级 agent 处排队（含计划/审查阶段），等待预算放宽
+t = wait_until(lambda: (task_of(ex_id) or {}).get("status") == "done" and task_of(ex_id), 150)
 check("C1 exempted task ran to done without acceptance", t is not None,
       (task_of(ex_id) or {}).get("status"))
 if t:
@@ -222,20 +229,30 @@ if open_dec:
           dd and dd.get("ruling"))
 
 print("[smoke] 6) C4 — decision maker may not be assigned as executor/acceptor")
+# M4.5：人类可把「兼有决策者角色」的实例指派为执行者/验收者（角色不设隔离）
 s, body = post(f"/projects/{pid}/tasks", {
-    "title": "角色隔离探针", "description": "探针", "acceptance_required": False,
-    "executor_agent_id": dm_id,
+    "title": "多角色探针", "description": "探针", "acceptance_required": False,
+    "executor_agent_id": multi_a.get("id"),
 })
-check("C4 assigning DM as executor rejected", s == 400, f"{s} {body}")
+check("C4 assigning DM+executor instance as executor accepted",
+      s == 200 and body.get("executor_agent_id") == multi_a.get("id"), f"{s} {body}")
 s, body = post(f"/projects/{pid}/tasks", {
-    "title": "角色隔离探针2", "description": "探针", "acceptance_required": True,
-    "executor_agent_id": exec_a["id"], "acceptor_agent_id": dm_id,
+    "title": "多角色探针2", "description": "探针", "acceptance_required": True,
+    "executor_agent_id": exec_a["id"], "acceptor_agent_id": multi_b.get("id"),
 })
-check("C4 assigning DM as acceptor rejected", s == 400, f"{s} {body}")
+check("C4 assigning DM+acceptor instance as acceptor accepted",
+      s == 200 and body.get("acceptor_agent_id") == multi_b.get("id"), f"{s} {body}")
+# 摘除多角色实例的 decision_maker 角色（它们已被任务引用，不能删除），
+# 保证后续「决策者故障降级」用例中不再有可用决策者
+req("PATCH", f"/agents/{multi_a.get('id')}", {"roles": ["executor"]})
+req("PATCH", f"/agents/{multi_b.get('id')}", {"roles": ["acceptor"]})
 
 print("[smoke] 7) C3/C4 — decision maker down: inbox item + branch isolation")
+# 决策者故障降级：移除唯一 DM 实例（多角色探针已在 C4 段清理）
 s, delres = req("DELETE", f"/agents/{dm_id}", None)
 check("decision maker removed", s == 200, f"{s} {delres}")
+_remaining_dm = [a for a in get("/agents")[1] if "decision_maker" in (a.get("roles") or [])]
+check("no decision maker instance left", not _remaining_dm, _remaining_dm)
 s, t_down = post(f"/projects/{pid}/tasks", {
     "title": "决策者故障期任务", "description": "需要豁免裁定", "acceptance_required": False,
     "executor_agent_id": exec_a["id"],
@@ -270,7 +287,7 @@ check("decision maker re-registered", s == 200 and dm2.get("id"), f"{s} {dm2}")
 d = wait_until(lambda: next((d for d in decisions(pid, kind="exemption")
                               if d["id"] == down_dec_id and d["status"] == "ruled"), None), 25) if down_dec_id else None
 check("stuck decision re-queued and ruled", d is not None, "down decision did not resume after DM re-registration")
-t = wait_until(lambda: (task_of(down_id) or {}).get("status") == "done", 30)
+t = wait_until(lambda: (task_of(down_id) or {}).get("status") == "done", 150)
 check("suspended branch resumed to done", t is not None, (task_of(down_id) or {}).get("status"))
 if item:
     s, inbox = get("/inbox")
@@ -280,7 +297,8 @@ if item:
 print("[smoke] 9) audit trail completeness")
 s, dl = get(f"/projects/{pid}/decisions")
 kinds = sorted({d["kind"] for d in dl})
-check("all three decision kinds queryable", kinds == ["change_review", "exemption", "negotiation_failed"], kinds)
+# 协商机制已退场：新流程只产生 change_review / exemption（如出现历史 kind 亦接受）
+check("decision kinds queryable", {"change_review", "exemption"} <= set(kinds), kinds)
 check("every decision has a scope", all(d.get("scope") in ("tactical", "strategic") for d in dl), dl)
 check("decision.requested/ruled/escalated/maker_down events all emitted",
       all(e in event_types() for e in

@@ -693,6 +693,15 @@ async fn plan_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
         match outcome {
             Ok(plan) => {
                 db::set_task_plan(&conn, &fresh.id, Some(&plan));
+                if !fresh.acceptance_required {
+                    // 免验收任务没有验收者，跳过计划审查直接进入执行
+                    events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "task.plan_approved",
+                        json!({"attempt": fresh.attempt, "note": "acceptance_required=false，跳过计划审查"}));
+                    let _ = events::status_changed(&state, &conn, &fresh, "executing", "plan_approved_no_review");
+                    drop(guard);
+                    state.wake();
+                    return;
+                }
                 let _ = conn.execute("UPDATE tasks SET status='plan_review' WHERE id=?1", params![fresh.id]);
                 events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "task.plan_drafted",
                     json!({"attempt": fresh.attempt, "excerpt": plan.chars().take(400).collect::<String>()}));

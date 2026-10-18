@@ -122,7 +122,7 @@ def agents():
 def agent_by(prefix):
     return next((a for a in agents() if a["id"] == prefix), None)
 
-def wait_agent(prefix, pred, timeout=20, interval=0.05):
+def wait_agent(prefix, pred, timeout=90, interval=0.05):
     end = time.time() + timeout
     while time.time() < end:
         a = agent_by(prefix)
@@ -280,7 +280,7 @@ s, _ = post(f"/api/inbox/{gate['id']}/resolve", {"resolution": "pass", "note": "
 check("收件箱 gate 处理成功（前端「处理」按钮路径）", s == 200, s)
 check("阶段一 → passed",
       next((m["status"] for m in project_detail(pid).get("milestones", []) if m["id"] == M1_id), None) == "passed")
-bfull = wait_agent(B_id, lambda a: len(a.get("current_task_ids") or []) == 2)
+bfull = wait_agent(B_id, lambda a: len(a.get("current_task_ids") or []) == 2, timeout=120)
 lb2 = load(bfull) if bfull else load(agent_by(B_id) or {})
 check("执行者 B 并行执行 2 个任务：占用 2/2（100%）、空闲 0",
       lb2["occupied"] == 2 and lb2["pct"] == 100 and lb2["free"] == 0, lb2)

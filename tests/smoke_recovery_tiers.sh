@@ -17,12 +17,12 @@
 #   事件契约 task.recovered（tier/outcome/reason/task_id/attempt/session_id，append-only，时间线与审计可见）。
 #
 # 用法：bash scripts/smoke_recovery_tiers.sh          （退出码 0 = 全部通过）
-#       DOMO_RT_PORT=8797 DOMO_RT_MODEL=opencode-go/glm-5.3-flash bash scripts/smoke_recovery_tiers.sh
+#       DOMO_RT_PORT=8797 DOMO_RT_MODEL=<provider>/<model> bash scripts/smoke_recovery_tiers.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${DOMO_RT_PORT:-8797}"
-MODEL="${DOMO_RT_MODEL:-opencode-go/glm-5.3-flash}"
+MODEL="${DOMO_RT_MODEL:?请通过 DOMO_RT_MODEL 指定真实模型（如 provider/model）}"
 TMP_ROOT="${TMPDIR:-/tmp}"
 RUN_DIR="$(mktemp -d "$TMP_ROOT/domo_recovery_tiers.XXXXXX")"
 DB="$RUN_DIR/domo.db"

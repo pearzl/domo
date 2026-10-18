@@ -163,8 +163,12 @@ pub fn resolve_role(
     } else {
         task.executor_agent_id.clone()
     };
+    // 人类固定只作用于「已显式绑定」的角色；该角色未绑定（如免验收任务无 acceptor）时
+    // 仍按池动态解析，避免固定标记把任务卡死。
     if task.agent_pinned {
-        return bound.filter(|id| db::get_agent(conn, id).is_some());
+        if let Some(b) = bound.filter(|id| !id.is_empty()) {
+            return db::get_agent(conn, &b).map(|_| b);
+        }
     }
     let pool = db::project_pool(conn, project_id);
     let tried = db::task_tried(conn, &task.id);

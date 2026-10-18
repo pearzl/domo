@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M3 端到端冒烟（真实 opencode / glm 系 agent）—— 全链路正向 + 负路径 + 重启恢复。
+# M3 端到端冒烟（真实 agent）—— 全链路正向 + 负路径 + 重启恢复。
 #
 # 团队池：planner×2 / executor×2 / acceptor×2 / decision_maker×2（全部 adapter=opencode，
 #         model 默认 opencode-go/glm-5.3-flash，可用 DOMO_M3_MODEL 覆盖）。
@@ -17,12 +17,12 @@
 #
 # 用法：bash scripts/smoke_m3_e2e.sh          （退出码 0 = 全部通过）
 #       DOMO_M3_PORT=8801 bash scripts/smoke_m3_e2e.sh
-#       DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash scripts/smoke_m3_e2e.sh
+#       DOMO_M3_MODEL=<provider>/<model> bash scripts/smoke_m3_e2e.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${DOMO_M3_PORT:-8799}"
-MODEL="${DOMO_M3_MODEL:-opencode-go/glm-5.3-flash}"
+MODEL="${DOMO_M3_MODEL:?请通过 DOMO_M3_MODEL 指定真实模型（如 provider/model）}"
 TMP_ROOT="${TMPDIR:-/tmp}"
 RUN_DIR="$(mktemp -d "$TMP_ROOT/domo_m3_e2e.XXXXXX")"
 DB="$RUN_DIR/domo.db"
@@ -189,7 +189,7 @@ def dump_results():
 # PHASE 1: 团队池 → 正向全链路 → 负路径 → 决策者缺席 → 快照后崩溃重启
 # ======================================================================
 def phase1():
-    print("[m3-smoke] 1) 团队池：真实 opencode glm 系，多角色多实例")
+    print("[m3-smoke] 1) 团队池：真实 agent，多角色多实例")
     ids = {}
     def mk(name, roles, mp=1):
         s, b = post("/agents", {"name": name, "adapter": "opencode", "roles": roles,
@@ -248,19 +248,18 @@ def phase1():
     allmember = {t for m in msA for t in m.get("task_ids", [])}
     check("任务全部归属里程碑", all(t["id"] in allmember for t in tasksA),
           [(t["id"] in allmember) for t in tasksA])
-    check("规划任务均分配了 executor 且非决策者",
-          all(t.get("executor_agent_id") and t["executor_agent_id"] not in dm_ids for t in tasksA))
-    check("规划任务均分配了 acceptor 且非决策者、且 != executor",
-          all(t.get("acceptor_agent_id") and t["acceptor_agent_id"] not in dm_ids
-              and t["acceptor_agent_id"] != t["executor_agent_id"] for t in tasksA))
-    check("规划任务进入验收标准协商（negotiation_status=pending）",
-          all(t.get("negotiation_status") == "pending" for t in tasksA),
+    # M4.5：规划不再绑定 agent——任务执行时按「角色 + 项目池优先级」动态解析
+    check("规划任务未在规划阶段绑定 agent（动态选人）",
+          all(not t.get("agent_pinned") for t in tasksA),
+          [(t.get("executor_agent_id"), t.get("agent_pinned")) for t in tasksA])
+    check("规划任务验收标准由规划者给出（negotiation_status=agreed）",
+          all(t.get("negotiation_status") == "agreed" for t in tasksA),
           [t.get("negotiation_status") for t in tasksA])
 
     s, _ = post(f"/projects/{pidA}/confirm", {})
     check("项目 A 人确认 → running", s == 200 and project_status(pidA) == "running", s)
 
-    print("[m3-smoke] 3) 项目 A：协商 → 执行 → 验收 → 里程碑 gate 通过 → 总结报告")
+    print("[m3-smoke] 3) 项目 A：计划制定/审查 → 执行 → 验收 → 里程碑 gate 通过 → 总结报告")
     # pump: 自动通过出现的 gate，安全恢复升级项，直到项目 completed
     seen = set()
     end = time.time() + 1500
@@ -280,19 +279,20 @@ def phase1():
     check("项目 A 全部终态 → completed", project_status(pidA) == "completed", project_status(pidA))
     msA_status = [m["status"] for m in milestones_of(pidA)]
     check("项目 A 全部里程碑 passed", msA_status and all(x == "passed" for x in msA_status), msA_status)
-    # 协商执行都可审计
+    # 计划/执行/验收全程可审计
     ta = etypes(pidA)
-    check("项目 A 有 negotiation.round 事件（真实多轮协商）", "negotiation.round" in ta)
-    check("项目 A 有 negotiation.agreed 事件", "negotiation.agreed" in ta)
+    check("项目 A 有 task.plan_drafted 事件（执行者制定计划）", "task.plan_drafted" in ta)
+    check("项目 A 有 task.plan_approved 事件（验收者审查通过）", "task.plan_approved" in ta)
     check("项目 A 有 acceptance.recorded（验收通过）事件", "acceptance.recorded" in ta)
     check("项目 A 有 milestone.passed 事件", "milestone.passed" in ta)
     doneA = [t for t in tasks_of(pidA) if t["status"] == "done"]
     check("项目 A 所有任务 done", len(doneA) == len(tasks_of(pidA)) and len(doneA) > 0,
           [t["status"] for t in tasks_of(pidA)])
-    # 协商历史落库可回放
+    # 任务计划落库可回放
     anydetail = task_detail(doneA[0]["id"]) if doneA else {}
-    neg = anydetail.get("negotiation") or {}
-    check("项目 A 任务详情含协商轮次记录", bool(neg.get("rounds")), neg.get("rounds"))
+    check("项目 A 任务详情含任务计划（execution_plan）",
+          bool((anydetail.get("task", {}).get("execution_plan") or "").strip()),
+          bool(anydetail.get("task", {}).get("execution_plan")))
     wait_until(lambda: (report(pidA) or {}).get("status") == "ready", 600)
     repA = report(pidA) or {}
     check("项目 A 总结报告自动生成 ready", repA.get("status") == "ready", repA.get("status"))
@@ -472,47 +472,53 @@ def phase1():
     _, MC = post(f"/projects/{pidC}/milestones", {"name": "C阶段", "goal": "决策通道验证阶段"})
     MCid = MC.get("id")
     check("项目 C 里程碑创建（C1 完成后保持项目非终态）", bool(MCid), MC)
-    c1 = create_task(pidC, "C-协商失败", "在当前工作目录创建文件 c1.txt，内容为一行：c1 ok",
-                     E1, A1, milestone_id=MCid,
+    # M4.5 负路径：计划审查连续打回 → escalated（用 mock 实例保证确定性；
+    # 任务固定（pinned）到 mock，避免失败换人，从而真实触发升级）
+    _, mock_e = post("/agents", {"name": "c-mock-exec", "adapter": "mock", "roles": ["executor"],
+                                 "capabilities": {"max_parallel": 1, "supports_resume": False},
+                                 "config": {"duration_ms": 50}})
+    _, mock_a = post("/agents", {"name": "c-mock-acc", "adapter": "mock", "roles": ["acceptor"],
+                                 "capabilities": {"max_parallel": 1, "supports_resume": False},
+                                 "config": {"duration_ms": 50}})
+    c1 = create_task(pidC, "C-计划打回升级", "[reject_plan_always] 计划将被连续打回",
+                     mock_e, mock_a, milestone_id=MCid,
                      acceptance_criteria="c1.txt 存在且内容为 c1 ok")
-    check("C1 任务创建为 planned+pending", bool(c1) and c1.get("status") == "planned"
-          and c1.get("negotiation_status") == "pending", c1)
-    s, r = post(f"/tasks/{c1['id']}/negotiation", {"status": "failed", "acceptance_criteria": "c1.txt 存在且内容为 c1 ok"})
-    dec1 = r.get("decision") if s == 200 else None
-    check("协商失败登记 decision(kind=negotiation_failed, pending)", bool(dec1) and dec1.get("kind") == "negotiation_failed",
-          (s, dec1))
-    check("协商失败任务未开工（保持 planned）", (task(c1["id"]) or {}).get("status") == "planned")
+    check("C1 任务创建（未开工）", bool(c1) and c1.get("status") == "planned", c1)
     s, _ = post(f"/projects/{pidC}/confirm", {})
-    check("项目 C confirm → running（触发决策者派发）", s == 200 and project_status(pidC) == "running", s)
-    ruled1 = wait_until(lambda: next((d for d in decisions(pidC, kind="negotiation_failed")
-                                      if d.get("task_id") == c1["id"] and d.get("status") == "ruled"), None), 600)
-    check("决策者（真实 agent）裁定协商失败请求", ruled1 is not None)
-    if ruled1:
-        check("裁定来源为 agent", (ruled1.get("ruling") or {}).get("by") == "agent", ruled1.get("ruling"))
-    settled1 = wait_until(lambda: (task(c1["id"]) or {}).get("negotiation_status") == "agreed", 300)
-    check("裁定后协商置 agreed 并恢复流转", settled1 is not None,
-          (task(c1["id"]) or {}).get("negotiation_status"))
-    check("negotiation.settled 事件留痕", "negotiation.settled" in etypes(pidC))
-    c1done = wait_until(lambda: (task(c1["id"]) or {}).get("status") == "done", 600)
-    check("C1 裁定后执行+验收跑完 done", c1done is not None, (task(c1["id"]) or {}).get("status"))
+    check("项目 C confirm → running", s == 200 and project_status(pidC) == "running", s)
+    esc_c1 = wait_until(lambda: (task(c1["id"]) or {}).get("status") == "escalated", 300)
+    check("C1 计划审查连续打回 → escalated", esc_c1 is not None, (task(c1["id"]) or {}).get("status"))
+    check("C1 计划打回事件留痕（task.plan_rejected ×≥2）",
+          etypes(pidC).count("task.plan_rejected") >= 2, etypes(pidC).count("task.plan_rejected"))
+    esc_item = wait_until(lambda: next((i for i in inbox() if i.get("status") == "open"
+                                        and i.get("project_id") == pidC
+                                        and (i.get("payload") or {}).get("task_id") == c1["id"]), None), 60)
+    check("C1 升级项进入决策收件箱", esc_item is not None)
+    # 人工裁决：放宽 → 重新流转到 done（真实/模拟执行均可）
+    if esc_item:
+        s, _ = resolve(esc_item["id"], "relax", "冒烟：放宽标准后继续")
+        check("人工裁决 relax 受理", s == 200, s)
+    c1done = wait_until(lambda: (task(c1["id"]) or {}).get("status") == "done", 300)
+    check("C1 裁决后跑完 done", c1done is not None, (task(c1["id"]) or {}).get("status"))
 
     # 决策者缺席
     s1, _ = delete(f"/agents/{D1}")
     s2, _ = delete(f"/agents/{D2}")
     check("删除两个决策者实例（模拟缺席）", s1 == 200 and s2 == 200, (s1, s2))
     post(f"/projects/{pidC}/pause", {})
-    c2 = create_task(pidC, "C-决策者缺席", "在当前工作目录创建文件 c2.txt，内容为一行：c2 ok",
-                     E2, A2, acceptance_criteria="c2.txt 存在且内容为 c2 ok")
-    post(f"/tasks/{c2['id']}/negotiation", {"status": "failed", "acceptance_criteria": "c2.txt 存在且内容为 c2 ok"})
+    # 决策者缺席的确定性路径：免验收任务需要决策者裁定（exemption），无决策者 → down + 挂起
+    c2 = create_task(pidC, "C-决策者缺席", "无需验收的简单任务（模拟）",
+                     mock_e, mock_a, acceptance_required=False,
+                     acceptance_criteria="")
     s, _ = post(f"/projects/{pidC}/resume", {})
     check("项目 C resume", s == 200, s)
     down_item = wait_until(lambda: open_dm_down(c2["id"]), 300)
     check("决策者缺席 → decision_maker_down 收件箱条目", down_item is not None)
-    d2 = wait_until(lambda: next((d for d in decisions(pidC, kind="negotiation_failed")
+    d2 = wait_until(lambda: next((d for d in decisions(pidC, kind="exemption")
                                   if d.get("task_id") == c2["id"] and d.get("status") == "down"), None), 300)
     check("对应决策置 down（挂起不阻塞无关分支）", d2 is not None)
     c2t = task(c2["id"]) or {}
-    check("协商失败任务因决策者缺席被挂起（suspended）", c2t.get("status") == "suspended", c2t.get("status"))
+    check("待裁定任务因决策者缺席被挂起（suspended）", c2t.get("status") == "suspended", c2t.get("status"))
     check("C1（无关分支）不受决策者缺席影响（已 done）",
           (task(c1["id"]) or {}).get("status") == "done")
 
@@ -574,10 +580,8 @@ def phase2():
 
     c2 = snap["C"]["c2"]
     c2t = task(c2) or {}
-    check("重启后 C2 协商失败状态保留（failed）", c2t.get("negotiation_status") == "failed",
-          c2t.get("negotiation_status"))
     check("重启后 C2 挂起状态保留（suspended）", c2t.get("status") == "suspended", c2t.get("status"))
-    d2 = next((d for d in decisions(pidC, kind="negotiation_failed")
+    d2 = next((d for d in decisions(pidC, kind="exemption")
                if d.get("task_id") == c2 and d.get("status") == "down"), None)
     check("重启后决策仍为 down（持久化）", d2 is not None)
     item = open_dm_down(c2)
@@ -594,9 +598,9 @@ def phase2():
     check("down 收件箱 retry 成功", s == 200, (s, r))
     s, _ = post(f"/projects/{pidC}/resume", {})
     check("项目 C 恢复 running", s == 200, s)
-    ruledC = wait_until(lambda: next((d for d in decisions(pidC, kind="negotiation_failed")
+    ruledC = wait_until(lambda: next((d for d in decisions(pidC, kind="exemption")
                                       if d.get("task_id") == c2 and d.get("status") == "ruled"), None), 600)
-    check("恢复后决策者裁定 C2 协商失败", ruledC is not None)
+    check("恢复后决策者裁定 C2 免验收请求", ruledC is not None)
     c2done = wait_until(lambda: (task(c2) or {}).get("status") == "done", 600)
     check("C2 裁定后执行+验收跑完 done", c2done is not None, (task(c2) or {}).get("status"))
     # C 的里程碑 gate：全部任务终态但 gate 未决 → 项目保持 running（不提前 completed），
@@ -619,10 +623,10 @@ def phase2():
 
     print("[m3-smoke] 9) 审计与日志落盘可复查")
     all_ev = etypes(pidA) + etypes(pidB) + etypes(pidC) + etypes(pidD)
-    for ev in ["planner.proposed", "negotiation.started", "negotiation.round", "negotiation.agreed",
+    for ev in ["planner.proposed", "task.plan_drafted", "task.plan_approved",
                "acceptance.recorded", "milestone.gate_opened", "milestone.passed", "milestone.failed",
                "milestone.window_opened", "milestone.window_applied", "replan.approved", "replan.applied",
-               "decision.requested", "decision.ruled", "negotiation.settled", "report.generated"]:
+               "decision.requested", "decision.ruled", "task.sandbox_ready", "report.generated"]:
         check(f"审计事件存在：{ev}", ev in all_ev)
     log = ""
     try:

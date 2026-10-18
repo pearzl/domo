@@ -204,7 +204,8 @@ for label, mid in (("阶段一", M1_id), ("阶段二", M2_id)):
         check(f"{label}：gate 确认 → passed", s == 200 and st == "passed", f"{s}/{st}")
 
 print("[report-smoke] 4) 负面任务终止（挂起 abandon / 升级 abandon）")
-n1 = wait_until(lambda: (task_by_title(pid, "N1 执行失败挂起") or {}).get("status") == "suspended", 60)
+# 失败重试含指数退避（5s→15s→45s），3 次失败需 >60s
+n1 = wait_until(lambda: (task_by_title(pid, "N1 执行失败挂起") or {}).get("status") == "suspended", 200)
 check("N1 连续失败 3 次 → suspended", n1 is not None, (task_by_title(pid, "N1 执行失败挂起") or {}).get("status"))
 esc1 = wait_until(lambda: open_escalation_for(N1["id"]), 20)
 check("N1 产生 open escalation 收件箱条目", esc1 is not None)
@@ -221,9 +222,9 @@ if esc2:
     check("N2 abandon → cancelled", s == 200 and (task_by_title(pid, "N2 验收退回升级") or {}).get("status") == "cancelled")
 
 print("[report-smoke] 5) 项目完成 → 自动生成报告（planner 故障 → failed）")
-done = wait_until(lambda: project_detail(pid).get("project", {}).get("status") == "completed", 60)
+done = wait_until(lambda: project_detail(pid).get("project", {}).get("status") == "completed", 200)
 check("项目 A 自动进入 completed", done is not None, project_detail(pid).get("project", {}).get("status"))
-failed = wait_until(lambda: (report_of(pid) or {}).get("status") == "failed", 30)
+failed = wait_until(lambda: (report_of(pid) or {}).get("status") == "failed", 90)
 rep = report_of(pid)
 check("planner 故障 → 报告自动生成失败（status=failed）", failed is not None, rep and rep.get("status"))
 check("失败原因来自 planner（mock report_fail）", rep and "report_fail" in (rep.get("error") or ""), rep and rep.get("error"))
@@ -252,8 +253,8 @@ content = (rep or {}).get("content") or ""
 print("[report-smoke] 7) 报告内容覆盖验收标准")
 for needle, label in [
     ("项目总结报告", "报告标题"),
-    ("打好地基", "阶段一 goal"),
-    ("上层功能", "阶段二 goal"),
+    ("打好地基", "里程碑一 goal"),
+    ("上层功能", "里程碑二 goal"),
     ("通过（gate 已确认", "里程碑 gate 结果（通过）"),
     ("任务状态统计", "任务状态统计章节"),
     ("退回 / 升级 / 挂起事件摘要", "退回/升级/挂起事件章节"),
@@ -288,7 +289,7 @@ gateB = wait_until(lambda: open_gate_for(M3_id), 60)
 check("项目 B：里程碑 gate 出现", gateB is not None)
 if gateB:
     post(f"/api/inbox/{gateB['id']}/resolve", {"resolution": "pass", "note": "冒烟通过"})
-doneB = wait_until(lambda: project_detail(pidB).get("project", {}).get("status") == "completed", 60)
+doneB = wait_until(lambda: project_detail(pidB).get("project", {}).get("status") == "completed", 200)
 check("项目 B 自动 completed", doneB is not None)
 readyB = wait_until(lambda: (report_of(pidB) or {}).get("status") == "ready", 40)
 repB = report_of(pidB)
