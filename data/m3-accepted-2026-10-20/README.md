@@ -10,8 +10,9 @@
   （run1 `00:34:03`；run2 复跑 `01:14:36` 同样 139/139；run3 `01:23:15` 用
   `opencode-go/glm-5.3` 全量模型在并发/上游抖动下再次 139/139，三次逐条检查集一致）
 - 重启恢复：phase1 结束后 `kill -9` 服务端并重启，A/B/D 终态与 C 的失败现场完整保留，续跑至 C `completed`
-- 服务端日志：run1 70 次 `opencode run spawn` / 69 次 `finished`（末次 spawn 在收尾 kill 前未落）、run2 74/74；
-  两次均 0 条 ERROR、0 次 `panicked at`
+- 服务端日志：run1 70 次 `opencode run spawn` / 69 次 `finished`（末次 spawn 在收尾 kill 前未落）、run2 74/74、
+  run3 65/65；三次均 0 条 ERROR、0 次 `panicked at`（run3 另有 4 条已知 WARN：自定义 session 回退 2 条、
+  一次上游流中断触发协商失败并由决策通道恢复 2 条，见非阻塞问题记录）
 - 单元测试：`cargo test` 71 passed / 0 failed（2026-10-20 复跑）
 - 运行目录：`/tmp/opencode/domo_m3_e2e.nW7qNY`
 

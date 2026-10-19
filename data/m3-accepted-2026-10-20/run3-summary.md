@@ -5,8 +5,8 @@
 - 端口：48481
 - 运行目录：/tmp/opencode/qa1/tmp/qa1.NNxaQT
 - phase1 退出码：0 / phase2 退出码：0
-- 结果明细：/home/pearzl/repos/domo/data/smoke_m3_e2e/run1-results.md（本次运行 run dir: /tmp/opencode/qa1/tmp/qa1.NNxaQT）
-- 服务端日志：/home/pearzl/repos/domo/data/smoke_m3_e2e/run1-domo.log（同一份另存 data/domo.log）
+- 结果明细：/home/pearzl/repos/domo/data/m3-accepted-2026-10-20/run3-results.md（原始归档 data/smoke_m3_e2e/run3-results.md；本次运行 run dir: /tmp/opencode/qa1/tmp/qa1.NNxaQT）
+- 服务端日志：/home/pearzl/repos/domo/data/m3-accepted-2026-10-20/run3-domo.log（原始归档 data/smoke_m3_e2e/run3-domo.log；同一份另存 data/domo.log）
 
 
 检查汇总：phase1 97/97、phase2 42/42，合计 139/139 PASS，0 FAIL，退出码 0/0。

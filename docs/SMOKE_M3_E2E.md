@@ -144,7 +144,7 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 | 运行目录 | `/tmp/opencode/domo_m3_e2e.nW7qNY`（SQLite、工作区、`projects/<prj>/summary-report.md`） |
 | 检查结果 | phase1 97/97、phase2 42/42，共 **139/139 PASS，0 FAIL**，退出码 0/0 |
 | 归档 | `data/smoke_m3_e2e/run1-*` / `run2-*` / `run3-*`（含 summary/results/domo.log）+ latest 别名 `summary.md` / `results.md` / `domo.log`；只读快照 `data/m3-accepted-2026-10-20/` |
-| 服务端日志 | `data/smoke_m3_e2e/run1-domo.log`（70 次 `opencode run spawn` / 69 次 `finished`，末次 spawn 在收尾 kill 前未落 finished；0 条 ERROR、0 次 `panicked at`），同份写入 `data/domo.log` |
+| 服务端日志 | `run1-domo.log`（70 次 `opencode run spawn` / 69 次 `finished`，末次 spawn 在收尾 kill 前未落 finished）、`run2-domo.log`（74/74）、`run3-domo.log`（65/65）；三次均 0 条 ERROR、0 次 `panicked at`，最新一份同份写入 `data/domo.log` |
 | 重启恢复 | phase1 结束后 `kill -9` 并重启，A/B/D 终态与 C 的失败现场全部保留，续跑至 C `completed` 且报告 `ready` |
 | 可重复性 | run1（00:34）/ run2（01:14）/ run3（01:23，`opencode-go/glm-5.3` 全量模型）连续三次 **139/139** 通过，逐条检查集一致（`data/smoke_m3_e2e/STABILITY.md`）；M3 时代另有连续七次 134/134 记录（明细未保留，见历史小节） |
 | 单元测试 | `cargo test`：71 passed / 0 failed（2026-10-20 复跑确认） |
