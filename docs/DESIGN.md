@@ -44,7 +44,7 @@ initializing ──确认规划──> running ──暂停──> pausing ─�
 ## 5. 任务状态机
 
 ```
-planned ──依赖就绪──> ready
+planned ──协商一致(或豁免裁定)──> ready
    │                    │
    │                    │（会话被中断 → recovering：等待恢复续跑，agent 忙时在此排队）
    │                    ▼
@@ -63,6 +63,8 @@ planned ──依赖就绪──> ready
 ```
 
 - **计划阶段**：执行者先产出任务计划（步骤、将改动的文件/产物、验证方式、风险），验收者审查通过后才开始执行。
+- **协商阶段**：需验收的任务在开工前由执行者与验收者就**验收标准**多轮协商（详见 §7.1）；
+  协商一致（`negotiation_status=agreed`，`acceptance_criteria` 非空）才进入 `ready`；协商失败转决策者裁定。
 - **验收阶段**：验收者依据「任务计划 + 验收标准 + 交付产物」判定；打回只要求**重新执行**（计划已确认不可再改）。
 - **失败**：执行/计划/验收基建失败 → 先按 agent 池换下一优先级重试（不计失败预算）；池内耗尽后计入 failure_count，≥3 次挂起（suspended）。
 - **状态归一**：只有**真正派发**的任务才处于 `executing`；被中断的尝试进入 `recovering`（等待三档恢复续跑），
@@ -93,7 +95,23 @@ planned ──依赖就绪──> ready
 ## 7. 规划、确认与重规划
 
 - **生成规划**：规划者（可选指定实例）依据项目目标、团队与工作区仓库清单产出任务与里程碑。
-- **确认迭代**：人工可对规划提修改意见 → 规划者重新规划 → **原子替换**（规划成功才替换旧任务/里程碑，失败原样保留）→ 直到确认通过。
+
+### 7.1 验收标准协商（开工前）
+
+- **触发**：任务创建/规划落地时为 `planned`。需验收（`acceptance_required=true`）且项目具备执行者/验收者角色候选时，
+  默认进入协商（`negotiation_status=pending`）；无需验收或缺少协商角色时直接视为一致。
+- **多轮协商**：调度器派发专用协商 worker——执行者提出/修订验收标准，验收者逐轮审核（可反对并给出意见），
+  最多 `MAX_NEGOTIATION_ROUNDS=3` 轮。每轮写入 `negotiation.round` 事件（角色 / 提案 / 是否同意 / 意见），
+  过程边界写入 `negotiation.started|resumed|agreed|failed|settled`。
+- **一致即放行**：某轮验收者同意（或给出最终标准）→ 写入 `acceptance_criteria` 且 `negotiation_status=agreed`，
+  `planned_gate` 才允许任务进入 `ready`；**协商未完成的 `planned` 任务不会被派发执行**。
+- **失败转裁决**：超轮次仍不一致或协商运行失败 → `negotiation_status=failed`，自动登记
+  `decision(kind=negotiation_failed)`（携带提案草案与完整轮次历史），由决策者裁定最终标准；
+  裁定前任务保持 `planned`（决策者缺席则挂起等待），裁定落地写 `negotiation.settled` 并恢复流转。
+- **留痕与恢复**：已完成轮次持久化于 `tasks.negotiation_round`，历史从事件流重建；任务详情返回
+  `negotiation.rounds` 供前端回放。进程重启后从下一轮继续（会话上下文复用，执行者/验收者各自沿用同一协商会话）。
+- **人工介入**：`POST /api/tasks/:id/negotiation` 可人工置 `pending|agreed|failed`（并写回标准）；
+  人工置 `failed` 同样登记决策裁定，置 `pending` 会清零已完成轮次重新协商。
 - **执行中重规划**：执行者/验收者可在输出末尾用 `REPLAN:` 块，或调用 `POST /api/tasks/:id/replan` 上报规划问题 → 决策者裁决（战术自决 / 战略转人工收件箱）→ 批准后复用规划会话落地（新任务默认带验收、依赖调整做环校验、单项失败不影响其余项）。
 - **人工介入**：项目负责人可直接与规划者对话（共用规划会话记忆），得到调整方案后自行采纳。
 - **里程碑重规划窗口**：里程碑 gate 被人工退回 → 里程碑转为 `failed` 并重开一条 `replan` 收件箱项

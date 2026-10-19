@@ -953,4 +953,41 @@ mod tests {
         let t = crate::db::get_task(&conn, "tsk_term").unwrap();
         assert_eq!(t.title, "原标题");
     }
+
+    /// 角色隔离（裁判不下场）：决策者实例若在本项目仍持有执行/验收指派，
+    /// 不得参与裁决（自审自裁）→ 隔离冲突必须被守卫识别出来。
+    #[test]
+    fn dm_role_conflict_blocks_self_adjudication() {
+        let dir = std::env::temp_dir().join(format!("domo_dm_conflict_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conn = crate::db::open(dir.join("t.db").to_str().unwrap());
+        conn.execute(
+            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at)
+             VALUES ('tsk_conflict','prj_1',NULL,'冲突任务','','[]','executor','agt_dm',NULL,1,NULL,'agreed','executing',0,0,0,'[]',0)",
+            [],
+        )
+        .unwrap();
+        let dm = Agent {
+            id: "agt_dm".into(),
+            name: "judge".into(),
+            adapter: "mock".into(),
+            roles: vec!["decision_maker".into(), "executor".into()],
+            config: serde_json::json!({}),
+            capabilities: Default::default(),
+            status: "idle".into(),
+            current_task_ids: vec![],
+        };
+        let conflict = dm_role_conflict(&conn, &dm, "prj_1");
+        assert!(conflict.is_some(), "决策者兼任执行者时必须报隔离冲突");
+        let reason = conflict.unwrap();
+        assert!(reason.contains("role isolation"), "{reason}");
+        // 别的项目不受影响；任务进入终态后不再构成冲突
+        assert!(dm_role_conflict(&conn, &dm, "prj_other").is_none());
+        conn.execute(
+            "UPDATE tasks SET status='done' WHERE id='tsk_conflict'",
+            [],
+        )
+        .unwrap();
+        assert!(dm_role_conflict(&conn, &dm, "prj_1").is_none());
+    }
 }

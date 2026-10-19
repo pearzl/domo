@@ -150,7 +150,7 @@ def phase1():
     T = create_task(P, "正常协商任务", "产出 health-check 报告", EXEC, ACC)
     # 创建默认进入协商
     check("acceptance-required task defaults to negotiation pending",
-          task_of(T["id"]).get("negotiation_status") == "pending", task_of(T["id"]).get("negotiation_status"))
+          T.get("negotiation_status") == "pending", T.get("negotiation_status"))
     agreed = wait_until(lambda: task_of(T["id"]).get("negotiation_status") == "agreed" and task_of(T["id"]), 40)
     check("negotiation reached agreed", agreed is not None, task_of(T["id"]).get("negotiation_status"))
     if agreed:
@@ -166,8 +166,8 @@ def phase1():
           any(e["type"] == "negotiation.agreed" for e in (d or {}).get("events", [])), None)
     # 未协商完成不得派发执行：agreed 事件必须先于任何 execute 会话
     agreed_id = first_event_id(T["id"], lambda e: e["type"] == "negotiation.agreed")
-    exec_id = first_event_id(T["id"], lambda e: e["type"] == "agent.session_started"
-                             and (e.get("payload") or {}).get("phase") == "execute")
+    exec_id = wait_until(lambda: first_event_id(T["id"], lambda e: e["type"] == "agent.session_started"
+                             and (e.get("payload") or {}).get("phase") == "execute"), 40)
     check("execution session starts only after negotiation agreed",
           agreed_id is not None and exec_id is not None and agreed_id < exec_id, (agreed_id, exec_id))
     done = wait_until(lambda: task_of(T["id"]).get("status") == "done" and task_of(T["id"]), 60)
