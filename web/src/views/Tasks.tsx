@@ -28,6 +28,8 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
     milestonesByProject,
     tasksViewMode,
     setTasksViewMode,
+    dagDir,
+    setDagDir,
     agents,
     selectedTaskId,
     taskDetail,
@@ -40,8 +42,7 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
     setError,
   } = useDomo();
   const [intervene, setIntervene] = useState(false);
-  // DAG 布局方向：tb=上下（默认）/ lr=左右
-  const [dagDir, setDagDir] = useState<'tb' | 'lr'>('tb');
+  // DAG 布局方向 tb=上下（默认）/ lr=左右：状态在全局 store，切页再切回不丢失
   // 初始化规划台：目标草稿 + 指定规划者/执行者/验收者 + 项目 agent 池
   const [briefDraft, setBriefDraft] = useState<string | null>(null);
   const [planPlanner, setPlanPlanner] = useState('');
@@ -241,7 +242,7 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
           selectedTaskId={selectedTaskId}
           onOpenTask={id => void openTask(id)}
           dir={dagDir}
-          onToggleDir={() => setDagDir(d => (d === 'tb' ? 'lr' : 'tb'))}
+          onToggleDir={() => setDagDir(dagDir === 'tb' ? 'lr' : 'tb')}
         />
       ) : (
         <div className="kanban">

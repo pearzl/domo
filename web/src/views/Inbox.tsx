@@ -136,8 +136,10 @@ function ContextPanel({ ctx }: { ctx: InboxContext }) {
   );
 }
 
-/** 收件箱行分派：里程碑 gate 有专属的「通过 / 退回」裁决，
- *  决策类条目（带 payload.decision_id）走「批准 / 否决 / 重试」，其余走升级裁决。 */
+/** 收件箱行分派：里程碑 gate 有专属的「通过 / 退回」裁决；
+ *  退回后重开的里程碑窗口（replan + payload.kind="milestone_window"）走窗口重规划；
+ *  决策类条目（带 payload.decision_id）走「批准 / 否决 / 重试」；
+ *  其余 replan 走普通重规划提示，升级类条目走升级裁决。 */
 function InboxRow({
   item,
   projectName,
@@ -158,7 +160,79 @@ function InboxRow({
   if (typeof payload.decision_id === 'string') {
     return <DecisionRow item={item} projectName={projectName} focused={focused} />;
   }
+  // 普通重规划提示（无决策请求，如放弃任务后提示下游需重规划）：确认知悉即可关闭
+  if (item.type === 'replan') {
+    return <PlainReplanRow item={item} projectName={projectName} focused={focused} />;
+  }
   return <EscalationRow item={item} projectName={projectName} focused={focused} />;
+}
+
+/** 普通重规划提示（无决策请求）：例如放弃任务后提示下游需要重规划。
+ *  这类条目不含自动落地动作，只需人工知悉并在任务看板/介入面板调整规划后确认关闭。 */
+function PlainReplanRow({
+  item,
+  projectName,
+  focused,
+}: {
+  item: InboxItem;
+  projectName: string;
+  focused?: boolean;
+}) {
+  const { resolveInboxItem, tasksByProject, selectProject, setView } = useDomo();
+  const payload = (item.payload ?? {}) as Record<string, unknown>;
+  const detail = typeof payload.detail === 'string' ? payload.detail : '';
+  const abandoned = typeof payload.abandoned_task_id === 'string' ? payload.abandoned_task_id : '';
+  const downstream = Array.isArray(payload.downstream)
+    ? (payload.downstream as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
+  const tasks = tasksByProject[item.project_id] ?? [];
+  const titleOf = (id: string) => tasks.find(t => t.id === id)?.title ?? `#${shortId(id)}`;
+
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    const ok = await resolveInboxItem(item.id, 'close', note.trim());
+    setBusy(false);
+    if (ok) setNote('');
+  }
+
+  return (
+    <div id={`inbox-${item.id}`} className={`panel inbox-item${focused ? ' inbox-focus' : ''}`}>
+      <div className="inbox-head">
+        <Badge tone="purple">{INBOX_TYPE_LABEL[item.type] ?? item.type}</Badge>
+        <Badge tone="amber">待重规划</Badge>
+        <span>{projectName}</span>
+        <span className="muted">{fmtTime(item.created_at)}</span>
+        <span className="spacer" />
+      </div>
+
+      <div className="stack" style={{ borderLeft: '3px solid var(--line, #ccc)', paddingLeft: 10 }}>
+        {detail && <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>💡 {detail}</p>}
+        {abandoned && <div className="muted">已放弃任务：{titleOf(abandoned)}</div>}
+        {downstream.length > 0 && (
+          <div className="muted">受影响的下游任务（{downstream.length}）：{downstream.map(titleOf).join('、')}</div>
+        )}
+        <p className="muted" style={{ margin: 0 }}>
+          请到任务看板 / 人工介入面板调整这些任务的后续规划；确认已知悉后可在此关闭该提示。
+        </p>
+      </div>
+
+      <div className="row-end">
+        <button className="btn" onClick={() => { selectProject(item.project_id); setView('tasks'); }}>
+          查看项目任务 →
+        </button>
+      </div>
+
+      <div className="resolve-row">
+        <input value={note} onChange={e => setNote(e.target.value)} placeholder="处理备注（可选）" />
+        <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+          {busy ? '处理中…' : '确认处理'}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /** 决策收件箱条目（战略升级 / 决策者故障降级）：人工 approve/deny 直接裁定，

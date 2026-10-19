@@ -15,14 +15,13 @@
 #   恢复：kill -9 重启后里程碑/gate/协商状态/决策/报告完整保留，中断流程续跑。
 #   审计：关键日志（data/domo.log 语义的服务端运行日志）与结果记录落盘可复查。
 #
-# 用法：bash scripts/smoke_m3_e2e.sh          （退出码 0 = 全部通过）
-#       DOMO_M3_PORT=8801 bash scripts/smoke_m3_e2e.sh
-#       DOMO_M3_MODEL=<provider>/<model> bash scripts/smoke_m3_e2e.sh
+# 用法：bash tests/smoke_m3_e2e.sh          （退出码 0 = 全部通过）
+#       DOMO_M3_PORT=8801 bash tests/smoke_m3_e2e.sh
+#       DOMO_M3_MODEL=<provider>/<model> bash tests/smoke_m3_e2e.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${DOMO_M3_PORT:-8799}"
-MODEL="${DOMO_M3_MODEL:?请通过 DOMO_M3_MODEL 指定真实模型（如 provider/model）}"
+MODEL="${DOMO_M3_MODEL:-opencode-go/glm-5.3-flash}"
 TMP_ROOT="${TMPDIR:-/tmp}"
 RUN_DIR="$(mktemp -d "$TMP_ROOT/domo_m3_e2e.XXXXXX")"
 DB="$RUN_DIR/domo.db"
@@ -32,6 +31,44 @@ STATE="$RUN_DIR/state.json"
 PY="$RUN_DIR/smoke.py"
 RESULTS="$RUN_DIR/results.md"
 mkdir -p "$WS"
+
+# ---------------- 端口隔离（可重复性修复） ----------------
+# 历史缺陷：遗留的旧服务端仍占用固定端口时，新启动的进程绑定失败退出，
+# 而健康检查却连到了旧实例——请求被写进旧 DB/旧 RUN_DIR，导致「报告未落盘」等假失败。
+# 对策：① 未指定 DOMO_M3_PORT 时自动挑选空闲端口；② 显式指定但被占用则立即失败；
+#       ③ 启动后确认本次进程存活且库为全新（空 /api/projects），拒绝连到遗留实例。
+_port_free_py() {
+  python3 - "$1" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("127.0.0.1", port))
+except OSError:
+    print("in-use")
+else:
+    s.close()
+PY
+}
+_pick_free_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+if [[ -n "${DOMO_M3_PORT:-}" ]]; then
+  PORT="$DOMO_M3_PORT"
+  if [[ -n "$(_port_free_py "$PORT")" ]]; then
+    echo "[m3-smoke] 端口 $PORT 已被占用（可能遗留旧服务端）。请先释放该端口，或不设置 DOMO_M3_PORT 让脚本自动选端口。" >&2
+    exit 1
+  fi
+else
+  PORT="$(_pick_free_port)"
+fi
+echo "[m3-smoke] 使用端口 :$PORT（DOMO_M3_PORT=${DOMO_M3_PORT:-<auto>}）"
 
 SERVER_PID=""
 cleanup() {
@@ -472,6 +509,19 @@ def phase1():
     _, MC = post(f"/projects/{pidC}/milestones", {"name": "C阶段", "goal": "决策通道验证阶段"})
     MCid = MC.get("id")
     check("项目 C 里程碑创建（C1 完成后保持项目非终态）", bool(MCid), MC)
+    # M3 负路径：验收标准协商失败转决策者（真实 executor/acceptor/decision_maker）。
+    # 任务先登记 failed 协商，confirm 后由决策者裁定并恢复流转，不得提前开工。
+    c0 = create_task(pidC, "C-协商失败", "在当前工作目录创建文件 c0.txt，内容为一行：c0 ok",
+                     E1, A1, milestone_id=MCid,
+                     acceptance_criteria="c0.txt 存在且内容为 c0 ok")
+    check("C0 协商失败任务创建（planned）", bool(c0) and c0.get("status") == "planned", c0)
+    s, r = post(f"/tasks/{c0['id']}/negotiation",
+                {"status": "failed", "acceptance_criteria": "c0.txt 存在且内容为 c0 ok"})
+    dec0 = r.get("decision") if s == 200 else None
+    check("协商失败登记 decision(kind=negotiation_failed, pending)",
+          bool(dec0) and dec0.get("kind") == "negotiation_failed"
+          and dec0.get("status") == "pending", (s, dec0))
+    check("协商失败任务未开工（保持 planned）", (task(c0["id"]) or {}).get("status") == "planned")
     # M4.5 负路径：计划审查连续打回 → escalated（用 mock 实例保证确定性；
     # 任务固定（pinned）到 mock，避免失败换人，从而真实触发升级）
     _, mock_e = post("/agents", {"name": "c-mock-exec", "adapter": "mock", "roles": ["executor"],
@@ -486,6 +536,19 @@ def phase1():
     check("C1 任务创建（未开工）", bool(c1) and c1.get("status") == "planned", c1)
     s, _ = post(f"/projects/{pidC}/confirm", {})
     check("项目 C confirm → running", s == 200 and project_status(pidC) == "running", s)
+    # 协商失败 → 决策者（真实 agent）裁定 → 恢复流转
+    ruled0 = wait_until(lambda: next((d for d in decisions(pidC, kind="negotiation_failed")
+                                      if d.get("task_id") == c0["id"] and d.get("status") == "ruled"), None), 600)
+    check("决策者（真实 agent）裁定协商失败请求", ruled0 is not None)
+    if ruled0:
+        check("协商失败裁定来源为 agent", (ruled0.get("ruling") or {}).get("by") == "agent",
+              ruled0.get("ruling"))
+    settled0 = wait_until(lambda: (task(c0["id"]) or {}).get("negotiation_status") == "agreed", 300)
+    check("裁定后协商置 agreed 并恢复流转", settled0 is not None,
+          (task(c0["id"]) or {}).get("negotiation_status"))
+    check("negotiation.settled 事件留痕", "negotiation.settled" in etypes(pidC))
+    c0done = wait_until(lambda: (task(c0["id"]) or {}).get("status") == "done", 600)
+    check("C0 裁定后执行+验收跑完 done", c0done is not None, (task(c0["id"]) or {}).get("status"))
     esc_c1 = wait_until(lambda: (task(c1["id"]) or {}).get("status") == "escalated", 300)
     check("C1 计划审查连续打回 → escalated", esc_c1 is not None, (task(c1["id"]) or {}).get("status"))
     check("C1 计划打回事件留痕（task.plan_rejected ×≥2）",

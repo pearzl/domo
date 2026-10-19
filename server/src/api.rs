@@ -1726,10 +1726,16 @@ fn validate_agent_roles(c: &rusqlite::Connection, executor: Option<&str>, accept
     if let Some(e) = executor {
         let Some(a) = db::get_agent(c, e) else { return Err("executor agent not found".into()); };
         if !a.roles.iter().any(|r| r == "executor") { return Err("executor agent lacks 'executor' role".into()); }
+        if crate::roles::agent_forbidden_for(&a.roles) {
+            return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", a.name));
+        }
     }
     if let Some(a) = acceptor {
         let Some(ag) = db::get_agent(c, a) else { return Err("acceptor agent not found".into()); };
         if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
+        if crate::roles::agent_forbidden_for(&ag.roles) {
+            return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", ag.name));
+        }
     }
     if let (Some(e), Some(a)) = (executor, acceptor) {
         if e == a { return Err("same agent instance cannot execute and accept the same task".into()); }
@@ -2603,6 +2609,9 @@ async fn create_agent(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Re
         capabilities.supports_resume = true;
     }
     // 角色隔离：决策者不得同时担任同一项目的 executor 或 acceptor（DOMO_DM_ROLE_OVERLAP=1 可显式打开例外）
+    if let Err(e) = crate::roles::check_roles(&roles) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
     let a = Agent {
         id: db::new_id("agt_"),
         name: name.trim().into(),
@@ -2659,6 +2668,10 @@ async fn patch_agent(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bo
             .unwrap_or_default();
         if roles.is_empty() || roles.iter().any(|r| !ROLES.contains(&r.as_str())) {
             return err(StatusCode::BAD_REQUEST, format!("roles must be a non-empty subset of {ROLES:?}"));
+        }
+        // 角色隔离：决策者不得与执行/验收角色并存（DOMO_DM_ROLE_OVERLAP=1 例外）
+        if let Err(e) = crate::roles::check_roles(&roles) {
+            return err(StatusCode::BAD_REQUEST, e);
         }
         let roles_set: std::collections::HashSet<String> = roles.iter().cloned().collect();
         // 悬空检查：撤销 executor/acceptor 角色时，不得仍有非终态任务以此身份引用该实例

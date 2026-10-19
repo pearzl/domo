@@ -1181,7 +1181,7 @@ pub async fn run_task_plan(state: Arc<App>, task: Task, agent: Agent, review_fee
             k,
         ),
     );
-    let out = run_cli(
+    let out = run_cli_ext(
         &state,
         Some(&task.id),
         Some(&cwd),
@@ -1189,6 +1189,13 @@ pub async fn run_task_plan(state: Arc<App>, task: Task, agent: Agent, review_fee
         model_of(&agent).as_deref(),
         timeout_of(&agent),
         &prompt,
+        None,
+        Some(PersistCtx {
+            logical: session.clone(),
+            task_id: Some(task.id.clone()),
+            phase: Some("plan_task".into()),
+            attempt: Some(task.attempt),
+        }),
     )
     .await?;
     let plan = out.text.trim().to_string();
@@ -1224,7 +1231,7 @@ pub async fn run_plan_review(state: Arc<App>, task: Task, agent: Agent) -> Resul
             |k| plan_review_prompt(&p, &task, task.execution_plan.as_deref().unwrap_or("(计划缺失)"), k),
         )
     };
-    let out = run_cli(
+    let out = run_cli_ext(
         &state,
         Some(&task.id),
         Some(&cwd),
@@ -1232,6 +1239,13 @@ pub async fn run_plan_review(state: Arc<App>, task: Task, agent: Agent) -> Resul
         model_of(&agent).as_deref(),
         timeout_of(&agent),
         &prompt,
+        None,
+        Some(PersistCtx {
+            logical: session.clone(),
+            task_id: Some(task.id.clone()),
+            phase: Some("plan_review".into()),
+            attempt: Some(task.attempt),
+        }),
     )
     .await
     .map_err(|e| format!("{INFRA_ACCEPT_ERROR_PREFIX}{e}"))?;
@@ -1291,7 +1305,7 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
     };
     let session = accept_session(&task.id, task.attempt);
 
-    let out = run_cli(
+    let out = run_cli_ext(
         &state,
         Some(&task.id),
         Some(&cwd),
@@ -1299,6 +1313,13 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
         model_of(&agent).as_deref(),
         timeout_of(&agent),
         &prompt,
+        None,
+        Some(PersistCtx {
+            logical: session.clone(),
+            task_id: Some(task.id.clone()),
+            phase: Some("accept".into()),
+            attempt: Some(task.attempt),
+        }),
     )
     .await
     .map_err(|e| format!("{INFRA_ACCEPT_ERROR_PREFIX}{e}"))?;

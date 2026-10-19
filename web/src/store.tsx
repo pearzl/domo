@@ -32,6 +32,8 @@ export type ConnState = 'connecting' | 'open' | 'closed';
 export type ViewId = 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge';
 /** 任务视图呈现方式：看板 / DAG 图（提升到 store，切页再切回不丢失） */
 export type TasksViewMode = 'kanban' | 'dag';
+/** DAG 布局方向：tb=上下（里程碑横泳道）/ lr=左右（同上看板流向）——同样跨视图保持 */
+export type DagDir = 'tb' | 'lr';
 
 /** M5 知识沉淀预填：从任务详情/Audit 一键带过来的来源人工指导事件 */
 export interface KnowledgePrefill {
@@ -73,6 +75,9 @@ export interface DomoStore {
   /** 任务视图呈现方式（看板 / DAG），跨视图切换保持 */
   tasksViewMode: TasksViewMode;
   setTasksViewMode: (m: TasksViewMode) => void;
+  /** DAG 布局方向（tb/lr），跨视图切换保持 */
+  dagDir: DagDir;
+  setDagDir: (d: DagDir) => void;
   /** 收件箱聚焦条目：从里程碑 gate 一键跳转时高亮并滚动到该项 */
   focusedInboxId: string | null;
   focusInbox: (itemId: string) => void;
@@ -175,6 +180,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
   const [taskDetail, setTaskDetail] = useState<TaskDetail | null>(null);
 
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>('dag');
+  const [dagDir, setDagDir] = useState<DagDir>('tb');
   const [focusedInboxId, setFocusedInboxId] = useState<string | null>(null);
   const [focusAgentId, setFocusAgentId] = useState<string | null>(null);
   const [knowledgePrefill, setKnowledgePrefill] = useState<KnowledgePrefill | null>(null);
@@ -666,6 +672,8 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     selectedTaskId,
     taskDetail,
     tasksViewMode,
+    dagDir,
+    setDagDir,
     focusAgentId,
     setFocusAgentId,
     knowledgePrefill,
