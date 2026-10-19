@@ -22,9 +22,10 @@ DOMO 是一个开源的个人项目。你提交项目说明，DOMO 组织一组 
 
 当前能力：
 - **规划**：planner 自动拆解（含里程碑）；人工确认迭代（带意见重规划，原子替换）；人工介入探讨通道
-- **任务生命周期**：执行者制定计划 → 验收者审查 → 按计划执行 → 按计划与产物验收（打回仅重新执行）
+- **任务生命周期**：开工前执行者↔验收者协商验收标准（一致才 READY，失败转决策者裁定）→ 执行者制定计划 → 验收者审查 → 按计划执行 → 按计划与产物验收（打回仅重新执行）
 - **Agent 池**：项目级角色优先级表；按优先级动态选人并在高优先级 agent 处排队；失败换人 + 限流熔断；人类可固定单任务 agent
 - **并发隔离**：任务沙盒（git worktree / 独立子目录）；验收通过由系统合并（冲突决策者先裁）；多仓库项目串行
+- **三档恢复（已落地）**：中断任务 `kill -9` 重启后依序降级——①**原生会话 resume**（agent 声明 `supports_resume` 且该中断 attempt 的真实 opencode 会话 id 已落 SQLite `session_map` 跨重启可查 → `opencode run --session <同一真实id>`，**attempt 不自增、逻辑会话名不变**）→ ②**交接摘要重建**（结构化交接书五节：目标/已完成/剩余/约束/产物路径，事件 payload 持久化 + 落盘，以新会话续作，新 id ≠ 原 id）→ ③**人工重建**（任务 `suspended` + 收件箱条目附两档失败原因，按任务去重、恢复成功自动关闭）；项目暂停期间恢复被冻结，resume 后续跑。审计事件 `task.recovered{tier∈{native_resume,handoff,manual}, outcome∈{succeeded,failed,skipped,suspended}, reason, task_id, attempt, session_id}`（每档各落一条、append-only、任务时间线与审计检索可见）；冒烟 `tests/smoke_recovery_tiers.sh`（用例清单 [docs/SMOKE_RECOVERY_TIERS.md](docs/SMOKE_RECOVERY_TIERS.md)，归档 `data/smoke_recovery_tiers/`）
 - **管控**：决策收件箱裁决、决策者自动裁决（战术自决/战略转人）、暂停两态 + 强制暂停、归档
 - **可观测**：事件溯源与审计（倒序/分页/筛选/关联详情）、任务轮次日志、服务端运行日志、项目总结报告
 - **工作区**：默认 `~/.domo/workspace/<project_id>`，也可显式指定 local 路径或 git URL

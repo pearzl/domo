@@ -172,6 +172,13 @@ pub fn resolve_role(
     }
     let pool = db::project_pool(conn, project_id);
     let tried = db::task_tried(conn, &task.id);
+    // 同任务的执行者与验收者必须为不同实例（DESIGN §6 核心规则）：
+    // 解析某角色时排除该任务另一角色已绑定的实例，避免动态选人绕过该约束。
+    let counterpart = if role == "acceptor" {
+        task.executor_agent_id.clone()
+    } else {
+        task.acceptor_agent_id.clone()
+    };
     let tried_ids: Vec<String> = tried
         .get(role)
         .and_then(|v| v.as_array())
@@ -189,6 +196,9 @@ pub fn resolve_role(
     for id in candidates {
         if tried_ids.iter().any(|t| t == &id) {
             continue;
+        }
+        if counterpart.as_deref() == Some(id.as_str()) {
+            continue; // 同一实例不得既执行又验收
         }
         let Some(a) = db::get_agent(conn, &id) else { continue };
         if a.status == "deleted" || !a.roles.iter().any(|r| r == role) {

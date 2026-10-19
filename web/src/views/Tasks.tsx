@@ -466,6 +466,42 @@ function TaskCard({
   );
 }
 
+/** 任务计划摘要：只展示总结性质的前若干要点，完整计划与原始输出指向归档。 */
+function PlanSummary({
+  plan,
+  outputs,
+}: {
+  plan: string;
+  outputs: { id: number; ts: number; attempt: number; outcome: string }[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  // 取前若干行/字符作为摘要（跳过空行，最多 12 行、600 字）
+  const lines = plan.split('\n').filter(l => l.trim().length > 0);
+  const summaryLines = expanded ? lines : lines.slice(0, 12);
+  let summary = summaryLines.join('\n');
+  if (!expanded && summary.length > 600) summary = summary.slice(0, 600) + '……';
+  const latest = outputs.length > 0 ? outputs[outputs.length - 1] : null;
+  return (
+    <div className="stack">
+      <pre className="pre-wrap" style={{ fontSize: 12, margin: 0 }}>{summary}</pre>
+      <div className="row-end" style={{ gap: 10 }}>
+        {(lines.length > summaryLines.length || plan.length > summary.length) && (
+          <button className="btn btn-sm" onClick={() => setExpanded(e => !e)}>
+            {expanded ? '收起摘要' : '展开摘要'}
+          </button>
+        )}
+        {latest ? (
+          <a className="btn btn-sm" href={`/api/agent-outputs/${latest.id}`} target="_blank" rel="noreferrer">
+            查看完整计划与 agent 原始输出 →
+          </a>
+        ) : (
+          <span className="muted" style={{ fontSize: 12 }}>（完整计划见下方「agent 原始输出归档」）</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaskDetailDrawer({
   task,
   onClose,
@@ -606,11 +642,15 @@ function TaskDetailDrawer({
         </section>
 
         <section className="drawer-section">
-          <h4>任务计划（执行者制定 · 验收者审查）</h4>
+          <h4>任务计划摘要（执行者制定 · 验收者审查）</h4>
           {(task.plan_rejection_count ?? 0) > 0 && (
             <p className="muted">计划已被打回 {task.plan_rejection_count} 轮</p>
           )}
-          <pre className="pre-wrap" style={{ fontSize: 12 }}>{task.execution_plan || '（尚未制定；任务进入「制定计划中」后产出）'}</pre>
+          {task.execution_plan ? (
+            <PlanSummary plan={task.execution_plan} outputs={(task.agent_outputs ?? []).filter(o => o.phase === 'plan_task')} />
+          ) : (
+            <p className="muted">（尚未制定；任务进入「制定计划中」后产出）</p>
+          )}
         </section>
 
         {negotiation && (
