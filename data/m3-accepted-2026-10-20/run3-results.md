@@ -1,0 +1,145 @@
+
+## phase1 — 2026-10-20 01:20:05
+
+- PASS — 8 个真实 agent 注册成功（planner/executor/acceptor/decision_maker ×2）
+- PASS — agent planner-1 adapter=opencode 且角色=['planner']
+- PASS — agent planner-2 adapter=opencode 且角色=['planner']
+- PASS — agent exec-1 adapter=opencode 且角色=['executor']
+- PASS — agent exec-2 adapter=opencode 且角色=['executor']
+- PASS — agent acc-1 adapter=opencode 且角色=['acceptor']
+- PASS — agent acc-2 adapter=opencode 且角色=['acceptor']
+- PASS — agent judge-1 adapter=opencode 且角色=['decision_maker']
+- PASS — agent judge-2 adapter=opencode 且角色=['decision_maker']
+- PASS — 项目 A 创建
+- PASS — planner 规划成功返回
+- PASS — planner 产出 >=2 个任务
+- PASS — planner 产出 >=1 个里程碑
+- PASS — 每个里程碑都关联了成员任务
+- PASS — 任务全部归属里程碑
+- PASS — 规划任务未在规划阶段绑定 agent（动态选人）
+- PASS — 规划任务默认进入验收标准协商（negotiation_status=pending）
+- PASS — 项目 A 人确认 → running
+- PASS — 项目 A 全部终态 → completed
+- PASS — 项目 A 全部里程碑 passed
+- PASS — 项目 A 有 task.plan_drafted 事件（执行者制定计划）
+- PASS — 项目 A 有 task.plan_approved 事件（验收者审查通过）
+- PASS — 项目 A 有 acceptance.recorded（验收通过）事件
+- PASS — 项目 A 有 milestone.passed 事件
+- PASS — 项目 A 所有任务 done
+- PASS — 项目 A 任务详情含任务计划（execution_plan）
+- PASS — 项目 A 总结报告自动生成 ready
+- PASS — 项目 A 报告正文非空
+- PASS — 项目 A 报告落盘 summary-report.md
+- PASS — 项目 B 创建
+- PASS — 项目 B running
+- PASS — 项目 B 两个里程碑创建
+- PASS — 项目 B 4 个任务创建
+- PASS — 无关分支任务在 gate 未确认时独立跑完（done）
+- PASS — 阶段B1 成员全部 DONE → gate 出现（awaiting_confirm）
+- PASS — 下游分支被 gate 冻结：未开工（attempt=0，状态非 done）
+- PASS — 冻结发生在里程碑 gate 之前（creation 起即冻结），无关分支不受影响
+- PASS — gate 退回 → 里程碑 failed
+- PASS — 退回后重开里程碑重规划窗口（replan/milestone_window 收件箱项）
+- PASS — 退回后下游分支仍冻结
+- PASS — 窗口方案应用返回 200
+- PASS — 窗口内新增任务被应用（applied 含 add）
+- PASS — 成环依赖被拒并汇报原因（skipped 含 cycle）
+- PASS — 成环项被拒不影响其余项（同一批新增已应用）
+- PASS — 成环 update 被拒后原依赖保持不变（无半应用副作用）
+- PASS — 窗口新增任务默认挂到该里程碑
+- PASS — 窗口新增任务默认带验收与验收标准
+- PASS — 窗口操作写入 task.created source=milestone_window
+- PASS — 窗口开启/应用事件留痕
+- PASS — 环校验探针任务被取消清理
+- PASS — 窗口追加任务完成后 done
+- PASS — 窗口成员全部完成 → 里程碑重入 awaiting_confirm
+- PASS — 重入 gate 事件 reason=window_replan_done
+- PASS — 重入 gate 有对应收件箱条目
+- PASS — 二次确认 → 里程碑 passed
+- PASS — gate 通过后下游分支解冻并跑完
+- PASS — 阶段B2 成员完成后 gate 出现
+- PASS — 项目 B 全部终态 → completed
+- PASS — 项目 B 总结报告生成 ready
+- PASS — 项目 D 创建
+- PASS — 项目 D running
+- PASS — 项目 D 锚点任务创建（非终态，可上报重规划）
+- PASS — 重规划请求登记（scope=tactical，decision.kind=replan）
+- PASS — replan.proposed 事件留痕
+- PASS — 决策者（真实 agent）批准纠偏重规划
+- PASS — 纠偏裁定来源为 agent 且为批准
+- PASS — replan.approved 事件留痕
+- PASS — planner 复用规划会话产出调整并落地（replan.applied）
+- PASS — 重规划新增任务落地并进入调度（planned/ready/…）
+- PASS — 重规划新建任务默认带验收
+- PASS — 项目 D 纠偏后全部终态 → completed
+- PASS — 项目 D 总结报告生成 ready
+- PASS — 项目 C 创建（initializing）
+- PASS — 项目 C 里程碑创建（C1 完成后保持项目非终态）
+- PASS — C0 协商失败任务创建（planned）
+- PASS — 协商失败登记 decision(kind=negotiation_failed, pending)
+- PASS — 协商失败任务未开工（保持 planned）
+- PASS — mock 确定性 agent 就绪（c-mock-exec/c-mock-acc）
+- PASS — C1 任务创建（未开工）
+- PASS — C1 固定到 mock（agent_pinned，避免失败换人）
+- PASS — 项目 C confirm → running
+- PASS — 决策者（真实 agent）裁定协商失败请求
+- PASS — 协商失败裁定来源为 agent
+- PASS — 裁定后协商置 agreed 并恢复流转
+- PASS — negotiation.settled 事件留痕
+- PASS — C0 裁定后执行+验收跑完 done
+- PASS — C1 计划审查连续打回 → escalated
+- PASS — C1 计划打回事件留痕（task.plan_rejected ×≥2）
+- PASS — C1 升级项进入决策收件箱
+- PASS — 人工裁决 relax 受理
+- PASS — C1 裁决后跑完 done
+- PASS — 删除两个决策者实例（模拟缺席）
+- PASS — 项目 C resume
+- PASS — 决策者缺席 → decision_maker_down 收件箱条目
+- PASS — 对应决策置 down（挂起不阻塞无关分支）
+- PASS — 待裁定任务因决策者缺席被挂起（suspended）
+- PASS — C1（无关分支）不受决策者缺席影响（已 done）
+
+## phase2 — 2026-10-20 01:23:15
+
+- PASS — 重启后项目 A 仍 completed
+- PASS — 重启后项目 A 里程碑状态保留（全 passed）
+- PASS — 重启后项目 A 报告保留 ready
+- PASS — 重启后项目 A 任务数不变
+- PASS — 重启后项目 B 仍 completed
+- PASS — 重启后项目 B 里程碑状态保留（全 passed）
+- PASS — 重启后项目 B 报告保留 ready
+- PASS — 重启后项目 D 状态保留且一致（completed/archived）
+- PASS — 重启后 C2 挂起状态保留（suspended）
+- PASS — 重启后决策仍为 down（持久化）
+- PASS — 重启后 decision_maker_down 收件箱条目仍 open
+- PASS — 重启后项目 C 保持 paused
+- PASS — 重新注册决策者实例
+- PASS — 恢复前 C2 仍挂起（未擅自放行）
+- PASS — down 收件箱 retry 成功
+- PASS — 项目 C 恢复 running
+- PASS — 恢复后决策者裁定 C2 免验收请求
+- PASS — C2 裁定后执行+验收跑完 done
+- PASS — C 全部任务终态后里程碑 gate 打开（项目保持非终态）
+- PASS — gate 未确认时项目 C 保持 running（不提前 completed）
+- PASS — gate 未确认时不提前生成总结报告
+- PASS — 项目 C 里程碑 gate 确认 → passed
+- PASS — 项目 C 全部终态 → completed
+- PASS — 项目 C 总结报告生成 ready
+- PASS — 审计事件存在：planner.proposed
+- PASS — 审计事件存在：task.plan_drafted
+- PASS — 审计事件存在：task.plan_approved
+- PASS — 审计事件存在：acceptance.recorded
+- PASS — 审计事件存在：milestone.gate_opened
+- PASS — 审计事件存在：milestone.passed
+- PASS — 审计事件存在：milestone.failed
+- PASS — 审计事件存在：milestone.window_opened
+- PASS — 审计事件存在：milestone.window_applied
+- PASS — 审计事件存在：replan.approved
+- PASS — 审计事件存在：replan.applied
+- PASS — 审计事件存在：decision.requested
+- PASS — 审计事件存在：decision.ruled
+- PASS — 审计事件存在：task.sandbox_ready
+- PASS — 审计事件存在：report.generated
+- PASS — 服务端运行日志含 opencode spawn 记录
+- PASS — 服务端运行日志含 opencode run finished 记录
+- PASS — 服务端运行日志无 panic

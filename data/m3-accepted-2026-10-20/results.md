@@ -1,5 +1,5 @@
 
-## phase1 — 2026-10-20 01:13:45
+## phase1 — 2026-10-20 01:20:05
 
 - PASS — 8 个真实 agent 注册成功（planner/executor/acceptor/decision_maker ×2）
 - PASS — agent planner-1 adapter=opencode 且角色=['planner']
@@ -99,7 +99,7 @@
 - PASS — 待裁定任务因决策者缺席被挂起（suspended）
 - PASS — C1（无关分支）不受决策者缺席影响（已 done）
 
-## phase2 — 2026-10-20 01:14:36
+## phase2 — 2026-10-20 01:23:15
 
 - PASS — 重启后项目 A 仍 completed
 - PASS — 重启后项目 A 里程碑状态保留（全 passed）

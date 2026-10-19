@@ -143,10 +143,10 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 | 团队池 | 8 实例：planner×2 / executor×2 / acceptor×2 / decision_maker×2 |
 | 运行目录 | `/tmp/opencode/domo_m3_e2e.nW7qNY`（SQLite、工作区、`projects/<prj>/summary-report.md`） |
 | 检查结果 | phase1 97/97、phase2 42/42，共 **139/139 PASS，0 FAIL**，退出码 0/0 |
-| 归档 | `data/smoke_m3_e2e/run1-{summary,results,domo.log}` 与复跑 `run2-*` + latest 别名 `summary.md` / `results.md` / `domo.log`；只读快照 `data/m3-accepted-2026-10-20/` |
+| 归档 | `data/smoke_m3_e2e/run1-*` / `run2-*` / `run3-*`（含 summary/results/domo.log）+ latest 别名 `summary.md` / `results.md` / `domo.log`；只读快照 `data/m3-accepted-2026-10-20/` |
 | 服务端日志 | `data/smoke_m3_e2e/run1-domo.log`（70 次 `opencode run spawn` / 69 次 `finished`，末次 spawn 在收尾 kill 前未落 finished；0 条 ERROR、0 次 `panicked at`），同份写入 `data/domo.log` |
 | 重启恢复 | phase1 结束后 `kill -9` 并重启，A/B/D 终态与 C 的失败现场全部保留，续跑至 C `completed` 且报告 `ready` |
-| 可重复性 | run1（00:34）与 run2（01:14）连续两次 **139/139** 通过，逐条检查集一致（`data/smoke_m3_e2e/STABILITY.md`）；M3 时代另有连续七次 134/134 记录（明细未保留，见历史小节） |
+| 可重复性 | run1（00:34）/ run2（01:14）/ run3（01:23，`opencode-go/glm-5.3` 全量模型）连续三次 **139/139** 通过，逐条检查集一致（`data/smoke_m3_e2e/STABILITY.md`）；M3 时代另有连续七次 134/134 记录（明细未保留，见历史小节） |
 | 单元测试 | `cargo test`：71 passed / 0 failed（2026-10-20 复跑确认） |
 
 ### M3 验收版本（历史，2026-10-18）
@@ -211,6 +211,20 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
      则 PATCH 重新固定，并新增断言确认确定性 mock 已就绪、任务已固定。
    - 结果：C1「计划审查连续打回 → escalated」负路径稳定可复现。
 
+3. **规划任务的协商状态断言与设计不一致（会误判 A 组）**
+   - 现象：脚本曾断言 `/plan` 后任务 `negotiation_status=agreed`；但 DESIGN §7.1 与实现均为
+     「需验收任务默认 `pending`，由 executor↔acceptor 协商一致后才置 `agreed`」，该断言会确定性 FAIL。
+   - 修复：断言改为 `negotiation_status=pending`，与设计/实现一致；「协商失败转决策者」仍由
+     C 组负路径覆盖。
+   - 结果：A2/A4 与后续协商链路稳定通过。
+
+4. **真实 agent 在并发/上游抖动下的超时过紧（会把正常长任务误判为卡死）**
+   - 现象：`/plan` 客户端 420s 超时短于服务端 planner 预算，客户端放弃后重试会叠加后台运行；
+     agent 300s 无输出即被 idle-watchdog 判死，进而让无关分支任务因 `failure_limit` 被 `suspended`。
+   - 修复：`/plan` 最多 5 次、单次 900s（失败不落库，可安全重试）；团队池 agent 的
+     `timeout_ms` 300s → 600s；依赖任务完成等待同步放宽。断言仍基于持久化状态，不引入时序竞态。
+   - 结果：run3（01:23，处于并发/上游抖动环境）139/139 通过。
+
 ## 已知非阻塞问题
 
 当前无未决的阻塞级缺陷（历史阻塞项见上）。以下为冒烟过程中观察到、不影响验收结论的问题，记录备查：
@@ -231,8 +245,8 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
      当前行为符合设计中的异常兜底路径，故未改动。
 
 3. **真实 agent 输出存在非确定性**
-   - 现象：planner 偶尔返回的任务/里程碑结构或协商 JSON 需要重试（脚本对 planner 规划做最多 3 次尝试，
-     协商失败走决策者裁决）；协商调用也可能因上游长时间无输出触发 600s idle 终止，随后按决策通道兜底。
+   - 现象：planner 偶尔返回的任务/里程碑结构或协商 JSON 需要重试（脚本对 planner 规划做最多 5 次尝试、
+     单次 900s；协商失败走决策者裁决）；协商调用也可能因上游长时间无输出触发 600s idle 终止，随后按决策通道兜底。
    - 处理：断言均基于持久化状态而非固定轮次/时序；M3 时代曾连续七次运行检查集一致；本次当前 HEAD
      （M4.5 语义）实跑 139/139 通过。
    - 影响：单次运行耗时可能波动，但结果稳定，非阻塞。
@@ -241,5 +255,7 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
    - 现象：2026-10-19 23:13 的一次并行验证中，planner 的 opencode 调用连续返回
      `Streaming response failed: [400] Generation stopped with an incomplete tool call.`（接口侧 500），
      三次规划尝试均未产出，脚本按设计记为规划失败（该次运行未进入主链，未写入有效归档）。
-   - 处理：脚本对规划最多重试 3 次；重试窗口内上游恢复即可继续，后续同一脚本实跑 139/139 通过。
+   - 处理：脚本对规划最多重试 5 次（单次 900s）；重试窗口内上游恢复即可继续，后续同一脚本实跑 139/139 通过。
+     上游拥塞导致 flash 长时间无输出时，可用 `DOMO_M3_MODEL=opencode-go/glm-5.3`（同为 glm 系、全量模型）
+     复跑；run3 即由该模型 139/139 通过。
    - 影响：属于上游模型/网络波动，非产品缺陷；失败时现场（SQLite / `domo.log`）完整保留可复查。

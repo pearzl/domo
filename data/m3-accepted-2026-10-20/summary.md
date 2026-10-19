@@ -1,15 +1,15 @@
-# M3 端到端冒烟结果（run2）
+# M3 端到端冒烟结果（run3）
 
-- 时间：2026-10-20T01:14:36+08:00
-- 模型：opencode-go/glm-5.3-flash
-- 端口：45621
-- 运行目录：/tmp/opencode/domo_m3_e2e.ih8bkQ
+- 时间：2026-10-20T01:23:15+08:00
+- 模型：opencode-go/glm-5.3
+- 端口：48481
+- 运行目录：/tmp/opencode/qa1/tmp/qa1.NNxaQT
 - phase1 退出码：0 / phase2 退出码：0
-- 结果明细：/home/pearzl/repos/domo/data/smoke_m3_e2e/run2-results.md（本次运行 run dir: /tmp/opencode/domo_m3_e2e.ih8bkQ）
-- 服务端日志：/home/pearzl/repos/domo/data/smoke_m3_e2e/run2-domo.log（同一份另存 data/domo.log）
+- 结果明细：/home/pearzl/repos/domo/data/smoke_m3_e2e/run1-results.md（本次运行 run dir: /tmp/opencode/qa1/tmp/qa1.NNxaQT）
+- 服务端日志：/home/pearzl/repos/domo/data/smoke_m3_e2e/run1-domo.log（同一份另存 data/domo.log）
 
 
-## phase1 — 2026-10-20 01:13:45
+## phase1 — 2026-10-20 01:20:05
 
 - PASS — 8 个真实 agent 注册成功（planner/executor/acceptor/decision_maker ×2）
 - PASS — agent planner-1 adapter=opencode 且角色=['planner']
@@ -109,7 +109,7 @@
 - PASS — 待裁定任务因决策者缺席被挂起（suspended）
 - PASS — C1（无关分支）不受决策者缺席影响（已 done）
 
-## phase2 — 2026-10-20 01:14:36
+## phase2 — 2026-10-20 01:23:15
 
 - PASS — 重启后项目 A 仍 completed
 - PASS — 重启后项目 A 里程碑状态保留（全 passed）
