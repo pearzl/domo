@@ -249,7 +249,9 @@ pub fn switch_on_failure(
             events::push_event(state, conn, &task.project_id, Some(&task.id), "agent.switched",
                 json!({"role": role, "from": current, "to": next_id, "to_name": name,
                        "reason": reason, "note": "失败容错：换下一优先级 agent 重试（不计入失败预算）"}));
-            events::log_line_state(state, &task.id, &format!("失败换人：{role} → {name}（{reason}）"));
+            // 注意：调用方（handle_agent_failure）已持有 db 连接 —— 必须用传入的 conn 写日志；
+            // 用 log_line_state 会对同一把 std::sync::Mutex 二次加锁 → 自死锁（整个服务挂起）。
+            events::log_line(state, conn, &task.id, &format!("失败换人：{role} → {name}（{reason}）"));
             true
         }
         None => false,
