@@ -29,9 +29,17 @@ import type {
 } from './types';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
-export type ViewId = 'projects' | 'tasks' | 'org' | 'inbox' | 'audit';
+export type ViewId = 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge';
 /** 任务视图呈现方式：看板 / DAG 图（提升到 store，切页再切回不丢失） */
 export type TasksViewMode = 'kanban' | 'dag';
+
+/** M5 知识沉淀预填：从任务详情/Audit 一键带过来的来源人工指导事件 */
+export interface KnowledgePrefill {
+  event_id: number;
+  project_id: string;
+  /** 指导正文，作为新条目的 body 预填 */
+  text: string;
+}
 
 export interface DomoStore {
   conn: ConnState;
@@ -40,6 +48,11 @@ export interface DomoStore {
   /** 组织视图聚焦的 agent（审计点跳转用；高亮展示，含软删除快照回退） */
   focusAgentId: string | null;
   setFocusAgentId: (id: string | null) => void;
+
+  /** M5 知识沉淀预填（任务详情/Audit 一键带来源事件 → 知识库视图开新建表单） */
+  knowledgePrefill: KnowledgePrefill | null;
+  /** 触发预填并跳到知识库视图；consume=true 清空预填（表单已读取） */
+  distillGuidance: (p: KnowledgePrefill | null, consume?: boolean) => void;
   error: string | null;
   setError: (e: string | null) => void;
 
@@ -164,6 +177,14 @@ export function DomoProvider({ children }: { children: ReactNode }) {
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>('dag');
   const [focusedInboxId, setFocusedInboxId] = useState<string | null>(null);
   const [focusAgentId, setFocusAgentId] = useState<string | null>(null);
+  const [knowledgePrefill, setKnowledgePrefill] = useState<KnowledgePrefill | null>(null);
+
+  /** M5 知识沉淀：带来源指导事件跳到知识库视图（consume=true 时清空，供表单读取一次） */
+  const distillGuidance = useCallback((p: KnowledgePrefill | null, consume = false) => {
+    setKnowledgePrefill(p);
+    if (p) setViewRaw('knowledge');
+    if (consume) setKnowledgePrefill(null);
+  }, []);
 
   /** 切换视图：离开收件箱时清除一次性高亮（下次进入不再残留脉冲） */
   const setView = useCallback((v: ViewId) => {
@@ -647,6 +668,8 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     tasksViewMode,
     focusAgentId,
     setFocusAgentId,
+    knowledgePrefill,
+    distillGuidance,
     setTasksViewMode,
     focusedInboxId,
     focusInbox,

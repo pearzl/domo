@@ -167,6 +167,27 @@ pub struct Guidance {
     pub created_at: i64,
 }
 
+/// M5 项目知识条目：把人工指导沉淀为可复用的项目规范。
+///
+/// 每条条目随 SQLite 持久化，可增删改查；`source_event_id` 回链到产生它的
+/// 人工指导事件（events.id，通常为 `task.guidance_added`），保证来源可追溯。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KnowledgeEntry {
+    pub id: String,
+    /// 来源项目（提升为全局后仍保留，便于审计归属）
+    pub project_id: String,
+    /// 'project'（仅来源项目可见）| 'global'（全部项目可见并引用）
+    pub scope: String,
+    /// 规范正文（注入提示词的内容）
+    pub body: String,
+    /// 适用范围说明（可选，如「全部任务」「仅前端任务」）
+    pub applies_to: Option<String>,
+    /// 来源人工指导事件（events.id）
+    pub source_event_id: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogLine {
     pub id: i64,

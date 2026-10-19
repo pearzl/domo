@@ -473,7 +473,7 @@ function TaskDetailDrawer({
   onClose: () => void;
   onEdit: () => void;
 }) {
-  const { tasksByProject, agents, logsByTask, sendGuidance, reviewTask, reportReplan } = useDomo();
+  const { tasksByProject, agents, logsByTask, sendGuidance, reviewTask, reportReplan, distillGuidance } = useDomo();
   const siblings = tasksByProject[task.project_id] ?? [];
 
   const [guidance, setGuidance] = useState('');
@@ -489,6 +489,10 @@ function TaskDetailDrawer({
   const executor = agents.find(a => a.id === task.executor_agent_id);
   const acceptor = agents.find(a => a.id === task.acceptor_agent_id);
   const negotiation = task.negotiation;
+  // M5：本任务最新一条人工指导事件（一键「沉淀为规范」的来源）
+  const latestGuidanceEv = [...(task.events ?? [])]
+    .reverse()
+    .find(e => e.type === 'task.guidance_added');
 
   async function doReview(verdict: 'accept' | 'reject') {
     if (verdict === 'reject' && !comment.trim()) {
@@ -698,6 +702,24 @@ function TaskDetailDrawer({
             placeholder="写入指导，作用于当前/下次尝试"
           />
           <div className="row-end">
+            {latestGuidanceEv && (
+              <button
+                className="btn"
+                title="把最新一条人工指导沉淀为项目规范（随 SQLite 持久化，注入后续 planner/executor/acceptor 提示词）"
+                onClick={() =>
+                  distillGuidance({
+                    event_id: latestGuidanceEv.id,
+                    project_id: latestGuidanceEv.project_id,
+                    text:
+                      typeof (latestGuidanceEv.payload as Record<string, unknown>)?.text === 'string'
+                        ? ((latestGuidanceEv.payload as Record<string, unknown>).text as string)
+                        : '',
+                  })
+                }
+              >
+                沉淀为规范
+              </button>
+            )}
             <button className="btn" disabled={busy || !guidance.trim()} onClick={() => void doGuidance()}>
               发送指导
             </button>

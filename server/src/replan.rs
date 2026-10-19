@@ -309,7 +309,9 @@ async fn build_changes(state: &Arc<App>, d: &Decision) -> (String, Vec<Value>) {
     // 1) 真实 planner：与生成规划 / 人工介入共用 planner-<prj_id> 会话 → memory 连续
     if let (Some(project), Some(planner)) = (project.as_ref(), planner.as_ref()) {
         let note = compose_note(&d.request);
-        let prompt = opencode::intervene_prompt(project, &tasks, &note);
+        let prompt = crate::knowledge::assemble(state, &d.project_id, d.task_id.as_deref(), "planner", "intervene", |k| {
+            opencode::intervene_prompt(project, &tasks, &note, k)
+        });
         let session = opencode::plan_session(&d.project_id);
         let call = opencode::run_cli(
             state,
