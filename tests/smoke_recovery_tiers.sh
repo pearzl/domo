@@ -274,26 +274,28 @@ def mk_task(pid, title, desc, ex, acc):
 REAL_DESC = ("在当前工作目录创建文件 {f}，内容为 12 行：第 1 行到第 12 行，"
              "每行一句简短英文。完成后回复 TASK_DONE 并简述产出。")
 
-def wait_session_then_crash(tid, timeout=300):
-    """等执行真正开始（可能先经历他人新增的 plan_drafting/plan_review 阶段）→ 等该 attempt 的
-    真实会话 id **已落 SQLite session_map**（=满足第一档 resume 前置条件）→ 立刻 kill -9 整个进程组。"""
+def wait_session_then_crash(tid, timeout=600):
+    """等执行真正开始（可能先经历计划制定/审查阶段，且可能有打回重拟）→ 等该 attempt 的
+    真实会话 id **已落 SQLite session_map**（=满足第一档 resume 前置条件）→ 立刻 kill -9 整个进程组。
+    返回 (真实会话 id, 崩溃时刻状态, 中断时的 attempt)。"""
     st = wait_status(tid, "executing", timeout)
+    attempt = int((task_of(tid) or {}).get("attempt") or 0)
     if st != "executing":
-        return None, st
-    attempt = (task_of(tid) or {}).get("attempt") or 1
+        return None, st, attempt
+    attempt = int((task_of(tid) or {}).get("attempt") or 1)
     logical = f"{tid}_a{attempt}"
     sid = None
     end = time.time() + timeout
     while time.time() < end:
         t = task_of(tid) or {}
         if t.get("status") != "executing":
-            return None, t.get("status")  # 执行在持久化前就结束了（罕见）
+            return None, t.get("status"), attempt  # 执行在持久化前就结束了（罕见）
         sid = session_map_real(logical)
         if sid:
             break
         time.sleep(0.3)
     crash()
-    return sid, (task_of(tid) or {}).get("status")
+    return sid, (task_of(tid) or {}).get("status"), attempt
 
 def wait_mock_then_crash(tid, timeout=180):
     """mock 执行 worker 已在途（executing + live_handles>=1）→ kill -9 整个进程组。"""
@@ -307,8 +309,9 @@ def wait_mock_then_crash(tid, timeout=180):
                 break
         time.sleep(0.3)
     status_now = (task_of(tid) or {}).get("status")
+    attempt_used = int((task_of(tid) or {}).get("attempt") or 0)
     crash()
-    return status_now
+    return status_now, attempt_used
 
 def contract_ok(e):
     p = e.get("payload") or {}
@@ -365,11 +368,9 @@ def main():
 def case4():
     section("用例 4 / 口径 1+3+4：真实 opencode 中断 → kill -9 → tier=native_resume 原生恢复")
     tid = mk_task(P1, "C4-原生恢复", REAL_DESC.format(f="c4_native.txt"), IDS["exec-native"], IDS["acc"])
-    check("[4.1] C4 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
-    t0 = task_of(tid) or {}
-    attempt_pre = int(t0.get("attempt") or 0)   # 中断时的 attempt（计划阶段可能占用前几轮）
-    check("[4.2] C4 中断前已进入执行轮（attempt>=1，恢复不新建 attempt）", attempt_pre >= 1, t0.get("attempt"))
-    sid, st = wait_session_then_crash(tid)
+    check("[4.1] C4 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 600) == "executing", tid)
+    sid, st, attempt_pre = wait_session_then_crash(tid)   # attempt_pre = 中断时的 attempt
+    check("[4.2] C4 中断前已进入执行轮（attempt>=1，恢复不新建 attempt）", attempt_pre >= 1, (attempt_pre, st))
     check("[4.3] C4 崩溃前已解析到真实 opencode 会话 id 并落 SQLite", bool(sid), (sid, st))
     logical = f"{tid}_a{attempt_pre}"
     check("[4.4] 崩溃前 session_map 持久化 logical→real 映射", session_map_real(logical) == sid, (logical, session_map_real(logical)))
@@ -415,14 +416,13 @@ def case4():
 def case5():
     section("用例 5 / 口径 2+5：supports_resume=false → 第一档 skipped → 第二档交接重建")
     tid = mk_task(P1, "C5-交接重建", REAL_DESC.format(f="c5_handoff.txt"), IDS["exec-nor"], IDS["acc"])
-    check("[5.1] C5 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    check("[5.1] C5 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 600) == "executing", tid)
     t0 = task_of(tid) or {}
-    attempt_pre = int(t0.get("attempt") or 0)
     check("[5.1b] C5 执行者固定为 oc-exec-nr（supports_resume=false，动态选人不覆盖固定）",
           t0.get("executor_agent_id") == IDS["exec-nor"] and t0.get("agent_pinned") is True
           and (amap_caps(IDS["exec-nor"]).get("supports_resume") is False),
           (t0.get("executor_agent_id"), t0.get("agent_pinned")))
-    sid, st = wait_session_then_crash(tid)
+    sid, st, attempt_pre = wait_session_then_crash(tid)
     check("[5.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
     if not start_server():
         check("[5] 服务重启成功", False)
@@ -465,13 +465,12 @@ def case5():
 def case6():
     section("用例 6 / 口径 6：mock 适配器中断 → 跳过①直接②（reason 注明 supports_resume=false）")
     tid = mk_task(P2, "C6-mock交接", "模拟任务，稍后完成", IDS["exec-mock"], IDS["acc"])
-    check("[6.1] C6 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    check("[6.1] C6 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 600) == "executing", tid)
     t0 = task_of(tid) or {}
-    attempt_pre = int(t0.get("attempt") or 0)
     check("[6.1b] C6 执行者固定为 mock-exec（supports_resume=false）",
           t0.get("executor_agent_id") == IDS["exec-mock"] and t0.get("agent_pinned") is True,
           (t0.get("executor_agent_id"), t0.get("agent_pinned")))
-    wait_mock_then_crash(tid)
+    _, attempt_pre = wait_mock_then_crash(tid)
     if not start_server():
         check("[6] 服务重启成功", False)
         return
@@ -500,10 +499,8 @@ def case6():
 def case7():
     section("用例 7 / 口径 7：持久化真实 session id 置无效 → 第一档 failed → 自动降级②")
     tid = mk_task(P1, "C7-强制失败降级", REAL_DESC.format(f="c7_forced.txt"), IDS["exec-native"], IDS["acc"])
-    check("[7.1] C7 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
-    t0 = task_of(tid) or {}
-    attempt_pre = int(t0.get("attempt") or 0)
-    sid, st = wait_session_then_crash(tid)
+    check("[7.1] C7 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 600) == "executing", tid)
+    sid, st, attempt_pre = wait_session_then_crash(tid)
     check("[7.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
     logical = f"{tid}_a{attempt_pre}"
     db_exec("UPDATE session_map SET real=? WHERE logical=?", ("corrupted-not-a-session-id", logical))
@@ -542,9 +539,8 @@ def case9_and_10():
     tid = mk_task(P1, "C9-两档失败", REAL_DESC.format(f="c9_manual.txt"), IDS["exec-native"], IDS["acc"])
     tid2 = mk_task(P1, "C9-无关分支", "无关分支任务（mock，不需要工作区；长时执行确保被崩溃打断）", IDS["exec-mock-slow"], IDS["acc"])
     check("[9.1] C9 主任务与无关分支任务创建并进入执行", bool(tid) and bool(tid2)
-          and wait_status(tid, "executing", 300) == "executing", (tid, tid2))
-    attempt_pre = int((task_of(tid) or {}).get("attempt") or 0)
-    sid, st = wait_session_then_crash(tid)
+          and wait_status(tid, "executing", 600) == "executing", (tid, tid2))
+    sid, st, attempt_pre = wait_session_then_crash(tid)
     check("[9.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
     broken = WS + "-BROKEN"
     rows = db_query("SELECT workspace FROM projects WHERE id=?", (P1,))
@@ -622,7 +618,7 @@ def case9_and_10():
 def case11():
     section("用例 11 / 口径 11：paused 期间中断任务不自动恢复，resume 后按三档续跑")
     tid = mk_task(P2, "C11-暂停不恢复", "暂停语义探针任务", IDS["exec-mock"], IDS["acc"])
-    check("[11.1] C11 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    check("[11.1] C11 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 600) == "executing", tid)
     s, _ = post(f"/projects/{P2}/pause", {})
     check("[11.2] 项目暂停受理（在途会话跑完当前尝试即停：pausing→paused）",
           s == 200 and project_status(P2) in ("pausing", "paused"), (s, project_status(P2)))
