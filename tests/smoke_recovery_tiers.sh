@@ -16,8 +16,8 @@
 #   用例 12 任何恢复路径下同一 task 只有一个在途执行 worker/句柄（DB 占用表 + live_handles 断言）。
 #   事件契约 task.recovered（tier/outcome/reason/task_id/attempt/session_id，append-only，时间线与审计可见）。
 #
-# 用法：bash scripts/smoke_recovery_tiers.sh          （退出码 0 = 全部通过）
-#       DOMO_RT_PORT=8797 DOMO_RT_MODEL=<provider>/<model> bash scripts/smoke_recovery_tiers.sh
+# 用法：DOMO_RT_MODEL=<provider>/<model> bash tests/smoke_recovery_tiers.sh   （退出码 0 = 全部通过）
+#       DOMO_RT_PORT=8797 DOMO_RT_MODEL=<provider>/<model> bash tests/smoke_recovery_tiers.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,7 +44,8 @@ PORT, RUN_DIR, WS, DB, LOG, MODEL, ROOT = sys.argv[1:8]
 PORT = int(PORT)
 BASE = f"http://127.0.0.1:{PORT}/api"
 RESULTS = os.path.join(RUN_DIR, "results.md")
-SERVER_BIN = os.path.join(ROOT, "server/target/debug/domo-server")
+# DOMO_SERVER_BIN 可覆盖服务端二进制（隔离运行时避开按进程名的批量清理）
+SERVER_BIN = os.environ.get("DOMO_SERVER_BIN") or os.path.join(ROOT, "server/target/debug/domo-server")
 SERVER = None
 CHECKS, NOTES, SAMPLERS = [], [], {}
 
@@ -144,6 +145,13 @@ def recovered_events(pid=None, tid=None):
 def inbox():
     s, b = get("/inbox")
     return b if s == 200 else []
+
+def amap_caps(agent_id):
+    s, b = get("/agents")
+    for a in (b if s == 200 else []):
+        if a.get("id") == agent_id:
+            return a.get("capabilities") or {}
+    return {}
 
 def open_recovery_items(tid):
     return [i for i in inbox()
@@ -358,11 +366,12 @@ def case4():
     tid = mk_task(P1, "C4-原生恢复", REAL_DESC.format(f="c4_native.txt"), IDS["exec-native"], IDS["acc"])
     check("[4.1] C4 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
     t0 = task_of(tid) or {}
-    check("[4.2] C4 中断前 attempt==1（改造前此处后续会自增到 2）", t0.get("attempt") == 1, t0.get("attempt"))
+    attempt_pre = int(t0.get("attempt") or 0)   # 中断时的 attempt（计划阶段可能占用前几轮）
+    check("[4.2] C4 中断前已进入执行轮（attempt>=1，恢复不新建 attempt）", attempt_pre >= 1, t0.get("attempt"))
     sid, st = wait_session_then_crash(tid)
     check("[4.3] C4 崩溃前已解析到真实 opencode 会话 id 并落 SQLite", bool(sid), (sid, st))
-    logical = f"{tid}_a1"
-    check("[4.4] 崩溃前 session_map 持久化 logical→real 映射", session_map_real(logical) == sid, session_map_real(logical))
+    logical = f"{tid}_a{attempt_pre}"
+    check("[4.4] 崩溃前 session_map 持久化 logical→real 映射", session_map_real(logical) == sid, (logical, session_map_real(logical)))
     pre_rows = db_query("SELECT real, task_id, phase, attempt FROM session_map WHERE logical=?", (logical,))
     if not start_server():
         check("[4] 服务重启成功", False, "server did not come up")
@@ -378,9 +387,10 @@ def case4():
     check("[4.7] 事件契约字段齐全（tier/outcome/reason/task_id/attempt/session_id）", okc, p)
     check("[4.8] 恢复事件 session_id == 崩溃前真实 id", p.get("session_id") == sid, (p.get("session_id"), sid))
     t1 = task_of(tid) or {}
-    check("[4.9] attempt 未自增（同一中断 attempt 恢复=第一档落地证据）", t1.get("attempt") == 1, t1.get("attempt"))
+    check("[4.9] attempt 未自增（恢复后 attempt == 中断前 attempt=第一档落地证据）",
+          t1.get("attempt") == attempt_pre, (t1.get("attempt"), attempt_pre))
     check("[4.10] 恢复派发的逻辑会话名不变（exec_session(task_id,attempt)）",
-          any((e.get("payload") or {}).get("session_id") == f"{tid}_a1"
+          any((e.get("payload") or {}).get("session_id") == f"{tid}_a{attempt_pre}"
               and (e.get("payload") or {}).get("trigger") == "recovery"
               for e in events(P1) if e["type"] == "agent.session_started"),
           [ (e.get("payload") or {}).get("session_id") for e in events(P1) if e["type"] == "agent.session_started" ])
@@ -392,11 +402,11 @@ def case4():
           [(e["payload"] or {}).get("tier") for e in evs])
     # 基线差异对照（口径 1）：改造前对无活句柄的 executing 任务走 dispatch_exec(…"recovery")
     # → attempt+1 → 全新会话 {task}_a2 重派。改造后这两类痕迹都必须不存在。
-    check("[4.14] 对照断言：改造前行为痕迹不存在（无 {task}_a2 全新会话重派、attempt 未自增）",
-          not any((e.get("payload") or {}).get("session_id") == f"{tid}_a2"
+    check("[4.14] 对照断言：改造前行为痕迹不存在（无 {task}_a{pre+1} 全新会话重派、attempt 未自增）",
+          not any((e.get("payload") or {}).get("session_id") == f"{tid}_a{attempt_pre + 1}"
                   for e in events(P1) if e["type"] == "agent.session_started")
-          and (task_of(tid) or {}).get("attempt") == 1,
-          ((task_of(tid) or {}).get("attempt")))
+          and (task_of(tid) or {}).get("attempt") == attempt_pre,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre))
     sampler_checks("C4-native", tid)
     return True
 
@@ -405,6 +415,12 @@ def case5():
     section("用例 5 / 口径 2+5：supports_resume=false → 第一档 skipped → 第二档交接重建")
     tid = mk_task(P1, "C5-交接重建", REAL_DESC.format(f="c5_handoff.txt"), IDS["exec-nor"], IDS["acc"])
     check("[5.1] C5 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    t0 = task_of(tid) or {}
+    attempt_pre = int(t0.get("attempt") or 0)
+    check("[5.1b] C5 执行者固定为 oc-exec-nr（supports_resume=false，动态选人不覆盖固定）",
+          t0.get("executor_agent_id") == IDS["exec-nor"] and t0.get("agent_pinned") is True
+          and (amap_caps(IDS["exec-nor"]).get("supports_resume") is False),
+          (t0.get("executor_agent_id"), t0.get("agent_pinned")))
     sid, st = wait_session_then_crash(tid)
     check("[5.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
     if not start_server():
@@ -435,10 +451,10 @@ def case5():
     check("[5.9] 第二档使用新 session id ≠ 原 session id（事件可证）",
           bool(new_sid) and new_sid != sid, (new_sid, sid))
     check("[5.10] 第二档新会话在日志可证（执行日志出现新会话 id）", bool(new_sid) and log_has(tid, f"opencode session: {new_sid}"))
-    check("[5.11] attempt 未自增（交接沿用同一中断 attempt）", (task_of(tid) or {}).get("attempt") == 1,
-          (task_of(tid) or {}).get("attempt"))
-    check("[5.12] 交接会话逻辑名 = {task}_a1_h1（新会话，非原 exec_session 名）",
-          any((e.get("payload") or {}).get("session_id") == f"{tid}_a1_h1"
+    check("[5.11] attempt 未自增（交接沿用同一中断 attempt）", (task_of(tid) or {}).get("attempt") == attempt_pre,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre))
+    check("[5.12] 交接会话逻辑名 = {task}_a{pre}_h1（新会话，非原 exec_session 名）",
+          any((e.get("payload") or {}).get("session_id") == f"{tid}_a{attempt_pre}_h1"
               and (e.get("payload") or {}).get("trigger") == "recovery"
               for e in events(P1) if e["type"] == "agent.session_started"))
     sampler_checks("C5-handoff", tid)
@@ -449,6 +465,11 @@ def case6():
     section("用例 6 / 口径 6：mock 适配器中断 → 跳过①直接②（reason 注明 supports_resume=false）")
     tid = mk_task(P2, "C6-mock交接", "模拟任务，稍后完成", IDS["exec-mock"], IDS["acc"])
     check("[6.1] C6 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    t0 = task_of(tid) or {}
+    attempt_pre = int(t0.get("attempt") or 0)
+    check("[6.1b] C6 执行者固定为 mock-exec（supports_resume=false）",
+          t0.get("executor_agent_id") == IDS["exec-mock"] and t0.get("agent_pinned") is True,
+          (t0.get("executor_agent_id"), t0.get("agent_pinned")))
     wait_mock_then_crash(tid)
     if not start_server():
         check("[6] 服务重启成功", False)
@@ -468,7 +489,8 @@ def case6():
           len(hof) == 1 and hof[0]["payload"].get("outcome") == "succeeded"
           and "supports_resume=false" in (hof[0]["payload"].get("reason") or ""),
           [(e["payload"] or {}).get("outcome") for e in hof])
-    check("[6.6] attempt 未自增", (task_of(tid) or {}).get("attempt") == 1, (task_of(tid) or {}).get("attempt"))
+    check("[6.6] attempt 未自增（恢复沿用中断 attempt）", (task_of(tid) or {}).get("attempt") == attempt_pre,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre))
     okc, _ = contract_ok(hof[0]) if hof else (False, {})
     check("[6.7] handoff 事件契约字段齐全", okc)
     sampler_checks("C6-mock", tid)
@@ -478,12 +500,14 @@ def case7():
     section("用例 7 / 口径 7：持久化真实 session id 置无效 → 第一档 failed → 自动降级②")
     tid = mk_task(P1, "C7-强制失败降级", REAL_DESC.format(f="c7_forced.txt"), IDS["exec-native"], IDS["acc"])
     check("[7.1] C7 任务创建并进入执行", bool(tid) and wait_status(tid, "executing", 300) == "executing", tid)
+    t0 = task_of(tid) or {}
+    attempt_pre = int(t0.get("attempt") or 0)
     sid, st = wait_session_then_crash(tid)
     check("[7.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
-    logical = f"{tid}_a1"
+    logical = f"{tid}_a{attempt_pre}"
     db_exec("UPDATE session_map SET real=? WHERE logical=?", ("corrupted-not-a-session-id", logical))
     check("[7.3] 已将持久化 session id 置为无效值（模拟 resume 失败）",
-          session_map_real(logical) == "corrupted-not-a-session-id", session_map_real(logical))
+          session_map_real(logical) == "corrupted-not-a-session-id", (logical, session_map_real(logical)))
     if not start_server():
         check("[7] 服务重启成功", False)
         return
@@ -504,8 +528,8 @@ def case7():
           len(hof) == 1 and hof[0]["payload"].get("outcome") == "succeeded"
           and (hof[0]["payload"].get("session_id") or "") not in ("", sid),
           [(e["payload"] or {}).get("outcome") for e in hof])
-    check("[7.8] attempt 未自增（降级轮次沿用同一 attempt）", (task_of(tid) or {}).get("attempt") == 1,
-          (task_of(tid) or {}).get("attempt"))
+    check("[7.8] attempt 未自增（降级轮次沿用同一 attempt）", (task_of(tid) or {}).get("attempt") == attempt_pre,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre))
     check("[7.9] 恢复档失败不计入「失败 3 次挂起」额度（failure_count 不变）",
           (task_of(tid) or {}).get("failure_count") == 0, (task_of(tid) or {}).get("failure_count"))
     sampler_checks("C7-forced", tid)
@@ -518,6 +542,7 @@ def case9_and_10():
     tid2 = mk_task(P1, "C9-无关分支", "无关分支任务（mock，不需要工作区）", IDS["exec-mock"], IDS["acc"])
     check("[9.1] C9 主任务与无关分支任务创建并进入执行", bool(tid) and bool(tid2)
           and wait_status(tid, "executing", 300) == "executing", (tid, tid2))
+    attempt_pre = int((task_of(tid) or {}).get("attempt") or 0)
     sid, st = wait_session_then_crash(tid)
     check("[9.2] 崩溃前解析到真实会话 id", bool(sid), (sid, st))
     broken = WS + "-BROKEN"
@@ -553,8 +578,8 @@ def case9_and_10():
     check("[9.9] 收件箱 payload 同时含第一档与第二档失败原因",
           bool(pl.get("tier1_reason")) and bool(pl.get("tier2_reason")), pl)
     check("[9.10] attempt 未自增、failure_count 未被恢复失败抬高",
-          (task_of(tid) or {}).get("attempt") == 1 and (task_of(tid) or {}).get("failure_count") == 0,
-          ((task_of(tid) or {}).get("attempt"), (task_of(tid) or {}).get("failure_count")))
+          (task_of(tid) or {}).get("attempt") == attempt_pre and (task_of(tid) or {}).get("failure_count") == 0,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre, (task_of(tid) or {}).get("failure_count")))
     # C9 主任务两档都是「秒失败」（工作区失效），worker 存活极短：只断言句柄恒 ≤1；
     # 无关分支（mock 交接续作 20s）作为在途 worker 采样对象。
     sampler_checks("C9-manual", tid, expect_ran=False)
@@ -585,7 +610,8 @@ def case9_and_10():
               and (i.get("payload") or {}).get("reason") == "recovery_exhausted"))
     check("[10.5] 同一任务无重复堆叠收件箱条目（open 条目为 0）", len(open_recovery_items(tid)) == 0,
           len(open_recovery_items(tid)))
-    check("[10.6] attempt 全程未自增", (task_of(tid) or {}).get("attempt") == 1, (task_of(tid) or {}).get("attempt"))
+    check("[10.6] attempt 全程未自增", (task_of(tid) or {}).get("attempt") == attempt_pre,
+          ((task_of(tid) or {}).get("attempt"), attempt_pre))
     check("[10.7] 原生续作仍用崩溃前同一真实 id",
           bool(nat2) and nat2[-1]["payload"].get("session_id") == sid, (nat2[-1]["payload"].get("session_id") if nat2 else None, sid))
     sampler_checks("C10-rering", tid)
