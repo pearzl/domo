@@ -453,8 +453,12 @@ pub fn decide_prompt(
             t.acceptance_criteria.as_deref().unwrap_or("(未指定)")
         ));
     }
-    s.push_str(&format!("决策类型：{}（scope=tactical）\n", decision.kind));
+    s.push_str(&format!("决策类型：{}（scope={}）\n", decision.kind, decision.scope));
     s.push_str(&format!("决策请求：{}\n\n", serde_json::to_string_pretty(&decision.request).unwrap_or_default()));
+    s.push_str("权限分层（必须遵守）：\n");
+    s.push_str("- 战术事项由你自决并留痕：豁免（免验收）裁定、验收标准协商失败裁决、不触及已确认里程碑/项目目标的任务级变更。\n");
+    s.push_str("- 战略事项一律转人工（系统已直接把它们放进决策收件箱，不会派给你）：触及已确认里程碑/项目目标的变更、新增角色或启用新 agent、卡死升级（执行失败 ≥3 次 / 验收退回 ≥2 轮）。\n");
+    s.push_str("- 若请求实际触及上述战略事项，不要自批：给 approve=false，并在 rationale 里写明「应转人工」及原因。\n");
     s.push_str("输出要求：\n");
     s.push_str("- 只输出一个 JSON 对象，首字符 '{'，末字符 '}'。\n");
     s.push_str("- 格式：{\"approve\":true|false,\"rationale\":\"简短理由\",\"criteria\":\"可选：协商失败时可给出建议的验收标准\"}\n");
