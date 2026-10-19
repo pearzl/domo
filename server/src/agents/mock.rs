@@ -57,6 +57,17 @@ pub async fn run_execution(
             events::log_line(&state, &conn, &task.id, &format!("carrying human guidance: {g}"));
         }
     }
+    // M5：与 opencode 同源组装执行提示词并落审计（知识注入可被断言）。
+    {
+        let c = state.db.lock().unwrap();
+        let project = db::get_project(&c, &task.project_id);
+        let guidance = db::latest_guidance(&c, &task.id);
+        drop(c);
+        let _prompt = crate::knowledge::assemble(
+            &state, &task.project_id, Some(&task.id), "executor", "execute",
+            |k| super::opencode::exec_prompt(project.as_ref(), &task, guidance.as_deref(), k),
+        );
+    }
     let dur = duration_of(&agent);
     tokio::time::sleep(std::time::Duration::from_millis(dur)).await;
     if task.description.contains("[fail]") {
@@ -78,6 +89,31 @@ fn chrono_like() -> String {
     db::now().to_string()
 }
 
+/// M5：mock planner 的确定性规划产出（无 opencode planner 时兜底，供本地/冒烟端到端走通）。
+/// 产出 2 个相互依赖的任务（第二个依赖第一个），均需验收、含可检验验收标准。
+pub fn plan_json(project: &crate::models::Project) -> String {
+    serde_json::json!({
+        "tasks": [
+            {
+                "title": "梳理需求与约束",
+                "description": format!("为项目「{}」梳理目标、约束与验收口径", project.name),
+                "depends_on": [],
+                "acceptance_required": true,
+                "acceptance_criteria": "产出需求要点清单，覆盖项目简介中的全部目标"
+            },
+            {
+                "title": "交付最小可用产物",
+                "description": "基于需求要点产出可验收的最小可用交付物",
+                "depends_on": [0],
+                "acceptance_required": true,
+                "acceptance_criteria": "产物可独立运行/使用，并通过验收者复核"
+            }
+        ],
+        "milestones": []
+    })
+    .to_string()
+}
+
 /// Run acceptance. Rejects when the task description contains `[reject]`,
 /// otherwise approves after 2 seconds.
 /// M4 计划阶段（mock）：产出模拟任务计划；`[fail_plan]` 触发计划制定失败。
@@ -93,6 +129,24 @@ pub async fn run_task_plan(
             &state, &conn, &task.id,
             &format!("mock executor '{}' 制定任务计划（adapter=mock）{}", agent.name,
                      review_feedback.map(|f| format!("，按打回意见修订：{f}")).unwrap_or_default()),
+        );
+    }
+    // M5：mock 与 opencode 同源组装提示词并落 `prompt.assembled` 审计（含知识注入）。
+    {
+        let c = state.db.lock().unwrap();
+        let project = db::get_project(&c, &task.project_id);
+        let guidance = db::latest_guidance(&c, &task.id);
+        drop(c);
+        let _prompt = crate::knowledge::assemble(
+            &state, &task.project_id, Some(&task.id), "executor", "plan_drafting",
+            |k| super::opencode::task_plan_prompt(
+                project.as_ref(),
+                &task,
+                guidance.as_deref(),
+                task.execution_plan.as_deref(),
+                review_feedback,
+                k,
+            ),
         );
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -115,6 +169,23 @@ pub async fn run_plan_review(state: Arc<App>, task: Task, agent: Agent) -> Resul
             &format!("mock acceptor '{}' 审查任务计划（adapter=mock）", agent.name),
         );
     }
+    // M5：与 opencode 同源组装提示词并落审计（知识注入可被断言）。
+    {
+        let c = state.db.lock().unwrap();
+        let Some(p) = db::get_project(&c, &task.project_id) else {
+            return Ok(());
+        };
+        drop(c);
+        let _prompt = crate::knowledge::assemble(
+            &state, &task.project_id, Some(&task.id), "acceptor", "plan_review",
+            |k| super::opencode::plan_review_prompt(
+                &p,
+                &task,
+                task.execution_plan.as_deref().unwrap_or("(计划缺失)"),
+                k,
+            ),
+        );
+    }
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     if task.description.contains("[reject_plan_always]")
         || (task.description.contains("[reject_plan]") && task.plan_rejection_count == 0)
@@ -133,6 +204,29 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
             &task.id,
             &format!("mock acceptor '{}' started reviewing artifact of task '{}'", agent.name, task.title),
         );
+    }
+    // M5：与 opencode 同源组装验收提示词并落审计（知识注入可被断言）。
+    {
+        let c = state.db.lock().unwrap();
+        let project = db::get_project(&c, &task.project_id);
+        let logs = db::task_logs(&c, &task.id);
+        drop(c);
+        if let Some(p) = project {
+            let log_tail: String = logs
+                .iter()
+                .rev()
+                .take(20)
+                .map(|l| l.line.clone())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _prompt = crate::knowledge::assemble(
+                &state, &task.project_id, Some(&task.id), "acceptor", "accept",
+                |k| super::opencode::accept_prompt(&p, &task, &log_tail, k),
+            );
+        }
     }
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     {

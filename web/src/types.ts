@@ -121,6 +121,23 @@ export interface AuditEvent {
   payload: unknown;
 }
 
+/** M5 项目知识条目：人工指导沉淀为可复用的项目/全局规范 */
+export interface KnowledgeEntry {
+  id: string;
+  /** 来源项目（提升为全局后仍保留，便于审计归属） */
+  project_id: string;
+  /** 'project'=仅来源项目可见 | 'global'=全部项目可见并引用 */
+  scope: 'project' | 'global';
+  /** 规范正文（注入 planner/executor/acceptor 提示词的内容） */
+  body: string;
+  /** 适用范围说明（可空） */
+  applies_to: string | null;
+  /** 来源人工指导事件（events.id，回链审计） */
+  source_event_id: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Agent {
   id: string;
   name: string;

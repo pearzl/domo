@@ -1,6 +1,7 @@
 import { Component, useState, type ReactNode } from 'react';
 import { AuditView } from './views/Audit';
 import { InboxView } from './views/Inbox';
+import { KnowledgeView } from './views/Knowledge';
 import { OrgView } from './views/Org';
 import { ProjectsView } from './views/Projects';
 import { TaskFormModal as TasksFormModal, TasksView, type TaskFormState } from './views/Tasks';
@@ -12,6 +13,7 @@ const VIEW_TITLES: Record<ViewId, string> = {
   org: '组织视图',
   inbox: '决策收件箱',
   audit: '审计日志',
+  knowledge: '项目知识库',
 };
 
 function Sidebar() {
@@ -22,6 +24,7 @@ function Sidebar() {
     { id: 'tasks', label: '任务视图', dot: !!selectedProjectId },
     { id: 'org', label: '组织视图' },
     { id: 'inbox', label: '决策收件箱', badge: openCount },
+    { id: 'knowledge', label: '知识库' },
     { id: 'audit', label: '审计' },
   ];
   return (
@@ -114,6 +117,7 @@ function Shell() {
             {view === 'tasks' && <TasksView onOpenForm={setTaskForm} />}
             {view === 'org' && <OrgView />}
             {view === 'inbox' && <InboxView />}
+            {view === 'knowledge' && <KnowledgeView />}
             {view === 'audit' && <AuditView />}
           </ViewErrorBoundary>
         </div>

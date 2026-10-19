@@ -166,6 +166,24 @@ fn migrate(c: &Connection) {
     )
     .expect("milestone indexes");
 
+    // M5 项目知识库：人工指导沉淀的项目规范条目（随 SQLite 持久化）。
+    //   scope:      'project'=仅来源项目可见 | 'global'=全部项目可见（跨项目复用）
+    //   applies_to: 适用范围说明（可空）
+    //   source_event_id: 来源人工指导事件（events.id，回链审计）
+    c.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS knowledge (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'project',
+            body TEXT NOT NULL, applies_to TEXT,
+            source_event_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge(project_id);
+        "#,
+    )
+    .expect("knowledge");
+
     // boot recovery: no in-memory worker survives a restart; agent slots must be freed
     c.execute_batch("UPDATE agents SET current_task_ids='[]', status='idle';")
         .expect("boot recovery");
@@ -582,6 +600,90 @@ pub fn inbox_open_count(c: &Connection, project_id: &str) -> i64 {
         |r| r.get(0),
     )
     .unwrap_or(0)
+}
+
+/// 单条事件（知识条目来源回链 / 校验用）。
+pub fn get_event(c: &Connection, id: i64) -> Option<Event> {
+    c.query_row("SELECT * FROM events WHERE id=?1", params![id], event_row)
+        .optional()
+        .ok()
+        .flatten()
+}
+
+// ---------- knowledge (M5 项目知识库) ----------
+
+fn knowledge_row(r: &Row) -> rusqlite::Result<KnowledgeEntry> {
+    Ok(KnowledgeEntry {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        scope: r.get(2)?,
+        body: r.get(3)?,
+        applies_to: r.get(4)?,
+        source_event_id: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+    })
+}
+
+pub fn insert_knowledge(c: &Connection, k: &KnowledgeEntry) {
+    c.execute(
+        "INSERT INTO knowledge (id,project_id,scope,body,applies_to,source_event_id,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            k.id, k.project_id, k.scope, k.body, k.applies_to,
+            k.source_event_id, k.created_at, k.updated_at
+        ],
+    )
+    .expect("insert knowledge");
+}
+
+pub fn get_knowledge(c: &Connection, id: &str) -> Option<KnowledgeEntry> {
+    c.query_row(
+        "SELECT * FROM knowledge WHERE id=?1",
+        params![id],
+        knowledge_row,
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// 某项目可见的知识条目 = 本项目条目 + 全局条目（跨项目复用）。
+pub fn list_knowledge(c: &Connection, project_id: &str) -> Vec<KnowledgeEntry> {
+    let mut st = c
+        .prepare(
+            "SELECT * FROM knowledge WHERE project_id=?1 OR scope='global' ORDER BY created_at, id",
+        )
+        .unwrap();
+    st.query_map(params![project_id], knowledge_row)
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .collect()
+}
+
+pub fn update_knowledge(
+    c: &Connection,
+    id: &str,
+    body: &str,
+    applies_to: Option<&str>,
+    updated_at: i64,
+) {
+    let _ = c.execute(
+        "UPDATE knowledge SET body=?2, applies_to=?3, updated_at=?4 WHERE id=?1",
+        params![id, body, applies_to, updated_at],
+    );
+}
+
+pub fn delete_knowledge(c: &Connection, id: &str) -> bool {
+    c.execute("DELETE FROM knowledge WHERE id=?1", params![id]).unwrap_or(0) > 0
+}
+
+/// 提升为全局条目（跨项目复用）。
+pub fn set_knowledge_scope(c: &Connection, id: &str, scope: &str, updated_at: i64) {
+    let _ = c.execute(
+        "UPDATE knowledge SET scope=?2, updated_at=?3 WHERE id=?1",
+        params![id, scope, updated_at],
+    );
 }
 
 // ---------- reports (M3 项目总结报告) ----------
@@ -1142,6 +1244,83 @@ mod tests {
         c.execute("UPDATE inbox SET status='resolved' WHERE id='inb_win'", []).unwrap();
         assert!(open_window_item(&c, "mst1").is_none(), "resolved window is no longer open");
         assert!(has_window_item(&c, "mst1"), "resolved window still counts as worked");
+    }
+
+    fn kn(id: &str, pid: &str, scope: &str, body: &str, applies: Option<&str>, ev: i64) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: id.into(), project_id: pid.into(), scope: scope.into(),
+            body: body.into(), applies_to: applies.map(String::from),
+            source_event_id: ev, created_at: 100, updated_at: 100,
+        }
+    }
+
+    #[test]
+    fn knowledge_crud_roundtrip_fields() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        migrate(&c); // idempotent: knowledge table create must not error twice
+        seed_project(&c, "prj1");
+        c.execute(
+            "INSERT INTO events (id,ts,project_id,task_id,\"type\",payload) VALUES (7,1,'prj1',NULL,'task.guidance_added','{}')",
+            [],
+        ).unwrap();
+
+        let k = kn("kn1", "prj1", "project", "所有 PR 必须带测试", Some("全部任务"), 7);
+        insert_knowledge(&c, &k);
+
+        // 字段逐项一致
+        let got = get_knowledge(&c, "kn1").unwrap();
+        assert_eq!(got, k);
+
+        // update：正文/适用范围/updated_at 变化，其余不变
+        update_knowledge(&c, "kn1", "所有 PR 必须带测试与截图", None, 200);
+        let got = get_knowledge(&c, "kn1").unwrap();
+        assert_eq!(got.body, "所有 PR 必须带测试与截图");
+        assert_eq!(got.applies_to, None);
+        assert_eq!(got.updated_at, 200);
+        assert_eq!(got.source_event_id, 7);
+        assert_eq!(got.created_at, 100);
+
+        // delete 后消失，其它条目无损
+        insert_knowledge(&c, &kn("kn2", "prj1", "project", "第二条", None, 7));
+        assert!(delete_knowledge(&c, "kn1"));
+        assert!(get_knowledge(&c, "kn1").is_none());
+        assert!(get_knowledge(&c, "kn2").is_some());
+        assert!(!delete_knowledge(&c, "kn1"), "second delete is a no-op");
+    }
+
+    #[test]
+    fn knowledge_visibility_project_vs_global() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prjA");
+        seed_project(&c, "prjB");
+        insert_knowledge(&c, &kn("ka", "prjA", "project", "A 的项目规范", None, 1));
+        insert_knowledge(&c, &kn("kg", "prjA", "global", "全局规范", None, 1));
+
+        // A 可见：自己的项目条目 + 全局条目
+        let a: Vec<String> = list_knowledge(&c, "prjA").into_iter().map(|e| e.id).collect();
+        assert_eq!(a, vec!["ka".to_string(), "kg".to_string()]);
+        // B 只可见全局条目，不可见 A 的项目条目
+        let b: Vec<String> = list_knowledge(&c, "prjB").into_iter().map(|e| e.id).collect();
+        assert_eq!(b, vec!["kg".to_string()]);
+    }
+
+    #[test]
+    fn knowledge_promote_scope_makes_it_global() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prjA");
+        seed_project(&c, "prjB");
+        insert_knowledge(&c, &kn("ka", "prjA", "project", "规范", None, 1));
+        assert!(list_knowledge(&c, "prjB").is_empty());
+
+        set_knowledge_scope(&c, "ka", "global", 300);
+        let got = get_knowledge(&c, "ka").unwrap();
+        assert_eq!(got.scope, "global");
+        assert_eq!(got.updated_at, 300);
+        // 提升后 B 可见并可引用
+        assert_eq!(list_knowledge(&c, "prjB").len(), 1);
     }
 }
 

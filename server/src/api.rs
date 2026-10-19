@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{
-    agents::opencode,
-    db, decision, events,
+    agents::{mock, opencode},
+    db, decision, events, knowledge,
     models::*,
     negotiation,
     replan,
@@ -43,6 +43,10 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/milestones/{id}/window/apply", post(milestone_window_apply))
         .route("/api/tasks/{id}", get(get_task_detail).patch(patch_task))
         .route("/api/tasks/{id}/guidance", post(add_guidance))
+        // M5 项目知识库：条目 CRUD + 提升为全局（全部写审计事件）
+        .route("/api/projects/{id}/knowledge", get(list_project_knowledge).post(create_knowledge))
+        .route("/api/knowledge/{id}", get(get_knowledge).patch(patch_knowledge).delete(delete_knowledge))
+        .route("/api/knowledge/{id}/promote", post(promote_knowledge))
         .route("/api/tasks/{id}/negotiation", post(negotiate_task))
         .route("/api/tasks/{id}/accept", post(task_accept))
         .route("/api/tasks/{id}/reject", post(task_reject))
@@ -743,27 +747,30 @@ async fn plan_project(
             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
         }
     }
-    // 指定规划者（缺省=第一个 opencode+planner 实例）
+    // 指定规划者（缺省=第一个 opencode+planner 实例，其次任意 planner 实例含 mock）
     let forced_planner: Option<String> = body["planner_agent_id"].as_str().map(String::from);
     if let Some(fid) = &forced_planner {
         let ok = db::get_agent(&st.db.lock().unwrap(), fid)
-            .map(|a| a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner"))
+            .map(|a| a.roles.iter().any(|r| r == "planner"))
             .unwrap_or(false);
         if !ok {
-            return err(StatusCode::BAD_REQUEST, "planner_agent_id is not an opencode agent with the 'planner' role (or is a decision_maker)");
+            return err(StatusCode::BAD_REQUEST, "planner_agent_id is not an agent with the 'planner' role");
         }
     }
 
     let planner = match &forced_planner {
         Some(fid) => agents.iter().find(|a| &a.id == fid),
-        None => agents.iter().find(|a| {
-            a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner")
-        }),
+        None => agents
+            .iter()
+            .find(|a| a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner"))
+            // M5：没有 opencode planner 时，允许 mock planner 兜底（本地/冒烟确定性规划）
+            .or_else(|| agents.iter().find(|a| a.roles.iter().any(|r| r == "planner"))),
     };
     let Some(planner) = planner else {
-        return err(StatusCode::BAD_REQUEST, "no opencode agent with the 'planner' role is registered; add one to use automatic planning");
+        return err(StatusCode::BAD_REQUEST, "no agent with the 'planner' role is registered; add one to use automatic planning");
     };
     let planner_id = planner.id.clone();
+    let planner_is_mock = planner.adapter != "opencode";
     let session = opencode::plan_session(&id);
 
     {
@@ -791,37 +798,50 @@ async fn plan_project(
         !existing.is_empty()
     };
 
-    let mut prompt = opencode::plan_prompt(&project, &agents);
-    if let Some(fb) = feedback {
-        prompt.push_str(&format!(
-            "\n\n【人工修改意见（必须据此重做规划）】\n{fb}\n\n请输出**完整**的新规划（全部任务与里程碑），覆盖上一版；不要只输出差异。\n"
-        ));
+    // M5：planner 提示词注入项目规范段（高优先级），并落 `prompt.assembled` 审计。
+    let mut prompt = crate::knowledge::assemble(&st, &id, None, "planner", "plan", |k| {
+        let mut p = opencode::plan_prompt(&project, &agents, k);
+        if let Some(fb) = feedback {
+            p.push_str(&format!(
+                "\n\n【人工修改意见（必须据此重做规划）】\n{fb}\n\n请输出**完整**的新规划（全部任务与里程碑），覆盖上一版；不要只输出差异。\n"
+            ));
+        }
+        p
+    });
+    // mock planner 兜底：不调用 CLI，产出确定性计划（供本地/冒烟端到端走通规划链路）。
+    if planner_is_mock {
+        prompt = mock::plan_json(&project);
     }
     let planner_model = opencode::model_of(planner);
-    let call = opencode::run_cli(
-        &st,
-        None,
-        None,
-        &session,
-        planner_model.as_deref(),
-        opencode::PLAN_TIMEOUT_MS, // hard timeout for a single plan call
-        &prompt,
-    );
-    let outcome = match call.await {
-        Ok(o) => o,
-        Err(e) => {
-            plan_session_end(&st, &id, &planner_id, &session, "error", Some(e.clone()));
-            return err(StatusCode::INTERNAL_SERVER_ERROR, e);
+    // opencode planner 走真实 CLI；mock planner 已在上面产出确定性计划文本。
+    let plan_text: String = if planner_is_mock {
+        prompt
+    } else {
+        let call = opencode::run_cli(
+            &st,
+            None,
+            None,
+            &session,
+            planner_model.as_deref(),
+            opencode::PLAN_TIMEOUT_MS, // hard timeout for a single plan call
+            &prompt,
+        );
+        match call.await {
+            Ok(o) => o.text,
+            Err(e) => {
+                plan_session_end(&st, &id, &planner_id, &session, "error", Some(e.clone()));
+                return err(StatusCode::INTERNAL_SERVER_ERROR, e);
+            }
         }
     };
 
-    let (planned, planned_milestones) = match parse_plan_json(&outcome.text) {
+    let (planned, planned_milestones) = match parse_plan_json(&plan_text) {
         Ok(p) => p,
         Err(e) => {
             plan_session_end(&st, &id, &planner_id, &session, "error", Some(e.clone()));
             // 服务端日志保留完整原始输出，便于事后排障
-            tracing::warn!(target: "planner", project = %id, raw = %truncate(&outcome.text, 2000), "planner JSON parse failed");
-            let tail: String = outcome.text.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
+            tracing::warn!(target: "planner", project = %id, raw = %truncate(&plan_text, 2000), "planner JSON parse failed");
+            let tail: String = plan_text.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
             return err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}; output tail: {tail}"));
         }
     };
@@ -1026,7 +1046,9 @@ async fn intervene_project(
     }
     tracing::info!(target: "planner", project = %id, note = %truncate(note, 400), "intervention requested");
 
-    let prompt = opencode::intervene_prompt(&project, &tasks, note);
+    let prompt = crate::knowledge::assemble(&st, &id, None, "planner", "intervene", |k| {
+        opencode::intervene_prompt(&project, &tasks, note, k)
+    });
     let planner_model = opencode::model_of(planner);
     let call = opencode::run_cli(
         &st, None, None, &session,
@@ -2012,8 +2034,146 @@ async fn add_guidance(State(st): State<Arc<App>>, Path(id): Path<String>, Json(b
     let g = Guidance { id: db::new_id("gd_"), task_id: id.clone(), text: text.into(), created_at: db::now() };
     c.execute("INSERT INTO guidance (id,task_id,text,created_at) VALUES (?1,?2,?3,?4)",
         rusqlite::params![g.id, g.task_id, g.text, g.created_at]).unwrap();
-    events::push_event(&st, &c, &t.project_id, Some(&t.id), "task.guidance_added", json!({"text": g.text}));
+    // M5：事件 payload 带 guidance_id，便于知识条目回链「产生它的人工指导事件」
+    events::push_event(&st, &c, &t.project_id, Some(&t.id), "task.guidance_added",
+        json!({"text": g.text, "guidance_id": g.id}));
     ok(g)
+}
+
+// ---------- M5 项目知识库（条目 CRUD + 提升为全局） ----------
+
+/// 校验并规范化条目正文 / 适用范围（均须非空）。返回 Err(错误文案)。
+fn knowledge_fields(body: &Value) -> Result<(String, Option<String>), String> {
+    let b = body["body"].as_str().map(str::trim).filter(|s| !s.is_empty())
+        .ok_or("body is required")?;
+    let applies = body["applies_to"].as_str().map(str::trim)
+        .filter(|s| !s.is_empty()).map(String::from);
+    Ok((b.to_string(), applies))
+}
+
+/// GET /api/projects/:id/knowledge —— 本项目条目 + 全局条目（列表不写审计，防刷屏）。
+async fn list_project_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    if db::get_project(&c, &id).is_none() {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    }
+    ok(db::list_knowledge(&c, &id))
+}
+
+/// POST /api/projects/:id/knowledge —— 新建条目（须引用一条已存在的人工指导事件）。
+async fn create_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    let (b, applies) = match knowledge_fields(&body) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    let source_event_id = body["source_event_id"].as_i64();
+    let Some(source_event_id) = source_event_id else {
+        return err(StatusCode::BAD_REQUEST, "source_event_id is required");
+    };
+    let c = st.db.lock().unwrap();
+    if db::get_project(&c, &id).is_none() {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    }
+    if db::get_project(&c, &id).map(|p| p.status) == Some("archived".into()) {
+        return err(StatusCode::CONFLICT, "project is archived (read-only)");
+    }
+    // 来源可追溯：source_event_id 必须指向一条真实存在的人工指导事件
+    match db::get_event(&c, source_event_id) {
+        None => return err(StatusCode::BAD_REQUEST, "source_event_id does not reference an existing event"),
+        Some(ev) if ev.kind != "task.guidance_added" => {
+            return err(StatusCode::BAD_REQUEST,
+                format!("source_event_id must reference a task.guidance_added event (got {})", ev.kind));
+        }
+        Some(_) => {}
+    }
+    let now = db::now();
+    let k = KnowledgeEntry {
+        id: db::new_id("kn_"),
+        project_id: id.clone(),
+        scope: "project".into(),
+        body: b,
+        applies_to: applies,
+        source_event_id,
+        created_at: now,
+        updated_at: now,
+    };
+    db::insert_knowledge(&c, &k);
+    events::push_event(&st, &c, &k.project_id, None, "knowledge.created", knowledge::entry_payload(&k));
+    ok(k)
+}
+
+/// GET /api/knowledge/:id —— 详情（写 `knowledge.viewed` 审计）。
+async fn get_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    let Some(k) = db::get_knowledge(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "knowledge entry not found");
+    };
+    events::push_event(&st, &c, &k.project_id, None, "knowledge.viewed", knowledge::entry_payload(&k));
+    ok(k)
+}
+
+/// PATCH /api/knowledge/:id —— 修改正文 / 适用范围（写 `knowledge.updated`）。
+async fn patch_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    let (b, applies) = match knowledge_fields(&body) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    let c = st.db.lock().unwrap();
+    let Some(k) = db::get_knowledge(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "knowledge entry not found");
+    };
+    if db::get_project(&c, &k.project_id).map(|p| p.status) == Some("archived".into()) {
+        return err(StatusCode::CONFLICT, "project is archived (read-only)");
+    }
+    let updated_at = db::now();
+    db::update_knowledge(&c, &id, &b, applies.as_deref(), updated_at);
+    let mut k2 = k.clone();
+    k2.body = b;
+    k2.applies_to = applies;
+    k2.updated_at = updated_at;
+    events::push_event(&st, &c, &k2.project_id, None, "knowledge.updated", json!({
+        "entry": knowledge::entry_payload(&k2),
+        "prev": knowledge::entry_payload(&k),
+    }));
+    ok(k2)
+}
+
+/// DELETE /api/knowledge/:id —— 删除条目（写 `knowledge.deleted`，payload 为删除前快照）。
+async fn delete_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    let Some(k) = db::get_knowledge(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "knowledge entry not found");
+    };
+    if db::get_project(&c, &k.project_id).map(|p| p.status) == Some("archived".into()) {
+        return err(StatusCode::CONFLICT, "project is archived (read-only)");
+    }
+    db::delete_knowledge(&c, &id);
+    events::push_event(&st, &c, &k.project_id, None, "knowledge.deleted", knowledge::entry_payload(&k));
+    ok(k)
+}
+
+/// POST /api/knowledge/:id/promote —— 提升为全局条目（跨项目复用；幂等 409）。
+async fn promote_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    let Some(k) = db::get_knowledge(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "knowledge entry not found");
+    };
+    if k.scope == "global" {
+        return err(StatusCode::CONFLICT, "knowledge entry is already global");
+    }
+    if db::get_project(&c, &k.project_id).map(|p| p.status) == Some("archived".into()) {
+        return err(StatusCode::CONFLICT, "project is archived (read-only)");
+    }
+    let updated_at = db::now();
+    db::set_knowledge_scope(&c, &id, "global", updated_at);
+    let mut k2 = k.clone();
+    k2.scope = "global".into();
+    k2.updated_at = updated_at;
+    events::push_event(&st, &c, &k2.project_id, None, "knowledge.promoted", json!({
+        "entry": knowledge::entry_payload(&k2),
+        "from_project": k.project_id,
+    }));
+    ok(k2)
 }
 
 /// 验收标准协商：failed → 决策者裁决（任务在裁定前不开工）；

@@ -101,6 +101,15 @@ pub fn negotiate_acc_session(task_id: &str) -> String {
 
 // ---------- prompts ----------
 
+/// M5 知识库：把项目规范段放到提示词**开头**（高优先级，人工指导升级为团队规范）。
+/// 规范段在头部，也保证后续任何「保头截断」都不会截掉它。
+fn push_knowledge_section(s: &mut String, knowledge: Option<&str>) {
+    if let Some(k) = knowledge.filter(|k| !k.trim().is_empty()) {
+        s.push_str(k);
+        s.push_str("\n\n");
+    }
+}
+
 /// M4 计划阶段：执行者制定任务计划（属规划性质 → 携带项目目标）。
 /// 审查打回时携带上一版计划与验收者意见，要求修订。
 pub fn task_plan_prompt(
@@ -109,8 +118,10 @@ pub fn task_plan_prompt(
     guidance: Option<&str>,
     prior_plan: Option<&str>,
     review_feedback: Option<&str>,
+    knowledge: Option<&str>,
 ) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的执行者 agent（executor）。任务已分配给你，但**先不要动手**：请先制定任务执行计划，交由验收者审查通过后再执行。\n\n");
     if let Some(p) = project {
         s.push_str(&format!("项目名称：{}\n项目目标：{}\n\n", p.name, p.brief));
@@ -136,8 +147,9 @@ pub fn task_plan_prompt(
 }
 
 /// M4 计划阶段：验收者审查执行者的任务计划。
-pub fn plan_review_prompt(project: &Project, task: &Task, plan: &str) -> String {
+pub fn plan_review_prompt(project: &Project, task: &Task, plan: &str, knowledge: Option<&str>) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的验收者 agent（acceptor）。执行者提交了任务计划，请审查该计划是否足以达成任务目标与验收标准。\n\n");
     s.push_str(&format!("项目名称：{}\n项目目标：{}\n\n", project.name, project.brief));
     s.push_str(&format!("任务标题：{}\n任务描述：\n{}\n\n", task.title, task.description));
@@ -151,8 +163,9 @@ pub fn plan_review_prompt(project: &Project, task: &Task, plan: &str) -> String 
     s
 }
 
-pub fn exec_prompt(project: Option<&Project>, task: &Task, guidance: Option<&str>) -> String {
+pub fn exec_prompt(project: Option<&Project>, task: &Task, guidance: Option<&str>, knowledge: Option<&str>) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的执行者 agent（executor）。请直接完成下面这个任务：直接动手做，不要向用户提问或请求确认。\n\n");
     if let Some(p) = project {
         s.push_str(&format!("项目名称：{}\n\n", p.name));
@@ -186,16 +199,18 @@ pub fn handoff_prompt(
     task: &Task,
     guidance: Option<&str>,
     doc: &crate::recovery::HandoffDoc,
+    knowledge: Option<&str>,
 ) -> String {
-    let mut s = exec_prompt(project, task, guidance);
+    let mut s = exec_prompt(project, task, guidance, knowledge);
     s.push_str("\n【中断恢复 · 交接摘要】上一轮执行会话因服务进程重启而中断，本轮以新会话续作。\n");
     s.push_str("请先完整阅读下面的交接书：已完成部分不要重做，从「剩余」部分继续，直到任务完成。\n\n");
     s.push_str(&doc.markdown);
     s
 }
 
-pub fn accept_prompt(project: &Project, task: &Task, log_tail: &str) -> String {
+pub fn accept_prompt(project: &Project, task: &Task, log_tail: &str, knowledge: Option<&str>) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的验收者 agent（acceptor）。请根据【任务计划 + 验收标准】审核执行结果与交付产物。\n\n");
     s.push_str(&format!("项目名称：{}\n\n", project.name));
     s.push_str(&format!("任务标题：{}\n任务描述：\n{}\n\n", task.title, task.description));
@@ -282,11 +297,13 @@ pub fn negotiate_review_prompt(
     s
 }
 
-pub fn plan_prompt(project: &Project, agents: &[Agent]) -> String {
-    let mut s = format!(
+pub fn plan_prompt(project: &Project, agents: &[Agent], knowledge: Option<&str>) -> String {
+    let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
+    s.push_str(&format!(
         "你是项目「{}」的规划者 agent（planner）。请根据下面的项目信息与团队情况，把项目拆解成一组可执行、可验收的任务。\n\n项目名称：{}\n项目简介：{}\n\n当前团队（agent 池）：\n",
         project.name, project.name, project.brief
-    );
+    ));
     for a in agents {
         s.push_str(&format!(
             "- {}（id: {}，适配器: {}，角色: {}）\n",
@@ -309,11 +326,13 @@ pub fn plan_prompt(project: &Project, agents: &[Agent]) -> String {
 }
 
 /// 人工介入：把当前任务全貌 + 用户说明交给规划者，产出可执行的调整方案。
-pub fn intervene_prompt(project: &Project, tasks: &[Task], note: &str) -> String {
-    let mut s = format!(
+pub fn intervene_prompt(project: &Project, tasks: &[Task], note: &str, knowledge: Option<&str>) -> String {
+    let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
+    s.push_str(&format!(
         "你是项目「{}」的规划者 agent（planner）。用户是项目负责人，正在人工介入。请基于介入说明与当前任务现状，制定调整方案并说明理由。\n\n项目名称：{}\n项目目标：{}\n\n任务清单：\n",
         project.name, project.name, project.brief
-    );
+    ));
     if tasks.is_empty() {
         s.push_str("（当前没有任何任务）\n");
     }
@@ -1031,17 +1050,20 @@ pub async fn run_execution(
         let c = state.db.lock().unwrap();
         (db::get_project(&c, &task.project_id), db::latest_guidance(&c, &task.id))
     };
-    let prompt = match &mode {
-        ExecMode::Handoff { doc, .. } => {
-            events::log_line_state(
-                &state,
-                &task.id,
-                &format!("交接书已生成：{}（目标/已完成/剩余/约束/产物路径）", doc.path),
-            );
-            handoff_prompt(project.as_ref(), &task, guidance.as_deref(), doc)
-        }
-        _ => exec_prompt(project.as_ref(), &task, guidance.as_deref()),
-    };
+    let prompt = crate::knowledge::assemble(
+        &state, &task.project_id, Some(&task.id), "executor", "execute",
+        |k| match &mode {
+            ExecMode::Handoff { doc, .. } => {
+                events::log_line_state(
+                    &state,
+                    &task.id,
+                    &format!("交接书已生成：{}（目标/已完成/剩余/约束/产物路径）", doc.path),
+                );
+                handoff_prompt(project.as_ref(), &task, guidance.as_deref(), doc, k)
+            }
+            _ => exec_prompt(project.as_ref(), &task, guidance.as_deref(), k),
+        },
+    );
     let resume = match &mode {
         ExecMode::Resume { real_id } => Some(real_id.clone()),
         _ => None,
@@ -1110,12 +1132,16 @@ pub async fn run_task_plan(state: Arc<App>, task: Task, agent: Agent, review_fee
         let c = state.db.lock().unwrap();
         (db::get_project(&c, &task.project_id), db::latest_guidance(&c, &task.id))
     };
-    let prompt = task_plan_prompt(
-        project.as_ref(),
-        &task,
-        guidance.as_deref(),
-        task.execution_plan.as_deref(),
-        review_feedback,
+    let prompt = crate::knowledge::assemble(
+        &state, &task.project_id, Some(&task.id), "executor", "plan_drafting",
+        |k| task_plan_prompt(
+            project.as_ref(),
+            &task,
+            guidance.as_deref(),
+            task.execution_plan.as_deref(),
+            review_feedback,
+            k,
+        ),
     );
     let out = run_cli(
         &state,
@@ -1154,7 +1180,11 @@ pub async fn run_plan_review(state: Arc<App>, task: Task, agent: Agent) -> Resul
         let Some(p) = db::get_project(&c, &task.project_id) else {
             return Err("project not found".into());
         };
-        plan_review_prompt(&p, &task, task.execution_plan.as_deref().unwrap_or("(计划缺失)"))
+        drop(c);
+        crate::knowledge::assemble(
+            &state, &task.project_id, Some(&task.id), "acceptor", "plan_review",
+            |k| plan_review_prompt(&p, &task, task.execution_plan.as_deref().unwrap_or("(计划缺失)"), k),
+        )
     };
     let out = run_cli(
         &state,
@@ -1212,8 +1242,12 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
     let prompt = {
         let c = state.db.lock().unwrap();
         let project = db::get_project(&c, &task.project_id);
+        drop(c);
         match project {
-            Some(p) => opencode_accept_prompt_inner(&p, &task, &log_tail),
+            Some(p) => crate::knowledge::assemble(
+                &state, &task.project_id, Some(&task.id), "acceptor", "accept",
+                |k| opencode_accept_prompt_inner(&p, &task, &log_tail, k),
+            ),
             None => return Err("project not found".into()),
         }
     };
@@ -1248,8 +1282,8 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
     parse_verdict(&out.text)
 }
 
-fn opencode_accept_prompt_inner(p: &Project, t: &Task, log_tail: &str) -> String {
-    accept_prompt(p, t, log_tail)
+fn opencode_accept_prompt_inner(p: &Project, t: &Task, log_tail: &str, knowledge: Option<&str>) -> String {
+    accept_prompt(p, t, log_tail, knowledge)
 }
 
 /// M3 协商：executor 用真实 CLI 提出/修订验收标准。会话按任务复用（memory 连续），
@@ -1495,6 +1529,74 @@ mod tests {
         let s = decide_prompt(None, None, &d);
         assert!(s.contains("exemption"));
         assert!(s.contains("simple"));
+    }
+
+    /// M5：知识段注入——planner/executor/acceptor 三类提示词在有条目时开头含规范段，
+    /// 无条目时不含；正文在段内可检索。
+    #[test]
+    fn knowledge_injected_into_all_role_prompts() {
+        let proj = Project {
+            id: "prj1".into(),
+            name: "P".into(),
+            brief: "brief".into(),
+            status: "running".into(),
+            plan: None,
+            workspace: None,
+            agent_pool: None,
+            repos: Vec::new(),
+            created_at: 0,
+        };
+        let task = Task {
+            id: "t1".into(),
+            project_id: "prj1".into(),
+            milestone_id: None,
+            title: "T".into(),
+            description: "desc".into(),
+            depends_on: Vec::new(),
+            assignee_role: "executor".into(),
+            executor_agent_id: None,
+            acceptor_agent_id: None,
+            acceptance_required: true,
+            acceptance_criteria: Some("c".into()),
+            negotiation_status: "agreed".into(),
+            negotiation_round: 0,
+            execution_plan: None,
+            plan_rejection_count: 0,
+            scope_repos: Vec::new(),
+            agent_pinned: false,
+            tried_agents: serde_json::json!({}),
+            status: "ready".into(),
+            attempt: 0,
+            rejection_count: 0,
+            failure_count: 0,
+            artifacts: Vec::new(),
+            created_at: 0,
+        };
+        let body = "禁止在未评审时合并到 main";
+        let ksec = format!("{}-{}", crate::knowledge::SECTION_MARK, body);
+
+        let with = |ks: Option<&str>| -> [String; 5] {
+            [
+                plan_prompt(&proj, &[], ks),
+                task_plan_prompt(Some(&proj), &task, None, None, None, ks),
+                exec_prompt(Some(&proj), &task, None, ks),
+                plan_review_prompt(&proj, &task, "plan", ks),
+                accept_prompt(&proj, &task, "tail", ks),
+            ]
+        };
+        for p in with(Some(&ksec)) {
+            assert!(p.starts_with(crate::knowledge::SECTION_MARK), "规范段必须在提示词开头");
+            assert!(p.contains(body), "提示词须包含规范正文");
+        }
+        // 无条目（未注入项目）→ 一律不含规范段与正文
+        for p in with(None) {
+            assert!(!p.contains(crate::knowledge::SECTION_MARK));
+            assert!(!p.contains(body));
+        }
+        // 空白段等同于未注入
+        for p in with(Some("   ")) {
+            assert!(!p.contains(crate::knowledge::SECTION_MARK));
+        }
     }
 
     #[test]

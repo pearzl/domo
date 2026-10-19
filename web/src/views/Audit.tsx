@@ -211,6 +211,10 @@ function EventRow({
   const p = (ev.payload ?? {}) as Record<string, unknown>;
   const refs = agentRefs(ev);
   const pr = projectRef(ev.project_id);
+  const { distillGuidance } = useDomo();
+  // M5：人工指导事件旁一键「沉淀为规范」——携带来源事件 id + 指导正文跳到知识库
+  const isGuidance = ev.type === 'task.guidance_added';
+  const guidanceText = typeof p.text === 'string' ? p.text : '';
 
   return (
     <div className="event-row">
@@ -226,6 +230,7 @@ function EventRow({
           <span className="muted">{pr.name}</span>
         )}
         {ev.task_id ? <span className="mono muted"> · #{shortId(ev.task_id)}</span> : null}
+        {isGuidance && <span className="muted"> · {guidanceText.slice(0, 40)}</span>}
         {refs.length > 0 && (
           <span className="muted">
             {' · '}
@@ -238,6 +243,15 @@ function EventRow({
         )}
         {typeof p.error === 'string' && <span className="event-err" title={p.error}>⚠ {p.error.slice(0, 60)}</span>}
       </span>
+      {isGuidance && (
+        <button
+          className="btn btn-sm"
+          title="把这条人工指导沉淀为项目规范（可复用、注入后续提示词）"
+          onClick={() => distillGuidance({ event_id: ev.id, project_id: ev.project_id, text: guidanceText })}
+        >
+          沉淀为规范
+        </button>
+      )}
       <button className="btn btn-sm" onClick={onOpenDetail}>
         详情 →
       </button>

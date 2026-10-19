@@ -3,6 +3,7 @@ mod api;
 mod db;
 mod events;
 mod decision;
+mod knowledge;
 mod models;
 mod negotiation;
 mod recovery;

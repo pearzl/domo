@@ -4,6 +4,7 @@ import type {
   ApplyResult,
   AuditEvent,
   InboxItem,
+  KnowledgeEntry,
   LogLine,
   Milestone,
   PoolView,
@@ -103,6 +104,17 @@ export const api = {
     normalizeTaskDetail(await request<unknown>(`/tasks/${id}`)),
   sendGuidance: (id: string, text: string) =>
     request<unknown>(`/tasks/${id}/guidance`, 'POST', { text }),
+
+  /** M5 项目知识库：条目 CRUD + 提升为全局（全部写审计事件） */
+  listKnowledge: (projectId: string) => request<KnowledgeEntry[]>(`/projects/${projectId}/knowledge`),
+  createKnowledge: (projectId: string, body: { body: string; applies_to?: string; source_event_id: number }) =>
+    request<KnowledgeEntry>(`/projects/${projectId}/knowledge`, 'POST', body),
+  getKnowledge: (id: string) => request<KnowledgeEntry>(`/knowledge/${id}`),
+  updateKnowledge: (id: string, body: { body: string; applies_to?: string }) =>
+    request<KnowledgeEntry>(`/knowledge/${id}`, 'PATCH', body),
+  deleteKnowledge: (id: string) => request<unknown>(`/knowledge/${id}`, 'DELETE'),
+  /** 提升为全局条目（跨项目复用）；已是 global 时后端 409 */
+  promoteKnowledge: (id: string) => request<KnowledgeEntry>(`/knowledge/${id}/promote`, 'POST', {}),
   acceptTask: (id: string, comment: string) =>
     request<unknown>(`/tasks/${id}/accept`, 'POST', { comment }),
   rejectTask: (id: string, comment: string) =>
