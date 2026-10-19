@@ -363,6 +363,42 @@ pub fn suspend_manual(state: &Arc<App>, c: &Connection, t: &Task) {
     }
 }
 
+/// 恢复重入（任务脱离挂起、系统自动重试一轮三档）时结档旧的 `recovery_exhausted` 条目：
+/// 避免出现「条目说已挂起、任务实际在跑」的陈旧状态；若本轮再次失败，会重新登记新条目。
+pub fn mark_recovery_retry(state: &Arc<App>, c: &Connection, t: &Task) {
+    let resolution = json!({
+        "resolution": "auto_retry",
+        "note": "系统已自动重试一轮三档恢复，任务脱离挂起；若再次失败将重新登记条目",
+    });
+    let items: Vec<String> = db::list_inbox(c)
+        .into_iter()
+        .filter(|i| {
+            i.kind == "escalation"
+                && i.status == "open"
+                && i.payload.get("task_id").and_then(|v| v.as_str()) == Some(t.id.as_str())
+                && i.payload.get("reason").and_then(|v| v.as_str()) == Some(INBOX_REASON)
+        })
+        .map(|i| i.id)
+        .collect();
+    for id in items {
+        let _ = c.execute(
+            "UPDATE inbox SET status='resolved', resolution=?2 WHERE id=?1",
+            params![id, resolution.to_string()],
+        );
+        events::push_event(
+            state,
+            c,
+            &t.project_id,
+            None,
+            "escalation.resolved",
+            json!({"inbox_id": id, "resolution": resolution}),
+        );
+        if let Some(item) = db::get_inbox(c, &id) {
+            events::send_inbox(state, &item);
+        }
+    }
+}
+
 /// 恢复成功后关闭该任务的第三档人工挂起收件箱条目（避免成功后残留 open 条目）。
 pub fn close_recovery_inbox(state: &Arc<App>, c: &Connection, t: &Task) {
     let resolution = json!({

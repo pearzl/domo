@@ -1422,69 +1422,76 @@ fn fold_lower(s: &str) -> String {
 /// case-insensitive). Tolerates ``` fences and prose around it; classification
 /// happens on the verdict line itself.
 pub fn parse_verdict(text: &str) -> Result<(), String> {
-    let low = fold_lower(text);
-    let mut last: Option<(usize, bool)> = None; // (byte offset of "verdict", pass?)
-    let mut from = 0;
-    while let Some(rel) = low[from..].find("verdict") {
-        let at = from + rel;
-        let line_end = low[at..].find('\n').map(|i| at + i).unwrap_or(low.len());
-        let rest = &low[(at + 7).min(low.len())..line_end];
-        let pass_pos = rest.find("pass");
-        let rej_pos = rest.find("reject");
-        let verdict = match (pass_pos, rej_pos) {
-            (None, None) => None,
-            (Some(_), None) => Some(true),
-            (None, Some(_)) => Some(false),
-            (Some(a), Some(b)) => Some(a < b), // whichever keyword comes first after "verdict"
-        };
-        if let Some(v) = verdict {
-            last = Some((at, v));
+    // M4.5 加固：只承认「独占一行的结论行」，并排除提示词回声（指令模板里写着
+    // `VERDICT: pass 或 VERDICT: reject`），避免把指令文本误判为真实结论。
+    // 完全解析不出结论 → 按**基建失败**处理（走换人/重试），不再默认当退回。
+    let lines: Vec<&str> = text.lines().collect();
+    let mut last: Option<(usize, bool)> = None; // (行号, pass?)
+    for (idx, raw) in lines.iter().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
         }
-        from = at + 7;
+        let low = fold_lower(line);
+        let Some(vpos) = low.find("verdict") else { continue };
+        let after = low[(vpos + 7).min(low.len())..].trim_start_matches(|ch: char| {
+            ch.is_whitespace() || ch == ':' || ch == '：' || ch == '*' || ch == '`' || ch == '"' || ch == '\''
+        });
+        let pass = if after.starts_with("pass") {
+            true
+        } else if after.starts_with("reject") {
+            false
+        } else {
+            continue;
+        };
+        // 回声判定（仅针对结论行本身）：
+        //  - 同一行同时出现 pass 与 reject（指令模板形态）
+        //  - 出现指令措辞（例如 / 若结论 / 大小写不限 / 「或」连接两个结论）
+        let has_pass = low.contains("pass");
+        let has_reject = low.contains("reject");
+        let echo_like = (has_pass && has_reject)
+            || low.contains("例如")
+            || low.contains("若结论")
+            || low.contains("大小写不限")
+            || (low.contains('或') && has_pass && has_reject);
+        if echo_like {
+            continue;
+        }
+        last = Some((idx, pass));
     }
     match last {
         Some((_, true)) => Ok(()),
-        Some((at, false)) => Err(reject_reason(&low, at)),
-        None => Err("未给出明确验收结论（输出中没有 VERDICT: pass / VERDICT: reject）".into()),
+        Some((idx, false)) => Err(reject_reason_from(lines[idx], &lines[idx + 1..])),
+        None => Err(format!(
+            "{INFRA_ACCEPT_ERROR_PREFIX}验收者未给出可解析的结论行（`VERDICT: pass` 或 `VERDICT: reject`，需独占一行）；疑似输出格式问题或提示词回声，按基建失败重试"
+        )),
     }
 }
 
-/// Reason for a reject verdict: text of the verdict line after `VERDICT`, else
-/// the next non-empty line (per API.md, reject is followed by a reason line).
-fn reject_reason(low: &str, at: usize) -> String {
-    let line_end = low[at..].find('\n').map(|i| at + i).unwrap_or(low.len());
-    let mut seg = low[(at + 7).min(low.len())..line_end].trim();
-    seg = seg.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ':' || ch == '：' || ch == '`' || ch == '"' || ch == '\'');
-    // strip the verdict keyword itself and any separator after it (the actual
-    // reason conventionally sits on the next line)
-    for kw in ["pass", "reject"] {
-        if seg.starts_with(kw) {
-            seg = &seg[kw.len()..];
-            break;
-        }
+/// 退回理由：结论行中 `reject` 之后的内容；为空则取后续第一个非空行。
+fn reject_reason_from(verdict_line: &str, following: &[&str]) -> String {
+    let low = fold_lower(verdict_line);
+    let at = low.find("verdict").unwrap_or(0);
+    let mut seg = verdict_line[(at + 7).min(verdict_line.len())..].trim();
+    seg = seg.trim_start_matches(|ch: char| {
+        ch.is_whitespace() || ch == ':' || ch == '：' || ch == '*' || ch == '`' || ch == '"' || ch == '\''
+    });
+    let low_seg = fold_lower(seg);
+    if low_seg.starts_with("reject") {
+        seg = seg[6..].trim();
+        seg = seg.trim_start_matches(|ch: char| {
+            ch.is_whitespace() || ch == ':' || ch == '：' || ch == '-' || ch == '—' || ch == '*' || ch == '`'
+        });
     }
-    let seg = seg
-        .trim_start_matches(|ch: char| ch.is_whitespace() || ch == ':' || ch == '：' || ch == '-' || ch == '—' || ch == '`')
-        .trim_end_matches('`')
-        .trim();
     if !seg.is_empty() {
-        return cut_reason(seg);
+        return seg.to_string();
     }
-    let next_line = low[line_end..]
-        .lines()
-        .skip(1)
-        .map(str::trim)
+    following
+        .iter()
+        .map(|l| l.trim())
         .find(|l| !l.is_empty())
-        .unwrap_or("rejected by acceptor");
-    cut_reason(next_line)
-}
-
-fn cut_reason(s: &str) -> String {
-    let mut n = s.chars().take(300).collect::<String>();
-    if s.chars().count() > 300 {
-        n.push('…');
-    }
-    n
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "验收者退回（未附理由）".to_string())
 }
 
 #[cfg(test)]
@@ -1505,8 +1512,10 @@ mod tests {
         );
         // reject with reason on same line / in fenced output (original casing kept)
         assert_eq!(parse_verdict("```\nVERDICT: REJECT — 文件缺失\n```").unwrap_err(), "文件缺失");
-        // no verdict at all -> explicit failure
-        assert!(parse_verdict("看起来没问题").unwrap_err().contains("未给出明确验收结论"));
+        // M4.5：无结论行 → 基建失败（走换人/重试），不再当作退回
+        assert!(parse_verdict("看起来没问题")
+            .unwrap_err()
+            .starts_with(INFRA_ACCEPT_ERROR_PREFIX));
         // keyword confusion: reject after pass on the same verdict line
         assert!(parse_verdict("VERDICT: pass").is_ok());
         assert!(parse_verdict("VERDICT: reject").is_err());
@@ -1634,5 +1643,54 @@ mod tests {
         // small input passes through verbatim, no marker
         let small: Vec<String> = vec!["a".into(), "b".into()];
         assert_eq!(shape_log_tail(small.clone(), 40, 60_000, small.len()), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_plain_pass() {
+        assert!(parse_verdict("复核完成\n\nVERDICT: pass").is_ok());
+    }
+
+    #[test]
+    fn accepts_markdown_emphasized_pass() {
+        assert!(parse_verdict("结论如下：\n**VERDICT: pass**\n").is_ok());
+    }
+
+    #[test]
+    fn reject_with_reason_on_next_line() {
+        let e = parse_verdict("核对后发现产物缺失。\nVERDICT: reject\n缺少 summary.txt 与验证记录").unwrap_err();
+        assert!(e.contains("缺少 summary.txt"), "{e}");
+        assert!(!e.starts_with(INFRA_ACCEPT_ERROR_PREFIX), "{e}");
+    }
+
+    #[test]
+    fn reject_reason_on_same_line() {
+        let e = parse_verdict("VERDICT: reject —— 产物为空").unwrap_err();
+        assert!(e.contains("产物为空"), "{e}");
+    }
+
+    /// 关键回归：提示词回声（指令模板里含 `VERDICT: pass 或 VERDICT: reject`）
+    /// 不得被当作真实结论；解析不出结论 → 基建失败（走换人/重试）而非退回。
+    #[test]
+    fn prompt_echo_is_not_a_verdict() {
+        let echo = "输出要求：你的回复中必须包含明确的验收结论行：`VERDICT: pass` 或 `VERDICT: reject`（大小写不限）。\n若结论为 reject，请在结论行的下一行写明拒收理由。\n如果你在执行中发现现有规划需要调整，请在回复末尾单独一行输出：replan: {...}";
+        let e = parse_verdict(echo).unwrap_err();
+        assert!(e.starts_with(INFRA_ACCEPT_ERROR_PREFIX), "应判为基建失败: {e}");
+    }
+
+    #[test]
+    fn real_verdict_wins_over_echo() {
+        let mixed = "输出要求：必须包含 `VERDICT: pass` 或 `VERDICT: reject`（大小写不限）。\n\n核对完成，产物齐全。\nVERDICT: pass";
+        assert!(parse_verdict(mixed).is_ok());
+    }
+
+    #[test]
+    fn empty_or_no_verdict_is_infra_failure() {
+        assert!(parse_verdict("").unwrap_err().starts_with(INFRA_ACCEPT_ERROR_PREFIX));
+        assert!(parse_verdict("我看了文件，看起来没问题。").unwrap_err().starts_with(INFRA_ACCEPT_ERROR_PREFIX));
     }
 }

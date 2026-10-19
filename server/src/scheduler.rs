@@ -875,6 +875,8 @@ fn dispatch_recover(
         Some(x) => x,
         None => return false,
     };
+    // 恢复重入即结档旧的「已挂起待人工重建」条目（避免条目与实际状态不一致）
+    recovery::mark_recovery_retry(state, conn, &fresh);
     // 执行中任务恢复续作；第三档人工挂起任务经三档重新进入流程
     if fresh.status != "executing" && fresh.status != "suspended" {
         return false;
