@@ -9,6 +9,8 @@
 - 服务端日志：/home/pearzl/repos/domo/data/smoke_m3_e2e/run1-domo.log（同一份另存 data/domo.log）
 
 
+检查汇总：phase1 97/97、phase2 42/42，合计 139/139 PASS，0 FAIL，退出码 0/0。
+
 ## phase1 — 2026-10-20 01:20:05
 
 - PASS — 8 个真实 agent 注册成功（planner/executor/acceptor/decision_maker ×2）
