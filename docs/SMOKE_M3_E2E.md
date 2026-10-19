@@ -63,8 +63,9 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 另有 `RUN_DIR`（如 `/tmp/opencode/domo_m3_e2e.XXXXXX/`）保留本次运行的 SQLite、工作区与
 `projects/<prj>/summary-report.md` 等产物。
 
-> 归档目录中的 `run1` ~ `run7` 是当前（134 项检查）版本的七次连续运行，逐条检查集一致；
-> 强化前的 130 项历史运行保留在 `data/smoke_m3_e2e/history-2026-10-18-pre-strengthen/` 备查。
+> 当前归档 `data/smoke_m3_e2e/run1` ~ `run3` 是当前 HEAD（M4.5 语义、139 项检查）的三次连续运行，
+> 逐条检查集一致；只读快照见 `data/m3-accepted-2026-10-20/`。M3 代码时代（134 项、run1~run7）与
+> 强化前（130 项）的历史明细在环境重置后未保留，相关小节仅作回放参考。
 
 ## 用例清单
 
@@ -180,7 +181,7 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
 
 ## 已修复的阻塞级缺陷（本次交付）
 
-本次冒烟交付中发现并修复了 1 处阻塞级缺陷（会导致服务端无法编译、阻断全部用例）：
+本次冒烟交付中发现并修复了 2 处阻塞级缺陷（分别导致服务端无法编译、失败换人时整服务挂起）：
 
 1. **调度器编译失败（`server/src/scheduler.rs`）**
    - `suspend()` 调用少了 `phase` 参数（`E0061`）：执行端失败上限分支未传入 `"execute"`；
@@ -188,7 +189,16 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
      `Option<String>` 使用（`E0277`）。
    - 修复：补齐 `suspend(state, &conn, t, "execute")`；将失败原因二元组解构为
      具体原因字符串后回退默认文案。
-   - 结果：`cargo build` / `cargo test` 恢复通过（**44 passed / 0 failed**），冒烟全绿。
+   - 结果：`cargo build` / `cargo test` 恢复通过（当时 **44 passed / 0 failed**，当前 HEAD 为 71），冒烟全绿。
+
+2. **失败换人路径自死锁（`server/src/pool.rs`）**
+   - 现象：执行/验收 agent 失败触发换人时，`switch_on_failure` 在已持有 DB 连接的
+     `handle_agent_failure` 调用链中又调用 `events::log_line_state`，对同一把
+     `std::sync::Mutex` 二次加锁 → 整个服务端挂起，后续所有任务停滞。
+   - 修复：换人审计日志改用调用方已持有的连接（`events::log_line(state, conn, ...)`），
+     消除重入加锁；失败换人语义与事件内容不变。
+   - 结果：失败换人可正常继续（含 agent 池降级/重试路径），冒烟与恢复用例不再卡死；
+     `cargo test` 71 passed / 0 failed。
 
 ## 本次交付的脚本稳定性修复
 
