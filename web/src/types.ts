@@ -13,6 +13,7 @@ export type TaskStatus =
   | 'plan_drafting'
   | 'plan_review'
   | 'executing'
+  | 'recovering'
   | 'awaiting_acceptance'
   | 'escalated'
   | 'suspended'
@@ -222,6 +223,17 @@ export interface Negotiation {
 export interface TaskDetail extends Task {
   logs: LogLine[];
   events: AuditEvent[];
+  /** M5：agent 运行归档输出（模型输出由 DOMO 自行存档，供审计回放） */
+  agent_outputs?: {
+    id: number;
+    phase: string;
+    attempt: number;
+    session: string;
+    ts: number;
+    outcome: string;
+    text: string;
+    raw_len: number;
+  }[];
   negotiation?: Negotiation;
 }
 

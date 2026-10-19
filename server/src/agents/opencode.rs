@@ -700,6 +700,7 @@ async fn run_cli_once(
                 .unwrap()
                 .insert(session.to_string(), real.clone());
         }
+        archive_agent_output(state, session, &out, persist.as_ref(), "success");
         Ok(out)
     } else {
         let cli_err = emsg.lock().unwrap().clone().unwrap_or_default();
@@ -708,6 +709,8 @@ async fn run_cli_once(
             tail_chars(&errb.lock().unwrap(), 600)
         );
         tracing::warn!(target: "opencode", session = %session, "{detail}");
+        // 失败运行同样归档（含原始流），便于事后复核结论/排障
+        archive_agent_output(state, session, &out, persist.as_ref(), "failed");
         Err(detail)
     }
 }
@@ -759,6 +762,41 @@ fn cut_bytes(s: &str, max: usize) -> String {
         return s.to_string();
     }
     format!("{}…", head_bytes(s, max.saturating_sub(3)))
+}
+
+/// M5：把一次 agent 运行的完整输出写入归档表（模型输出已由 DOMO 获得 → 自行存档）。
+/// 审计可回放原始输出；验收结论亦据此复核（不要求模型做任何额外动作）。
+fn archive_agent_output(
+    state: &Arc<App>,
+    logical_session: &str,
+    out: &RunOutcome,
+    persist: Option<&PersistCtx>,
+    outcome: &str,
+) {
+    const TEXT_MAX: usize = 200_000; // 助手文本上限
+    const RAW_MAX: usize = 400_000; // 原始 stdout 流上限
+    let text = cut_bytes(&out.text, TEXT_MAX);
+    let raw = cut_bytes(&out.raw, RAW_MAX);
+    let c = state.db.lock().unwrap();
+    let project_id = persist
+        .and_then(|p| p.task_id.as_deref())
+        .and_then(|tid| db::get_task(&c, tid))
+        .map(|t| t.project_id)
+        .unwrap_or_else(|| "-".into());
+    db::insert_agent_output(
+        &c,
+        &db::AgentOutputRecord {
+            task_id: persist.and_then(|p| p.task_id.as_deref()),
+            project_id: &project_id,
+            phase: persist.and_then(|p| p.phase.as_deref()).unwrap_or(""),
+            attempt: persist.and_then(|p| p.attempt).unwrap_or(0),
+            session: logical_session,
+            real_session_id: out.session_id.as_deref(),
+            outcome,
+            text: &text,
+            raw: &raw,
+        },
+    );
 }
 
 /// Belt-and-braces guard before spawn: if the prompt still exceeds the argv

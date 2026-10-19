@@ -53,7 +53,13 @@ pub fn boot_mark(c: &Connection) {
             continue; // 失败重试路径（不进三档，保持 attempt+1 语义）
         }
         tracing::info!(task = %id, attempt, "boot: interrupted execution marked for three-tier recovery");
+        // M5 状态归一：中断尝试不再停留在 executing（那会让任务视图把「等待恢复/排队」
+        // 误显示为「正在执行」），改为显式 recovering；真正派发恢复时才回到 executing。
         db::recovery_set(c, &id, Some(true), Some(TIER_NATIVE), None);
+        let _ = c.execute(
+            "UPDATE tasks SET status='recovering' WHERE id=?1 AND status='executing'",
+            params![id],
+        );
     }
     // 第三档人工重建挂起的任务：本次重启重新进一轮三档（每轮重启至多一轮）
     let _ = c.execute(

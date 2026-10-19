@@ -10,6 +10,7 @@ const COLUMNS: TaskStatus[] = [
   'plan_drafting',
   'plan_review',
   'executing',
+  'recovering',
   'awaiting_acceptance',
   'escalated',
   'suspended',
@@ -577,6 +578,30 @@ function TaskDetailDrawer({
         <section className="drawer-section">
           <h4>验收标准</h4>
           <p className="pre-wrap">{task.acceptance_criteria || '（未填写）'}</p>
+        </section>
+
+        <section className="drawer-section">
+          <h4>agent 原始输出归档（{(task as unknown as { agent_outputs?: unknown[] }).agent_outputs?.length ?? 0}）</h4>
+          {(() => {
+            const outs = (task as unknown as { agent_outputs?: { id: number; phase: string; attempt: number; ts: number; outcome: string; text: string; raw_len: number }[] }).agent_outputs ?? [];
+            if (outs.length === 0) return <p className="muted">暂无归档（每次 agent 运行都会自动存档，供审计回放）</p>;
+            return (
+              <div className="stack">
+                {outs.slice().reverse().map(o => (
+                  <details key={o.id} className="json">
+                    <summary>
+                      {o.phase || 'run'} · 第 {o.attempt} 轮 · {o.outcome} · {fmtTime(o.ts)}
+                      {o.raw_len > 0 ? ` · 原始流 ${Math.round(o.raw_len / 1024)}KB` : ''}
+                    </summary>
+                    <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11.5 }}>{o.text || '（无文本输出）'}</pre>
+                    <p className="muted">
+                      <a href={`/api/agent-outputs/${o.id}`} target="_blank" rel="noreferrer">查看完整记录（含原始 stdout 流）</a>
+                    </p>
+                  </details>
+                ))}
+              </div>
+            );
+          })()}
         </section>
 
         <section className="drawer-section">

@@ -42,6 +42,7 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/milestones/{id}/fail", post(fail_milestone))
         .route("/api/milestones/{id}/window/apply", post(milestone_window_apply))
         .route("/api/tasks/{id}", get(get_task_detail).patch(patch_task))
+        .route("/api/agent-outputs/{id}", get(get_agent_output))
         .route("/api/tasks/{id}/guidance", post(add_guidance))
         // M5 项目知识库：条目 CRUD + 提升为全局（全部写审计事件）
         .route("/api/projects/{id}/knowledge", get(list_project_knowledge).post(create_knowledge))
@@ -1861,12 +1862,34 @@ async fn create_task(
     }
 }
 
+/// M5：agent 运行归档输出（单条全文，含原始 stdout 流）。
+async fn get_agent_output(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let Ok(oid) = id.parse::<i64>() else { return err(StatusCode::BAD_REQUEST, "id must be an integer") };
+    let c = st.db.lock().unwrap();
+    match db::get_agent_output(&c, oid) {
+        Some(v) => ok(v),
+        None => err(StatusCode::NOT_FOUND, "agent output not found"),
+    }
+}
+
 async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let c = st.db.lock().unwrap();
     let Some(t) = db::get_task(&c, &id) else { return err(StatusCode::NOT_FOUND, "task not found"); };
     // M3 协商：把轮次记录随详情返回，前端据此在任务详情展示协商过程
     let rounds = negotiation::history(&c, &id);
     let rec = db::recovery_state(&c, &id);
+    // M5：归档的 agent 原始输出（模型输出已由 DOMO 获得 → 自行存档，供审计回放与结论复核）
+    let outputs: Vec<Value> = db::list_agent_outputs(&c, &id, 10)
+        .into_iter()
+        .map(|mut o| {
+            if let Some(t) = o.get("text").and_then(|v| v.as_str()) {
+                if t.len() > 8000 {
+                    o["text"] = json!(format!("{}…（完整文本见 /api/agent-outputs/{}）", &t[..8000.min(t.len())], o["id"]));
+                }
+            }
+            o
+        })
+        .collect();
     let negotiation = json!({
         "status": t.negotiation_status,
         "round": t.negotiation_round,
@@ -1875,7 +1898,7 @@ async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
         "rounds": rounds,
     });
     let body = json!({
-        "task": t, "logs": db::task_logs(&c, &id),
+        "task": t, "logs": db::task_logs(&c, &id), "agent_outputs": outputs,
         "events": db::list_events(&c, None, Some(&id)),
         "guidance": db::list_guidance(&c, &id),
         "negotiation": negotiation,

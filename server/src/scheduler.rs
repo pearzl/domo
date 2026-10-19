@@ -183,6 +183,24 @@ fn scan(state: &Arc<App>) {
                 //  a) 进程重启中断（boot 已标记 recovery_pending）→ M4 三档恢复
                 //     （原生 resume → 交接摘要重建 → 人工重建），attempt 不自增；
                 //  b) 上一轮真实执行失败（有失败计数）→ 原有失败重试语义（attempt+1 全新派发）。
+                // M5 状态归一：中断尝试（recovering）等待恢复续跑；agent 忙则继续排队
+                "recovering" if !state.has_live_handle(&t.id) => {
+                    if db::recovery_state(&conn, &t.id).pending {
+                        if recover_dispatch(state, &conn, &t) {
+                            drop(conn);
+                            state.wake();
+                            return;
+                        }
+                    } else if t.failure_count >= 3 {
+                        suspend(state, &conn, t, "execute");
+                    } else if !backoff_elapsed(&conn, t) {
+                        // 退避窗口内
+                    } else if dispatch_exec(state, &conn, t, "retry") {
+                        drop(conn);
+                        state.wake();
+                        return;
+                    }
+                }
                 "executing" if !state.has_live_handle(&t.id) => {
                     if db::recovery_state(&conn, &t.id).pending {
                         if recover_dispatch(state, &conn, &t) {
@@ -878,7 +896,7 @@ fn dispatch_recover(
     // 恢复重入即结档旧的「已挂起待人工重建」条目（避免条目与实际状态不一致）
     recovery::mark_recovery_retry(state, conn, &fresh);
     // 执行中任务恢复续作；第三档人工挂起任务经三档重新进入流程
-    if fresh.status != "executing" && fresh.status != "suspended" {
+    if fresh.status != "executing" && fresh.status != "recovering" && fresh.status != "suspended" {
         return false;
     }
     if state.has_live_handle(&fresh.id) {

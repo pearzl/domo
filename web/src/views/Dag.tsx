@@ -9,6 +9,7 @@ export const TASK_STATUS_COLOR: Record<string, string> = {
   plan_drafting: '#4c8dff',
   plan_review: '#c9a227',
   executing: '#d9a014',
+  recovering: '#e08a3c',
   awaiting_acceptance: '#a37ff0',
   escalated: '#e5534b',
   suspended: '#e08a3c',

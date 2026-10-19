@@ -120,6 +120,23 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "repos", "TEXT");
     // M4: 任务涉及的仓库 scope（JSON rel 数组）
     add_column_if_missing(c, "tasks", "scope_repos", "TEXT");
+    // M5：agent 运行原始输出归档（模型输出已由我们获得 → 自行存档，供审计回放与结论复核）
+    let _ = c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_outputs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT,
+            project_id TEXT NOT NULL,
+            phase TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            session TEXT NOT NULL DEFAULT '',
+            real_session_id TEXT,
+            ts INTEGER NOT NULL,
+            outcome TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            raw TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_outputs_task ON agent_outputs(task_id, id);",
+    );
     // M4.5：人类指定 agent（固定）与已尝试 agent 记录（失败换人排除）
     add_column_if_missing(c, "tasks", "agent_pinned", "INTEGER NOT NULL DEFAULT 0");
     add_column_if_missing(c, "tasks", "tried_agents", "TEXT NOT NULL DEFAULT '{}'");
@@ -1454,4 +1471,99 @@ pub fn set_task_agent(c: &Connection, task_id: &str, role: &str, agent_id: Optio
         &format!("UPDATE tasks SET {col}=?2, agent_pinned=?3 WHERE id=?1"),
         params![task_id, agent_id, pinned as i64],
     );
+}
+
+/// M5：归档一次 agent 运行的完整输出（模型输出已由 DOMO 获得 → 自行存档）。
+pub struct AgentOutputRecord<'a> {
+    pub task_id: Option<&'a str>,
+    pub project_id: &'a str,
+    pub phase: &'a str,
+    pub attempt: i64,
+    pub session: &'a str,
+    pub real_session_id: Option<&'a str>,
+    pub outcome: &'a str,
+    pub text: &'a str,
+    pub raw: &'a str,
+}
+
+pub fn insert_agent_output(c: &Connection, r: &AgentOutputRecord) {
+    let _ = c.execute(
+        "INSERT INTO agent_outputs (task_id,project_id,phase,attempt,session,real_session_id,ts,outcome,text,raw)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![r.task_id, r.project_id, r.phase, r.attempt, r.session, r.real_session_id,
+                now(), r.outcome, r.text, r.raw],
+    );
+}
+
+/// 某任务的归档输出（按时间正序；`limit` 为最近 N 条，0=全部）。
+pub fn list_agent_outputs(c: &Connection, task_id: &str, limit: i64) -> Vec<Value> {
+    let sql = if limit > 0 {
+        format!("SELECT id,phase,attempt,session,real_session_id,ts,outcome,text,length(raw) raw_len FROM agent_outputs WHERE task_id=?1 ORDER BY id DESC LIMIT {limit}")
+    } else {
+        "SELECT id,phase,attempt,session,real_session_id,ts,outcome,text,length(raw) raw_len FROM agent_outputs WHERE task_id=?1 ORDER BY id".to_string()
+    };
+    let mut st = c.prepare(&sql).unwrap();
+    let rows: Vec<Value> = st
+        .query_map(params![task_id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "phase": r.get::<_, String>(1)?,
+                "attempt": r.get::<_, i64>(2)?,
+                "session": r.get::<_, String>(3)?,
+                "real_session_id": r.get::<_, Option<String>>(4)?,
+                "ts": r.get::<_, i64>(5)?,
+                "outcome": r.get::<_, String>(6)?,
+                "text": r.get::<_, String>(7)?,
+                "raw_len": r.get::<_, i64>(8)?,
+            }))
+        })
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .collect();
+    rows
+}
+
+/// 单条归档输出全文（含原始 stdout 流）。
+pub fn get_agent_output(c: &Connection, id: i64) -> Option<Value> {
+    c.query_row(
+        "SELECT id,task_id,project_id,phase,attempt,session,real_session_id,ts,outcome,text,raw FROM agent_outputs WHERE id=?1",
+        params![id],
+        |r| Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?,
+            "task_id": r.get::<_, Option<String>>(1)?,
+            "project_id": r.get::<_, String>(2)?,
+            "phase": r.get::<_, String>(3)?,
+            "attempt": r.get::<_, i64>(4)?,
+            "session": r.get::<_, String>(5)?,
+            "real_session_id": r.get::<_, Option<String>>(6)?,
+            "ts": r.get::<_, i64>(7)?,
+            "outcome": r.get::<_, String>(8)?,
+            "text": r.get::<_, String>(9)?,
+            "raw": r.get::<_, String>(10)?,
+        })),
+    ).ok()
+}
+
+#[cfg(test)]
+mod agent_output_tests {
+    use super::*;
+
+    #[test]
+    fn agent_output_roundtrip() {
+        let c = open(":memory:");
+        insert_agent_output(&c, &AgentOutputRecord {
+            task_id: Some("tsk_x"), project_id: "prj_x", phase: "accept", attempt: 2,
+            session: "tsk_x_a2_accept", real_session_id: Some("ses_real"), outcome: "success",
+            text: "核对完成\nVERDICT: pass", raw: "{\"type\":\"text\"}",
+        });
+        let list = list_agent_outputs(&c, "tsk_x", 10);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["phase"], "accept");
+        assert_eq!(list[0]["attempt"], 2);
+        assert!(list[0]["text"].as_str().unwrap().contains("VERDICT: pass"));
+        let id = list[0]["id"].as_i64().unwrap();
+        let full = get_agent_output(&c, id).unwrap();
+        assert_eq!(full["real_session_id"], "ses_real");
+        assert_eq!(full["raw"], "{\"type\":\"text\"}");
+    }
 }

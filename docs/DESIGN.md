@@ -46,6 +46,9 @@ initializing ──确认规划──> running ──暂停──> pausing ─�
 ```
 planned ──依赖就绪──> ready
    │                    │
+   │                    │（会话被中断 → recovering：等待恢复续跑，agent 忙时在此排队）
+   │                    ▼
+   │                    │
    │                    ▼
    │             plan_drafting ──计划产出──> plan_review ──通过──> executing
    │                    ▲                        │打回（≥2 轮 → escalated）
@@ -62,6 +65,8 @@ planned ──依赖就绪──> ready
 - **计划阶段**：执行者先产出任务计划（步骤、将改动的文件/产物、验证方式、风险），验收者审查通过后才开始执行。
 - **验收阶段**：验收者依据「任务计划 + 验收标准 + 交付产物」判定；打回只要求**重新执行**（计划已确认不可再改）。
 - **失败**：执行/计划/验收基建失败 → 先按 agent 池换下一优先级重试（不计失败预算）；池内耗尽后计入 failure_count，≥3 次挂起（suspended）。
+- **状态归一**：只有**真正派发**的任务才处于 `executing`；被中断的尝试进入 `recovering`（等待三档恢复续跑），
+  等轮到自己的任务保持 `ready` —— 因此任务视图与组织视图（占用/排队）始终一致。
 - 终态：done / cancelled。
 
 ## 6. 角色、Agent 池与选人
@@ -121,6 +126,9 @@ planned ──依赖就绪──> ready
 
 - 事件溯源：任务/项目/里程碑/agent/决策全生命周期事件（含 `agent.session_started/ended` 的 purpose/trigger/detail、错误分类与处置策略）。
 - 任务日志：按轮次拆分（轮次间最新在前、轮次内时序）。
+- **agent 运行输出归档**：每次 agent 运行的完整助手输出与原始 stdout 流自动落库
+  （`agent_outputs`：phase/attempt/会话/结果/文本/原始流），任务详情可展开查看、可拉全文；
+  验收结论由归档文本解析得出（不要求模型做任何额外动作），审计可完整回放。
 - 服务端运行日志：`data/domo.log`（stdout 同步；`DOMO_LOG`/`DOMO_LOG_LEVEL` 可调）。
 
 ## 13. 工作区与资源
