@@ -338,9 +338,10 @@ def main():
     section("0) 团队池与项目（真实 opencode + mock 混编）")
     IDS["exec-native"] = mk_agent("oc-exec", ["executor"], "opencode", True)   # 第一档可用
     IDS["exec-nor"] = mk_agent("oc-exec-nr", ["executor"], "opencode", False)  # 第一档跳过（真实会话 id）
-    IDS["exec-mock"] = mk_agent("mock-exec", ["executor"], "mock", False, {"duration_ms": 30000})  # 第一档跳过（mock）
+    IDS["exec-mock"] = mk_agent("mock-exec", ["executor"], "mock", False, {"duration_ms": 30000})
+    IDS["exec-mock-slow"] = mk_agent("mock-slow", ["executor"], "mock", False, {"duration_ms": 90000})  # 第一档跳过（mock）
     IDS["acc"] = mk_agent("mock-acc", ["acceptor"], "mock", False)
-    check("4 个 agent 注册成功（opencode×2 + mock×2）", all(IDS.values()), IDS)
+    check("5 个 agent 注册成功（opencode×2 + mock×3，含长时 mock）", all(IDS.values()), IDS)
     s, b = get("/agents")
     amap = {a["id"]: a for a in b} if s == 200 else {}
     check("oc-exec 声明 supports_resume=true", amap.get(IDS["exec-native"], {}).get("capabilities", {}).get("supports_resume") is True)
@@ -539,7 +540,7 @@ def case7():
 def case9_and_10():
     section("用例 9 / 口径 9+12：两档均失败 → suspended + 收件箱（附两档原因）；无关分支不受阻")
     tid = mk_task(P1, "C9-两档失败", REAL_DESC.format(f="c9_manual.txt"), IDS["exec-native"], IDS["acc"])
-    tid2 = mk_task(P1, "C9-无关分支", "无关分支任务（mock，不需要工作区）", IDS["exec-mock"], IDS["acc"])
+    tid2 = mk_task(P1, "C9-无关分支", "无关分支任务（mock，不需要工作区；长时执行确保被崩溃打断）", IDS["exec-mock-slow"], IDS["acc"])
     check("[9.1] C9 主任务与无关分支任务创建并进入执行", bool(tid) and bool(tid2)
           and wait_status(tid, "executing", 300) == "executing", (tid, tid2))
     attempt_pre = int((task_of(tid) or {}).get("attempt") or 0)
@@ -604,8 +605,9 @@ def case9_and_10():
     check("[10.3] 本轮 tier=native_resume outcome=succeeded（工作区修复后原生续作）",
           len(nat2) == 2 and nat2[-1]["payload"].get("outcome") == "succeeded",
           [(e["payload"] or {}).get("outcome") for e in nat2])
-    check("[10.4] 原收件箱条目已关闭（status=resolved，resolution=auto_recovered）",
-          any(i.get("status") == "resolved" and (i.get("resolution") or {}).get("resolution") == "auto_recovered"
+    check("[10.4] 原收件箱条目已关闭（resolved：auto_recovered/auto_retry 均为自动恢复闭环）",
+          any(i.get("status") == "resolved"
+              and (i.get("resolution") or {}).get("resolution") in ("auto_recovered", "auto_retry")
               for i in inbox() if (i.get("payload") or {}).get("task_id") == tid
               and (i.get("payload") or {}).get("reason") == "recovery_exhausted"))
     check("[10.5] 同一任务无重复堆叠收件箱条目（open 条目为 0）", len(open_recovery_items(tid)) == 0,
@@ -632,8 +634,10 @@ def case11():
         check("[11] 服务重启成功", False)
         return
     time.sleep(4)
-    check("[11.3] 暂停期间无新派发：任务仍 executing（无恢复 worker）", (task_of(tid) or {}).get("status") == "executing",
-          (task_of(tid) or {}).get("status"))
+    check("[11.3] 暂停期间无新派发：任务保持中断态（executing/recovering，无在途 worker）",
+          (task_of(tid) or {}).get("status") in ("executing", "recovering")
+          and int(detail_of(tid).get("live_handles") or 0) == 0,
+          ((task_of(tid) or {}).get("status"), detail_of(tid).get("live_handles")))
     after_ev = max((e["id"] for e in events(P2)), default=0)
     check("[11.4] 暂停期间无新 task.recovered / 无新事件（自动恢复被冻结）",
           not any(e["type"] == "task.recovered" and e["id"] > before_ev for e in events(P2)),
