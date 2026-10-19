@@ -28,6 +28,7 @@ DOMO 是一个开源的个人项目。你提交项目说明，DOMO 组织一组 
 - **三档恢复（已落地）**：中断任务 `kill -9` 重启后依序降级——①**原生会话 resume**（agent 声明 `supports_resume` 且该中断 attempt 的真实 opencode 会话 id 已落 SQLite `session_map` 跨重启可查 → `opencode run --session <同一真实id>`，**attempt 不自增、逻辑会话名不变**）→ ②**交接摘要重建**（结构化交接书五节：目标/已完成/剩余/约束/产物路径，事件 payload 持久化 + 落盘，以新会话续作，新 id ≠ 原 id）→ ③**人工重建**（任务 `suspended` + 收件箱条目附两档失败原因，按任务去重、恢复成功自动关闭）；项目暂停期间恢复被冻结，resume 后续跑。审计事件 `task.recovered{tier∈{native_resume,handoff,manual}, outcome∈{succeeded,failed,skipped,suspended}, reason, task_id, attempt, session_id}`（每档各落一条、append-only、任务时间线与审计检索可见）；冒烟 `tests/smoke_recovery_tiers.sh`（用例清单 [docs/SMOKE_RECOVERY_TIERS.md](docs/SMOKE_RECOVERY_TIERS.md)，归档 `data/smoke_recovery_tiers/`）
 - **管控**：决策收件箱裁决、决策者自动裁决（战术自决/战略转人）、暂停两态 + 强制暂停、归档
 - **可观测**：事件溯源与审计（倒序/分页/筛选/关联详情）、任务轮次日志、服务端运行日志、项目总结报告
+- **端到端冒烟（已实跑）**：真实 opencode 8 实例团队池跑通规划→协商→计划/执行/验收→里程碑 gate→纠偏重规划→总结报告，覆盖协商失败/成环拒绝/决策者缺席/gate 只挂下游等负路径与 `kill -9` 重启恢复；2026-10-20 连续两次 **139/139** 全绿，结果与日志归档 `data/smoke_m3_e2e/` 并保留验收快照 `data/m3-accepted-2026-10-20/`，用例清单 [docs/SMOKE_M3_E2E.md](docs/SMOKE_M3_E2E.md)
 - **工作区**：默认 `~/.domo/workspace/<project_id>`，也可显式指定 local 路径或 git URL
 
 ## 快速开始
@@ -52,6 +53,7 @@ cd server && cargo run --release
 | [docs/DESIGN.md](docs/DESIGN.md) | 完整产品设计：概念模型、状态机、调度规则、验收机制、角色权限、恢复策略、接入协议 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 渐进式实施路线图与各阶段验收标准 |
 | [docs/API.md](docs/API.md) | 服务端 API 契约（REST + SSE），前后端对接依据 |
+| [docs/SMOKE_M3_E2E.md](docs/SMOKE_M3_E2E.md) | M3 端到端冒烟：用例清单、运行方式、结果与日志归档、可重复性记录 |
 
 ## 技术栈
 

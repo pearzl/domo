@@ -52,11 +52,12 @@
 
 ## 待办清单（使用中发现，按需排期）
 
-- **真实模型冒烟实跑确认**：`tests/smoke_recovery_tiers.sh`（三档恢复）已实跑通过——
-  **106/106 全绿**（2026-10-20，模型 `opencode-go/glm-5.3-flash`），结果与关键日志归档
-  `data/smoke_recovery_tiers/{summary.md,results.md,domo.log}`，用例清单见
-  [SMOKE_RECOVERY_TIERS.md](SMOKE_RECOVERY_TIERS.md)；`tests/smoke_m3_e2e.sh`（全链路）仍需一次实跑确认
-  （模型经环境变量 `DOMO_M3_MODEL` 传入）
+- **真实模型冒烟实跑确认（均已通过，2026-10-20，模型 `opencode-go/glm-5.3-flash`）**：
+  - `tests/smoke_m3_e2e.sh`（全链路）：**139/139 全绿**（phase1 97 + phase2 42），退出码 0/0；
+    结果与关键日志归档 `data/smoke_m3_e2e/{summary.md,results.md,domo.log}`，并保留只读验收快照
+    `data/m3-accepted-2026-10-20/`；用例清单见 [SMOKE_M3_E2E.md](SMOKE_M3_E2E.md)。
+  - `tests/smoke_recovery_tiers.sh`（三档恢复）：**106/106 全绿**，归档 `data/smoke_recovery_tiers/`，
+    用例清单见 [SMOKE_RECOVERY_TIERS.md](SMOKE_RECOVERY_TIERS.md)。
 - 规划者选择防呆：下拉标注免费层易限流；失败信息点名当前规划者
 - 审计：非任务级 agent 会话原始输出可视化
 - 工作区资源上传（`resources/` 目录与引用约定）

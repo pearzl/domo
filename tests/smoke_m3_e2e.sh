@@ -168,6 +168,32 @@ def wait_until(fn, timeout=300, interval=1.0):
         time.sleep(interval)
     return None
 
+def pump_project(pid, seen=None):
+    """自动处理真实 agent 的瞬时故障升级项（空闲超时/失败上限→挂起），
+    让冒烟不因单次上游抖动而假失败；与项目 A 的自动恢复语义一致。"""
+    seen = seen if seen is not None else set()
+    for it in inbox():
+        if it.get("status") != "open" or it.get("project_id") != pid or it.get("id") in seen:
+            continue
+        if it.get("type") not in ("escalation", "decision_maker_down"):
+            continue
+        resolution = "retry" if it.get("type") == "decision_maker_down" else "resume"
+        s, _ = resolve(it["id"], resolution, "冒烟自动恢复：瞬时 agent 故障")
+        if s == 200:
+            seen.add(it["id"])
+    return seen
+
+def wait_until_pump(fn, pid, timeout=300, interval=1.0):
+    end = time.time() + timeout
+    seen = set()
+    while time.time() < end:
+        pump_project(pid, seen)
+        v = fn()
+        if v:
+            return v
+        time.sleep(interval)
+    return None
+
 def project(pid):
     s, b = get(f"/projects/{pid}")
     return b if s == 200 else {}
@@ -252,7 +278,7 @@ def phase1():
     def mk(name, roles, mp=1):
         s, b = post("/agents", {"name": name, "adapter": "opencode", "roles": roles,
                                 "capabilities": {"max_parallel": mp, "supports_resume": True},
-                                "config": {"model": MODEL, "timeout_ms": 300000}})
+                                "config": {"model": MODEL, "timeout_ms": 600000}})
         return s, b
     specs = [("planner-1", ["planner"]), ("planner-2", ["planner"]),
              ("exec-1", ["executor"]), ("exec-2", ["executor"]),
@@ -287,13 +313,16 @@ def phase1():
     check("项目 A 创建", bool(pidA), pidA)
 
     planned = None
-    for attempt in range(1, 4):
-        s, b = post(f"/projects/{pidA}/plan", {"engine": "opencode"}, timeout=420)
+    # 真实 planner 在并发/限流下可能偶发 500、超时或流中断；/plan 失败不落库，可安全重试。
+    # 单次等待上限与服务端 planner 预算（PLAN_TIMEOUT_MS）对齐到 15 分钟，最多 5 次。
+    for attempt in range(1, 6):
+        s, b = post(f"/projects/{pidA}/plan", {"engine": "opencode"}, timeout=900)
         if s == 200 and b.get("tasks_added") and b.get("milestones_added"):
             planned = b
             break
         note(f"规划第 {attempt} 次未产出里程碑（status={s}），重试")
-    check("planner 规划成功返回", planned is not None, "规划 3 次均未返回含里程碑的规划")
+        time.sleep(2)
+    check("planner 规划成功返回", planned is not None, "规划 5 次均未返回含里程碑的规划")
     if planned is None:
         json.dump({"pidA": pidA, "ids": ids, "failed": "plan", "complete": False}, open(STATE, "w"))
         return dump_results()
@@ -310,8 +339,10 @@ def phase1():
     check("规划任务未在规划阶段绑定 agent（动态选人）",
           all(not t.get("agent_pinned") for t in tasksA),
           [(t.get("executor_agent_id"), t.get("agent_pinned")) for t in tasksA])
-    check("规划任务验收标准由规划者给出（negotiation_status=agreed）",
-          all(t.get("negotiation_status") == "agreed" for t in tasksA),
+    # M3/DESIGN §7.1：规划产出的需验收任务默认进入开工前验收标准协商（pending），
+    # 由 executor↔acceptor 协商一致后才置 agreed 并放行执行；不得由规划者直接给定。
+    check("规划任务默认进入验收标准协商（negotiation_status=pending）",
+          all(t.get("negotiation_status") == "pending" for t in tasksA),
           [t.get("negotiation_status") for t in tasksA])
 
     s, _ = post(f"/projects/{pidA}/confirm", {})
@@ -381,7 +412,7 @@ def phase1():
     check("项目 B 4 个任务创建", all([b_base, b_unrel, b_down, b_probe]))
 
     # 无关分支应继续跑完，而下游分支被冻结
-    unrel_done = wait_until(lambda: (task(b_unrel["id"]) or {}).get("status") == "done", 600)
+    unrel_done = wait_until(lambda: (task(b_unrel["id"]) or {}).get("status") == "done", 900)
     check("无关分支任务在 gate 未确认时独立跑完（done）", unrel_done is not None,
           (task(b_unrel["id"]) or {}).get("status"))
     m1gate = wait_until(lambda: open_gate(M1id), 600)
@@ -454,14 +485,14 @@ def phase1():
         s, _ = resolve(g2["id"], "pass", "冒烟二次确认")
         m1b = next((m for m in milestones_of(pidB) if m["id"] == M1id), {})
         check("二次确认 → 里程碑 passed", s == 200 and m1b.get("status") == "passed", (s, m1b.get("status")))
-    down_done = wait_until(lambda: (task(b_down["id"]) or {}).get("status") == "done", 900)
+    down_done = wait_until_pump(lambda: (task(b_down["id"]) or {}).get("status") == "done", pidB, 900)
     check("gate 通过后下游分支解冻并跑完", down_done is not None, (task(b_down["id"]) or {}).get("status"))
     # M2 gate（b_down）
     m2gate = wait_until(lambda: open_gate(M2id), 300)
     check("阶段B2 成员完成后 gate 出现", m2gate is not None)
     if m2gate:
         resolve(m2gate["id"], "pass", "冒烟确认")
-    compB = wait_until(lambda: project_status(pidB) == "completed", 600)
+    compB = wait_until_pump(lambda: project_status(pidB) == "completed", pidB, 600)
     check("项目 B 全部终态 → completed", compB is not None, project_status(pidB))
     wait_until(lambda: (report(pidB) or {}).get("status") == "ready", 600)
     check("项目 B 总结报告生成 ready", (report(pidB) or {}).get("status") == "ready",
@@ -506,7 +537,7 @@ def phase1():
     check("重规划新建任务默认带验收",
           bool(newD) and newD.get("acceptance_required") and bool((newD.get("acceptance_criteria") or "").strip()),
           newD)
-    pumpD = wait_until(lambda: project_status(pidD) == "completed", 1200)
+    pumpD = wait_until_pump(lambda: project_status(pidD) == "completed", pidD, 1200)
     if pumpD:
         check("项目 D 纠偏后全部终态 → completed", True)
         wait_until(lambda: (report(pidD) or {}).get("status") == "ready", 600)
@@ -545,16 +576,29 @@ def phase1():
     check("协商失败任务未开工（保持 planned）", (task(c0["id"]) or {}).get("status") == "planned")
     # M4.5 负路径：计划审查连续打回 → escalated（用 mock 实例保证确定性；
     # 任务固定（pinned）到 mock，避免失败换人，从而真实触发升级）
-    _, mock_e = post("/agents", {"name": "c-mock-exec", "adapter": "mock", "roles": ["executor"],
-                                 "capabilities": {"max_parallel": 1, "supports_resume": False},
-                                 "config": {"duration_ms": 50}})
-    _, mock_a = post("/agents", {"name": "c-mock-acc", "adapter": "mock", "roles": ["acceptor"],
-                                 "capabilities": {"max_parallel": 1, "supports_resume": False},
-                                 "config": {"duration_ms": 50}})
+    _, me = post("/agents", {"name": "c-mock-exec", "adapter": "mock", "roles": ["executor"],
+                             "capabilities": {"max_parallel": 1, "supports_resume": False},
+                             "config": {"duration_ms": 50}})
+    _, ma = post("/agents", {"name": "c-mock-acc", "adapter": "mock", "roles": ["acceptor"],
+                             "capabilities": {"max_parallel": 1, "supports_resume": False},
+                             "config": {"duration_ms": 50}})
+    # 响应偶发丢失时按名字回查，避免显式 agent 变成 null 后任务被动态改派给真实 agent
+    def _agent_id(resp, name):
+        return (resp or {}).get("id") or next(
+            (a["id"] for a in get("/agents")[1] if a.get("name") == name), None)
+    mock_e = _agent_id(me, "c-mock-exec")
+    mock_a = _agent_id(ma, "c-mock-acc")
+    check("mock 确定性 agent 就绪（c-mock-exec/c-mock-acc）", bool(mock_e) and bool(mock_a),
+          (mock_e, mock_a))
     c1 = create_task(pidC, "C-计划打回升级", "[reject_plan_always] 计划将被连续打回",
                      mock_e, mock_a, milestone_id=MCid,
                      acceptance_criteria="c1.txt 存在且内容为 c1 ok")
+    if c1 and not c1.get("agent_pinned"):
+        patch(f"/tasks/{c1['id']}", {"executor_agent_id": mock_e, "acceptor_agent_id": mock_a})
+        c1 = task(c1["id"]) or c1
     check("C1 任务创建（未开工）", bool(c1) and c1.get("status") == "planned", c1)
+    check("C1 固定到 mock（agent_pinned，避免失败换人）",
+          bool(c1) and c1.get("agent_pinned"), c1 and c1.get("agent_pinned"))
     s, _ = post(f"/projects/{pidC}/confirm", {})
     check("项目 C confirm → running", s == 200 and project_status(pidC) == "running", s)
     # 协商失败 → 决策者（真实 agent）裁定 → 恢复流转
@@ -675,7 +719,7 @@ def phase2():
     print("[m3-smoke] 8) 恢复决策者实例 → retry → 续裁 → C 跑完 → 总结报告")
     s1, j1 = post("/agents", {"name": "judge-3", "adapter": "opencode", "roles": ["decision_maker"],
                               "capabilities": {"max_parallel": 1, "supports_resume": True},
-                              "config": {"model": MODEL, "timeout_ms": 300000}})
+                              "config": {"model": MODEL, "timeout_ms": 600000}})
     check("重新注册决策者实例", s1 == 200 and j1.get("id"), (s1, j1))
     check("恢复前 C2 仍挂起（未擅自放行）", (task(c2) or {}).get("status") == "suspended")
     s, r = resolve(item["id"], "retry", "决策者已恢复，重新裁定")

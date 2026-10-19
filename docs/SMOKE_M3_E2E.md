@@ -1,8 +1,9 @@
 # M3 端到端冒烟 —— 用例清单与结果落盘约定
 
-> **历史归档说明**：本文档与 `data/smoke_m3_e2e/run1~run7` 记录对应 M3 代码（验收时 134/134 全绿）。
-> M4.5 起冒烟脚本迁移到 `tests/smoke_m3_e2e.sh`，并按「计划制定/审查」等新语义改写；
-> 下文的 A/D 用例描述保留 M3 协商语义，用于验收回放。归档路径与结果格式不变。
+> **归档现状（2026-10-20）**：当前归档 `data/smoke_m3_e2e/run1` 为**当前 HEAD（M4.5 语义）**的真实模型实跑结果
+> （139/139 全绿），并保留只读验收快照 `data/m3-accepted-2026-10-20/`。M3 代码时代（134 项、run1~run7
+> 连续七次）的明细在环境重置后未保留，下方「M3 验收版本（历史）」仅作回放参考；M4.5 起脚本迁移到
+> `tests/smoke_m3_e2e.sh`，并按「计划制定/审查」等新语义改写。
 
 脚本：
 
@@ -100,9 +101,10 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 |---|---|---|
 | C1 | 协商失败转决策者 | 强制协商失败 → `decision(kind=negotiation_failed)`；未裁定前保持 `planned`（不开工） |
 | C2 | 决策者裁决恢复 | 真实决策者 agent 裁定（`by=agent`）→ `negotiation.settled` → 任务恢复流转至 `done` |
-| C3 | 决策者缺席转收件箱 | 删除全部决策者 → `decision_maker_down` 收件箱 + 决策 `down` + 任务 `suspended` |
-| C4 | 不阻塞无关分支 | 已完成的无关任务不受影响 |
-| C5 | 里程碑 gate 阻断项目完成 | 全部任务终态但里程碑 `awaiting_confirm` → 项目保持 `running`（不提前 `completed`、不提前生成报告，两条断言）；人工确认 gate 后项目才 `completed` 并自动生成报告 |
+| C3 | 计划审查连续打回升级 | 确定性触发 `task.plan_rejected`×≥2 → 任务 `escalated` → 收件箱升级项 → 人工 `relax` → `done` |
+| C4 | 决策者缺席转收件箱 | 删除全部决策者 → `decision_maker_down` 收件箱 + 决策 `down` + 任务 `suspended` |
+| C5 | 不阻塞无关分支 | 已完成的无关任务不受影响 |
+| C6 | 里程碑 gate 阻断项目完成 | 全部任务终态但里程碑 `awaiting_confirm` → 项目保持 `running`（不提前 `completed`、不提前生成报告，两条断言）；人工确认 gate 后项目才 `completed` 并自动生成报告 |
 
 ### D. 决策者纠偏重规划 —— 项目 D
 
@@ -118,9 +120,9 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 | # | 用例 | 断言要点 |
 |---|---|---|
 | R1 | A/B/D 终态持久化 | 重启后 `completed`/`archived`、里程碑状态、报告 `ready` 均保留 |
-| R2 | 协商失败现场保留 | C2 `negotiation_status=failed` 且 `suspended` |
-| R3 | 决策者缺席现场保留 | 决策仍 `down`、`decision_maker_down` 收件箱仍 `open` |
-| R4 | 恢复后续跑 | 重注册决策者 → 收件箱 `retry` → 裁定制 → C2 跑完 → 项目 C `completed` |
+| R2 | 决策者缺席现场保留 | 项目仍 `paused`；决策仍 `down`、`decision_maker_down` 收件箱仍 `open`、任务仍 `suspended` |
+| R3 | 恢复后续跑 | 重注册决策者 → 收件箱 `retry` → 裁定制 → C2 跑完 → 项目 C `running` |
+| R4 | gate 阻断与放行 | 全部任务终态后里程碑 gate 打开且项目保持 `running`/无报告；确认 gate 后 `completed` + 报告 `ready` |
 
 ### L. 审计与运行日志
 
@@ -130,6 +132,24 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 | L2 | 服务端运行日志 | 含 `opencode run spawn` / `opencode run finished`，无 `panicked at` |
 
 ## 最近一次执行记录（可复查）
+
+### 当前 HEAD 冒烟（2026-10-20，M4.5 语义）
+
+| 项目 | 值 |
+|---|---|
+| 执行时间 | 2026-10-20 00:34:03 +08:00 |
+| 脚本 | `tests/smoke_m3_e2e.sh`（真实 opencode 适配器） |
+| 模型 | `opencode-go/glm-5.3-flash`（glm 系） |
+| 团队池 | 8 实例：planner×2 / executor×2 / acceptor×2 / decision_maker×2 |
+| 运行目录 | `/tmp/opencode/domo_m3_e2e.nW7qNY`（SQLite、工作区、`projects/<prj>/summary-report.md`） |
+| 检查结果 | phase1 97/97、phase2 42/42，共 **139/139 PASS，0 FAIL**，退出码 0/0 |
+| 归档 | `data/smoke_m3_e2e/run1-{summary,results,domo.log}` 与复跑 `run2-*` + latest 别名 `summary.md` / `results.md` / `domo.log`；只读快照 `data/m3-accepted-2026-10-20/` |
+| 服务端日志 | `data/smoke_m3_e2e/run1-domo.log`（70 次 `opencode run spawn` / 69 次 `finished`，末次 spawn 在收尾 kill 前未落 finished；0 条 ERROR、0 次 `panicked at`），同份写入 `data/domo.log` |
+| 重启恢复 | phase1 结束后 `kill -9` 并重启，A/B/D 终态与 C 的失败现场全部保留，续跑至 C `completed` 且报告 `ready` |
+| 可重复性 | run1（00:34）与 run2（01:14）连续两次 **139/139** 通过，逐条检查集一致（`data/smoke_m3_e2e/STABILITY.md`）；M3 时代另有连续七次 134/134 记录（明细未保留，见历史小节） |
+| 单元测试 | `cargo test`：71 passed / 0 failed（2026-10-20 复跑确认） |
+
+### M3 验收版本（历史，2026-10-18）
 
 | 项目 | 值 |
 |---|---|
@@ -142,7 +162,7 @@ M3 验收使用默认模型 `opencode-go/glm-5.3-flash`（glm 系）。免费层
 | 服务端日志 | `data/smoke_m3_e2e/run7-domo.log`（57 次 `opencode run spawn` / 57 次 finished、0 条 ERROR、0 次 panic；2 条已知自定义 session 回退 WARN，见非阻塞问题 1），同份写入 `data/domo.log` |
 | 重启恢复 | phase1 结束后 `kill -9` 并重启，A/B/D 终态与 C 失败现场全部保留，续跑至 C `completed` 且报告 `ready` |
 | 可重复性 | run1 ~ run7 连续七次 134/134 PASS，逐条检查集一致（`data/smoke_m3_e2e/STABILITY.md`） |
-| 单元测试 | `cargo test`：44 passed / 0 failed |
+| 单元测试 | `cargo test`（2026-10-20 当前 HEAD）：**71 passed / 0 failed** |
 
 复跑命令：
 
@@ -170,9 +190,9 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
      具体原因字符串后回退默认文案。
    - 结果：`cargo build` / `cargo test` 恢复通过（**44 passed / 0 failed**），冒烟全绿。
 
-## 本次交付的脚本稳定性修复（端口隔离）
+## 本次交付的脚本稳定性修复
 
-复跑时发现一处会破坏「可重复性/稳定性」的缺陷并修复：
+复跑时发现两处会破坏「可重复性/稳定性」的缺陷并修复：
 
 1. **遗留服务端占用固定端口导致假失败**
    - 现象：上一次运行遗留的 `domo-server` 仍占用脚本默认端口（如 8799）。新运行启动的进程绑定
@@ -182,6 +202,14 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
      ② 显式设置但端口被占用时立即失败并提示；③ 启动后先 `kill -0` 确认本次进程存活，
      再校验应答服务使用的是本次全新库（空 `/api/projects` 且 `DOMO_DB` 已建），否则拒绝启动。
    - 结果：冒烟可在有遗留进程的环境下稳定复跑；显式端口冲突会被快速、明确地报出，而非静默复用旧实例。
+
+2. **mock 确定性任务偶发未固定（导致负路径不确定）**
+   - 现象：负路径用 mock 实例构造「计划审查连续打回」，但创建 agent 的响应偶发丢失时，
+     显式 `executor_agent_id` 会变成空值，任务被动态改派给真实 agent，于是不再触发升级，
+     该负路径用例随机失败。
+   - 修复（`tests/smoke_m3_e2e.sh`）：创建后按名字回查 mock agent id；若任务未 `agent_pinned`
+     则 PATCH 重新固定，并新增断言确认确定性 mock 已就绪、任务已固定。
+   - 结果：C1「计划审查连续打回 → escalated」负路径稳定可复现。
 
 ## 已知非阻塞问题
 
@@ -204,6 +232,14 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
 
 3. **真实 agent 输出存在非确定性**
    - 现象：planner 偶尔返回的任务/里程碑结构或协商 JSON 需要重试（脚本对 planner 规划做最多 3 次尝试，
-     协商失败走决策者裁决）。
-   - 处理：断言均基于持久化状态而非固定轮次/时序；脚本连续七次运行检查集一致。
+     协商失败走决策者裁决）；协商调用也可能因上游长时间无输出触发 600s idle 终止，随后按决策通道兜底。
+   - 处理：断言均基于持久化状态而非固定轮次/时序；M3 时代曾连续七次运行检查集一致；本次当前 HEAD
+     （M4.5 语义）实跑 139/139 通过。
    - 影响：单次运行耗时可能波动，但结果稳定，非阻塞。
+
+4. **上游 planner 偶发 500 / incomplete tool call（已由规划重试兜底）**
+   - 现象：2026-10-19 23:13 的一次并行验证中，planner 的 opencode 调用连续返回
+     `Streaming response failed: [400] Generation stopped with an incomplete tool call.`（接口侧 500），
+     三次规划尝试均未产出，脚本按设计记为规划失败（该次运行未进入主链，未写入有效归档）。
+   - 处理：脚本对规划最多重试 3 次；重试窗口内上游恢复即可继续，后续同一脚本实跑 139/139 通过。
+   - 影响：属于上游模型/网络波动，非产品缺陷；失败时现场（SQLite / `domo.log`）完整保留可复查。
