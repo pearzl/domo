@@ -231,15 +231,16 @@ pub fn accept_prompt(project: &Project, task: &Task, log_tail: &str, knowledge: 
 // ---------- M3 验收标准协商（executor ↔ acceptor 多轮）----------
 
 /// executor 提案提示词：携带任务上下文 + 历史轮次与上轮 acceptor 意见，输出可检验标准。
-#[allow(dead_code)] // M4 协商退场
 pub fn negotiate_propose_prompt(
     project: Option<&Project>,
     task: &Task,
     round: i64,
     feedback: Option<&str>,
     history: &[Value],
+    knowledge: Option<&str>,
 ) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的执行者 agent（executor）。项目处于规划阶段，你需要与验收者（acceptor）就【验收标准】进行协商，直到双方一致。\n");
     s.push_str("验收标准必须具体、可检验（可对照产物/文件/行为判定通过或退回）。\n\n");
     if let Some(p) = project {
@@ -277,14 +278,15 @@ pub fn negotiate_propose_prompt(
 }
 
 /// acceptor 审核提示词：判定该轮提案是否可接受；同意可给出最终标准。
-#[allow(dead_code)] // M4 协商退场
 pub fn negotiate_review_prompt(
     project: Option<&Project>,
     task: &Task,
     round: i64,
     proposal: &str,
+    knowledge: Option<&str>,
 ) -> String {
     let mut s = String::new();
+    push_knowledge_section(&mut s, knowledge);
     s.push_str("你是项目的验收者 agent（acceptor）。执行者已就【验收标准】给出提案，请你审核其是否具体、可检验、能覆盖任务目标。\n\n");
     if let Some(p) = project {
         s.push_str(&format!("项目名称：{}\n项目简介：{}\n\n", p.name, p.brief));
@@ -656,32 +658,64 @@ async fn run_cli_once(
     let sid = Arc::new(Mutex::new(None::<String>));
     let errb = Arc::new(Mutex::new(String::new()));
     let emsg = Arc::new(Mutex::new(None::<String>));
+    // M5：不再限制总时长，改为**空闲看门狗**——按输出间隔判卡死（阈值复用配置的超时）
+    let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
 
     tracing::info!(target: "opencode", session = %session, custom_session, model = model.unwrap_or("<default>"), timeout_ms, "opencode run spawn");
 
-    let r_out = tokio::spawn(stream_json(stdio_ok(stdout), state.clone(), log_task.map(String::from), raw.clone(), text.clone(), sid.clone(), emsg.clone(), persist.clone()));
-    let r_err = tokio::spawn(stream_stderr(stdio_ok(stderr), state.clone(), log_task.map(String::from), errb.clone()));
+    let r_out = tokio::spawn(stream_json(stdio_ok(stdout), state.clone(), log_task.map(String::from), raw.clone(), text.clone(), sid.clone(), emsg.clone(), persist.clone(), last_activity.clone()));
+    let r_err = tokio::spawn(stream_stderr(stdio_ok(stderr), state.clone(), log_task.map(String::from), errb.clone(), last_activity.clone()));
 
-    let status = {
-        let wait = async { child.wait().await };
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), wait).await {
-            Ok(Ok(st)) => st,
-            Ok(Err(e)) => {
-                let _ = child.kill().await;
-                r_err.abort();
-                r_out.abort();
-                return Err(format!("waiting on opencode failed: {e}"));
+    // 空闲看门狗：只要 agent 持续产出（stdout/stderr 有行）就继续跑，不做总时长限制；
+    // 连续 idle_ms 无任何输出 → 判定卡死，终止进程（错误保留 timed out 字样，
+    // 由错误分类归入 Timeout → 换下一优先级 agent 重试）。
+    let idle_ms = timeout_ms;
+    let killed_idle = Arc::new(Mutex::new(false));
+    let child_pid = child.id();
+    let watchdog = {
+        let last = last_activity.clone();
+        let killed = killed_idle.clone();
+        let session_name = session.to_string();
+        tokio::spawn(async move {
+            let tick = Duration::from_millis(1000.min(idle_ms.max(1)));
+            loop {
+                tokio::time::sleep(tick).await;
+                let idle = last.lock().unwrap().elapsed().as_millis() as u64;
+                if idle >= idle_ms {
+                    *killed.lock().unwrap() = true;
+                    tracing::warn!(target: "opencode", session = %session_name, idle_ms,
+                        "opencode run idle for {idle_ms}ms (no output) — treating as stuck, terminating");
+                    if let Some(pid) = child_pid {
+                        // 先 TERM 给一次收尾机会，3 秒后仍在则 KILL
+                        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+                    }
+                    break;
+                }
             }
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                r_err.abort();
-                r_out.abort();
-                return Err(format!("opencode run timed out after {timeout_ms}ms (session {session}, killed)"));
-            }
-        }
+        })
     };
 
+    let status = match child.wait().await {
+        Ok(st) => st,
+        Err(e) => {
+            watchdog.abort();
+            let _ = child.kill().await;
+            r_err.abort();
+            r_out.abort();
+            return Err(format!("waiting on opencode failed: {e}"));
+        }
+    };
+    watchdog.abort();
+    if *killed_idle.lock().unwrap() {
+        let _ = child.kill().await;
+        r_err.abort();
+        r_out.abort();
+        return Err(format!(
+            "opencode run timed out after {idle_ms}ms idle (no output; session {session}, killed)"
+        ));
+    }
     // pipes are closed; let the readers finish draining, then harvest the text
     let _ = r_out.await;
     let _ = r_err.await;
@@ -859,6 +893,7 @@ async fn stream_json(
     sid: Arc<Mutex<Option<String>>>,
     emsg: Arc<Mutex<Option<String>>>,
     persist: Option<PersistCtx>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     loop {
@@ -866,6 +901,7 @@ async fn stream_json(
             Ok(Some(l)) => l,
             Ok(None) | Err(_) => break,
         };
+        *last_activity.lock().unwrap() = std::time::Instant::now();
         {
             let mut b = raw.lock().unwrap();
             b.push_str(&line);
@@ -955,6 +991,7 @@ async fn stream_stderr(
     state: Arc<App>,
     task_id: Option<String>,
     buf: Arc<Mutex<String>>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     loop {
@@ -962,6 +999,7 @@ async fn stream_stderr(
             Ok(Some(l)) => l,
             Ok(None) | Err(_) => break,
         };
+        *last_activity.lock().unwrap() = std::time::Instant::now();
         if let Ok(mut b) = buf.lock() {
             b.push_str(&line);
             b.push('\n');
@@ -1347,7 +1385,6 @@ fn opencode_accept_prompt_inner(p: &Project, t: &Task, log_tail: &str, knowledge
 
 /// M3 协商：executor 用真实 CLI 提出/修订验收标准。会话按任务复用（memory 连续），
 /// 提示词同时显式携带历史轮次与上轮意见，输出为标准正文（非 JSON）。
-#[allow(dead_code)] // M4 协商退场
 pub async fn negotiate_propose(
     state: Arc<App>,
     task: Task,
@@ -1370,7 +1407,9 @@ pub async fn negotiate_propose(
         let c = state.db.lock().unwrap();
         (db::get_project(&c, &task.project_id), crate::negotiation::history(&c, &task.id))
     };
-    let prompt = negotiate_propose_prompt(project.as_ref(), &task, round, feedback, &history);
+    let prompt = crate::knowledge::assemble(&state, &task.project_id, Some(&task.id), "executor", "negotiate", |k| {
+        negotiate_propose_prompt(project.as_ref(), &task, round, feedback, &history, k)
+    });
     let session = negotiate_exec_session(&task.id);
     let out = run_cli(
         &state,
@@ -1391,7 +1430,6 @@ pub async fn negotiate_propose(
 }
 
 /// M3 协商：acceptor 用真实 CLI 审核提案，必须输出 JSON `{agree, comment, criteria}`。
-#[allow(dead_code)] // M4 协商退场
 pub async fn negotiate_review(
     state: Arc<App>,
     task: Task,
@@ -1417,7 +1455,9 @@ pub async fn negotiate_review(
             + 1;
         (db::get_project(&c, &task.project_id), round)
     };
-    let prompt = negotiate_review_prompt(project.as_ref(), &task, round, proposal);
+    let prompt = crate::knowledge::assemble(&state, &task.project_id, Some(&task.id), "acceptor", "negotiate", |k| {
+        negotiate_review_prompt(project.as_ref(), &task, round, proposal, k)
+    });
     let session = negotiate_acc_session(&task.id);
     let out = run_cli(
         &state,
@@ -1751,5 +1791,21 @@ mod verdict_tests {
     fn empty_or_no_verdict_is_infra_failure() {
         assert!(parse_verdict("").unwrap_err().starts_with(INFRA_ACCEPT_ERROR_PREFIX));
         assert!(parse_verdict("我看了文件，看起来没问题。").unwrap_err().starts_with(INFRA_ACCEPT_ERROR_PREFIX));
+    }
+}
+
+#[cfg(test)]
+mod idle_watchdog_tests {
+    /// 看门狗判据：空闲时长达到阈值即判卡死（阈值复用配置的超时）。
+    fn stuck(idle_ms: u64, threshold_ms: u64) -> bool {
+        idle_ms >= threshold_ms
+    }
+
+    #[test]
+    fn idle_watchdog_decision() {
+        assert!(!stuck(0, 60_000));
+        assert!(!stuck(59_999, 60_000));
+        assert!(stuck(60_000, 60_000));
+        assert!(stuck(3_600_000, 3_600_000));
     }
 }

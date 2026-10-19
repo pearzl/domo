@@ -10,6 +10,7 @@ mod recovery;
 mod replan;
 mod pool;
 mod report;
+mod roles;
 mod sandbox;
 mod scheduler;
 mod state;

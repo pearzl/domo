@@ -5,6 +5,20 @@ import { Badge, Empty, Modal, ROLE_LABEL, TaskLink, shortId } from '../ui';
 
 const ALL_ROLES: Role[] = ['planner', 'executor', 'acceptor', 'decision_maker'];
 
+/**
+ * 角色隔离（裁判不下场）：决策者不得同时担任执行者/验收者。
+ * 与后端同口径（server/src/roles.rs），前端先拦一道，避免用户拿到 400 才知道。
+ */
+export function dmRoleConflict(roles: Role[]): string | null {
+  if (
+    roles.includes('decision_maker') &&
+    (roles.includes('executor') || roles.includes('acceptor'))
+  ) {
+    return '决策者（裁判）不得同时担任执行者/验收者：请登记独立实例（裁判不下场）';
+  }
+  return null;
+}
+
 export function OrgView() {
   const { agents, tasksByProject, createAgent, updateAgent, deleteAgent } = useDomo();
 
@@ -45,6 +59,8 @@ export function OrgView() {
     setEErr('');
     if (!eName.trim()) return void setEErr('请填写 agent 名称');
     if (eRoles.length === 0) return void setEErr('请至少选择一个角色');
+    const conflict = dmRoleConflict(eRoles);
+    if (conflict) return void setEErr(conflict);
     setBusy(true);
     const ok = await updateAgent(editing.id, {
       name: eName.trim(),
@@ -96,6 +112,8 @@ export function OrgView() {
     setErr('');
     if (!name.trim()) return void setErr('请填写 agent 名称');
     if (roles.length === 0) return void setErr('请至少选择一个角色');
+    const conflict = dmRoleConflict(roles);
+    if (conflict) return void setErr(conflict);
     if (!Number.isFinite(maxParallel) || maxParallel < 1) return void setErr('并行上限需 ≥ 1');
     if (adapter === 'mock') {
       if (!Number.isFinite(durationMs) || durationMs < 0) return void setErr('执行时长需 ≥ 0');
@@ -187,14 +205,32 @@ export function OrgView() {
                   <input
                     type="checkbox"
                     checked={roles.includes(r)}
+                    title={
+                      r !== 'decision_maker' && roles.includes('decision_maker')
+                        ? '角色隔离：决策者不得同时担任执行者/验收者（裁判不下场）'
+                        : undefined
+                    }
                     onChange={e =>
-                      setRoles(prev => (e.target.checked ? [...prev, r] : prev.filter(x => x !== r)))
+                      setRoles(prev => {
+                        if (!e.target.checked) return prev.filter(x => x !== r);
+                        // 勾上决策者 → 摘掉执行/验收（角色隔离：裁判不下场）
+                        if (r === 'decision_maker') {
+                          return [...prev.filter(x => x !== 'executor' && x !== 'acceptor'), r];
+                        }
+                        return [...prev, r];
+                      })
                     }
                   />
                   {ROLE_LABEL[r]}
                 </label>
               ))}
             </div>
+            {roles.includes('decision_maker') && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                角色隔离：决策者不担任执行/验收（裁判不下场）；确需兼任时由服务端以
+                DOMO_DM_ROLE_OVERLAP=1 显式放行。
+              </div>
+            )}
           </div>
           <button className="btn btn-primary" type="submit" disabled={busy}>
             {busy ? '登记中…' : '登记 Agent'}
@@ -401,14 +437,30 @@ export function OrgView() {
                     <input
                       type="checkbox"
                       checked={eRoles.includes(r)}
+                      title={
+                        r !== 'decision_maker' && eRoles.includes('decision_maker')
+                          ? '角色隔离：决策者不得同时担任执行者/验收者（裁判不下场）'
+                          : undefined
+                      }
                       onChange={e =>
-                        setERoles(prev => (e.target.checked ? [...prev, r] : prev.filter(x => x !== r)))
+                        setERoles(prev => {
+                          if (!e.target.checked) return prev.filter(x => x !== r);
+                          if (r === 'decision_maker') {
+                            return [...prev.filter(x => x !== 'executor' && x !== 'acceptor'), r];
+                          }
+                          return [...prev, r];
+                        })
                       }
                     />
                     {ROLE_LABEL[r]}
                   </label>
                 ))}
               </div>
+              {eRoles.includes('decision_maker') && (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  角色隔离：决策者不担任执行/验收（裁判不下场）。
+                </div>
+              )}
             </div>
             <label>
               并行上限

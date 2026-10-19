@@ -766,9 +766,18 @@ pub fn task_decision(c: &Connection, task_id: &str, kind: &str) -> Option<Decisi
     .ok()
     .flatten()
 }
-/// 决策者实例解析：全局 agent 池中持有 decision_maker 角色的实例
+/// 决策者实例列表：全局 agent 池中持有 decision_maker 角色的实例
+pub fn list_decision_makers(c: &Connection) -> Vec<Agent> {
+    list_agents(c)
+        .into_iter()
+        .filter(|a| a.roles.iter().any(|r| r == "decision_maker"))
+        .collect()
+}
+
+/// 决策者实例解析：全局 agent 池中持有 decision_maker 角色的第一个实例
+#[allow(dead_code)]
 pub fn find_decision_maker(c: &Connection) -> Option<Agent> {
-    list_agents(c).into_iter().find(|a| a.roles.iter().any(|r| r == "decision_maker"))
+    list_decision_makers(c).into_iter().next()
 }
 
 // ---------- write ----------

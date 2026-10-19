@@ -14,8 +14,6 @@
 //! - **会话上下文复用**：每轮携带任务上下文与历史轮次（含上轮 acceptor 意见），
 //!   opencode 适配器为 executor/acceptor 各自复用同一协商会话（memory 连续）。
 
-#![allow(dead_code)] // M4：验收标准协商机制已退场，保留实现供历史数据回放参考
-
 use std::sync::Arc;
 
 use rusqlite::Connection;
@@ -61,10 +59,102 @@ pub fn needs_dispatch(t: &Task) -> bool {
     t.status == "planned" && t.acceptance_required && t.negotiation_status == "pending"
 }
 
+/// 角色候选列表（与 `pool::resolve_role` 同口径：项目池优先，未配置则全量角色实例）。
+fn candidates(conn: &Connection, project_id: &str, role: &str) -> Vec<String> {
+    let pool = db::project_pool(conn, project_id);
+    match pool.get(role) {
+        Some(list) => list.clone(),
+        None => db::list_agents(conn)
+            .into_iter()
+            .filter(|a| a.roles.iter().any(|r| r == role))
+            .map(|a| a.id)
+            .collect(),
+    }
+}
+
+/// 项目是否具备协商条件：执行者与验收者两个角色都存在可用候选实例。
+/// 供任务创建时决定默认协商状态（无法协商的任务退回「标准由规划者固定」）。
+pub fn possible(conn: &Connection, project_id: &str) -> bool {
+    let usable = |role: &str| -> bool {
+        candidates(conn, project_id, role).iter().any(|id| {
+            db::get_agent(conn, id)
+                .map(|a| {
+                    a.status != "deleted"
+                        && a.roles.iter().any(|r| r == role)
+                        // 角色隔离：决策者不能充当协商双方
+                        && (crate::roles::overlap_allowed() || !crate::roles::is_decision_maker(&a.roles))
+                })
+                .unwrap_or(false)
+        })
+    };
+    usable("executor") && usable("acceptor")
+}
+
+/// 解析某角色 agent，额外排除若干实例（用于保证验收者 ≠ 执行者）。
+fn resolve_role_excluding(
+    state: &Arc<App>,
+    conn: &Connection,
+    task: &Task,
+    role: &str,
+    exclude: &[String],
+) -> Option<String> {
+    let bound = if role == "acceptor" { task.acceptor_agent_id.clone() } else { task.executor_agent_id.clone() };
+    if task.agent_pinned {
+        if let Some(b) = bound.filter(|id| !id.is_empty() && !exclude.contains(id)) {
+            return db::get_agent(conn, &b).map(|_| b);
+        }
+    }
+    let tried = db::task_tried(conn, &task.id);
+    let tried_ids: Vec<String> = tried
+        .get(role)
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for id in candidates(conn, &task.project_id, role) {
+        if exclude.contains(&id) || tried_ids.contains(&id) {
+            continue;
+        }
+        let Some(a) = db::get_agent(conn, &id) else { continue };
+        if a.status == "deleted" || !a.roles.iter().any(|r| r == role) {
+            continue;
+        }
+        // 角色隔离（裁判不下场）：协商双方都是执行/验收角色，决策者不得充当其一。
+        if crate::roles::is_decision_maker(&a.roles) && !crate::roles::overlap_allowed() {
+            continue;
+        }
+        if crate::pool::circuit_open(state, &id) {
+            continue;
+        }
+        return Some(id);
+    }
+    None
+}
+
 /// 派发协商 worker（单任务独占：`has_live_handle` 由调度器先判）。
+/// M4.5：规划不绑定 agent，这里按「角色 + 项目池优先级」动态解析执行者/验收者并落回任务字段。
 /// 协商阶段不占用 agent 的 `current_task_ids`（不改执行/验收负载口径），
 /// 但同一任务不会并发协商；跨任务的并发由适配器/会话隔离。
 pub fn dispatch(state: &Arc<App>, conn: &Connection, t: &Task) -> bool {
+    let mut t = t.clone();
+    if t.executor_agent_id.as_deref().filter(|s| !s.is_empty()).is_none() {
+        match resolve_role_excluding(state, conn, &t, "executor", &[]) {
+            Some(id) => {
+                db::set_task_agent(conn, &t.id, "executor", Some(&id), t.agent_pinned);
+                t.executor_agent_id = Some(id);
+            }
+            None => return false, // 池内暂无可派执行者 → 下一轮再试
+        }
+    }
+    if t.acceptor_agent_id.as_deref().filter(|s| !s.is_empty()).is_none() {
+        let exclude: Vec<String> = t.executor_agent_id.iter().cloned().collect();
+        match resolve_role_excluding(state, conn, &t, "acceptor", &exclude) {
+            Some(id) => {
+                db::set_task_agent(conn, &t.id, "acceptor", Some(&id), t.agent_pinned);
+                t.acceptor_agent_id = Some(id);
+            }
+            None => return false, // 池内暂无可派验收者 → 下一轮再试
+        }
+    }
     let (Some(exec_id), Some(acc_id)) = (t.executor_agent_id.clone(), t.acceptor_agent_id.clone()) else {
         return false;
     };
@@ -74,6 +164,19 @@ pub fn dispatch(state: &Arc<App>, conn: &Connection, t: &Task) -> bool {
     };
     if exec_id == acc_id {
         return false; // 同一实例禁止既执行又验收（创建时已校验；防御性）
+    }
+    // 角色隔离（裁判不下场）：协商双方必须是执行/验收实例，决策者不得参与。
+    if !crate::roles::overlap_allowed()
+        && (crate::roles::is_decision_maker(&executor.roles)
+            || crate::roles::is_decision_maker(&acceptor.roles))
+    {
+        tracing::warn!(
+            task = %t.id,
+            executor = %exec_id,
+            acceptor = %acc_id,
+            "negotiation skipped: decision maker instance must not act as executor/acceptor (裁判不下场)"
+        );
+        return false;
     }
     events::push_event(
         state, conn, &t.project_id, Some(&t.id), "agent.session_started",

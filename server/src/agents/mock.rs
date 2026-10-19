@@ -264,6 +264,21 @@ pub async fn run_adjudication(
             ),
         );
     }
+    // 故障注入：config.adjudication_fail=true 时模拟决策者运行失败（LLM 调用异常），
+    // 供 e2e 覆盖「决策者故障 → decision_maker_down 降级 + 分支隔离」路径。
+    if agent
+        .config
+        .get("adjudication_fail")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        events::log_line_state(
+            &state,
+            decision.task_id.as_deref().unwrap_or("-"),
+            "[adjudication_fail] mock 决策者模拟运行失败（注入）",
+        );
+        return Err("[adjudication_fail] simulated decision maker failure".into());
+    }
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     match decision.kind.as_str() {
         "exemption" => Ok(crate::decision::Ruling {
@@ -324,7 +339,6 @@ const NEGOTIATE_STEP_MS: u64 = 150;
 
 /// M3 协商：executor 提出/修订验收标准。第 1 轮以任务既有标准（planer 草案）为基础，
 /// 之后携带 acceptor 的历史意见修订，模拟「多轮往复」。
-#[allow(dead_code)] // M4 协商退场
 pub async fn negotiate_propose(
     state: Arc<App>,
     task: Task,
@@ -366,7 +380,6 @@ pub async fn negotiate_propose(
 /// - 任务描述含 `[negotiate-reject]` → 拒绝任何标准（对抗用例，必然协商失败）；
 /// - 含 `[negotiate-round2]` → 第 1 轮反对、第 2 轮起同意（演示多轮）；
 /// - 其余 → 首轮即一致通过。
-#[allow(dead_code)] // M4 协商退场
 pub async fn negotiate_review(
     state: Arc<App>,
     task: Task,

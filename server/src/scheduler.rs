@@ -8,6 +8,7 @@ use crate::{
     events,
     models::*,
 
+    negotiation,
     recovery::{self, TIER_HANDOFF, TIER_NATIVE},
     replan,
     report,
@@ -148,6 +149,15 @@ fn scan(state: &Arc<App>) {
                 continue; // frozen behind an unconfirmed milestone gate
             }
             match t.status.as_str() {
+                // M3 协商：需验收的 planned 任务先由 executor↔acceptor 协商验收标准，
+                // 一致后才由 planned_gate 放行；协商未完成的任务不会被派发执行。
+                "planned" if !state.has_live_handle(&t.id) && negotiation::needs_dispatch(t) => {
+                    if negotiation::dispatch(state, &conn, t) {
+                        drop(conn);
+                        state.wake();
+                        return;
+                    }
+                }
                 "ready" => {
                     if deps_met(&map, t) && !state.has_live_handle(&t.id) {
                         // M4 流程：先制定任务计划（执行者）→ 验收者审查 → 才进入执行

@@ -26,6 +26,29 @@ use crate::{
 pub const MAX_DECISION_ATTEMPTS: i64 = 2;
 
 
+/// 角色隔离守卫（DESIGN §6「裁判不下场」）：决策者实例若在同一项目仍持有
+/// executor / acceptor 指派（非终态任务），则不得参与裁决——否则「战术自决」
+/// 会变成自审自裁。此时该裁定转人工收件箱（decision_maker_down）。
+pub fn dm_role_conflict(conn: &Connection, dm: &Agent, project_id: &str) -> Option<String> {
+    const TERMINAL: [&str; 2] = ["done", "cancelled"];
+    for t in db::list_tasks(conn, project_id) {
+        if TERMINAL.contains(&t.status.as_str()) {
+            continue;
+        }
+        let as_executor = t.executor_agent_id.as_deref() == Some(dm.id.as_str());
+        let as_acceptor = t.acceptor_agent_id.as_deref() == Some(dm.id.as_str());
+        if as_executor || as_acceptor {
+            let role = if as_executor { "executor" } else { "acceptor" };
+            return Some(format!(
+                "role isolation: decision maker '{}' ({}) is assigned as {role} on non-terminal task '{}' — \
+                 unassign the role before letting it rule (DESIGN §6; set DOMO_DM_ROLE_OVERLAP=1 to override)",
+                dm.name, dm.id, t.title
+            ));
+        }
+    }
+    None
+}
+
 /// change_review / replan 请求的战略触发键：request 命中任一键即必须升级到人。
 pub(crate) const STRATEGIC_KEYS: [&str; 9] = [
     "milestone_id",
@@ -278,8 +301,25 @@ pub fn apply_ruling(
                     "note": "战略事项须由人工按 request 落实（自动路径不得改动已确认里程碑与项目目标）",
                 });
             } else {
-                let applied = apply_change(state, conn, d)?;
-                effect = json!({"effect": "change_applied", "fields": applied});
+                // 任务已终态（执行/验收已收尾）：裁定本身有效（决策者没有故障），
+                // 只是改动无处落地——记为「未落地」即可。
+                // 否则「落地失败」会被误当成决策者运行故障 → 误转 decision_maker_down。
+                let terminal = d
+                    .task_id
+                    .as_deref()
+                    .and_then(|tid| db::get_task(conn, tid))
+                    .map(|t| t.status == "done" || t.status == "cancelled")
+                    .unwrap_or(false);
+                if terminal {
+                    effect = json!({
+                        "effect": "change_not_applied",
+                        "applied": false,
+                        "reason": "task is terminal; the change had nowhere to land",
+                    });
+                } else {
+                    let applied = apply_change(state, conn, d)?;
+                    effect = json!({"effect": "change_applied", "fields": applied});
+                }
             }
         }
         "merge_conflict" => {
@@ -545,9 +585,8 @@ pub fn human_rule(
 /// Some(reason) 可转 ready；None 表示仍被协商 / 裁定请求挂起。
 pub fn planned_gate(conn: &Connection, t: &Task) -> Option<&'static str> {
     if t.acceptance_required {
-        // M4 流程：验收标准由规划者给出并随确认锁定，开工前无需协商（协商机制已退场；
-        // 历史协商任务在新流程清洗后不再出现）。
-        return Some("criteria_fixed_by_planner");
+        // M3：验收标准须由 executor↔acceptor 协商一致（或协商失败经决策者裁定）后放行。
+        return (t.negotiation_status == "agreed").then_some("criteria_agreed_auto");
     }
     let d = db::task_decision(conn, &t.id, "exemption")?;
     let approved = d.status == "ruled"
@@ -599,23 +638,48 @@ pub fn scan(state: &Arc<App>) {
             if state.has_live_handle(&d.id) {
                 continue;
             }
-            match db::find_decision_maker(&conn) {
-                None => maker_down(
+            // 决策者实例解析：优先选「本项目未同时担任执行/验收」的实例（裁判不下场）；
+            // 一个都不存在时（实例缺失 / 全部冲突）→ 裁定转人工收件箱。
+            let candidates: Vec<Agent> = db::list_decision_makers(&conn);
+            if candidates.is_empty() {
+                maker_down(
                     state,
                     &conn,
                     &d,
                     "no agent with the decision_maker role is registered (removed or never added)",
-                ),
-                Some(dm) => {
-                    if !db::agent_free(&conn, &dm.id) {
-                        continue; // 决策者忙碌：下一轮再试
-                    }
-                    if dispatch(state, &conn, &d, &dm) {
-                        drop(conn);
-                        state.wake();
-                        return;
+                );
+                continue;
+            }
+            let mut chosen: Option<Agent> = None;
+            let mut conflict: Option<String> = None;
+            for dm in &candidates {
+                if !crate::roles::overlap_allowed() {
+                    if let Some(reason) = dm_role_conflict(&conn, dm, &p.id) {
+                        conflict.get_or_insert(reason);
+                        continue;
                     }
                 }
+                chosen = Some(dm.clone());
+                break;
+            }
+            let Some(dm) = chosen else {
+                maker_down(
+                    state,
+                    &conn,
+                    &d,
+                    &conflict.unwrap_or_else(|| {
+                        "no usable decision_maker instance for this project (all candidates are role-conflicted)".to_string()
+                    }),
+                );
+                continue;
+            };
+            if !db::agent_free(&conn, &dm.id) {
+                continue; // 决策者忙碌：下一轮再试
+            }
+            if dispatch(state, &conn, &d, &dm) {
+                drop(conn);
+                state.wake();
+                return;
             }
         }
     }
@@ -837,8 +901,56 @@ mod tests {
         let r = Ruling { approve: true, rationale: "简单任务".into(), criteria: None, action: None };
         apply_ruling(&st, &conn, &d, &r, "agent", Some("agt_x")).unwrap();
         assert_eq!(planned_gate(&conn, &t), Some("exemption_granted_by_decision_maker"));
-        // M4：需验收的任务不再依赖协商，验收标准由规划者固定 → 直接放行
+        // M3：需验收的任务只有在协商一致后才放行
         t.acceptance_required = true;
-        assert_eq!(planned_gate(&conn, &t), Some("criteria_fixed_by_planner"));
+        t.negotiation_status = "pending".into();
+        assert_eq!(planned_gate(&conn, &t), None, "pending negotiation must block");
+        t.negotiation_status = "failed".into();
+        assert_eq!(planned_gate(&conn, &t), None, "failed negotiation must block until ruled");
+        t.negotiation_status = "agreed".into();
+        assert_eq!(planned_gate(&conn, &t), Some("criteria_agreed_auto"));
+    }
+
+    /// 裁定到达时任务已终态：裁定本身有效（决策者没有故障），改动无处落地 → 记为
+    /// 「未落地」并结案；不得因「落地失败」把决策误判成运行故障（→ decision_maker_down）。
+    #[test]
+    fn change_review_on_terminal_task_is_ruled_not_failed() {
+        let dir = std::env::temp_dir().join(format!("domo_terminal_change_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conn = crate::db::open(dir.join("t.db").to_str().unwrap());
+        conn.execute(
+            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at)
+             VALUES ('tsk_term','prj_1',NULL,'原标题','','[]','executor',NULL,NULL,1,NULL,'agreed','done',0,0,0,'[]',0)",
+            [],
+        )
+        .unwrap();
+        let st = std::sync::Arc::new(App {
+            db: std::sync::Mutex::new(crate::db::open(":memory:")),
+            tx: tokio::sync::broadcast::channel(1).0,
+            handles: Default::default(),
+            circuits: Default::default(),
+            handle_seq: Default::default(),
+            wake: Default::default(),
+            sessions: Default::default(),
+        });
+        let d = request(
+            &st,
+            &conn,
+            "prj_1",
+            Some("tsk_term"),
+            "change_review",
+            json!({"proposal": {"title": "新标题"}}),
+        );
+        let r = Ruling { approve: true, rationale: "任务级调整".into(), criteria: None, action: None };
+        apply_ruling(&st, &conn, &d, &r, "agent", Some("agt_x"))
+            .expect("ruling must not fail when the target task is already terminal");
+        let fresh = crate::db::get_decision(&conn, &d.id).unwrap();
+        assert_eq!(fresh.status, "ruled");
+        let effect = fresh.ruling.unwrap()["effect"].clone();
+        assert_eq!(effect["effect"], "change_not_applied", "{effect}");
+        assert_eq!(effect["applied"], false, "{effect}");
+        // 终态任务不被改动
+        let t = crate::db::get_task(&conn, "tsk_term").unwrap();
+        assert_eq!(t.title, "原标题");
     }
 }

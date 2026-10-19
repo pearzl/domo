@@ -17,7 +17,7 @@
 # 另含回归：暂停冻结「自动」规划派发——人工裁决立即生效（planning=pending），
 # 但 planner 派发延后到恢复后续跑，与 exec/accept 派发的冻结语义一致。
 #
-# 用法：bash scripts/smoke_replan.sh   （退出码 0 = 全部通过）
+# 用法：bash tests/smoke_replan.sh   （退出码 0 = 全部通过）
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

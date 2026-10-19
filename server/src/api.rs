@@ -693,6 +693,22 @@ async fn put_project_pool(State(st): State<Arc<App>>, Path(id): Path<String>, Js
                 }
             }
         }
+        // 角色隔离：决策者实例不得进入 executor / acceptor 优先级列表（裁判不下场）
+        if !crate::roles::overlap_allowed() {
+            for role in ["executor", "acceptor"] {
+                if let Some(ids) = pool.get(role) {
+                    for aid in ids {
+                        if let Some(a) = db::get_agent(&c, aid) {
+                            if crate::roles::is_decision_maker(&a.roles) {
+                                return err(StatusCode::BAD_REQUEST, format!(
+                                    "agent '{}' holds the decision_maker role and may not be enabled as '{role}' in the project pool (裁判不下场); use a separate instance or set DOMO_DM_ROLE_OVERLAP=1",
+                                    a.name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         db::set_project_pool(&c, &id, &pool);
         events::push_event(&st, &c, &id, None, "project.pool_updated",
             json!({"pool": serde_json::to_value(&pool).unwrap_or(json!({}))}));
@@ -730,11 +746,14 @@ async fn plan_project(
     let in_pool = |id: &str| pool.as_ref().map(|p| p.iter().any(|x| x == id)).unwrap_or(true);
     let forced_executor: Option<String> = body["executor_agent_id"].as_str().map(String::from);
     if let Some(fid) = &forced_executor {
-        let ok = db::get_agent(&st.db.lock().unwrap(), fid)
-            .map(|a| a.roles.iter().any(|r| r == "executor") && in_pool(&a.id))
-            .unwrap_or(false);
+        let a = db::get_agent(&st.db.lock().unwrap(), fid);
+        let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "executor") && in_pool(&a.id)).unwrap_or(false);
         if !ok {
             return err(StatusCode::BAD_REQUEST, "executor_agent_id is not an executor-capable agent (or is a decision_maker, or not in the project agent pool)");
+        }
+        // 角色隔离：决策者不得担任执行者（裁判不下场）
+        if a.as_ref().map(|a| crate::roles::agent_forbidden_for(&a.roles)).unwrap_or(false) {
+            return err(StatusCode::BAD_REQUEST, "executor_agent_id must not be a decision_maker instance (裁判不下场)");
         }
     }
     let forced_acceptor: Option<String> = body["acceptor_agent_id"].as_str().map(String::from);
@@ -743,6 +762,10 @@ async fn plan_project(
         let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "acceptor") && in_pool(&a.id)).unwrap_or(false);
         if !ok {
             return err(StatusCode::BAD_REQUEST, "acceptor_agent_id is not an acceptor-capable agent (or is a decision_maker, or not in the project agent pool)");
+        }
+        // 角色隔离：决策者不得担任验收者（裁判不下场）
+        if a.as_ref().map(|a| crate::roles::agent_forbidden_for(&a.roles)).unwrap_or(false) {
+            return err(StatusCode::BAD_REQUEST, "acceptor_agent_id must not be a decision_maker instance (裁判不下场)");
         }
         if forced_executor.as_deref() == Some(fid) {
             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
@@ -872,6 +895,8 @@ async fn plan_project(
     // any failure rolls the whole proposal back.
     let mut created: Vec<Task> = {
         let c = st.db.lock().unwrap();
+        // M3：项目具备执行者/验收者角色候选时，需验收的规划任务进入协商
+        let negotiable = crate::negotiation::possible(&c, &id);
         let run = || -> Result<Vec<Task>, Response> {
             let tx = c.unchecked_transaction()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("begin transaction: {e}")))?;
@@ -900,7 +925,7 @@ async fn plan_project(
                     acceptance_required: pt.acceptance_required,
                     acceptance_criteria: pt.criteria.clone(),
                     // M3：需验收的规划任务进入协商（executor↔acceptor），一致后才 READY
-                    negotiation_status: "agreed".into(), // M4：验收标准由规划者给出，无需开工前协商
+                    negotiation_status: if pt.acceptance_required && negotiable { "pending".into() } else { "agreed".into() },
                     negotiation_round: 0,
                     execution_plan: None,
                     plan_rejection_count: 0,
@@ -1196,6 +1221,11 @@ pub(crate) fn apply_replan_changes(
                 }
                 let (executor, acceptor) = (None::<String>, None::<String>);
                 let _ = rot;
+                // M3：项目具备执行者/验收者候选时，需验收的新增任务进入协商
+                let negotiable = {
+                    let c = st.db.lock().unwrap();
+                    crate::negotiation::possible(&c, &id)
+                };
                 let t = Task {
                     id: db::new_id("tsk_"),
                     project_id: id.to_string(),
@@ -1209,7 +1239,7 @@ pub(crate) fn apply_replan_changes(
                     acceptance_required,
                     acceptance_criteria: criteria,
                     // M3：重规划新增任务默认进入协商（executor↔acceptor）
-                    negotiation_status: "agreed".into(), // M4：验收标准固定，无需协商
+                    negotiation_status: if acceptance_required && negotiable { "pending".into() } else { "agreed".into() },
                     negotiation_round: 0,
                     execution_plan: None,
                     plan_rejection_count: 0,
@@ -1725,17 +1755,17 @@ fn validate_agent_roles(c: &rusqlite::Connection, executor: Option<&str>, accept
     // 角色隔离优先报错：决策者实例即使被授予了 executor/acceptor 角色也绝不下场
     if let Some(e) = executor {
         let Some(a) = db::get_agent(c, e) else { return Err("executor agent not found".into()); };
-        if !a.roles.iter().any(|r| r == "executor") { return Err("executor agent lacks 'executor' role".into()); }
         if crate::roles::agent_forbidden_for(&a.roles) {
             return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", a.name));
         }
+        if !a.roles.iter().any(|r| r == "executor") { return Err("executor agent lacks 'executor' role".into()); }
     }
     if let Some(a) = acceptor {
         let Some(ag) = db::get_agent(c, a) else { return Err("acceptor agent not found".into()); };
-        if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
         if crate::roles::agent_forbidden_for(&ag.roles) {
             return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", ag.name));
         }
+        if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
     }
     if let (Some(e), Some(a)) = (executor, acceptor) {
         if e == a { return Err("same agent instance cannot execute and accept the same task".into()); }
@@ -1793,10 +1823,13 @@ async fn create_task(
         let negotiation_status = match body["negotiation_status"].as_str() {
             Some(v @ ("pending" | "agreed" | "failed")) => v.to_string(),
             Some(_) => return err(StatusCode::BAD_REQUEST, "negotiation_status must be pending|agreed|failed"),
-            // M3 默认：需验收且有执行者与验收者 → 进入协商（PLANNED=协商中）；
-            // 无需验收 / 缺执行者（无法协商）→ 直接视为一致。
+            // M3 默认：需验收且具备协商条件 → 进入协商（PLANNED=协商中）；
+            // 无需验收 / 项目缺少执行者或验收者角色（无法协商）→ 视为一致。
             None => {
-                if accept_required && executor.is_some() && acceptor.is_some() {
+                if accept_required
+                    && ((executor.is_some() && acceptor.is_some())
+                        || crate::negotiation::possible(&c, &id))
+                {
                     "pending".to_string()
                 } else {
                     "agreed".to_string()
@@ -3007,17 +3040,25 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::NOT_FOUND, "agent not found");
                         }
-                        Some(ag) if ag.roles.iter().any(|r| r == "executor") => Some(ag),
-                        Some(ag) => {
+                        Some(ag) if !ag.roles.iter().any(|r| r == "executor") => {
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, format!("agent '{}' lacks the 'executor' role", ag.name));
                         }
+                        // 角色隔离：决策者不得担任执行者（裁判不下场）
+                        Some(ag) if crate::roles::agent_forbidden_for(&ag.roles) => {
+                            drop(c);
+                            return err(StatusCode::BAD_REQUEST, format!(
+                                "agent '{}' holds the decision_maker role and may not act as executor (裁判不下场)",
+                                ag.name));
+                        }
+                        Some(ag) => Some(ag),
                     },
                     None => {
-                        // auto: pick another idle executor-capable instance
+                        // auto: pick another idle executor-capable instance（排除决策者，角色隔离）
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "executor")
+                                && !crate::roles::agent_forbidden_for(&a.roles)
                                 && a.current_task_ids.is_empty()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {
@@ -3064,6 +3105,13 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "candidate agent lacks 'acceptor' role");
                         }
+                        // 角色隔离：决策者不得担任验收者（裁判不下场）
+                        if crate::roles::agent_forbidden_for(&ag.roles) {
+                            drop(c);
+                            return err(StatusCode::BAD_REQUEST, format!(
+                                "agent '{}' holds the decision_maker role and may not act as acceptor (裁判不下场)",
+                                ag.name));
+                        }
                         if ag.id == t.executor_agent_id.clone().unwrap_or_default() {
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
@@ -3075,6 +3123,7 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "acceptor")
+                                && !crate::roles::agent_forbidden_for(&a.roles)
                                 && a.id != t.acceptor_agent_id.clone().unwrap_or_default()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {

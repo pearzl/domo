@@ -29,11 +29,18 @@ DOMO_M3_PORT=8801 bash scripts/smoke_m3_e2e.sh
 DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash scripts/smoke_m3_e2e.sh
 ```
 
-当前 HEAD（M4.5 语义，模型必须显式传入）：
+当前 HEAD（M4.5 语义；模型默认 `opencode-go/glm-5.3-flash`，可用 `DOMO_M3_MODEL` 覆盖）：
 
 ```bash
+bash tests/smoke_m3_e2e.sh                                    # 端口自动挑选空闲端口
+DOMO_M3_PORT=8801 bash tests/smoke_m3_e2e.sh                  # 指定端口（被占用则立即失败）
 DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
 ```
+
+**端口隔离（可重复性修复）**：未指定 `DOMO_M3_PORT` 时脚本自动挑选一个空闲端口；显式指定但已被
+占用时立即失败，绝不静默复用遗留实例。启动后会确认本次进程仍存活、且应答的是本次全新库
+（`/api/projects` 为空、`DOMO_DB` 已创建），否则放弃本次启动。这从根上避免了「新进程绑定失败退出、
+健康检查却连到旧服务端，请求被写进旧 DB/旧 RUN_DIR」所导致的假失败（如「项目报告未落盘」）。
 
 脚本可重复执行且结果稳定：每次运行独立 `mktemp` 运行目录（独立 SQLite / 工作区 / 日志），
 结束自动清理服务进程；真实 agent 的 LLM 调用带超时与重试，断言基于**状态持久化**而非时序竞态。
@@ -162,6 +169,19 @@ DOMO_M3_MODEL=opencode-go/glm-5.3-flash bash tests/smoke_m3_e2e.sh
    - 修复：补齐 `suspend(state, &conn, t, "execute")`；将失败原因二元组解构为
      具体原因字符串后回退默认文案。
    - 结果：`cargo build` / `cargo test` 恢复通过（**44 passed / 0 failed**），冒烟全绿。
+
+## 本次交付的脚本稳定性修复（端口隔离）
+
+复跑时发现一处会破坏「可重复性/稳定性」的缺陷并修复：
+
+1. **遗留服务端占用固定端口导致假失败**
+   - 现象：上一次运行遗留的 `domo-server` 仍占用脚本默认端口（如 8799）。新运行启动的进程绑定
+     失败后立即退出，而健康检查仍从遗留实例拿到 200，于是后续请求被写进**旧实例的 DB / 旧 RUN_DIR**，
+     断言在本次运行目录里找不到产物（如 `projects/<prj>/summary-report.md`），表现为莫名其妙的 FAIL。
+   - 修复（`tests/smoke_m3_e2e.sh`）：① 未设置 `DOMO_M3_PORT` 时自动挑选空闲端口；
+     ② 显式设置但端口被占用时立即失败并提示；③ 启动后先 `kill -0` 确认本次进程存活，
+     再校验应答服务使用的是本次全新库（空 `/api/projects` 且 `DOMO_DB` 已建），否则拒绝启动。
+   - 结果：冒烟可在有遗留进程的环境下稳定复跑；显式端口冲突会被快速、明确地报出，而非静默复用旧实例。
 
 ## 已知非阻塞问题
 

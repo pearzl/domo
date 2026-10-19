@@ -80,6 +80,7 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
+  local expect_empty="${1:-0}"
   echo "[m3-smoke] starting server on :$PORT (db $DB, log $LOG)"
   (
     cd "$ROOT/server"
@@ -88,7 +89,27 @@ start_server() {
   ) >"$RUN_DIR/stdout.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 120); do
-    if curl -sf "http://127.0.0.1:$PORT/api/agents" >/dev/null 2>&1; then return 0; fi
+    # 关键：本次进程若绑定失败会立即退出，绝不能在这种情况下连到遗留实例
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "[m3-smoke] server 进程提前退出（疑似端口被占或启动失败）；stdout/log tail:"
+      tail -40 "$RUN_DIR/stdout.log" 2>/dev/null
+      tail -20 "$LOG" 2>/dev/null
+      return 1
+    fi
+    if curl -sf "http://127.0.0.1:$PORT/api/agents" >/dev/null 2>&1; then
+      if [[ "$expect_empty" == "1" ]]; then
+        if ! curl -sf "http://127.0.0.1:$PORT/api/projects" 2>/dev/null | grep -q '^\[\]'; then
+          echo "[m3-smoke] :$PORT 有服务应答但项目列表非空（疑似遗留实例），放弃本次启动。"
+          curl -s "http://127.0.0.1:$PORT/api/projects" 2>/dev/null | head -c 200; echo
+          return 1
+        fi
+        if [[ ! -f "$DB" ]]; then
+          echo "[m3-smoke] :$PORT 有服务应答但未创建本次库 $DB（疑似遗留实例），放弃本次启动。"
+          return 1
+        fi
+      fi
+      return 0
+    fi
     sleep 0.25
   done
   echo "[m3-smoke] server did not come up; log:"; tail -40 "$RUN_DIR/stdout.log"
@@ -709,7 +730,7 @@ else:
     sys.exit(phase2())
 PY
 
-start_server || exit 1
+start_server 1 || exit 1
 python3 "$PY" phase1 "$PORT" "$RUN_DIR" "$WS" "$STATE" "$MODEL"
 RC1=$?
 
@@ -717,7 +738,7 @@ echo "[m3-smoke] kill -9 server (pid $SERVER_PID) and restart (simulated crash)�
 kill -9 "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
-start_server || exit 1
+start_server 0 || exit 1
 python3 "$PY" phase2 "$PORT" "$RUN_DIR" "$WS" "$STATE" "$MODEL"
 RC2=$?
 
