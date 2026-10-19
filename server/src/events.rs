@@ -1,3 +1,15 @@
+//! 事件、状态流转与 SSE 广播的唯一出口。
+//!
+//! - 事件 **append-only**：只能新增，不能改删；`kind` 命名 `<域>.<动作>`
+//!   （如 `task.status_changed`、`milestone.gate_opened`、`sandbox.violation`）。
+//! - `payload` 必须自包含（关联 id + 判定所需信息），保证事后可回放。
+//! - 任务状态变更只能走 `status_changed`、里程碑用 `milestone_status_changed`：
+//!   落库 + 审计事件 + SSE 广播一次完成。**禁止只改库不发事件**（前端会显示陈旧状态），
+//!   也不要自行拼装状态变更事件。
+//! - SSE 事件类型：`task` / `agent` / `project` / `inbox` / `milestone` / `report` /
+//!   `event` / `log`，payload 为实体完整快照（前端据此整体替换，不做增量合并）。
+//! - 每次 agent 调用的输入（提示词、上下文、注入的知识条目）与完整输出都要归档。
+
 use std::sync::Arc;
 use crate::db;
 use crate::models::*;

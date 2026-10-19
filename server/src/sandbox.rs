@@ -8,6 +8,12 @@
 //!
 //! 隔离边界：执行/验收都在沙盒内；每轮执行结束后对「scope 外的源仓库」做脏文件
 //! 基线比对，发现 agent 绕过沙盒直写源仓库 → `sandbox.violation` 事件 + 收件箱。
+//!
+//! 合入规则：**先同步项目基线 → 再合入**；冲突一律交人（`task.merge_conflict` + 收件箱），
+//! 已 abort 的 merge 保留 worktree 供人工处置，**禁止**静默强制覆盖或丢弃 agent 改动。
+//!
+//! 多仓工程不使用本模块的 worktree：直接在工程目录的项目分支上串行工作
+//! （暂停 → 逐仓检查干净 → 逐仓切分支 → 恢复，见 DESIGN §4.2）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

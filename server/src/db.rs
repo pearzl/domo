@@ -1,3 +1,13 @@
+//! 持久化与迁移：**唯一写 SQL 的地方**。
+//!
+//! - 全进程只有一个 SQLite 连接，由 `state::Db = Mutex<Connection>` 保护。
+//!   **绝不在持锁期间做阻塞操作**（git、网络、子进程、大文件读写）：先取快照 → 释放锁 →
+//!   做耗时工作 → 重新加锁写回。持锁跑 git 会造成服务级冻结（HTTP 全部无响应、调度器停摆）。
+//! - 迁移必须幂等：`CREATE TABLE IF NOT EXISTS` + `ensure_column`，对既有库安全，
+//!   不得要求用户删库；测试用 `migrate_for_tests`。
+//! - 时间统一为毫秒时间戳（`now()`）；路径入库前统一转绝对路径。
+//! - 事件 append-only、归档只增不改（见 `events`）。
+
 use crate::models::*;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;

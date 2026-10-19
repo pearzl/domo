@@ -1,3 +1,11 @@
+//! 真实适配器：驱动 OpenCode CLI（`opencode run`），stdout 逐行流入任务日志。
+//!
+//! - 结论协议：计划审查与验收回复必须有独占一行的 `VERDICT: pass` / `VERDICT: reject`；
+//!   解析只认最后一处真实结论，排除提示词回声；同一行同时出现 pass/reject 视为格式错误。
+//! - 无结论 / 无法解析 → 按基建失败处理（换人重试），不记为"退回"。
+//! - `timeout_ms` 是**空闲阈值**（持续无输出才判定卡死），不是总运行时长上限。
+//! - 每次调用的提示词与完整输出都会归档（见 `archive_agent_output`）。
+
 use super::{AdapterCapabilities, ExecMode, ExecOutcome};
 use crate::{db, events, models::{Agent, Project, Task}, state::App};
 use serde_json::{json, Value};

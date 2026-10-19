@@ -1,3 +1,15 @@
+//! 适配器契约：不同 agent（不同 CLI / 模型 / 供应商）对上层必须表现一致。
+//!
+//! - 能力声明见 `AdapterCapabilities`：会话恢复、spawn、消息发送、过程观察。
+//! - 派发形态见 `ExecMode`：`Fresh`（新会话）/ `Resume`（原生恢复：复用**同一 attempt**
+//!   与逻辑会话名）/ `Handoff`（交接书重建：同一 attempt、**新**会话 id）。
+//!   恢复时不得擅自 `attempt + 1`。
+//! - 计划审查与验收的回复必须包含**独占一行**的 `VERDICT: pass` 或 `VERDICT: reject`
+//!   （大小写不敏感）；无法解析出结论 = 基建设施失败（可换人重试），**不得**当作"退回"。
+//! - 基建失败使用固定前缀（见 `opencode::INFRA_ACCEPT_ERROR_PREFIX`），与业务结论区分；
+//!   限流/额度、配置错误、网络抖动、超时等内容失败必须分类上报。
+//! - 每次调用的输入（提示词、上下文、注入知识）与完整输出都要归档，供审计回放。
+
 pub mod mock;
 pub mod opencode;
 

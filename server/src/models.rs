@@ -1,3 +1,19 @@
+//! 数据模型与术语（产品设计见 docs/DESIGN.md，仓库规范见 docs/DEV.md）。
+//!
+//! - 层级：工程（完整产品）→ 项目（project，即产品文档中的"项目/迭代"）→ 任务。
+//! - 角色：规划者（planner，**兼该任务的验收者**）与执行者（executor）；
+//!   没有决策者 agent，一切裁决由人（收件箱）完成。
+//! - 任务状态：planned / ready / plan_drafting / plan_review / executing /
+//!   awaiting_acceptance / done / escalated / suspended / recovering。
+//!   `recovering` = 进程重启中断、等待恢复，**不得**统计或展示为"执行中"。
+//! - 项目状态：initializing / running / pausing / paused / completed / archived；
+//!   `archived` 全程只读。
+//! - 验收结论只有**通过 / 退回**；"重试"仅指验收者自身运行失败（限流/超时/配置错）
+//!   后的换人重试，不计失败预算、不占退回次数。
+//! - 状态一律用字符串字面量落库；**非法转移由调用方拒绝（API 409）**，不得静默纠正；
+//!   终态不再被调度器改写。
+//! - 新增字段必须可选 + 默认值，保证旧数据缺字段时不崩溃；字段变更需同步 web/src/types.ts。
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
