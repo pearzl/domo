@@ -52,9 +52,11 @@
 
 ## 待办清单（使用中发现，按需排期）
 
-- **真实模型冒烟脚本需一次实跑确认**：`tests/smoke_m3_e2e.sh`（全链路）与 `tests/smoke_recovery_tiers.sh`（三档恢复）
-  已按新语义改写（计划/审查阶段、决策者兼任放开、动态选人与沙盒隔离），但需要真实模型配额才能实跑；
-  模型仅通过环境变量传入（`DOMO_M3_MODEL` / `DOMO_RT_MODEL`）
+- **真实模型冒烟实跑确认**：`tests/smoke_recovery_tiers.sh`（三档恢复）已实跑通过——
+  **106/106 全绿**（2026-10-20，模型 `opencode-go/glm-5.3-flash`），结果与关键日志归档
+  `data/smoke_recovery_tiers/{summary.md,results.md,domo.log}`，用例清单见
+  [SMOKE_RECOVERY_TIERS.md](SMOKE_RECOVERY_TIERS.md)；`tests/smoke_m3_e2e.sh`（全链路）仍需一次实跑确认
+  （模型经环境变量 `DOMO_M3_MODEL` 传入）
 - 规划者选择防呆：下拉标注免费层易限流；失败信息点名当前规划者
 - 审计：非任务级 agent 会话原始输出可视化
 - 工作区资源上传（`resources/` 目录与引用约定）
