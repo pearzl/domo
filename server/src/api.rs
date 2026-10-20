@@ -3077,6 +3077,45 @@ fn inbox_context(c: &rusqlite::Connection, item: &InboxItem) -> Option<Value> {
 }
 
 /// 列表（每条 open escalation 附 context 字段）
+/// 收件箱条目的可用动作（按待决类型下发，前端据此渲染，不再写死）。
+fn inbox_actions(i: &crate::models::InboxItem) -> Vec<Value> {
+    if i.status != "open" {
+        return vec![];
+    }
+    let act = |id: &str, label: &str| json!({"id": id, "label": label});
+    if i.kind == "milestone_gate" {
+        return vec![act("pass", "确认通过"), act("reject", "退回重规划")];
+    }
+    if i.payload.get("decision_id").and_then(|v| v.as_str()).is_some() {
+        let kind = i.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        return match kind {
+            "merge_conflict" => vec![act("approve", "退回执行者解决冲突"), act("deny", "转人工处理")],
+            _ => vec![act("approve", "批准"), act("deny", "否决"), act("retry", "恢复后重试自动裁决")],
+        };
+    }
+    match i.kind.as_str() {
+        "escalation" => {
+            let reason = i.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            if reason == "merge_conflict" {
+                return vec![
+                    json!({"id":"resume","label":"恢复重派"}),
+                    json!({"id":"abandon","label":"放弃任务"}),
+                ];
+            }
+            vec![
+                json!({"id":"resume","label":"恢复重派"}),
+                json!({"id":"reassign","label":"更换执行者","needs_agent":"executor"}),
+                json!({"id":"reassign_acceptor","label":"更换验收者","needs_agent":"acceptor"}),
+                json!({"id":"relax","label":"放宽标准"}),
+                json!({"id":"abandon","label":"放弃任务"}),
+            ]
+        }
+        "replan" => vec![json!({"id":"approve","label":"批准"}), json!({"id":"deny","label":"否决"})],
+        "decision_maker_down" => vec![json!({"id":"retry","label":"重试自动裁决"})],
+        _ => vec![json!({"id":"close","label":"确认处理"})],
+    }
+}
+
 async fn list_inbox(State(st): State<Arc<App>>) -> Response {
     let c = st.db.lock().unwrap();
     let items = db::list_inbox(&c);
@@ -3088,6 +3127,9 @@ async fn list_inbox(State(st): State<Arc<App>>) -> Response {
                 if let Some(ctx) = inbox_context(&c, &i) {
                     v["context"] = ctx;
                 }
+            }
+            if i.status == "open" {
+                v["actions"] = json!(inbox_actions(&i));
             }
             v
         })

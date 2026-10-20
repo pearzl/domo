@@ -168,6 +168,13 @@ export interface Agent {
   current_task_ids: string[];
 }
 
+export interface InboxAction {
+  id: string;
+  label: string;
+  /** 该动作需要指定 agent 时，给出角色 */
+  needs_agent?: 'executor' | 'acceptor';
+}
+
 export interface InboxItem {
   id: string;
   project_id: string;
@@ -176,6 +183,8 @@ export interface InboxItem {
   status: InboxStatus;
   resolution?: string | null;
   created_at: number;
+  /** 后端按待决类型下发的可用动作（open 项才有） */
+  actions?: InboxAction[];
   /** escalation 条目的裁决上下文（GET /inbox 时由后端读时计算，仅 open 项附加） */
   context?: InboxContext;
 }

@@ -8,12 +8,6 @@ import {
 
 const TERMINAL_STATUS = ['done', 'cancelled'];
 
-/** 各裁决动作是否需要指定 agent */
-const NEEDS_AGENT: Record<string, 'executor' | 'acceptor'> = {
-  reassign: 'executor',
-  reassign_acceptor: 'acceptor',
-};
-
 function resolutionLabel(resolution: InboxItem['resolution']): string {
   // 后端 resolution 是 JSON 对象 {resolution, note?, agent_id?, decision?}
   const raw = typeof resolution === 'object' && resolution !== null
@@ -811,19 +805,28 @@ function EscalationRow({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const needAgent = NEEDS_AGENT[resolution];
-  const wantRole = needAgent;
+  // 动作由后端按待决类型下发；缺省时回退到旧动作集（兼容旧快照）
+  const actions: { id: string; label: string; needs_agent?: 'executor' | 'acceptor' }[] =
+    item.actions && item.actions.length > 0
+      ? item.actions
+      : [
+          { id: 'resume', label: '恢复重派' },
+          { id: 'reassign', label: '更换执行者', needs_agent: 'executor' },
+          { id: 'reassign_acceptor', label: '更换验收者', needs_agent: 'acceptor' },
+          { id: 'relax', label: '放宽标准' },
+          { id: 'abandon', label: '放弃任务' },
+        ];
+  const wantRole = actions.find(a => a.id === resolution)?.needs_agent;
   const [agentId, setAgentId] = useState<string>('');
 
   const candidates = wantRole === 'executor'
     ? agents.filter(a => a.roles.includes('executor'))
     : agents.filter(a => a.roles.includes('acceptor'));
-  // 同任务执行与验收不得同一实例；决策者不得担任执行/验收
-  const excluded = wantRole === 'acceptor' ? ctx?.executor?.id : ctx?.acceptor?.id;
+  // 允许执行与验收同一实例（设计如此），仅排除决策者下场
   const dmIds = agents.filter(a => a.roles.includes('decision_maker')).map(a => a.id);
   // 切换裁决动作时，预选当前任务对应的 agent（方便只改最小项）
   function pickDefaultAgent(res: string) {
-    const role = NEEDS_AGENT[res];
+    const role = actions.find(a => a.id === res)?.needs_agent;
     if (!role || !ctx) return '';
     return role === 'executor' ? (ctx.executor?.id ?? '') : (ctx.acceptor?.id ?? '');
   }
@@ -858,16 +861,16 @@ function EscalationRow({
 
       <div className="resolve-row">
         <select value={resolution} onChange={e => { setResolution(e.target.value); setAgentId(pickDefaultAgent(e.target.value)); }} className="select">
-          {['resume', 'reassign', 'reassign_acceptor', 'relax', 'abandon'].map(r => (
-            <option key={r} value={r}>
-              {RESOLUTION_LABEL[r]}
+          {actions.map(a => (
+            <option key={a.id} value={a.id}>
+              {a.label}
             </option>
           ))}
         </select>
         {wantRole && (
           <select value={agentId} onChange={e => setAgentId(e.target.value)} className="select">
             <option value="">选择{wantRole === 'executor' ? '执行者' : '验收者'}…</option>
-            {candidates.filter(a => a.id !== excluded && !dmIds.includes(a.id)).map(a => (
+            {candidates.filter(a => !dmIds.includes(a.id)).map(a => (
               <option key={a.id} value={a.id}>
                 {a.name}（{a.roles.map(r => ROLE_LABEL[r] ?? r).join('/')} · {a.status === 'busy' ? '忙碌' : '空闲'}
                 {a.adapter === 'opencode' && a.config?.model ? ` · ${a.config.model}` : ''})
