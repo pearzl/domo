@@ -64,8 +64,9 @@ pub fn log_line_state(state: &Arc<App>, task_id: &str, line: &str) {
 
 pub fn status_changed(state: &Arc<App>, c: &Connection, task: &Task, to: &str, reason: &str) -> Task {
     let from = task.status.clone();
+    // ARCH A2：状态变更必须推进 version，派发方的 CAS 才能识别“已被别人改过”。
     let _ = c.execute(
-        "UPDATE tasks SET status=?2 WHERE id=?1",
+        "UPDATE tasks SET status=?2, version=version+1 WHERE id=?1",
         params![task.id, to],
     );
     // M4 三档恢复标记随状态自洽：进入终态清全部；离开 suspended 清「人工重建挂起」
@@ -86,6 +87,7 @@ pub fn status_changed(state: &Arc<App>, c: &Connection, task: &Task, to: &str, r
     );
     let mut t = task.clone();
     t.status = to.into();
+    t.version += 1;
     state.send("task", serde_json::to_value(&t).unwrap_or(json!({})));
     t
 }

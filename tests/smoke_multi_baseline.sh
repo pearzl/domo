@@ -30,7 +30,11 @@ cleanup() {
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   chmod -R u+rwX "$RUN_DIR" 2>/dev/null || true
-  rm -rf "$RUN_DIR"
+  if [[ "${DOMO_KEEP:-0}" == "1" ]]; then
+    echo "[baseline-smoke] kept run dir: $RUN_DIR"
+  else
+    rm -rf "$RUN_DIR"
+  fi
 }
 trap cleanup EXIT
 
@@ -40,7 +44,7 @@ echo "[baseline-smoke] building server…"
 echo "[baseline-smoke] starting server on :$PORT (db $DB)"
 (
   cd "$ROOT/server"
-  DOMO_DB="$DB" DOMO_PORT="$PORT" DOMO_LOG="$LOG" DOMO_LOG_LEVEL=warn \
+  DOMO_DB="$DB" DOMO_PORT="$PORT" DOMO_LOG="$LOG" DOMO_LOG_LEVEL="${DOMO_LOG_LEVEL:-warn}" \
     DOMO_WORKSPACE_ROOT="$RUN_DIR/domo-ws" \
     exec "$ROOT/server/target/debug/domo-server"
 ) >"$RUN_DIR/stdout.log" 2>&1 &

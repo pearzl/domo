@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// 宿主进程环境标记（启动时扫描 /proc 回收 kill -9 遗留的宿主）。
+const HOST_MARKER: &str = "domo-exec-host";
+
 pub struct Host {
     /// 键 = 规范化后的工作区绝对路径
     pub key: String,
@@ -128,6 +131,8 @@ pub async fn ensure(cwd: &Path) -> Result<u16, String> {
     let mut cmd = Command::new("opencode");
     cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
         .env("OPENCODE_SERVER_PASSWORD", password())
+        // 启动对账用标记：kill -9 后据此回收遗留宿主（不依赖进程名匹配）。
+        .env("DOMO_HOST_MARKER", HOST_MARKER)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -189,6 +194,49 @@ pub fn sweep(idle: Duration) -> usize {
         kill_group(h.pid, "-KILL");
     }
     removed.len()
+}
+
+/// ARCH §8.3：回收上次进程被 kill -9 后遗留的宿主。
+///
+/// 只按本进程启动时注入的 `DOMO_HOST_MARKER` 环境变量识别，**不按进程名匹配**，
+/// 因此不会误杀用户自己的 opencode 或其它工具。返回回收数量。
+pub fn reap_orphans() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let me = std::process::id();
+        let mut pids: Vec<u32> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Ok(pid) = name.parse::<u32>() else { continue };
+                if pid == me || pid <= 1 {
+                    continue;
+                }
+                let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) else { continue };
+                let marker = format!("DOMO_HOST_MARKER={HOST_MARKER}");
+                if env.split(|b| *b == 0).any(|kv| kv == marker.as_bytes()) {
+                    pids.push(pid);
+                }
+            }
+        }
+        for pid in &pids {
+            kill_group(*pid, "-TERM");
+        }
+        if !pids.is_empty() {
+            std::thread::sleep(Duration::from_millis(100));
+            for pid in &pids {
+                kill_group(*pid, "-KILL");
+            }
+        }
+        if !pids.is_empty() {
+            tracing::warn!(count = pids.len(), "reaped orphan execution hosts from previous run");
+        }
+        pids.len()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
 }
 
 pub fn stop_all() {

@@ -21,6 +21,29 @@ mod verification;
 use std::sync::Arc;
 use state::App;
 
+/// 停机信号：Ctrl-C 或 SIGTERM（systemd / 容器 / 冒烟脚本清理）。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // runtime logs: stdout + data/domo.log (append). DOMO_LOG 可覆盖。
@@ -76,8 +99,11 @@ async fn main() {
         handle_seq: Default::default(),
         wake: Default::default(),
         sessions: Default::default(),
+        stopping: Default::default(),
     });
 
+    // ARCH §8.3：先对账（重复收件箱 / 遗留宿主），再启动调度器。
+    scheduler::reconcile(&app);
     tokio::spawn(scheduler::run(app.clone()));
 
     let mut router = api::router(app.clone());
@@ -108,10 +134,20 @@ async fn main() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind port");
-    // Ctrl-C：先回收执行宿主（进程组），再退出，避免留下孤儿 server
-    tokio::spawn(async {
-        let _ = tokio::signal::ctrl_c().await;
+    // Ctrl-C 优雅停机（ARCH §8.4）：冻结派发 → 取消 worker → 回收宿主 → WAL 检查点。
+    let shutdown_state = app.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown requested; freezing scheduler");
+        shutdown_state.begin_shutdown();
+        shutdown_state.abort_all_handles();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         crate::host::stop_all();
+        {
+            let c = shutdown_state.db.lock().unwrap();
+            db::checkpoint(&c);
+        }
+        tracing::info!("graceful shutdown complete");
         std::process::exit(0);
     });
     println!("domo-server listening on http://{addr} (db: {db_path})");

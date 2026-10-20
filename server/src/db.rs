@@ -187,6 +187,9 @@ fn migrate(c: &Connection) {
     // M3 协商：tasks.negotiation_round（已完成轮次）— 幂等列添加。
     add_column_if_missing(c, "tasks", "negotiation_round", "INTEGER NOT NULL DEFAULT 0");
 
+    // ARCH A2：任务状态条件更新版本号（每次状态变更 +1，派发前 CAS 校验）。
+    add_column_if_missing(c, "tasks", "version", "INTEGER NOT NULL DEFAULT 0");
+
     // M4 三档恢复（DESIGN §10）：中断任务的恢复状态列（幂等列添加）。
     //   recovery_pending: 1=待走三档恢复流程（启动标记 / 档位切换时保持）
     //   recovery_tier:    下一个要尝试的档位（native_resume | handoff）
@@ -432,6 +435,7 @@ fn task_row(r: &Row) -> rusqlite::Result<Task> {
             .unwrap_or_else(|| serde_json::json!({})),
         negotiation_round: r.get("negotiation_round").unwrap_or(0),
         status: r.get("status")?,
+        version: r.get("version").unwrap_or(0),
         attempt: r.get("attempt")?,
         rejection_count: r.get("rejection_count")?,
         failure_count: r.get("failure_count")?,
@@ -652,6 +656,54 @@ pub fn has_window_item(c: &Connection, milestone_id: &str) -> bool {
             && i.payload.get("milestone_id").and_then(|v| v.as_str()) == Some(milestone_id)
     })
 }
+/// ARCH §5.2：派发条件更新（compare-and-set）。
+///
+/// 仅当 `id`、`version`、当前状态都在预期内时更新为 `to`、写入 attempt 并把 version+1。
+/// 返回 false = 已被其他唤醒/操作抢先，调用方必须放弃本次派发。
+pub fn cas_task_dispatch(
+    c: &Connection,
+    id: &str,
+    expected_version: i64,
+    from: &[&str],
+    to: &str,
+    attempt: i64,
+) -> bool {
+    if from.is_empty() {
+        return false;
+    }
+    let placeholders = vec!["?"; from.len()].join(",");
+    let sql = format!(
+        "UPDATE tasks SET status=?, attempt=?, version=version+1 \
+         WHERE id=? AND version=? AND status IN ({placeholders})"
+    );
+    let mut vals: Vec<rusqlite::types::Value> = vec![
+        rusqlite::types::Value::Text(to.to_string()),
+        rusqlite::types::Value::Integer(attempt),
+        rusqlite::types::Value::Text(id.to_string()),
+        rusqlite::types::Value::Integer(expected_version),
+    ];
+    vals.extend(from.iter().map(|s| rusqlite::types::Value::Text((*s).to_string())));
+    c.execute(&sql, rusqlite::params_from_iter(vals))
+        .map(|n| n == 1)
+        .unwrap_or(false)
+}
+
+/// 仅“占用”一个阶段（状态不变，例如 plan_review / awaiting_acceptance），
+/// 用 version+1 保证同一版本只能被一个派发者抢到。
+pub fn cas_task_claim(c: &Connection, id: &str, expected_version: i64, status: &str) -> bool {
+    c.execute(
+        "UPDATE tasks SET version=version+1 WHERE id=?1 AND version=?2 AND status=?3",
+        params![id, expected_version, status],
+    )
+    .map(|n| n == 1)
+    .unwrap_or(false)
+}
+
+/// 停机时把 WAL 落盘（尽力而为；失败不阻塞退出）。
+pub fn checkpoint(c: &Connection) {
+    let _ = c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+}
+
 pub fn get_task(c: &Connection, id: &str) -> Option<Task> {
     c.query_row("SELECT * FROM tasks WHERE id=?1", params![id], task_row).optional().ok().flatten()
 }
@@ -664,6 +716,42 @@ pub fn list_agents(c: &Connection) -> Vec<Agent> {
 pub fn get_agent(c: &Connection, id: &str) -> Option<Agent> {
     c.query_row("SELECT * FROM agents WHERE id=?1", params![id], agent_row).optional().ok().flatten()
 }
+/// ARCH §8.3 启动对账：合并重复的 open 收件箱条目。
+///
+/// 同一项目、同一类型、同一目标（task / milestone / decision）且同一 reason 的 open
+/// 条目只保留最早一条；其余标记为 resolved（resolution 记录去重原因）。幂等。
+pub fn dedupe_open_inbox(c: &Connection) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = 0usize;
+    for i in list_inbox(c).into_iter().filter(|i| i.status == "open") {
+        let field = |k: &str| i.payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let key = format!(
+            "{}|{}|{}|{}|{}|{}",
+            i.project_id,
+            i.kind,
+            field("task_id"),
+            field("milestone_id"),
+            field("decision_id"),
+            field("reason"),
+        );
+        // 没有目标信息的条目无法可靠判定重复 → 一律保留。
+        if key.ends_with("|||||") || seen.insert(key) {
+            continue;
+        }
+        let resolution = serde_json::json!({"resolution": "deduped", "note": "startup reconciliation"});
+        if c.execute(
+            "UPDATE inbox SET status='resolved', resolution=?2 WHERE id=?1 AND status='open'",
+            params![i.id, resolution.to_string()],
+        )
+        .map(|n| n == 1)
+        .unwrap_or(false)
+        {
+            resolved += 1;
+        }
+    }
+    resolved
+}
+
 pub fn list_inbox(c: &Connection) -> Vec<InboxItem> {
     let mut st = c.prepare("SELECT * FROM inbox ORDER BY (status='open') DESC, created_at, id").unwrap();
     let v = st.query_map([], inbox_row).unwrap().filter_map(|x| x.ok()).collect();
@@ -1333,8 +1421,56 @@ mod tests {
         migrate(&c); // a second boot must not error
         migrate(&c);
         assert!(table_has_column(&c, "tasks", "milestone_id"));
+        assert!(table_has_column(&c, "tasks", "version"));
         assert!(table_has_column(&c, "projects", "workspace"));
         assert!(table_has_column(&c, "projects", "baseline"));
+    }
+
+    #[test]
+    fn cas_dispatch_allows_only_one_claimer() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj_cas");
+        c.execute(
+            "INSERT INTO tasks (id,project_id,title,status,attempt,version,created_at)
+             VALUES ('t1','prj_cas','x','ready',0,0,1)",
+            [],
+        ).unwrap();
+
+        assert!(cas_task_dispatch(&c, "t1", 0, &["ready"], "executing", 1));
+        let t = get_task(&c, "t1").unwrap();
+        assert_eq!(t.status, "executing");
+        assert_eq!(t.attempt, 1);
+        assert_eq!(t.version, 1);
+
+        // 旧 version / 旧状态 → 0 行，第二次派发必须放弃。
+        assert!(!cas_task_dispatch(&c, "t1", 0, &["ready"], "executing", 2));
+        assert!(!cas_task_dispatch(&c, "t1", 1, &["ready"], "executing", 2));
+        assert_eq!(get_task(&c, "t1").unwrap().attempt, 1);
+    }
+
+    #[test]
+    fn startup_reconciliation_dedupes_open_inbox() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        for (id, reason) in [
+            ("inb_1", "failure_limit"),
+            ("inb_2", "failure_limit"),
+            ("inb_3", "rejection_limit"),
+        ] {
+            c.execute(
+                "INSERT INTO inbox (id,project_id,\"type\",payload,status,created_at)
+                 VALUES (?1,'prj_x','escalation',?2,'open',1)",
+                params![id, serde_json::json!({"task_id": "t1", "reason": reason}).to_string()],
+            ).unwrap();
+        }
+
+        assert_eq!(dedupe_open_inbox(&c), 1);
+        assert_eq!(dedupe_open_inbox(&c), 0); // 幂等
+        let open: Vec<_> = list_inbox(&c).into_iter().filter(|i| i.status == "open").collect();
+        assert_eq!(open.len(), 2);
+        assert!(open.iter().any(|i| i.payload["reason"] == "failure_limit"));
+        assert!(open.iter().any(|i| i.payload["reason"] == "rejection_limit"));
     }
 
     #[test]
@@ -1742,7 +1878,7 @@ pub fn task_tried_clear(c: &Connection, task_id: &str) {
 pub fn set_task_agent(c: &Connection, task_id: &str, role: &str, agent_id: Option<&str>, pinned: bool) {
     let col = if role == "acceptor" { "acceptor_agent_id" } else { "executor_agent_id" };
     let _ = c.execute(
-        &format!("UPDATE tasks SET {col}=?2, agent_pinned=?3 WHERE id=?1"),
+        &format!("UPDATE tasks SET {col}=?2, agent_pinned=?3, version=version+1 WHERE id=?1"),
         params![task_id, agent_id, pinned as i64],
     );
 }

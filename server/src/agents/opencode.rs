@@ -1777,6 +1777,7 @@ mod tests {
             acceptance_required: true,
             acceptance_criteria: Some("c".into()),
             negotiation_status: "agreed".into(),
+            version: 0,
             negotiation_round: 0,
             execution_plan: None,
             plan_rejection_count: 0,

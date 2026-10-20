@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::{atomic::{AtomicU64, Ordering}, Mutex}};
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Mutex}};
 use tokio::{sync::{broadcast, Notify}, task::JoinHandle};
 use serde_json::Value;
 
@@ -21,6 +21,8 @@ pub struct App {
     pub sessions: Mutex<HashMap<String, String>>,
     /// M4.5 全局 agent 熔断（限流/配置错误临时禁用，跨项目生效）
     pub circuits: std::sync::Mutex<std::collections::HashMap<String, (i64, String)>>,
+    /// ARCH §8.4：优雅停机标记。置位后调度器不再开始新的扫描/派发。
+    pub stopping: AtomicBool,
 }
 
 impl App {
@@ -31,6 +33,25 @@ impl App {
     /// Coalescing wakeup: notify_one stores at most one permit.
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.wake();
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    /// 取消全部在途 worker（停机时调用；状态由下次启动对账恢复）。
+    pub fn abort_all_handles(&self) {
+        let map = std::mem::take(&mut *self.handles.lock().unwrap());
+        for (_, hs) in map {
+            for e in hs {
+                e.handle.abort();
+            }
+        }
     }
 
     pub fn alloc_handle_id(&self) -> u64 {

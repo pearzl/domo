@@ -406,6 +406,7 @@ mod tests {
             agent_pinned: false,
             tried_agents: serde_json::json!({}),
             status: "executing".into(),
+            version: 0,
             attempt: 1,
             rejection_count: 0,
             failure_count: 0,

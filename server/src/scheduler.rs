@@ -10,7 +10,6 @@
 //! - 恢复必须可重入：重复执行不得产生重复收件箱条目、重复计次或重复提交。
 
 use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
-use tokio::time::MissedTickBehavior;
 
 use crate::{
     agents::{mock, opencode, ExecMode, ExecOutcome},
@@ -28,18 +27,51 @@ use crate::{
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
+/// 兜底巡检间隔（ARCH §5.1）：没有命令/完成回报/到期时间时不空转。
+const FALLBACK_SCAN: Duration = Duration::from_secs(30);
+
+/// 启动对账（ARCH §8.3）：重复收件箱、遗留宿主。DB 恢复标记由 `db::open` 完成。
+/// 幂等；返回本次修正数量，便于日志与测试。
+pub fn reconcile(state: &Arc<App>) -> (usize, usize) {
+    let deduped = {
+        let c = state.db.lock().unwrap();
+        db::dedupe_open_inbox(&c)
+    };
+    let reaped = crate::host::reap_orphans();
+    if deduped > 0 || reaped > 0 {
+        tracing::info!(deduped, reaped, "startup reconciliation complete");
+    }
+    (deduped, reaped)
+}
+
 pub async fn run(state: Arc<App>) {
-    let mut interval = tokio::time::interval(Duration::from_millis(500));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = interval.tick() => { crate::host::sweep(Duration::from_secs(1800)); }
-            _ = state.wake.notified() => {}
-        }
+    // 先做一轮即时扫描，随后只在“命令 / 完成回报 / 30s 兜底”时醒来。
+    if !state.is_stopping() {
+        crate::host::sweep(Duration::from_secs(1800));
         scan(&state);
         decision::scan(&state);
         replan::scan(&state);
     }
+    loop {
+        if state.is_stopping() {
+            break;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(FALLBACK_SCAN) => {}
+            _ = state.wake.notified() => {}
+        }
+        if state.is_stopping() {
+            break;
+        }
+        crate::host::sweep(Duration::from_secs(1800));
+        scan(&state);
+        if state.is_stopping() {
+            break;
+        }
+        decision::scan(&state);
+        replan::scan(&state);
+    }
+    tracing::info!("scheduler stopped");
 }
 
 const TERMINAL: [&str; 2] = ["done", "cancelled"];
@@ -97,6 +129,8 @@ fn scan(state: &Arc<App>) {
             if t.status == "planned" {
                 if let Some(reason) = decision::planned_gate(&conn, &t) {
                     events::status_changed(state, &conn, &t, "ready", reason);
+                    // 状态已变化 → 立即再跑一轮（本轮的 tasks 快照仍是 planned）。
+                    state.wake();
                     map.entry(t.id.clone()).and_modify(|m| m.status = "ready".into());
                 }
             }
@@ -591,10 +625,10 @@ fn dispatch_exec(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
     let fresh = db::get_task(conn, &tid).unwrap_or(fresh);
 
     let attempt = fresh.attempt + 1;
-    let _ = conn.execute(
-        "UPDATE tasks SET status='executing', attempt=?2 WHERE id=?1",
-        params![tid, attempt],
-    );
+    // ARCH §5.2：条件更新抢派发权；0 行 = 状态/版本已被别人改过，放弃本次派发。
+    if !db::cas_task_dispatch(conn, &tid, fresh.version, &["ready", "executing"], "executing", attempt) {
+        return false;
+    }
     db::occupancy_add(conn, &agent_id, &tid);
     if let Some(a) = db::get_agent(conn, &agent_id) {
         events::send_agent(&state, &a);
@@ -607,10 +641,12 @@ fn dispatch_exec(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
                "purpose": format!("执行任务《{}》第 {} 轮", fresh.title, attempt),
                "trigger": trigger}),
     );
+    events::push_event(state, conn, &fresh.project_id, Some(&tid), "task.status_changed",
+        json!({"from": fresh.status, "to": "executing", "reason": "dispatched"}));
     let mut f = fresh.clone();
     f.status = "executing".into();
+    f.version += 1;
     f.attempt = attempt;
-    events::status_changed(state, conn, &fresh, "executing", "dispatched");
     events::send_task(state, &f);
 
     let state2 = state.clone();
@@ -636,10 +672,9 @@ fn dispatch_plan(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
     };
     let fresh = db::get_task(conn, &tid).unwrap_or(fresh);
     let attempt = fresh.attempt + 1;
-    let _ = conn.execute(
-        "UPDATE tasks SET status='plan_drafting', attempt=?2 WHERE id=?1",
-        params![tid, attempt],
-    );
+    if !db::cas_task_dispatch(conn, &tid, fresh.version, &["ready", "plan_drafting"], "plan_drafting", attempt) {
+        return false;
+    }
     db::occupancy_add(conn, &agent_id, &tid);
     if let Some(a) = db::get_agent(conn, &agent_id) {
         events::send_agent(state, &a);
@@ -652,10 +687,12 @@ fn dispatch_plan(state: &Arc<App>, conn: &Connection, t: &Task, trigger: &str) -
                "purpose": format!("制定任务计划《{}》第 {} 轮", fresh.title, attempt),
                "trigger": trigger}),
     );
+    events::push_event(state, conn, &fresh.project_id, Some(&tid), "task.status_changed",
+        json!({"from": fresh.status, "to": "plan_drafting", "reason": "plan_drafting_started"}));
     let mut f = fresh.clone();
     f.status = "plan_drafting".into();
+    f.version += 1;
     f.attempt = attempt;
-    events::status_changed(state, conn, &fresh, "plan_drafting", "plan_drafting_started");
     events::send_task(state, &f);
 
     let state2 = state.clone();
@@ -675,6 +712,9 @@ fn dispatch_plan_review(state: &Arc<App>, conn: &Connection, t: &Task, _acc_id: 
     let acc_id = acc_owned.as_str();
     // 绑定结果落库后重取快照（worker 依赖其中的 acceptor_agent_id 释放占用）
     let t = &db::get_task(conn, &tid).unwrap_or_else(|| t.clone());
+    if !db::cas_task_claim(conn, &tid, t.version, "plan_review") {
+        return false;
+    }
     db::occupancy_add(conn, acc_id, &tid);
     events::send_agent(state, &agent);
     events::push_event(
@@ -757,11 +797,15 @@ async fn plan_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                     state.wake();
                     return;
                 }
-                let _ = conn.execute("UPDATE tasks SET status='plan_review' WHERE id=?1", params![fresh.id]);
+                let _ = conn.execute(
+                    "UPDATE tasks SET status='plan_review', version=version+1 WHERE id=?1",
+                    params![fresh.id],
+                );
                 events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "task.plan_drafted",
                     json!({"attempt": fresh.attempt, "excerpt": plan.chars().take(400).collect::<String>()}));
                 let mut f2 = fresh.clone();
                 f2.status = "plan_review".into();
+                f2.version += 1;
                 f2.execution_plan = Some(plan);
                 events::send_task(&state, &f2);
             }
@@ -946,7 +990,17 @@ fn dispatch_recover(
         ExecMode::Resume { real_id } => Some(real_id.clone()),
         _ => None,
     };
-    let _ = conn.execute("UPDATE tasks SET status='executing' WHERE id=?1", params![fresh.id]);
+    if !db::cas_task_dispatch(
+        conn,
+        &fresh.id,
+        fresh.version,
+        &["executing", "recovering", "suspended"],
+        "executing",
+        fresh.attempt,
+    ) {
+        return false;
+    }
+    let _ = conn.execute("UPDATE tasks SET recovery_manual=0 WHERE id=?1", params![fresh.id]);
     db::occupancy_add(conn, &agent.id, &fresh.id);
     if let Some(a) = db::get_agent(conn, &agent.id) {
         events::send_agent(state, &a);
@@ -959,12 +1013,15 @@ fn dispatch_recover(
                "purpose": format!("恢复执行任务《{}》第 {} 轮（三档恢复 · {}）", fresh.title, fresh.attempt, tier),
                "trigger": "recovery", "recovery_tier": tier}),
     );
+    let mut f = fresh.clone();
+    f.status = "executing".into();
+    f.version += 1;
     if fresh.status != "executing" {
-        // suspended → executing（事件时间线可读；同时清掉 recovery_manual 标记）
-        events::status_changed(state, conn, &fresh, "executing", "recovery");
-    } else {
-        events::send_task(state, &fresh);
+        // suspended / recovering → executing（事件时间线可读）
+        events::push_event(state, conn, &fresh.project_id, Some(&fresh.id), "task.status_changed",
+            json!({"from": fresh.status, "to": "executing", "reason": "recovery"}));
     }
+    events::send_task(state, &f);
     let state2 = state.clone();
     let hid = state.alloc_handle_id();
     let h = tokio::spawn(async move { exec_worker(state2, fresh, agent, hid, mode).await });
@@ -982,6 +1039,9 @@ fn dispatch_accept(state: &Arc<App>, conn: &Connection, t: &Task, _acc_id: &str)
     };
     let acc_id = acc_owned.as_str();
     let t = &db::get_task(conn, &tid).unwrap_or_else(|| t.clone());
+    if !db::cas_task_claim(conn, &tid, t.version, "awaiting_acceptance") {
+        return;
+    }
     db::occupancy_add(conn, acc_id, &tid);
     if let Some(a) = db::get_agent(conn, acc_id) {
         events::send_agent(&state, &a);
@@ -1414,6 +1474,7 @@ mod tests {
             acceptance_required: true,
             acceptance_criteria: None,
             negotiation_status: "agreed".into(),
+            version: 0,
             negotiation_round: 0,
             execution_plan: None,
             plan_rejection_count: 0,

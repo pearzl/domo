@@ -128,6 +128,8 @@ export interface Task {
   /** M4 计划审查打回轮数 */
   plan_rejection_count?: number;
   status: TaskStatus;
+  /** 条件更新版本号（ARCH A2；前端只读展示/排查） */
+  version?: number;
   attempt: number;
   rejection_count: number;
   failure_count: number;

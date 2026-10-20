@@ -57,7 +57,7 @@ pub fn boot_mark(c: &Connection) {
         // 误显示为「正在执行」），改为显式 recovering；真正派发恢复时才回到 executing。
         db::recovery_set(c, &id, Some(true), Some(TIER_NATIVE), None);
         let _ = c.execute(
-            "UPDATE tasks SET status='recovering' WHERE id=?1 AND status='executing'",
+            "UPDATE tasks SET status='recovering', version=version+1 WHERE id=?1 AND status='executing'",
             params![id],
         );
     }
@@ -497,6 +497,7 @@ mod tests {
             wake: Default::default(),
             sessions: Default::default(),
             circuits: Default::default(),
+            stopping: Default::default(),
         });
         // 事件写入独立连接（state.db 与这里不同）：直接用本地连接断言 payload 结构
         let payload = recovered(
@@ -582,6 +583,7 @@ mod tests {
             wake: Default::default(),
             sessions: Default::default(),
             circuits: Default::default(),
+            stopping: Default::default(),
         });
         let t = crate::db::get_task(&c, "t1").unwrap();
         // 第一档跳过 + 第二档失败的记录先落

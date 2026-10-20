@@ -149,6 +149,9 @@ pub struct Task {
     #[serde(default)]
     pub tried_agents: Value,
     pub status: String,
+    /// 状态条件更新（CAS）版本号：每次状态变更 +1，派发时校验，防重复派发。
+    #[serde(default)]
+    pub version: i64,
     pub attempt: i64,
     pub rejection_count: i64,
     pub failure_count: i64,
