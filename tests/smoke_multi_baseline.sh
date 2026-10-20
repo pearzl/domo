@@ -8,7 +8,8 @@
 #   4. 恢复已暂停项目 = 切换项目：脏工作区阻止并返回 dirty[{repo,files}]，项目保持暂停；
 #      清理后恢复 B → 成功；再从 B 切换回 A → 各仓回到 domo/iter-<A>；
 #   5. 某仓库只读时确认 C → 409 并列出失败仓库，其他仓库不切换、C 分支不创建；
-#      确认 C 前工作区有脏文件时同样 409 dirty 且不切换。
+#      确认 C 前工作区有脏文件时同样 409 dirty 且不切换；
+#   6. 多仓任务验收通过后逐仓提交：有改动写一次提交、无改动跳过、提交失败进收件箱。
 #
 # 用法：bash tests/smoke_multi_baseline.sh
 #       DOMO_BASELINE_SMOKE_PORT=xxxx bash tests/smoke_multi_baseline.sh
@@ -55,7 +56,7 @@ if ! curl -sf --max-time 2 "http://127.0.0.1:$PORT/api/agents" >/dev/null 2>&1; 
 fi
 
 python3 - "$PORT" "$WS" <<'PY'
-import json, os, subprocess, sys, urllib.error, urllib.request
+import json, os, subprocess, sys, time, urllib.error, urllib.request
 
 PORT, WS = sys.argv[1], sys.argv[2]
 BASE = f"http://127.0.0.1:{PORT}/api"
@@ -87,6 +88,26 @@ def git(dir, *args):
 
 def branch(dir):
     return git(dir, "rev-parse", "--abbrev-ref", "HEAD")
+
+
+def wait_task(pid, tid, wanted, timeout=60):
+    end = time.time() + timeout
+    while time.time() < end:
+        s, r = req("GET", f"/projects/{pid}")
+        t = next((x for x in (r or {}).get("tasks", []) if x.get("id") == tid), None)
+        if t and t.get("status") in wanted:
+            return t
+        time.sleep(0.2)
+    return None
+
+
+def events(pid):
+    s, r = req("GET", f"/events?project_id={pid}")
+    return r if s == 200 else []
+
+
+def task_events(pid, tid, kind):
+    return [e for e in events(pid) if e.get("task_id") == tid and e.get("type") == kind]
 
 
 def make_ready():
@@ -183,8 +204,105 @@ s, r = req("POST", f"/projects/{pa}/resume", {})
 check("switch back to A by resuming it", s == 200, f"{s} {r}")
 check("A switch restores api branch", branch(os.path.join(WS, "api")) == ba, branch(os.path.join(WS, "api")))
 check("A switch restores web branch", branch(os.path.join(WS, "web")) == ba, branch(os.path.join(WS, "web")))
+
+# 多仓任务验收通过后：在项目分支逐仓提交，不建 worktree、不做跨仓合并。
+s, ex = req("POST", "/agents", {"name": "baseline-exec", "adapter": "mock", "roles": ["executor"],
+                                "capabilities": {"max_parallel": 2}, "config": {"duration_ms": 50}})
+s2, acc = req("POST", "/agents", {"name": "baseline-acc", "adapter": "mock", "roles": ["acceptor"],
+                                  "capabilities": {"max_parallel": 2}, "config": {"duration_ms": 50}})
+check("create mock exec/acceptor", s == 200 and s2 == 200, (ex, acc))
+
+def new_task(title):
+    s, t = req("POST", f"/projects/{pa}/tasks", {
+        "title": title, "description": "多仓任务提交冒烟", "depends_on": [],
+        "executor_agent_id": ex.get("id"), "acceptor_agent_id": acc.get("id"),
+        "acceptance_required": True, "acceptance_criteria": "产物可验收",
+    })
+    return s, t
+
+s, t1 = new_task("提交改动")
+check("create multi task 1", s == 200 and t1.get("id"), f"{s} {t1}")
+with open(os.path.join(WS, "api", "api-change.txt"), "w") as f:
+    f.write("api change\n")
+with open(os.path.join(WS, "web", "web-change.txt"), "w") as f:
+    f.write("web change\n")
+t1 = wait_task(pa, t1.get("id", ""), {"done", "escalated", "suspended"}, timeout=60)
+check("multi task 1 reaches done", (t1 or {}).get("status") == "done", t1)
+subject_api = git(os.path.join(WS, "api"), "log", "-1", "--format=%s")
+subject_web = git(os.path.join(WS, "web"), "log", "-1", "--format=%s")
+check("api project branch committed once", "domo: task " in subject_api, subject_api)
+check("web project branch committed once", "domo: task " in subject_web, subject_web)
+check("task commit leaves both repos clean", not git(os.path.join(WS, "api"), "status", "--porcelain")
+      and not git(os.path.join(WS, "web"), "status", "--porcelain"))
+check("task branches still A", branch(os.path.join(WS, "api")) == ba and branch(os.path.join(WS, "web")) == ba)
+commit_ev = task_events(pa, t1.get("id", ""), "task.commit_completed")
+check("task.commit_completed recorded with 2 commits", commit_ev and len(commit_ev[-1].get("payload", {}).get("commits", [])) == 2, commit_ev)
+check("no worktree merge event for multi task", not task_events(pa, t1.get("id", ""), "task.merge_completed"))
+s, all_inbox = req("GET", "/inbox")
+check("multi task does not raise sandbox violation", not any(
+    (i.get("payload") or {}).get("reason") == "sandbox_violation"
+    and (i.get("payload") or {}).get("task_id") == t1.get("id") for i in (all_inbox or [])))
+
+s, t2 = new_task("无改动")
+check("create multi task 2", s == 200 and t2.get("id"), f"{s} {t2}")
+t2 = wait_task(pa, t2.get("id", ""), {"done", "escalated", "suspended"}, timeout=60)
+check("multi task 2 without changes reaches done", (t2 or {}).get("status") == "done", t2)
+skip_ev = task_events(pa, t2.get("id", ""), "task.commit_skipped")
+check("task.commit_skipped recorded", skip_ev and set(skip_ev[-1].get("payload", {}).get("repos", [])) == {"api", "web"}, skip_ev)
+check("no empty commit created", git(os.path.join(WS, "api"), "log", "-1", "--format=%s") == subject_api)
+
+# 提交失败 → task.commit_failed + 收件箱，任务不静默 done。
+hook_dir = os.path.join(WS, "web", ".git", "hooks")
+os.makedirs(hook_dir, exist_ok=True)
+hook = os.path.join(hook_dir, "pre-commit")
+with open(hook, "w") as f:
+    f.write("#!/bin/sh\nexit 1\n")
+os.chmod(hook, 0o755)
+s, t3 = new_task("提交失败")
+check("create multi task 3", s == 200 and t3.get("id"), f"{s} {t3}")
+with open(os.path.join(WS, "web", "fail.txt"), "w") as f:
+    f.write("fail\n")
+t3 = wait_task(pa, t3.get("id", ""), {"done", "escalated", "suspended"}, timeout=60)
+check("commit failure escalates task", (t3 or {}).get("status") == "escalated", t3)
+fail_ev = task_events(pa, t3.get("id", ""), "task.commit_failed")
+check("task.commit_failed recorded", fail_ev and fail_ev[-1].get("payload", {}).get("failures"), fail_ev)
+s, inbox = req("GET", "/inbox")
+inbox_ok = any(i.get("status") == "open" and i.get("type") == "escalation"
+               and (i.get("payload") or {}).get("reason") == "multi_commit_failed"
+               and (i.get("payload") or {}).get("task_id") == t3.get("id") for i in (inbox or []))
+check("commit failure lands in inbox", inbox_ok, inbox)
+os.remove(hook)
+os.remove(os.path.join(WS, "web", "fail.txt"))
+git(os.path.join(WS, "web"), "reset", "-q")
+check("failed repo cleaned for later checks", not git(os.path.join(WS, "web"), "status", "--porcelain"))
+
+# 人工验收路径：项目暂停时验收不被自动派发，人接管后同样在该项目分支提交。
+s, slow = req("POST", "/agents", {"name": "baseline-slow", "adapter": "mock", "roles": ["executor"],
+                                 "capabilities": {"max_parallel": 1}, "config": {"duration_ms": 1500}})
+check("create slow mock executor", s == 200, slow)
+s, t4 = req("POST", f"/projects/{pa}/tasks", {
+    "title": "人工验收提交", "description": "暂停后人工验收", "depends_on": [],
+    "executor_agent_id": slow.get("id"), "acceptor_agent_id": acc.get("id"),
+    "acceptance_required": True, "acceptance_criteria": "人工验收",
+})
+check("create multi task 4", s == 200 and t4.get("id"), f"{s} {t4}")
+with open(os.path.join(WS, "web", "human-change.txt"), "w") as f:
+    f.write("human change\n")
+t4 = wait_task(pa, t4.get("id", ""), {"executing"}, timeout=30)
+check("task 4 executing before pause", (t4 or {}).get("status") == "executing", t4)
 s, r = req("POST", f"/projects/{pa}/pause", {})
-check("pause A before C", s == 200, f"{s} {r}")
+check("pause A during task 4", s == 200, f"{s} {r}")
+t4 = wait_task(pa, t4.get("id", ""), {"awaiting_acceptance"}, timeout=30)
+check("task 4 waits for human acceptance while paused", (t4 or {}).get("status") == "awaiting_acceptance", t4)
+s, r = req("GET", f"/projects/{pa}")
+check("project A paused before human acceptance", (r or {}).get("project", {}).get("status") == "paused", r)
+s, r = req("POST", f"/tasks/{t4.get('id')}/accept", {"comment": "人工验收通过"})
+check("human accept on multi task", s == 200 and (r or {}).get("status") == "done", f"{s} {r}")
+check("human accept commits web branch",
+      "domo: task " in git(os.path.join(WS, "web"), "log", "-1", "--format=%s"),
+      git(os.path.join(WS, "web"), "log", "-1", "--format=%s"))
+check("human accept commit event", bool(task_events(pa, t4.get("id", ""), "task.commit_completed")))
+check("A remains paused before C", req("GET", f"/projects/{pa}")[1].get("project", {}).get("status") == "paused")
 
 s, c = req("POST", "/projects", {"name": "C", "brief": "third", "engineering_id": eid})
 check("create project C", s == 200 and c.get("id"), f"{s} {c}")

@@ -78,6 +78,28 @@ pub enum SwitchError {
     Baseline(BaselineFailure),
 }
 
+/// 多仓任务提交：每个仓库的一次提交。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RepoCommit {
+    pub repo: String,
+    pub branch: String,
+    pub commit: String,
+}
+
+/// 多仓任务提交结果：有改动的仓库提交，无改动跳过，失败逐仓记录。
+#[derive(Debug, Clone, Default)]
+pub struct CommitOutcome {
+    pub commits: Vec<RepoCommit>,
+    pub skipped: Vec<String>,
+    pub failures: Vec<RepoFailure>,
+}
+
+impl CommitOutcome {
+    pub fn is_ok(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
 /// 项目迭代分支名：`domo/iter-<项目 id 后缀>`。
 pub fn iteration_branch(project_id: &str) -> String {
     let short = project_id.rsplit('_').next().unwrap_or(project_id);
@@ -444,6 +466,114 @@ pub fn apply_multi(root: &Path, repos: &[RepoRef], project_id: &str) -> Result<V
     switch_multi(root, repos, &targets).map(|o| o.baseline)
 }
 
+/// 多仓任务提交：在项目分支上对每个仓库 `git add -A && git commit`。
+///
+/// - 仓库必须位于目标项目分支，避免把改动提交到别的项目分支；
+/// - 工作区干净 → 跳过并记录，不产生空提交；
+/// - 提交失败逐仓记录，调用方决定是否转人工；
+/// - 不建 worktree、不做跨仓合并。
+pub fn commit_multi_task(
+    root: &Path,
+    repos: &[RepoRef],
+    targets: &HashMap<String, String>,
+    task_id: &str,
+    title: &str,
+) -> CommitOutcome {
+    let mut out = CommitOutcome::default();
+    let short = task_id.rsplit('_').next().unwrap_or(task_id);
+    let message = format!("domo: task {short} ({title})");
+    for repo in repos {
+        let dir = repo_dir(root, &repo.rel);
+        let Some(expected) = targets
+            .get(&repo.rel)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            out.failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: "missing target branch".into(),
+            });
+            continue;
+        };
+        let Some(branch) = current_branch(&dir) else {
+            out.failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: format!("not on project branch {expected} (detached HEAD)"),
+            });
+            continue;
+        };
+        if branch != expected {
+            out.failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: format!("not on project branch {expected} (current {branch})"),
+            });
+            continue;
+        }
+        match dirty_files(&dir) {
+            Ok(files) if files.is_empty() => {
+                out.skipped.push(repo.rel.clone());
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                out.failures.push(RepoFailure {
+                    repo: repo.rel.clone(),
+                    error: e,
+                });
+                continue;
+            }
+        }
+        if let Err(e) = git(&dir, &["add", "-A"]).and_then(|o| {
+            if o.status.success() {
+                Ok(o)
+            } else {
+                Err(format!(
+                    "git add -A failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ))
+            }
+        }) {
+            out.failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: e,
+            });
+            continue;
+        }
+        match git(&dir, &["commit", "-m", &message]) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                out.failures.push(RepoFailure {
+                    repo: repo.rel.clone(),
+                    error: format!(
+                        "git commit failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ),
+                });
+                continue;
+            }
+            Err(e) => {
+                out.failures.push(RepoFailure {
+                    repo: repo.rel.clone(),
+                    error: e,
+                });
+                continue;
+            }
+        }
+        match git_ok(&dir, &["rev-parse", "HEAD"]) {
+            Ok(commit) => out.commits.push(RepoCommit {
+                repo: repo.rel.clone(),
+                branch,
+                commit,
+            }),
+            Err(e) => out.failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: e,
+            }),
+        }
+    }
+    out
+}
+
 /// 单仓项目基线：记录当前分支；detached HEAD 记录当前提交。
 ///
 /// `rel` 为仓库相对工作区的路径（"." = 工作区本身是仓库）。
@@ -706,6 +836,62 @@ mod tests {
                 Some("domo/iter-aaaa")
             );
         }
+    }
+
+    #[test]
+    fn multi_task_commit_commits_changes_and_skips_clean_repos() {
+        let tmp = Tmp::new("commit");
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        init_repo(&root.join("web"));
+        let repos = repos(&["api", "web"]);
+        apply_multi(root, &repos, "prj_aaaa").unwrap();
+        let targets = target_branches("prj_aaaa", None, &repos);
+
+        std::fs::write(root.join("api").join("api.txt"), "a\n").unwrap();
+        std::fs::write(root.join("web").join("web.txt"), "b\n").unwrap();
+        let out = commit_multi_task(root, &repos, &targets, "tsk_abc123", "交付");
+        assert!(out.is_ok(), "failures: {:?}", out.failures);
+        assert_eq!(out.commits.len(), 2);
+        assert!(out.skipped.is_empty());
+        for rel in ["api", "web"] {
+            assert!(dirty_files(&root.join(rel)).unwrap().is_empty());
+            let subject = git_ok(&root.join(rel), &["log", "-1", "--format=%s"]).unwrap();
+            assert!(subject.contains("domo: task abc123"));
+            assert_eq!(
+                current_branch(&root.join(rel)).as_deref(),
+                Some("domo/iter-aaaa")
+            );
+        }
+
+        // 无改动 → 跳过，不产生空提交。
+        let out = commit_multi_task(root, &repos, &targets, "tsk_abc124", "空改动");
+        assert!(out.is_ok());
+        assert!(out.commits.is_empty());
+        assert_eq!(out.skipped, vec!["api".to_string(), "web".to_string()]);
+    }
+
+    #[test]
+    fn multi_task_commit_refuses_to_commit_on_another_project_branch() {
+        let tmp = Tmp::new("commit-wrong-branch");
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        init_repo(&root.join("web"));
+        let repos = repos(&["api", "web"]);
+        apply_multi(root, &repos, "prj_aaaa").unwrap();
+        let targets = target_branches("prj_aaaa", None, &repos);
+
+        git_test(&root.join("web"), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(root.join("web").join("web.txt"), "b\n").unwrap();
+        std::fs::write(root.join("api").join("api.txt"), "a\n").unwrap();
+        let out = commit_multi_task(root, &repos, &targets, "tsk_abc125", "错分支");
+
+        assert!(!out.is_ok());
+        assert_eq!(out.commits.len(), 1);
+        assert_eq!(out.commits[0].repo, "api");
+        assert_eq!(out.failures.len(), 1);
+        assert_eq!(out.failures[0].repo, "web");
+        assert!(out.failures[0].error.contains("not on project branch"));
     }
 
     #[test]

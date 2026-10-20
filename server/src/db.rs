@@ -1614,6 +1614,15 @@ pub fn set_project_repos(c: &Connection, id: &str, repos: &[crate::models::RepoR
     );
 }
 
+/// 工程是否为多仓目录（不依赖项目仓库数量，单仓工程不受影响）。
+pub fn project_is_multi(c: &Connection, p: &Project) -> bool {
+    p.engineering_id
+        .as_deref()
+        .and_then(|eid| get_engineering(c, eid))
+        .map(|e| e.workspace_kind == "multi")
+        .unwrap_or(false)
+}
+
 /// ARCH §15：写入项目基线（None 清除）。
 pub fn set_project_baseline(c: &Connection, id: &str, baseline: Option<&Value>) {
     let s = baseline.map(|v| v.to_string());

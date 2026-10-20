@@ -84,7 +84,7 @@ fn scan(state: &Arc<App>) {
 
         // M4.5：多仓库项目禁止任务并行（保证合入前同步 + 合入后评估的有效性）：
         // 该项目内已有任一在途会话 → 本轮不派发任何新工作。
-        let multi_repo = db::project_repos(&conn, &project.id).len() > 1;
+        let multi_repo = db::project_is_multi(&conn, &project);
         if multi_repo && tasks.iter().any(|t| state.has_live_handle(&t.id)) {
             continue;
         }
@@ -1208,14 +1208,66 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                 let conn = state.db.lock().unwrap();
                 db::get_project(&conn, &fresh.project_id)
             };
-            // 合入与越权检测都要跑 git：必须在数据库锁之外
-            let merge = match &project {
-                Some(p) => crate::sandbox::merge_all(&state, p, &fresh, true),
-                None => crate::sandbox::MergeResult::Ok(vec![]),
+            let is_multi = project
+                .as_ref()
+                .map(|p| {
+                    let conn = state.db.lock().unwrap();
+                    db::project_is_multi(&conn, p)
+                })
+                .unwrap_or(false);
+            // 多仓：直接在项目分支上提交；单仓：保持 worktree 合入。
+            // 两者都要跑 git，必须在数据库锁之外。
+            let commit = if is_multi {
+                let (root, repos) = {
+                    let conn = state.db.lock().unwrap();
+                    let p = project.as_ref().expect("multi project");
+                    (db::project_workdir(&conn, p), db::project_repos(&conn, &p.id))
+                };
+                let Some(root) = root else {
+                    let conn = state.db.lock().unwrap();
+                    let _ = events::status_changed(&state, &conn, &fresh, "escalated", "multi_commit_failed");
+                    let detail = "project has no working directory".to_string();
+                    events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id),
+                        "task.commit_failed", json!({"failures": [{"repo": ".", "error": detail}], "commits": [], "skipped": []}));
+                    events::new_inbox_item(&state, &conn, &fresh.project_id, "escalation",
+                        json!({"task_id": fresh.id, "reason": "multi_commit_failed", "phase": "acceptance",
+                               "detail": detail}));
+                    drop(conn);
+                    state.wake();
+                    return;
+                };
+                let p = project.as_ref().expect("multi project");
+                let repos = if repos.is_empty() {
+                    crate::sandbox::scan_repos(&root)
+                        .into_iter()
+                        .map(|(rel, main)| crate::models::RepoRef { rel, main })
+                        .collect()
+                } else {
+                    repos
+                };
+                let targets = crate::baseline::target_branches(&p.id, p.baseline.as_ref(), &repos);
+                Some(crate::baseline::commit_multi_task(
+                    &root, &repos, &targets, &fresh.id, &fresh.title,
+                ))
+            } else {
+                None
             };
-            let violations = match &project {
-                Some(p) => crate::sandbox::detect_violations(&state, p, &fresh),
-                None => vec![],
+            let merge = if is_multi {
+                crate::sandbox::MergeResult::Ok(vec![])
+            } else {
+                match &project {
+                    Some(p) => crate::sandbox::merge_all(&state, p, &fresh, true),
+                    None => crate::sandbox::MergeResult::Ok(vec![]),
+                }
+            };
+            // 多仓不使用任务 worktree（直接改工程目录），不存在「scope 外仓库」概念。
+            let violations = if is_multi {
+                vec![]
+            } else {
+                match &project {
+                    Some(p) => crate::sandbox::detect_violations(&state, p, &fresh),
+                    None => vec![],
+                }
             };
 
             let conn = state.db.lock().unwrap();
@@ -1228,6 +1280,37 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                     json!({"task_id": fresh2.id, "reason": "sandbox_violation",
                            "detail": format!("任务《{}》执行期间发现 scope 外源仓库被直接修改（绕过沙盒）", fresh2.title),
                            "violations": violations}));
+            }
+            if let Some(outcome) = commit {
+                if outcome.is_ok() {
+                    if !outcome.commits.is_empty() {
+                        events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                            "task.commit_completed", json!({"commits": outcome.commits}));
+                    }
+                    if !outcome.skipped.is_empty() {
+                        events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                            "task.commit_skipped", json!({"repos": outcome.skipped, "reason": "no_changes"}));
+                    }
+                    let _ = events::status_changed(&state, &conn, &fresh2, "done", "acceptance_passed");
+                } else {
+                    let detail = outcome.failures.iter()
+                        .map(|f| format!("{}: {}", f.repo, f.error))
+                        .collect::<Vec<_>>().join("; ");
+                    events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                        "task.commit_failed", json!({"failures": outcome.failures,
+                                                     "commits": outcome.commits,
+                                                     "skipped": outcome.skipped}));
+                    let _ = events::status_changed(&state, &conn, &fresh2, "escalated", "multi_commit_failed");
+                    events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                        "escalation.raised", json!({"task_id": fresh2.id, "reason": "multi_commit_failed",
+                                                    "phase": "acceptance", "detail": detail}));
+                    events::new_inbox_item(&state, &conn, &fresh2.project_id, "escalation",
+                        json!({"task_id": fresh2.id, "reason": "multi_commit_failed",
+                               "phase": "acceptance",
+                               "detail": format!("任务《{}》验收通过，但项目分支提交失败：{}", fresh2.title, detail),
+                               "failures": outcome.failures}));
+                }
+                return;
             }
             match merge {
                 crate::sandbox::MergeResult::Ok(merged_repos) => {

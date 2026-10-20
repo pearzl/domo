@@ -2714,15 +2714,80 @@ fn human_verdict(st: &Arc<App>, id: &str, accept: bool, comment: Option<&str>) -
     let c = st.db.lock().unwrap();
     if let Some(acc) = t.acceptor_agent_id.clone() {
         db::occupancy_remove(&c, &acc, &t.id);
-        if let Some(ag) = db::get_agent(&c, &acc) { events::send_agent(&st, &ag); }
+        if let Some(ag) = db::get_agent(&c, &acc) { events::send_agent(st, &ag); }
     }
     drop(c);
 
     if accept {
+        let is_multi = {
+            let c = st.db.lock().unwrap();
+            events::push_event(st, &c, &t.project_id, Some(&t.id), "acceptance.recorded",
+                json!({"verdict": "approved", "by": "human", "comment": comment}));
+            db::get_project(&c, &t.project_id)
+                .map(|p| db::project_is_multi(&c, &p))
+                .unwrap_or(false)
+        };
+        if is_multi {
+            // ARCH §15 第 3 步：多仓任务在项目分支上提交，不建 worktree、不做跨仓合并。
+            let (root, repos, baseline) = {
+                let c = st.db.lock().unwrap();
+                match db::get_project(&c, &t.project_id) {
+                    Some(p) => (
+                        db::project_workdir(&c, &p),
+                        db::project_repos(&c, &t.project_id),
+                        p.baseline,
+                    ),
+                    None => (None, Vec::new(), None),
+                }
+            };
+            let Some(root) = root else {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
+            };
+            let repos = if repos.is_empty() {
+                crate::sandbox::scan_repos(&root)
+                    .into_iter()
+                    .map(|(rel, main)| crate::models::RepoRef { rel, main })
+                    .collect()
+            } else {
+                repos
+            };
+            let targets = crate::baseline::target_branches(&t.project_id, baseline.as_ref(), &repos);
+            let outcome = crate::baseline::commit_multi_task(&root, &repos, &targets, &t.id, &t.title);
+            let c = st.db.lock().unwrap();
+            let t2 = if outcome.is_ok() {
+                if !outcome.commits.is_empty() {
+                    events::push_event(st, &c, &t.project_id, Some(&t.id),
+                        "task.commit_completed", json!({"commits": outcome.commits}));
+                }
+                if !outcome.skipped.is_empty() {
+                    events::push_event(st, &c, &t.project_id, Some(&t.id),
+                        "task.commit_skipped", json!({"repos": outcome.skipped, "reason": "no_changes"}));
+                }
+                events::status_changed(st, &c, &t, "done", "human_accepted")
+            } else {
+                let detail = outcome.failures.iter()
+                    .map(|f| format!("{}: {}", f.repo, f.error))
+                    .collect::<Vec<_>>().join("; ");
+                events::push_event(st, &c, &t.project_id, Some(&t.id),
+                    "task.commit_failed", json!({"failures": outcome.failures,
+                                                 "commits": outcome.commits,
+                                                 "skipped": outcome.skipped}));
+                let t2 = events::status_changed(st, &c, &t, "escalated", "multi_commit_failed");
+                events::push_event(st, &c, &t.project_id, Some(&t.id),
+                    "escalation.raised", json!({"task_id": t.id, "reason": "multi_commit_failed",
+                                                "phase": "acceptance", "detail": detail}));
+                events::new_inbox_item(st, &c, &t.project_id, "escalation",
+                    json!({"task_id": t.id, "reason": "multi_commit_failed", "phase": "acceptance",
+                           "detail": format!("任务《{}》人工验收通过，但项目分支提交失败：{}", t.title, detail),
+                           "failures": outcome.failures}));
+                t2
+            };
+            drop(c);
+            st.wake();
+            return ok(t2);
+        }
         let c = st.db.lock().unwrap();
-        events::push_event(&st, &c, &t.project_id, Some(&t.id), "acceptance.recorded",
-            json!({"verdict": "approved", "by": "human", "comment": comment}));
-        let t2 = events::status_changed(&st, &c, &t, "done", "human_accepted");
+        let t2 = events::status_changed(st, &c, &t, "done", "human_accepted");
         drop(c);
         st.wake();
         return ok(t2);
@@ -2733,19 +2798,19 @@ fn human_verdict(st: &Arc<App>, id: &str, accept: bool, comment: Option<&str>) -
     let _ = c.execute("UPDATE tasks SET rejection_count=?2 WHERE id=?1", rusqlite::params![t.id, rc]);
     let mut f = t.clone();
     f.rejection_count = rc;
-    events::push_event(&st, &c, &t.project_id, Some(&t.id), "acceptance.rejected",
+    events::push_event(st, &c, &t.project_id, Some(&t.id), "acceptance.rejected",
         json!({"verdict": "rejected", "by": "human", "comment": comment}));
     if rc >= 2 {
-        let t3 = events::status_changed(&st, &c, &f, "escalated", "rejection_limit");
-        events::push_event(&st, &c, &t.project_id, Some(&t.id), "escalation.raised",
+        let t3 = events::status_changed(st, &c, &f, "escalated", "rejection_limit");
+        events::push_event(st, &c, &t.project_id, Some(&t.id), "escalation.raised",
             json!({"task_id": t.id, "reason": "rejection_limit", "detail": "human rejected twice; escalated"}));
-        events::new_inbox_item(&st, &c, &t.project_id, "escalation",
+        events::new_inbox_item(st, &c, &t.project_id, "escalation",
             json!({"task_id": t.id, "reason": "rejection_limit", "detail": format!("task '{}' rejected {} times (human)", t.title, rc)}));
         drop(c);
         st.wake();
         ok(t3)
     } else {
-        let t2 = events::status_changed(&st, &c, &f, "executing", "human_rejected_redo");
+        let t2 = events::status_changed(st, &c, &f, "executing", "human_rejected_redo");
         drop(c);
         st.wake();
         ok(t2)
@@ -3837,3 +3902,4 @@ mod tests {
         assert_eq!(ms[0].task_idx, vec![0, 1]);
     }
 }
+
