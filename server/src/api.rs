@@ -603,6 +603,8 @@ struct PlannedTask {
     criteria: Option<String>,
     /// M4：任务涉及的仓库（相对工作区路径），planner 可声明
     scope_repos: Vec<String>,
+    /// M7：机械检查项（结构化，schema 与 verification::Check 一致）
+    checks: Vec<Value>,
 }
 
 /// 规划产出的里程碑分组（M3）：planner 可以用里程碑描述项目阶段。
@@ -734,6 +736,24 @@ fn parse_plan_json(raw: &str) -> Result<(Vec<PlannedTask>, Vec<PlannedMilestone>
             }
             None => Vec::new(),
         };
+        let checks = match item.get("acceptance_checks") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) => {
+                let mut v = Vec::new();
+                for (j, chk) in a.iter().enumerate() {
+                    if let Err(e) = validate_check(chk) {
+                        return Err(format!(
+                            "planner: acceptance_checks[{j}] of task #{i} is invalid: {e}（只允许 file_exists / file_not_exists / command）"
+                        ));
+                    }
+                    v.push(chk.clone());
+                }
+                v
+            }
+            Some(_) => {
+                return Err(format!("planner: acceptance_checks of task #{i} must be an array"));
+            }
+        };
         out.push(PlannedTask {
             title,
             description: item["description"].as_str().unwrap_or("").to_string(),
@@ -744,6 +764,7 @@ fn parse_plan_json(raw: &str) -> Result<(Vec<PlannedTask>, Vec<PlannedMilestone>
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
+            checks,
         });
     }
 
@@ -1122,6 +1143,9 @@ async fn plan_project(
                         db::jstring(&Value::Array(Vec::new())), t.created_at, t.agent_pinned as i64
                     ],
                 ).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("insert planned task: {e}")))?;
+                if !pt.checks.is_empty() {
+                    db::set_task_checks(&tx, &t.id, &pt.checks);
+                }
                 if !t.scope_repos.is_empty() {
                     db::set_task_scope_repos(&tx, &t.id, &t.scope_repos);
                 }
@@ -3609,6 +3633,22 @@ mod tests {
         assert_eq!(ms[0].task_idx, vec![0]);
         assert_eq!(ms[1].name, "阶段二");
         assert_eq!(ms[1].task_idx, vec![1]);
+    }
+
+    #[test]
+    fn parse_plan_reads_acceptance_checks_and_rejects_invalid() {
+        let raw = "{\"tasks\":[{\"title\":\"A\",\"depends_on\":[],\"acceptance_checks\":[\
+            {\"type\":\"file_exists\",\"path\":\"out.txt\"},\
+            {\"type\":\"command\",\"cmd\":\"true\",\"expect_exit\":0}]}]}";
+        let (tasks, _) = parse_plan_json(raw).unwrap();
+        assert_eq!(tasks[0].checks.len(), 2);
+        assert_eq!(tasks[0].checks[0]["type"], "file_exists");
+
+        let bad = "{\"tasks\":[{\"title\":\"A\",\"acceptance_checks\":[{\"type\":\"http\",\"path\":\"/\"}]}]}";
+        assert!(parse_plan_json(bad).is_err());
+
+        let not_array = "{\"tasks\":[{\"title\":\"A\",\"acceptance_checks\":\"nope\"}]}";
+        assert!(parse_plan_json(not_array).is_err());
     }
 
     #[test]

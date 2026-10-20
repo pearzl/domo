@@ -326,10 +326,14 @@ pub fn plan_prompt(project: &Project, agents: &[Agent], knowledge: Option<&str>)
     s.push_str("- 不要输出 Markdown、代码围栏、解释、标题或第二个 JSON 对象。\n");
     s.push_str("- 所有键名必须用双引号括起的字符串。\n");
     s.push_str("格式如下：\n");
-    s.push_str("{\"tasks\":[{\"title\":\"...\",\"description\":\"...\",\"depends_on\":[0],\"acceptance_required\":true,\"acceptance_criteria\":\"...\"}],\"milestones\":[{\"name\":\"里程碑一 · <内容主题>\",\"goal\":\"...\",\"effect\":\"...\",\"tasks\":[0,1]}]}\n\n");
+    s.push_str("{\"tasks\":[{\"title\":\"...\",\"description\":\"...\",\"depends_on\":[0],\"acceptance_required\":true,\"acceptance_criteria\":\"...\",\"acceptance_checks\":[{\"type\":\"file_exists\",\"path\":\"relative/path\"},{\"type\":\"command\",\"cmd\":\"cargo test\",\"expect_exit\":0}]}],\"milestones\":[{\"name\":\"里程碑一 · <内容主题>\",\"goal\":\"...\",\"effect\":\"...\",\"tasks\":[0,1]}]}\n\n");
     s.push_str("约束：\n");
     s.push_str("- depends_on 引用其它任务在该数组中的下标（从 0 开始），无依赖写 []；不得成环。\n");
     s.push_str("- 每个任务都要有标题、具体的描述、以及明确可检验的验收标准；acceptance_required 保持 true。\n");
+    s.push_str("- acceptance_checks 是**机器可执行**的验收证据，0~3 条，只允许三种：\n");
+    s.push_str("  {\"type\":\"file_exists\",\"path\":...} / {\"type\":\"file_not_exists\",\"path\":...} / {\"type\":\"command\",\"cmd\":...,\"expect_exit\":0}。\n");
+    s.push_str("- 路径必须是任务工作区内的相对路径（不得含 .. 或绝对路径）；命令必须确定性、可在 2 分钟内跑完，不要依赖网络或交互输入。\n");
+    s.push_str("- 无法机器判定的要求写进 acceptance_criteria（由验收者用工具核查），不要硬凑 acceptance_checks。\n");
     s.push_str("- 任务数量适中（2~6 个），粒度应可独立完成，按依赖排好先后。\n");
     s.push_str("- milestones 里程碑规划：当任务可按交付批次分组时，用里程碑把任务分组。每个里程碑给 name（必填，命名直接以『里程碑』开头，如『里程碑一 · 会话稳定性』，不要用『阶段』等其它词）、goal/effect（可选），tasks 为该里程碑成员任务在 tasks 数组中的下标；同一个任务只放进一个里程碑；里程碑之间可以存在跨里程碑依赖（后一里程碑任务依赖前一里程碑任务）。不需要里程碑时 milestones 写 []。\n");
     s
