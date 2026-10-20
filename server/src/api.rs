@@ -246,6 +246,17 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
         }
         None => None,
     };
+    // 工程锚点：项目未显式给工作区时，默认落在工程工作区（多仓 = 直接在该目录工作）
+    let default_ws: Option<Value> = if body.get("workspace").map(|v| v.is_null()).unwrap_or(true) {
+        engineering.as_ref().and_then(|e| {
+            e.workspace_path.as_ref().map(|path| {
+                let mode = if e.workspace_kind == "multi" { "direct" } else { "worktree" };
+                json!({"kind": "local", "path": path, "mode": mode})
+            })
+        })
+    } else {
+        None
+    };
     let mut p = Project {
         id: db::new_id("prj_"),
         engineering_id,
@@ -283,8 +294,8 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
             }
         }
         // M2.5 修复：创建时携带的工作区直接落库（此前被忽略，逼用户再编辑一次）
-        if let Some(ws_val) = body.get("workspace") {
-            if !ws_val.is_null() {
+        if let Some(ws_val) = body.get("workspace").filter(|v| !v.is_null()).or(default_ws.as_ref()) {
+            {
                 match validate_workspace(ws_val) {
                     Ok(Some(w)) => {
                         db::set_project_workspace(&c, &p.id, Some(&w));
@@ -589,6 +600,25 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
         }
     }
     // M4 流程：确认即进入运行（验收标准协商机制已退场，任务直接进入计划制定阶段）
+    // 多仓工程：项目串行——同一时刻只允许一个运行中的项目（暂停后切换到另一个）
+    {
+        let c = st.db.lock().unwrap();
+        if let Some(p) = db::get_project(&c, &id) {
+            if let Some(eid) = p.engineering_id.as_deref() {
+                if let Some(e) = db::get_engineering(&c, eid) {
+                    if e.workspace_kind == "multi" {
+                        let busy = db::list_projects_of(&c, eid)
+                            .into_iter()
+                            .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
+                        if busy {
+                            return err(StatusCode::CONFLICT,
+                                "多仓工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
+                        }
+                    }
+                }
+            }
+        }
+    }
     set_project_status(&st, &id, "running", "confirmed")
 }
 

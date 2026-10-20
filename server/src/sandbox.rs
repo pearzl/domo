@@ -156,6 +156,21 @@ pub fn prepare(state: &Arc<App>, project: &Project, task: &Task) -> Result<Sandb
         source_root.ok_or_else(|| "project has no workspace (set a workspace or use the default one)".to_string())?;
     let root = sandbox_root(&project.id);
     let ts = short_id(&task.id);
+    // 多仓工程：直接在工程目录工作（项目/任务串行；不用 worktree，也不做跨仓合入编排）
+    let direct_mode = project
+        .workspace
+        .as_ref()
+        .and_then(|w| w.get("mode"))
+        .and_then(|m| m.as_str())
+        == Some("direct");
+    if direct_mode {
+        with_db(state, |c| {
+            events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_ready",
+                json!({"cwd": source_root.display().to_string(), "mode": "direct_workspace",
+                       "hint": "多仓工程：直接在工程目录的项目分支上工作"}));
+        });
+        return Ok(Sandbox { cwd: source_root.clone(), worktrees: vec![], source_root });
+    }
 
     if repos.is_empty() {
         // 工作区内没有登记到 git 仓库：
