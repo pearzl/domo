@@ -585,6 +585,7 @@ async fn run_via_host(
     prompt: &str,
     model: Option<&str>,
     timeout_ms: u64,
+    phase: &str,
 ) -> Result<Option<RunOutcome>, String> {
     if !crate::host::enabled() {
         return Ok(None);
@@ -604,6 +605,11 @@ async fn run_via_host(
         }
     };
     crate::host::touch(cwd);
+    {
+        // 真实会话 id 落库：宿主模式下同样支持跨重启按 id 续作
+        let c = state.db.lock().unwrap();
+        db::session_put(&c, logical, &sid, Some(&task.id), Some(phase), Some(task.attempt));
+    }
     let (text, raw) = crate::host::send_message(
         port, &sid, prompt, model, (timeout_ms / 1000).max(30),
     )?;
@@ -1215,7 +1221,7 @@ pub async fn run_execution(
 
     let out = if let Some(o) = run_via_host(
         &state, &task, &cwd, &logical, &prompt,
-        model_of(&agent).as_deref(), timeout_of(&agent),
+        model_of(&agent).as_deref(), timeout_of(&agent), "execute",
     ).await? {
         o
     } else {
@@ -1432,7 +1438,7 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
 
     let out = match run_via_host(
         &state, &task, &cwd, &session, &prompt,
-        model_of(&agent).as_deref(), timeout_of(&agent),
+        model_of(&agent).as_deref(), timeout_of(&agent), "accept",
     ).await {
         Ok(Some(o)) => o,
         Ok(None) => run_cli_ext(
