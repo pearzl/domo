@@ -57,7 +57,7 @@ cd server && cargo run --release
 
 - 后端：Rust (Axum + Tokio + rusqlite/SQLite)
 - 前端：React + Vite + TypeScript
-- Agent：BYO，通过适配器接入（OpenCode 以 HTTP 宿主为主、CLI 独立进程为降级，另有 Mock）
+- Agent：BYO，通过适配器接入（OpenCode 以 CLI 独立进程为默认；HTTP 宿主为实验性开关（默认关闭），另有 Mock）
 
 ## 许可证
 

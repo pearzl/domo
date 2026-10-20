@@ -613,6 +613,14 @@ async fn run_via_host(
     let (text, raw) = crate::host::send_message(
         port, &sid, prompt, model, (timeout_ms / 1000).max(30),
     )?;
+    if text.trim().is_empty() {
+        // 当前 opencode v2 的消息读取尚未适配（返回空文本）：宁可回退 CLI，也不让任务失败
+        events::log_line_state(
+            state, &task.id,
+            &format!("HTTP 会话返回空文本（session {sid}），回退独立进程模式"),
+        );
+        return Ok(None);
+    }
     events::log_line_state(state, &task.id, &format!("HTTP 会话完成（session {sid}），输出 {} 字", text.chars().count()));
     Ok(Some(RunOutcome { raw: raw.to_string(), text, session_id: Some(sid) }))
 }

@@ -34,6 +34,17 @@ fn key_of(cwd: &Path) -> String {
 }
 
 static HOSTS: OnceLock<Mutex<HashMap<String, Host>>> = OnceLock::new();
+/// 宿主 API 的 basic-auth 密码：启动宿主时由 DOMO 生成并注入，
+/// 兼容 opencode v2（`/api/*` + `opencode:<password>`）。
+fn password() -> &'static str {
+    static PWD: OnceLock<String> = OnceLock::new();
+    PWD.get_or_init(|| {
+        std::env::var("DOMO_OC_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("domo-{}", uuid::Uuid::new_v4().simple()))
+    })
+}
 
 fn hosts() -> &'static Mutex<HashMap<String, Host>> {
     HOSTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -116,6 +127,7 @@ pub async fn ensure(cwd: &Path) -> Result<u16, String> {
     let port = free_port()?;
     let mut cmd = Command::new("opencode");
     cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
+        .env("OPENCODE_SERVER_PASSWORD", password())
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -132,13 +144,11 @@ pub async fn ensure(cwd: &Path) -> Result<u16, String> {
         kill_group(pid, "-KILL");
         return Err("opencode serve 未在 10s 内就绪".into());
     }
-    // 能力探测：只认 /global/health 明确 healthy 的宿主；接口不兼容时调用方回退 CLI
-    let healthy = curl(port, "GET", "/global/health", None, 5)
-        .map(|v| v.get("healthy").and_then(|b| b.as_bool()).unwrap_or(false))
-        .unwrap_or(false);
+    // 能力探测：v2 的 `/api/project` 可读即视为可用；不同版本健康端点不一致，故不依赖它
+    let healthy = curl(port, "GET", "/project", None, 5).is_ok();
     if !healthy {
         kill_group(pid, "-KILL");
-        return Err("opencode serve 健康检查失败（/global/health），回退独立进程模式".into());
+        return Err("opencode serve 健康检查失败（/api/project），回退独立进程模式".into());
     }
 
     let mut map = hosts().lock().unwrap();
@@ -196,9 +206,10 @@ pub fn touch(cwd: &Path) {
 
 /// 简单 HTTP 调用（本地回环；`curl` 避免引入额外依赖）。
 fn curl(port: u16, method: &str, path: &str, body: Option<&Value>, timeout_secs: u64) -> Result<Value, String> {
-    let url = format!("http://127.0.0.1:{port}{path}");
+    let url = format!("http://127.0.0.1:{port}/api{path}");
     let mut cmd = Command::new("curl");
-    cmd.args(["-sS", "-X", method, "-H", "content-type: application/json"]);
+    cmd.args(["-sS", "-X", method, "-H", "content-type: application/json"])
+        .args(["-u", &format!("opencode:{}", password())]);
     cmd.args(["--max-time", &timeout_secs.to_string()]);
     if let Some(b) = body {
         cmd.args(["--data-binary", &b.to_string()]);
@@ -218,10 +229,14 @@ fn curl(port: u16, method: &str, path: &str, body: Option<&Value>, timeout_secs:
 /// 创建会话，返回真实 session id。
 pub fn create_session(port: u16, title: &str) -> Result<String, String> {
     let v = curl(port, "POST", "/session", Some(&json!({"title": title})), 30)?;
-    v.get("id")
+    // v2：{"data":{"id":...}}；兼容旧版顶层 {"id":...}
+    let id = v
+        .get("data")
+        .and_then(|d| d.get("id"))
+        .or_else(|| v.get("id"))
         .and_then(|x| x.as_str())
-        .map(String::from)
-        .ok_or_else(|| "session response has no id".to_string())
+        .map(String::from);
+    id.ok_or_else(|| format!("session response has no id: {v}"))
 }
 
 /// 发送消息并等待回复，返回（纯文本, 原始 JSON）。
@@ -241,6 +256,8 @@ pub fn abort_session(port: u16, session: &str) {
 
 fn extract_text(v: &Value) -> String {
     let mut out = String::new();
+    // v2：{"data":{info,parts}}；兼容旧版顶层 parts
+    let v = v.get("data").unwrap_or(v);
     if let Some(parts) = v.get("parts").and_then(|p| p.as_array()) {
         for p in parts {
             if p.get("type").and_then(|t| t.as_str()) == Some("text") {

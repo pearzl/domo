@@ -2095,6 +2095,10 @@ async fn create_task(
             }
             db::set_task_checks(&c, &t.id, arr);
         }
+        // 协商机制已退场（DESIGN §9）：新建任务的标准由人/规划直接给出，不再阻塞在 PLANNED
+        let _ = c.execute("UPDATE tasks SET negotiation_status='agreed' WHERE id=?1", rusqlite::params![t.id]);
+        let mut t = t;
+        t.negotiation_status = "agreed".into();
         events::push_event(&st, &c, &id, Some(&t.id), "task.created",
             json!({"title": t.title, "depends_on": t.depends_on}));
         if !t.acceptance_required {
