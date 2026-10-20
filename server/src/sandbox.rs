@@ -157,12 +157,13 @@ pub fn prepare(state: &Arc<App>, project: &Project, task: &Task) -> Result<Sandb
     let root = sandbox_root(&project.id);
     let ts = short_id(&task.id);
     // 多仓工程：直接在工程目录工作（项目/任务串行；不用 worktree，也不做跨仓合入编排）
+    // 多仓工程直接在工程目录工作；单仓/普通目录走各自逻辑
     let direct_mode = project
-        .workspace
-        .as_ref()
-        .and_then(|w| w.get("mode"))
-        .and_then(|m| m.as_str())
-        == Some("direct");
+        .engineering_id
+        .as_deref()
+        .and_then(|eid| with_db(state, |c| db::get_engineering(c, eid)))
+        .map(|e| e.workspace_kind == "multi")
+        .unwrap_or(false);
     if direct_mode {
         with_db(state, |c| {
             events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_ready",

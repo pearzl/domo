@@ -133,7 +133,6 @@ export function ProjectsView() {
     if (!engineeringId && engineerings.length > 0) setEngineeringId(engineerings[0].id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engineerings.length]);
-  const [ws, setWs] = useState<WsFields>({ kind: 'local', path: '', url: '', branch: '' });
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState<Project | null>(null);
   // 状态复选框已含归档开关（旧变量保留避免误引用）
@@ -162,19 +161,17 @@ export function ProjectsView() {
 
   async function submitCreate() {
     if (!name.trim()) return;
-    // M4：工作区可留空 → 使用默认工作区 ~/.domo/workspace/<项目id>/
-    const w = fieldsToWorkspace(ws);
+    // 工作区属于工程：项目不再单独指定
     if (!brief.trim()) {
       setError('必须填写项目目标。');
       return;
     }
     setBusy(true);
-    const ok = await createProject(name.trim(), brief.trim(), w, engineeringId || null);
+    const ok = await createProject(name.trim(), brief.trim(), undefined, engineeringId || null);
     setBusy(false);
     if (ok) {
       setName('');
       setBrief('');
-      setWs({ kind: 'local', path: '', url: '', branch: '' });
     }
   }
 
@@ -234,7 +231,6 @@ export function ProjectsView() {
               ))}
             </select>
           </label>
-          <WorkspaceFields f={ws} set={patch => setWs(prev => ({ ...prev, ...patch }))} />
           <button
             className="btn btn-primary"
             type="submit"

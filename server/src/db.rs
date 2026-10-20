@@ -1044,7 +1044,21 @@ pub fn set_project_workspace(c: &Connection, id: &str, ws: Option<&Value>) {
 
 /// Effective agent working directory for a project (DESIGN §13):
 /// local → the configured absolute path; git → data/workspaces/<project_id>.
-pub fn project_workdir(_c: &Connection, p: &Project) -> Option<std::path::PathBuf> {
+pub fn project_workdir(c: &Connection, p: &Project) -> Option<std::path::PathBuf> {
+    // 工作区属于工程：项目只声明基线。项目不再持有自己的工作区。
+    if let Some(eid) = p.engineering_id.as_deref() {
+        if let Some(e) = get_engineering(c, eid) {
+            if let Some(path) = e.workspace_path {
+                return Some(std::path::PathBuf::from(path));
+            }
+            let root = std::env::var("DOMO_WORKSPACE_ROOT").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                format!("{home}/.domo/workspace")
+            });
+            return Some(std::path::PathBuf::from(root).join(&e.id));
+        }
+    }
+    // 兼容：未归属工程的项目仍可用自带工作区（新库不会有此类数据）
     let w = p.workspace.as_ref()?;
     match w.get("kind").and_then(|k| k.as_str())? {
         "local" => Some(std::path::PathBuf::from(w.get("path")?.as_str()?)),
