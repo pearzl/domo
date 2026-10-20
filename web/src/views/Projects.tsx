@@ -298,6 +298,9 @@ export function ProjectsView() {
             const projInbox = inbox.filter(i => i.project_id === p.id && i.status === 'open').length;
             const open = OPEN_STATUSES.includes(p.status);
             const planning = planningId === p.id;
+            const engKind = p.engineering_id
+              ? engineerings.find(e => e.id === p.engineering_id)?.workspace_kind
+              : undefined;
             return (
               <div key={p.id} className="card project-card">
                 <div className="card-head">
@@ -451,7 +454,15 @@ export function ProjectsView() {
                       </>
                     )}
                     {p.status === 'paused' && (
-                      <button className="btn" onClick={() => void projectAction(p.id, 'resume')}>
+                      <button
+                        className="btn"
+                        title={
+                          engKind === 'multi'
+                            ? '切换到本项目分支并恢复；工作区有未提交改动时会阻止并列出仓库与文件'
+                            : '恢复运行'
+                        }
+                        onClick={() => void projectAction(p.id, 'resume')}
+                      >
                         恢复
                       </button>
                     )}

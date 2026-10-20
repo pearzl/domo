@@ -508,9 +508,69 @@ fn set_project_status(st: &Arc<App>, id: &str, status: &str, what: &str) -> Resp
     ok(p)
 }
 
+fn switch_failure_response(err: crate::baseline::SwitchError) -> Response {
+    match err {
+        crate::baseline::SwitchError::Dirty(d) => (StatusCode::CONFLICT, Json(d)).into_response(),
+        crate::baseline::SwitchError::Baseline(b) => (StatusCode::CONFLICT, Json(b)).into_response(),
+    }
+}
+
+/// 多仓确认/切换共用：检查干净 → 停宿主 → 逐仓切目标分支 → 写基线 + 事件。
+#[allow(clippy::result_large_err)] // Err 直接是 HTTP Response，避免额外包装层
+async fn switch_project_repos(
+    st: &Arc<App>,
+    project: &Project,
+    root: &std::path::Path,
+    repos: Vec<crate::models::RepoRef>,
+    event_kind: &str,
+) -> Result<Value, Response> {
+    if repos.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "多仓工程目录内没有发现 git 仓库（每个仓库需是工作区本身或其一级/二级子目录）",
+        ));
+    }
+    let targets = crate::baseline::target_branches(&project.id, project.baseline.as_ref(), &repos);
+    // 切分支前停掉共享宿主：宿主以工程目录为键，不能让旧分支的宿主继续服务。
+    crate::host::stop(root);
+    let (root2, repos2, targets2) = (root.to_path_buf(), repos.clone(), targets);
+    let outcome = match tokio::task::spawn_blocking(move || {
+        crate::baseline::switch_multi(&root2, &repos2, &targets2)
+    })
+    .await
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(switch_failure_response(e)),
+        Err(e) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("项目切换任务失败: {e}"),
+            ))
+        }
+    };
+    {
+        let c = st.db.lock().unwrap();
+        db::set_project_repos(&c, &project.id, &repos);
+        db::set_project_baseline(&c, &project.id, Some(&outcome.baseline));
+        events::push_event(
+            st,
+            &c,
+            &project.id,
+            None,
+            event_kind,
+            json!({
+                "baseline": outcome.baseline,
+                "switches": outcome.switches,
+                "mode": "multi",
+            }),
+        );
+    }
+    Ok(outcome.baseline)
+}
+
 async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
     // 状态 + 多仓串行检查：必须在任何分支切换动作之前拒绝（A running → B confirm 409）。
-    let (ws, engineering_kind): (Option<Value>, String) = {
+    let (project, engineering_kind): (Project, String) = {
         let c = st.db.lock().unwrap();
         let Some(project) = db::get_project(&c, &id) else {
             return err(StatusCode::NOT_FOUND, "project not found");
@@ -534,8 +594,9 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
                 }
             }
         }
-        (project.workspace, kind)
+        (project, kind)
     };
+    let ws: Option<Value> = project.workspace.clone();
     // M2 workspace handling (DESIGN §13):
     // local → the path must exist (400, project stays initializing);
     // git → clone into data/workspaces/<prj_id>/ at confirm time (already
@@ -602,7 +663,7 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
     // 工作目录：工作区属于工程（多仓 = 工程目录），扫描 git 仓库在锁外执行。
     let root = {
         let c = st.db.lock().unwrap();
-        db::get_project(&c, &id).and_then(|p| db::project_workdir(&c, &p))
+        db::project_workdir(&c, &project)
     };
     let Some(root) = root else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
@@ -613,31 +674,11 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
         .map(|(rel, main)| crate::models::RepoRef { rel, main })
         .collect();
 
-    // 多仓项目基线（ARCH §15 第 1 步）：先检查全部仓库，再逐仓切换；失败不写入任何状态。
+    // 多仓项目基线（ARCH §15 第 1~2 步）：先检查全部仓库（含干净），再逐仓切换。
     if engineering_kind == "multi" {
-        if repos.is_empty() {
-            return err(StatusCode::BAD_REQUEST,
-                "多仓工程目录内没有发现 git 仓库（每个仓库需是工作区本身或其一级/二级子目录）");
-        }
-        // 切分支前停掉共享宿主：宿主以工程目录为键，不能让旧分支的宿主继续服务。
-        crate::host::stop(&root);
-        let (root2, repos2, pid) = (root.clone(), repos.clone(), id.clone());
-        let baseline = match tokio::task::spawn_blocking(move || {
-            crate::baseline::apply_multi(&root2, &repos2, &pid)
-        }).await {
-            Ok(Ok(b)) => b,
-            Ok(Err(f)) => return (StatusCode::CONFLICT, Json(f)).into_response(),
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("项目基线任务失败: {e}")),
-        };
-        {
-            let c = st.db.lock().unwrap();
-            db::set_project_repos(&c, &id, &repos);
-            db::set_project_baseline(&c, &id, Some(&baseline));
-            events::push_event(&st, &c, &id, None, "project.baseline_set", json!({
-                "baseline": baseline,
-                "repos": repos.iter().map(|r| json!({"rel": r.rel, "main": r.main})).collect::<Vec<_>>(),
-                "mode": "multi",
-            }));
+        match switch_project_repos(&st, &project, &root, repos.clone(), "project.baseline_set").await {
+            Ok(_) => {}
+            Err(resp) => return resp,
         }
         tracing::info!(project = %id, repos = repos.len(), "multi-repo project baseline created/checked out");
     } else {
@@ -1757,14 +1798,62 @@ async fn pause_project(
 }
 
 async fn resume_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let project = {
+        let c = st.db.lock().unwrap();
+        let Some(project) = db::get_project(&c, &id) else {
+            return err(StatusCode::NOT_FOUND, "project not found");
+        };
+        match project.status.as_str() {
+            // paused=已暂停；pausing=暂停中（请求撤回，等于取消暂停）
+            "paused" | "pausing" => {}
+            _ => return err(StatusCode::CONFLICT, "project is not paused"),
+        }
+        project
+    };
+    // pausing → 取消暂停：仍在原项目分支上，不切分支。
+    if project.status == "pausing" {
+        return set_project_status(&st, &id, "running", "resumed");
+    }
+    // paused → 多仓需要把工程目录逐仓切回目标项目分支（ARCH §15 第 2 步）。
+    let mut engineering_kind = String::new();
     {
         let c = st.db.lock().unwrap();
-        match db::get_project(&c, &id).map(|p| p.status) {
-            // paused=已暂停；pausing=暂停中（请求撤回，等于取消暂停）
-            Some(s) if s == "paused" || s == "pausing" => {}
-            Some(_) => return err(StatusCode::CONFLICT, "project is not paused"),
-            None => return err(StatusCode::NOT_FOUND, "project not found"),
+        if let Some(eid) = project.engineering_id.as_deref() {
+            if let Some(e) = db::get_engineering(&c, eid) {
+                engineering_kind = e.workspace_kind.clone();
+                if engineering_kind == "multi" {
+                    let busy = db::list_projects_of(&c, eid)
+                        .into_iter()
+                        .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
+                    if busy {
+                        return err(StatusCode::CONFLICT,
+                            "多仓工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
+                    }
+                }
+            }
         }
+    }
+    if engineering_kind == "multi" {
+        let (root, repos) = {
+            let c = st.db.lock().unwrap();
+            (db::project_workdir(&c, &project), db::project_repos(&c, &id))
+        };
+        let Some(root) = root else {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
+        };
+        let repos = if repos.is_empty() {
+            crate::sandbox::scan_repos(&root)
+                .into_iter()
+                .map(|(rel, main)| crate::models::RepoRef { rel, main })
+                .collect()
+        } else {
+            repos
+        };
+        match switch_project_repos(&st, &project, &root, repos, "project.repos_switched").await {
+            Ok(_) => {}
+            Err(resp) => return resp,
+        }
+        tracing::info!(project = %id, "multi-repo project switched and resumed");
     }
     set_project_status(&st, &id, "running", "resumed")
 }

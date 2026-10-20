@@ -1,13 +1,15 @@
-//! 项目基线（DESIGN §4、ARCH §15 第 1 步）。
+//! 项目基线与多仓项目切换（DESIGN §4、ARCH §15 第 1~2 步）。
 //!
 //! - 单仓：确认项目时记录工程仓库当前 `{"branch"}`；detached HEAD 记录 `{"commit"}`。
-//! - 多仓：确认项目时逐仓确保 `domo/iter-<项目short>` 存在并 checkout；
-//!   全部成功才返回 `{"repos": {rel: branch}}`。
+//! - 多仓确认：逐仓确保 `domo/iter-<项目short>` 存在并 checkout；全部成功才写基线。
+//! - 多仓切换：恢复已暂停项目时，逐仓检查工作区干净并 checkout 目标分支；
+//!   有脏文件则返回 `dirty[{repo,files}]`，**一个仓库都不切**。
 //! - **先检查、后执行**：所有仓库通过预检后才动第一个仓库；执行中意外失败会回滚
 //!   本次已切换的仓库（并删除本次新建的分支），不留部分切换。
-//! - 任一失败都返回仓库级原因，供 API 以 409 列出失败仓库。
+//! - 任一失败都返回仓库级原因，供 API 以 409 列出失败仓库或脏文件。
 //! - 本模块只做 git 与文件系统操作，**不碰数据库、不持锁**；落库与事件由调用方负责。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +40,42 @@ impl BaselineFailure {
             repos,
         }
     }
+}
+
+/// 一个脏仓库：`files` 为 `git status --porcelain` 原始行（含状态码）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DirtyRepo {
+    pub repo: String,
+    pub files: Vec<String>,
+}
+
+/// 脏工作区导致切换被阻止（API 返回 `dirty[{repo,files}]`）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DirtyFailure {
+    pub error: String,
+    pub dirty: Vec<DirtyRepo>,
+}
+
+/// 切换完成后每个仓库的 from → to（审计与界面展示）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoSwitch {
+    pub repo: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// 切换结果：新基线 + 逐仓切换记录。
+#[derive(Debug, Clone)]
+pub struct SwitchOutcome {
+    pub baseline: Value,
+    pub switches: Vec<RepoSwitch>,
+}
+
+/// 切换失败：脏工作区或仓库/分支不可切换。
+#[derive(Debug)]
+pub enum SwitchError {
+    Dirty(DirtyFailure),
+    Baseline(BaselineFailure),
 }
 
 /// 项目迭代分支名：`domo/iter-<项目 id 后缀>`。
@@ -97,6 +135,22 @@ fn current_branch(dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// `git status --porcelain` 的原始行；空 = 工作区干净。
+fn dirty_files(dir: &Path) -> Result<Vec<String>, String> {
+    let out = git(dir, &["status", "--porcelain"])?;
+    if !out.status.success() {
+        return Err(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim_end().to_string())
+        .collect())
+}
+
 fn probe_writable(dir: &Path) -> Result<(), String> {
     if !dir.is_dir() {
         return Err(format!("directory not found: {}", dir.display()));
@@ -148,6 +202,15 @@ fn branch_checked_out_elsewhere(dir: &Path, branch: &str) -> Result<bool, String
 enum Original {
     Branch(String),
     Commit(String),
+}
+
+impl Original {
+    fn label(&self) -> String {
+        match self {
+            Original::Branch(b) => b.clone(),
+            Original::Commit(c) => c.chars().take(12).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -240,18 +303,75 @@ fn rollback(plans: &[Plan], switched: &[usize], failures: &mut Vec<RepoFailure>)
     }
 }
 
-/// 多仓项目基线：先检查全部仓库，再逐仓创建/切换迭代分支。
-pub fn apply_multi(
+/// 目标项目每仓分支：优先用项目基线，新增/旧数据回退到 `domo/iter-<项目short>`。
+pub fn target_branches(
+    project_id: &str,
+    baseline: Option<&Value>,
+    repos: &[RepoRef],
+) -> HashMap<String, String> {
+    let saved = baseline
+        .and_then(|b| b.get("repos"))
+        .and_then(|v| v.as_object());
+    let fallback = iteration_branch(project_id);
+    repos
+        .iter()
+        .map(|r| {
+            let branch = saved
+                .and_then(|m| m.get(&r.rel))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| fallback.clone());
+            (r.rel.clone(), branch)
+        })
+        .collect()
+}
+
+/// 多仓项目切换：先检查全部仓库（干净、可写、分支可用），再逐仓 checkout。
+///
+/// 目标分支不存在时从各仓当前 HEAD 创建；执行中失败会回滚已切换仓库。
+pub fn switch_multi(
     root: &Path,
     repos: &[RepoRef],
-    project_id: &str,
-) -> Result<Value, BaselineFailure> {
-    let branch = iteration_branch(project_id);
+    targets: &HashMap<String, String>,
+) -> Result<SwitchOutcome, SwitchError> {
+    if repos.is_empty() {
+        return Err(SwitchError::Baseline(BaselineFailure::new(
+            "没有可切换的 git 仓库",
+            Vec::new(),
+        )));
+    }
     let mut plans: Vec<Plan> = Vec::new();
     let mut failures: Vec<RepoFailure> = Vec::new();
+    let mut dirty: Vec<DirtyRepo> = Vec::new();
     for repo in repos {
-        match precheck(root, repo, &branch) {
-            Ok(p) => plans.push(p),
+        let Some(branch) = targets
+            .get(&repo.rel)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            failures.push(RepoFailure {
+                repo: repo.rel.clone(),
+                error: "missing target branch".into(),
+            });
+            continue;
+        };
+        match precheck(root, repo, branch) {
+            Ok(plan) => {
+                match dirty_files(&plan.dir) {
+                    Ok(files) if !files.is_empty() => dirty.push(DirtyRepo {
+                        repo: repo.rel.clone(),
+                        files,
+                    }),
+                    Ok(_) => {}
+                    Err(e) => failures.push(RepoFailure {
+                        repo: repo.rel.clone(),
+                        error: e,
+                    }),
+                }
+                plans.push(plan);
+            }
             Err(e) => failures.push(RepoFailure {
                 repo: repo.rel.clone(),
                 error: e,
@@ -259,13 +379,22 @@ pub fn apply_multi(
         }
     }
     if !failures.is_empty() {
-        return Err(BaselineFailure::new(
+        return Err(SwitchError::Baseline(BaselineFailure::new(
             format!(
-                "项目基线检查失败：{} 个仓库不可切换（未切换任何仓库）",
+                "项目切换检查失败：{} 个仓库不可切换（未切换任何仓库）",
                 failures.len()
             ),
             failures,
-        ));
+        )));
+    }
+    if !dirty.is_empty() {
+        return Err(SwitchError::Dirty(DirtyFailure {
+            error: format!(
+                "工作区存在未提交改动，已阻止切换项目（{} 个仓库）",
+                dirty.len()
+            ),
+            dirty,
+        }));
     }
 
     let mut switched: Vec<usize> = Vec::new();
@@ -279,19 +408,40 @@ pub fn apply_multi(
                 error: e,
             }];
             rollback(&plans, &switched, &mut failures);
-            return Err(BaselineFailure::new(
+            return Err(SwitchError::Baseline(BaselineFailure::new(
                 "项目分支切换失败，已回滚已切换的仓库",
                 failures,
-            ));
+            )));
         }
         switched.push(idx);
     }
 
     let mut map = Map::new();
     for plan in &plans {
-        map.insert(plan.rel.clone(), Value::String(branch.clone()));
+        map.insert(plan.rel.clone(), Value::String(plan.branch.clone()));
     }
-    Ok(json!({ "repos": map }))
+    let switches = plans
+        .iter()
+        .map(|p| RepoSwitch {
+            repo: p.rel.clone(),
+            from: p.original.label(),
+            to: p.branch.clone(),
+        })
+        .collect();
+    Ok(SwitchOutcome {
+        baseline: json!({ "repos": map }),
+        switches,
+    })
+}
+
+/// 多仓确认项目：全部仓库切到本项目同名迭代分支（测试辅助）。
+#[cfg(test)]
+pub fn apply_multi(root: &Path, repos: &[RepoRef], project_id: &str) -> Result<Value, SwitchError> {
+    let targets = repos
+        .iter()
+        .map(|r| (r.rel.clone(), iteration_branch(project_id)))
+        .collect();
+    switch_multi(root, repos, &targets).map(|o| o.baseline)
 }
 
 /// 单仓项目基线：记录当前分支；detached HEAD 记录当前提交。
@@ -446,6 +596,9 @@ mod tests {
 
         make_read_only(&root.join("web"));
         let err = apply_multi(root, &repos(&["api", "web"]), "prj_test0002").unwrap_err();
+        let SwitchError::Baseline(err) = err else {
+            panic!("expected baseline failure, got {err:?}");
+        };
 
         assert!(
             err.repos.iter().any(|r| r.repo == "web"),
@@ -478,10 +631,81 @@ mod tests {
         let api_before = current_branch(&root.join("api"));
 
         let err = apply_multi(root, &repos(&["api", "web"]), "prj_test0003").unwrap_err();
+        let SwitchError::Baseline(err) = err else {
+            panic!("expected baseline failure, got {err:?}");
+        };
 
         assert!(err.repos.iter().any(|r| r.repo == "web"));
         assert_eq!(current_branch(&root.join("api")), api_before);
         assert!(!branch_exists(&root.join("api"), &branch));
+    }
+
+    #[test]
+    fn switch_between_projects_uses_each_project_branch() {
+        let tmp = Tmp::new("switch");
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        init_repo(&root.join("web"));
+        let repos = repos(&["api", "web"]);
+
+        apply_multi(root, &repos, "prj_aaaa").unwrap();
+        let targets = target_branches("prj_bbbb", None, &repos);
+        let outcome = switch_multi(root, &repos, &targets).unwrap();
+
+        assert_eq!(outcome.baseline["repos"]["api"], "domo/iter-bbbb");
+        assert_eq!(outcome.baseline["repos"]["web"], "domo/iter-bbbb");
+        assert_eq!(outcome.switches.len(), 2);
+        for rel in ["api", "web"] {
+            assert_eq!(
+                current_branch(&root.join(rel)).as_deref(),
+                Some("domo/iter-bbbb")
+            );
+        }
+
+        // 切回 A：目标分支来自 A 的基线。
+        let targets = target_branches(
+            "prj_aaaa",
+            Some(&json!({"repos": {"api": "domo/iter-aaaa", "web": "domo/iter-aaaa"}})),
+            &repos,
+        );
+        switch_multi(root, &repos, &targets).unwrap();
+        for rel in ["api", "web"] {
+            assert_eq!(
+                current_branch(&root.join(rel)).as_deref(),
+                Some("domo/iter-aaaa")
+            );
+        }
+    }
+
+    #[test]
+    fn dirty_worktree_blocks_switch_without_touching_any_repo() {
+        let tmp = Tmp::new("dirty");
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        init_repo(&root.join("web"));
+        let repos = repos(&["api", "web"]);
+        apply_multi(root, &repos, "prj_aaaa").unwrap();
+
+        std::fs::write(root.join("web").join("untracked.txt"), "dirty\n").unwrap();
+        let targets = target_branches("prj_bbbb", None, &repos);
+        let err = switch_multi(root, &repos, &targets).unwrap_err();
+        let SwitchError::Dirty(err) = err else {
+            panic!("expected dirty failure, got {err:?}");
+        };
+
+        assert_eq!(err.dirty.len(), 1);
+        assert_eq!(err.dirty[0].repo, "web");
+        assert!(err.dirty[0]
+            .files
+            .iter()
+            .any(|f| f.contains("untracked.txt")));
+        // 一个仓库都不切
+        for rel in ["api", "web"] {
+            assert_eq!(
+                current_branch(&root.join(rel)).as_deref(),
+                Some("domo/iter-aaaa")
+            );
+        }
     }
 
     #[test]

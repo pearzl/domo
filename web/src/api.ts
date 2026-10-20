@@ -45,6 +45,17 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
       if (data && typeof data === 'object') {
         const m = data.error ?? data.message ?? data.detail;
         if (typeof m === 'string') msg = m;
+        // 多仓切换被脏工作区阻止：把仓库与文件一并显示出来。
+        if (Array.isArray(data.dirty)) {
+          const detail = data.dirty
+            .map(d => {
+              const item = d as { repo?: unknown; files?: unknown };
+              const files = Array.isArray(item.files) ? item.files.join(', ') : String(item.files ?? '');
+              return `${String(item.repo ?? '?')}: ${files}`;
+            })
+            .join('；');
+          if (detail) msg = `${msg}（${detail}）`;
+        }
       }
     } catch {
       /* 忽略非 JSON 响应体 */

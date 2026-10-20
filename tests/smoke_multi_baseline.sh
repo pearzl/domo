@@ -5,7 +5,10 @@
 #   1. 多仓工程确认项目 A：逐仓创建/切换到 domo/iter-<A>，baseline 记录每仓分支；
 #   2. A 运行中确认 B → 409，且 A 的仓库分支不被切换；
 #   3. A 暂停后确认 B → 成功，各仓切到 domo/iter-<B>，baseline 同步更新；
-#   4. 某仓库只读时确认 C → 409 并列出失败仓库，其他仓库不切换、C 分支不创建。
+#   4. 恢复已暂停项目 = 切换项目：脏工作区阻止并返回 dirty[{repo,files}]，项目保持暂停；
+#      清理后恢复 B → 成功；再从 B 切换回 A → 各仓回到 domo/iter-<A>；
+#   5. 某仓库只读时确认 C → 409 并列出失败仓库，其他仓库不切换、C 分支不创建；
+#      确认 C 前工作区有脏文件时同样 409 dirty 且不切换。
 #
 # 用法：bash tests/smoke_multi_baseline.sh
 #       DOMO_BASELINE_SMOKE_PORT=xxxx bash tests/smoke_multi_baseline.sh
@@ -154,10 +157,52 @@ check("B baseline records each repo", base.get("api") == bb and base.get("web") 
 
 s, r = req("POST", f"/projects/{pb}/pause", {})
 check("pause B", s == 200, f"{s} {r}")
+
+# 恢复已暂停项目 = 切换项目。脏工作区必须阻止，且项目保持 paused。
+dirty = os.path.join(WS, "web", "dirty.txt")
+with open(dirty, "w") as f:
+    f.write("dirty\n")
+s, r = req("POST", f"/projects/{pb}/resume", {})
+check("resume B is 409 with dirty worktree", s == 409, f"{s} {r}")
+dirty_repos = [x.get("repo") for x in (r or {}).get("dirty", [])]
+check("409 dirty lists web", dirty_repos == ["web"], r)
+check("dirty files include dirty.txt", any("dirty.txt" in x for x in ((r or {}).get("dirty") or [{}])[0].get("files", [])), r)
+check("dirty resume leaves B branches unchanged", branch(os.path.join(WS, "api")) == bb, branch(os.path.join(WS, "api")))
+s, r = req("GET", f"/projects/{pb}")
+check("dirty resume keeps B paused", ((r or {}).get("project") or {}).get("status") == "paused", r)
+os.remove(dirty)
+
+s, r = req("POST", f"/projects/{pb}/resume", {})
+check("resume B after cleaning dirty files", s == 200, f"{s} {r}")
+check("B resume keeps B branches", branch(os.path.join(WS, "api")) == bb, branch(os.path.join(WS, "api")))
+
+# 暂停 B 后恢复 A：逐仓切回 A 的迭代分支。
+s, r = req("POST", f"/projects/{pb}/pause", {})
+check("pause B again", s == 200, f"{s} {r}")
+s, r = req("POST", f"/projects/{pa}/resume", {})
+check("switch back to A by resuming it", s == 200, f"{s} {r}")
+check("A switch restores api branch", branch(os.path.join(WS, "api")) == ba, branch(os.path.join(WS, "api")))
+check("A switch restores web branch", branch(os.path.join(WS, "web")) == ba, branch(os.path.join(WS, "web")))
+s, r = req("POST", f"/projects/{pa}/pause", {})
+check("pause A before C", s == 200, f"{s} {r}")
+
 s, c = req("POST", "/projects", {"name": "C", "brief": "third", "engineering_id": eid})
 check("create project C", s == 200 and c.get("id"), f"{s} {c}")
 pc = c.get("id", "")
 bc = "domo/iter-" + pc.rsplit("_", 1)[-1]
+
+# 首次确认 C 也走同一套干净检查。
+with open(dirty, "w") as f:
+    f.write("dirty\n")
+s, r = req("POST", f"/projects/{pc}/confirm", {})
+check("C confirm is 409 with dirty worktree", s == 409, f"{s} {r}")
+check("confirm dirty lists web", "web" in [x.get("repo") for x in (r or {}).get("dirty", [])], r)
+check("dirty confirm leaves api on A branch", branch(os.path.join(WS, "api")) == ba, branch(os.path.join(WS, "api")))
+check("dirty confirm creates no C branch", subprocess.run(
+    ["git", "-C", os.path.join(WS, "api"), "rev-parse", "--verify", "--quiet", f"refs/heads/{bc}"],
+    capture_output=True).returncode != 0)
+os.remove(dirty)
+
 chmod_read_only(os.path.join(WS, "web"))
 try:
     s, r = req("POST", f"/projects/{pc}/confirm", {})
@@ -166,7 +211,7 @@ finally:
 check("C confirm is 409 on read-only repo", s == 409, f"{s} {r}")
 failed = [x.get("repo") for x in (r or {}).get("repos", [])]
 check("409 lists the failed repo", "web" in failed, r)
-check("failed C leaves api on B branch", branch(os.path.join(WS, "api")) == bb, branch(os.path.join(WS, "api")))
+check("failed C leaves api on A branch", branch(os.path.join(WS, "api")) == ba, branch(os.path.join(WS, "api")))
 check("failed C creates no C branch", subprocess.run(
     ["git", "-C", os.path.join(WS, "api"), "rev-parse", "--verify", "--quiet", f"refs/heads/{bc}"],
     capture_output=True).returncode != 0)
