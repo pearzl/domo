@@ -1939,7 +1939,8 @@ fn validate_agent_roles(c: &rusqlite::Connection, executor: Option<&str>, accept
         if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
     }
     if let (Some(e), Some(a)) = (executor, acceptor) {
-        if e == a { return Err("same agent instance cannot execute and accept the same task".into()); }
+        // 设计允许同一实例兼任执行与验收；独立性由界面提醒，不再拒绝。
+        let _ = (e, a);
     }
     Ok(())
 }

@@ -8,8 +8,8 @@
 //! - 失败容错：错误分类后优先换下一优先级 agent 重试（不计入失败预算）；
 //!   池内候选耗尽才计入 failure_count（3 次挂起）。
 //! - 限流/额度类错误 → 该 agent **全局临时熔断**（时长由接入层给出，缺省按 agent 配置）。
-//! - **选人必须排除本任务另一角色已绑定的同一实例**：执行者与验收者不能是同一实例，
-//!   否则等于自我验收；同模型允许，仅在界面提醒独立性有限。
+//! - **同一任务的执行者与验收者允许为同一实例**（DESIGN §7.1）：仅在界面提醒独立性有限；
+//!   候选解析不再按另一角色已绑定的实例做排除。
 //! - 人工对单任务固定 agent（`agent_pinned`）优先于默认策略，且不参与动态改派。
 
 use std::collections::HashMap;
@@ -175,13 +175,8 @@ pub fn resolve_role(
     }
     let pool = db::project_pool(conn, project_id);
     let tried = db::task_tried(conn, &task.id);
-    // 同任务的执行者与验收者必须为不同实例（DESIGN §6 核心规则）：
-    // 解析某角色时排除该任务另一角色已绑定的实例，避免动态选人绕过该约束。
-    let counterpart = if role == "acceptor" {
-        task.executor_agent_id.clone()
-    } else {
-        task.acceptor_agent_id.clone()
-    };
+    // 设计：同一任务的执行者与验收者**允许**为同一实例（仅界面提醒独立性有限）。
+    // 不再按另一角色已绑定的实例做排除。
     let tried_ids: Vec<String> = tried
         .get(role)
         .and_then(|v| v.as_array())
@@ -199,9 +194,6 @@ pub fn resolve_role(
     for id in candidates {
         if tried_ids.iter().any(|t| t == &id) {
             continue;
-        }
-        if counterpart.as_deref() == Some(id.as_str()) {
-            continue; // 同一实例不得既执行又验收
         }
         let Some(a) = db::get_agent(conn, &id) else { continue };
         if a.status == "deleted" || !a.roles.iter().any(|r| r == role) {

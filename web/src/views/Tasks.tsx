@@ -603,6 +603,12 @@ function TaskDetailDrawer({
             <span>{task.rejection_count} / {task.failure_count}</span>
             <span className="muted">验收要求</span>
             <span>{task.acceptance_required ? '需要验收' : '豁免'}</span>
+            {task.executor_agent_id && task.executor_agent_id === task.acceptor_agent_id && (
+              <>
+                <span className="muted">独立性</span>
+                <span>⚠ 执行与验收同一实例（独立性有限）</span>
+              </>
+            )}
             <span className="muted">协商状态</span><span>{task.negotiation_status ?? '—'}</span>
             <span className="muted">创建时间</span><span>{fmtTime(task.created_at)}</span>
           </div>
@@ -1129,8 +1135,6 @@ export function TaskFormModal({
     if (!value.title.trim()) return void setErr('请填写任务标题');
     if (!value.executor_agent_id) return void setErr('请选择执行 agent');
     if (!value.acceptor_agent_id) return void setErr('请选择验收 agent');
-    if (value.executor_agent_id === value.acceptor_agent_id)
-      return void setErr('同一 agent 实例不能既执行又验收');
     setBusy(true);
     const ok = await submitTaskForm(projectId, value, mode === 'edit' ? task?.id : undefined);
     setBusy(false);
@@ -1184,6 +1188,11 @@ export function TaskFormModal({
             </select>
           </label>
         </div>
+        {value.executor_agent_id && value.executor_agent_id === value.acceptor_agent_id && (
+          <p className="muted" style={{ margin: 0 }}>
+            ⚠ 执行与验收为同一实例：独立性有限，建议为验收另配实例（允许继续）。
+          </p>
+        )}
         <div className="form-pair">
           <label className="check-label">
             <input
