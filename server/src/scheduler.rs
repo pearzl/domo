@@ -1143,6 +1143,16 @@ async fn exec_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64, mode: 
 async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
     let guard = HandleGuard { state: state.clone(), task_id: task.id.clone(), id: hid };
     let acceptor_id = task.acceptor_agent_id.clone().unwrap_or_default();
+    // 机械检查先跑（可能执行命令，必须不持数据库锁）；结果作为验收证据
+    {
+        let project = {
+            let c = state.db.lock().unwrap();
+            db::get_project(&c, &task.project_id)
+        };
+        if let Some(p) = project {
+            let _ = crate::verification::run(&state, &p, &task).await;
+        }
+    }
     let outcome = match agent.adapter.as_str() {
         "opencode" => opencode::run_acceptance(state.clone(), task.clone(), agent.clone()).await,
         _ => mock::run_acceptance(state.clone(), task.clone(), agent.clone()).await,

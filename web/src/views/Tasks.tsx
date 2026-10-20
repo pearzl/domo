@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useDomo } from '../store';
 import type { Agent, ApplyResult, AuditEvent, InterveneResult, ReplanReportResult, Task, TaskDetail, TaskFormValue, TaskStatus } from '../types';
 import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
+import { formatChecks } from '../checks';
 import { TaskDag } from './Dag';
 import { PoolTable } from './PoolTable';
 const COLUMNS: TaskStatus[] = [
@@ -618,6 +619,43 @@ function TaskDetailDrawer({
         </section>
 
         <section className="drawer-section">
+          <h4>机械检查（系统执行 · 证据）</h4>
+          {(() => {
+            const checks = task.acceptance_checks ?? [];
+            const evidence = task.acceptance_evidence ?? [];
+            if (checks.length === 0 && evidence.length === 0) {
+              return <p className="muted">未配置机械检查。验收者会用自己的工具核查其余要求。</p>;
+            }
+            const rows = checks.map((c, i) => {
+              const ev = evidence[i];
+              const label =
+                c.type === 'command'
+                  ? `命令：${c.cmd}（期望退出码 ${c.expect_exit ?? 0}）`
+                  : c.type === 'file_exists'
+                    ? `文件存在：${c.path}`
+                    : `文件不存在：${c.path}`;
+              return { label, ev };
+            });
+            return (
+              <div className="stack">
+                {rows.map((r, i) => (
+                  <div key={i} className="risk-line" style={{ margin: 0 }}>
+                    <span>{r.ev ? (r.ev.passed ? '✓' : '✗') : '·'}</span>
+                    <span>{r.label}</span>
+                    {r.ev?.detail && (
+                      <span className="muted" style={{ marginLeft: 6 }}>
+                        {r.ev.detail.length > 200 ? `${r.ev.detail.slice(0, 200)}…` : r.ev.detail}
+                      </span>
+                    )}
+                  </div>
+                ))}
+                {evidence.length === 0 && <p className="muted">尚未执行（任务进入验收时自动运行）。</p>}
+              </div>
+            );
+          })()}
+        </section>
+
+        <section className="drawer-section">
           <h4>agent 原始输出归档（{(task as unknown as { agent_outputs?: unknown[] }).agent_outputs?.length ?? 0}）</h4>
           {(() => {
             const outs = (task as unknown as { agent_outputs?: { id: number; phase: string; attempt: number; ts: number; outcome: string; text: string; raw_len: number }[] }).agent_outputs ?? [];
@@ -1063,6 +1101,7 @@ export function TaskFormModal({
           acceptor_agent_id: task.acceptor_agent_id ?? '',
           acceptance_required: task.acceptance_required ?? true,
           acceptance_criteria: task.acceptance_criteria ?? '',
+          acceptance_checks_text: formatChecks(task.acceptance_checks),
         }
       : {
           title: '',
@@ -1072,6 +1111,7 @@ export function TaskFormModal({
           acceptor_agent_id: '',
           acceptance_required: true,
           acceptance_criteria: '',
+          acceptance_checks_text: '',
         },
   );
   const [err, setErr] = useState('');
@@ -1162,6 +1202,15 @@ export function TaskFormModal({
             value={value.acceptance_criteria}
             onChange={e => set('acceptance_criteria', e.target.value)}
             placeholder="可检验的条目（M1 视为协商一致）"
+          />
+        </label>
+        <label>
+          机械检查（每行一条，系统在任务工作区自动执行）
+          <textarea
+            rows={3}
+            value={value.acceptance_checks_text}
+            onChange={e => set('acceptance_checks_text', e.target.value)}
+            placeholder={'file: hello.txt\nnot-file: tmp/out.log\ncmd: cargo test => 0'}
           />
         </label>
         <div>

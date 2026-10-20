@@ -16,6 +16,7 @@ import {
   type ReactNode,
 } from 'react';
 import { api, SSE_URL } from './api';
+import { parseChecks } from './checks';
 import type {
   Adapter,
   Agent,
@@ -570,9 +571,11 @@ export function DomoProvider({ children }: { children: ReactNode }) {
   const submitTaskForm = useCallback(
     async (projectId: string, value: TaskFormValue, editTaskId?: string) => {
       try {
+        const { acceptance_checks_text, ...rest } = value;
+        const payload = { ...rest, acceptance_checks: parseChecks(acceptance_checks_text) };
         const t = editTaskId
-          ? await api.updateTask(editTaskId, value)
-          : await api.createTask(projectId, value);
+          ? await api.updateTask(editTaskId, payload as unknown as TaskFormValue)
+          : await api.createTask(projectId, payload as unknown as TaskFormValue);
         setTasksByProject(m => {
           const list = m[projectId] ?? [];
           return { ...m, [projectId]: upsertById(list, t) };

@@ -1338,7 +1338,11 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
             total_len,
         )
     };
-    let prompt = {
+    let evidence = {
+        let c = state.db.lock().unwrap();
+        db::latest_acceptance_evidence(&c, &task.id)
+    };
+    let mut prompt = {
         let c = state.db.lock().unwrap();
         let project = db::get_project(&c, &task.project_id);
         drop(c);
@@ -1350,6 +1354,14 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
             None => return Err("project not found".into()),
         }
     };
+    if let Some(ev) = &evidence {
+        prompt.push_str("\n\n## 自动机械检查结果（objective evidence）\n");
+        prompt.push_str(&serde_json::to_string_pretty(ev).unwrap_or_else(|_| ev.to_string()));
+        prompt.push_str(
+            "\n以上结果由系统在任务工作区内自动执行，未经模型解释。验收结论必须逐项引用这些结果；\n\
+             若某项失败或未执行，必须说明它是否影响任务目标的达成，不能忽略。\n",
+        );
+    }
     let session = accept_session(&task.id, task.attempt);
 
     let out = run_cli_ext(

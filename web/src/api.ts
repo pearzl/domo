@@ -71,7 +71,21 @@ function normalizeTaskDetail(raw: unknown): TaskDetail {
   const base = (obj.task ?? obj) as unknown as Task;
   const logs = Array.isArray(obj.logs) ? (obj.logs as LogLine[]) : [];
   const events = Array.isArray(obj.events) ? (obj.events as AuditEvent[]) : [];
-  return { ...base, logs, events };
+  const extra = obj as unknown as {
+    acceptance_checks?: unknown;
+    acceptance_evidence?: unknown;
+  };
+  return {
+    ...base,
+    logs,
+    events,
+    ...(Array.isArray(extra.acceptance_checks)
+      ? { acceptance_checks: extra.acceptance_checks as TaskDetail['acceptance_checks'] }
+      : {}),
+    ...(extra.acceptance_evidence !== undefined
+      ? { acceptance_evidence: extra.acceptance_evidence as TaskDetail['acceptance_evidence'] }
+      : {}),
+  };
 }
 
 export const api = {

@@ -103,6 +103,13 @@ fn ok<T: serde::Serialize>(v: T) -> Response {
 
 const ROLES: [&str; 4] = ["planner", "executor", "acceptor", "decision_maker"];
 
+/// 机械检查项结构校验（与 `verification::Check` 共用同一套结构）。
+fn validate_check(v: &Value) -> Result<(), String> {
+    serde_json::from_value::<crate::verification::Check>(v.clone())
+        .map(|_| ())
+        .map_err(|e| format!("acceptance_checks item invalid: {e}"))
+}
+
 // ---------- engineerings（工程层） ----------
 
 fn valid_workspace_kind(k: &str) -> bool {
@@ -2040,6 +2047,14 @@ async fn create_task(
                 t.agent_pinned as i64
             ],
         ).unwrap();
+        if let Some(arr) = body["acceptance_checks"].as_array() {
+            for chk in arr {
+                if let Err(e) = validate_check(chk) {
+                    return err(StatusCode::BAD_REQUEST, e);
+                }
+            }
+            db::set_task_checks(&c, &t.id, arr);
+        }
         events::push_event(&st, &c, &id, Some(&t.id), "task.created",
             json!({"title": t.title, "depends_on": t.depends_on}));
         if !t.acceptance_required {
@@ -2105,6 +2120,8 @@ async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
         "events": db::list_events(&c, None, Some(&id)),
         "guidance": db::list_guidance(&c, &id),
         "negotiation": negotiation,
+        "acceptance_checks": db::get_task_checks(&c, &id),
+        "acceptance_evidence": db::latest_acceptance_evidence(&c, &id),
         // M4：三档恢复状态 + 当前在途 worker 句柄数（同一 task 恒 ≤1）
         "recovery": {
             "pending": rec.pending, "tier": rec.tier, "manual": rec.manual,
@@ -2223,6 +2240,14 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
                 json!({"reason": "acceptance criteria negotiation failed",
                        "proposed_criteria": body["acceptance_criteria"].clone(),
                        "title": t.title.clone(), "source": "patch"}));
+        }
+        if let Some(arr) = body["acceptance_checks"].as_array() {
+            for chk in arr {
+                if let Err(e) = validate_check(chk) {
+                    return err(StatusCode::BAD_REQUEST, e);
+                }
+            }
+            db::set_task_checks(&c, &t.id, arr);
         }
         events::push_event(&st, &c, &t.project_id, Some(&t.id), "task.updated", json!({}));
         if body.get("milestone_id").is_some() {

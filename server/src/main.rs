@@ -14,6 +14,7 @@ mod roles;
 mod sandbox;
 mod scheduler;
 mod state;
+mod verification;
 
 use std::sync::Arc;
 use state::App;

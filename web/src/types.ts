@@ -110,6 +110,8 @@ export interface Task {
   acceptor_agent_id: string | null;
   acceptance_required: boolean;
   acceptance_criteria: string | null;
+  /** 机械检查项（详情接口返回；列表可能缺省） */
+  acceptance_checks?: AcceptanceCheck[];
   negotiation_status?: string;
   negotiation_round?: number;
   /** M4 任务计划（执行者产出，验收者审查） */
@@ -236,9 +238,28 @@ export interface Negotiation {
   rounds: NegotiationRound[];
 }
 
+export type AcceptanceCheck =
+  | { type: 'file_exists'; path: string }
+  | { type: 'file_not_exists'; path: string }
+  | { type: 'command'; cmd: string; expect_exit?: number };
+
+export interface CheckResult {
+  type: string;
+  passed: boolean;
+  detail?: string;
+  path?: string;
+  cmd?: string;
+  exit_code?: number;
+  expect_exit?: number;
+}
+
 export interface TaskDetail extends Task {
   logs: LogLine[];
   events: AuditEvent[];
+  /** 机械检查项（系统执行，结果作为验收证据） */
+  acceptance_checks?: AcceptanceCheck[];
+  /** 最近一次机械检查结果 */
+  acceptance_evidence?: CheckResult[] | null;
   /** M5：agent 运行归档输出（模型输出由 DOMO 自行存档，供审计回放） */
   agent_outputs?: {
     id: number;
@@ -296,6 +317,8 @@ export interface TaskFormValue {
   acceptor_agent_id: string;
   acceptance_required: boolean;
   acceptance_criteria: string;
+  /** 机械检查的可读文本（每行一条，见 checks.ts） */
+  acceptance_checks_text: string;
 }
 
 export interface AgentFormValue {

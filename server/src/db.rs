@@ -136,6 +136,21 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "engineering_id", "TEXT");
     c.execute_batch("CREATE INDEX IF NOT EXISTS idx_projects_engineering ON projects(engineering_id);")
         .ok();
+    // M7 验收机械检查（只支持 file_exists / file_not_exists / command 三类结构）
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_checks (
+            task_id TEXT NOT NULL, idx INTEGER NOT NULL,
+            kind TEXT NOT NULL, spec TEXT NOT NULL,
+            PRIMARY KEY(task_id, idx)
+        );
+        CREATE TABLE IF NOT EXISTS acceptance_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+            ts INTEGER NOT NULL, results TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_acceptance_evidence_task ON acceptance_evidence(task_id, id);",
+    )
+    .ok();
     // M2.5: 项目 agent 池（JSON 数组；NULL=全部 agent）
     add_column_if_missing(c, "projects", "agent_pool", "TEXT");
     // M4: 项目工作区内登记的 git 仓库（JSON [{rel,main}]）
@@ -523,8 +538,54 @@ pub fn list_projects(c: &Connection) -> Vec<Project> {
     let v = st.query_map([], project_row).unwrap().filter_map(|x| x.ok()).collect();
     v
 }
-pub fn list_tasks(c: &Connection, project_id: &str) -> Vec<Task> {
-    let mut st = c.prepare("SELECT * FROM tasks WHERE project_id=?1 ORDER BY created_at, id").unwrap();
+// ---------- 验收机械检查（M7） ----------
+
+/// 覆盖式写入任务的机械检查项（每项是 `{"type": ...}` 的 JSON）。
+pub fn set_task_checks(c: &Connection, task_id: &str, checks: &[Value]) {
+    let _ = c.execute("DELETE FROM task_checks WHERE task_id=?1", params![task_id]);
+    for (i, chk) in checks.iter().enumerate() {
+        let kind = chk.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let _ = c.execute(
+            "INSERT INTO task_checks (task_id, idx, kind, spec) VALUES (?1,?2,?3,?4)",
+            params![task_id, i as i64, kind, chk.to_string()],
+        );
+    }
+}
+
+pub fn get_task_checks(c: &Connection, task_id: &str) -> Vec<Value> {
+    let mut st = match c.prepare("SELECT spec FROM task_checks WHERE task_id=?1 ORDER BY idx") {
+        Ok(st) => st,
+        Err(_) => return vec![],
+    };
+    st.query_map(params![task_id], |r| r.get::<_, String>(0))
+        .map(|rows| {
+            rows.filter_map(|x| x.ok())
+                .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn insert_acceptance_evidence(c: &Connection, task_id: &str, attempt: i64, results: &Value) {
+    let _ = c.execute(
+        "INSERT INTO acceptance_evidence (task_id, attempt, ts, results) VALUES (?1,?2,?3,?4)",
+        params![task_id, attempt, now(), results.to_string()],
+    );
+}
+
+pub fn latest_acceptance_evidence(c: &Connection, task_id: &str) -> Option<Value> {
+    c.query_row(
+        "SELECT results FROM acceptance_evidence WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+        params![task_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+pub fn list_tasks(c: &Connection, project_id: &str) -> Vec<Task> {    let mut st = c.prepare("SELECT * FROM tasks WHERE project_id=?1 ORDER BY created_at, id").unwrap();
     let v = st.query_map(params![project_id], task_row).unwrap().filter_map(|x| x.ok()).collect();
     v
 }
