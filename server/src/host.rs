@@ -1,7 +1,9 @@
 //! 执行宿主（`opencode serve`）管理。
 //!
-//! 模型（ARCH §6）：**每个任务工作区一个宿主**，cwd 固定为该任务工作区；
-//! 同一任务的执行、验收与重试复用同一宿主，worktree 回收时一并销毁。
+//! 模型（ARCH §6）：**每个工作区（cwd）一个宿主**，而不是每个任务一个。
+//! - 单仓：每个任务有自己的 worktree → 天然一任务一宿主，可并行；
+//! - 多仓：项目/任务都在工程目录内串行 → 共用该目录的宿主，切分支时销毁重建；
+//! - 同一任务的执行、验收与重试复用同一宿主；worktree 回收时一并销毁。
 //!
 //! - 宿主以独立进程组启动，终止按组回收（`TERM → 3s → KILL`）。
 //! - 宿主数量有上限（`DOMO_MAX_HOSTS`，默认 4）；超出时调用方退化为
@@ -19,11 +21,16 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub struct Host {
-    pub task_id: String,
+    /// 键 = 规范化后的工作区绝对路径
+    pub key: String,
     pub port: u16,
     pub pid: u32,
     pub cwd: PathBuf,
     pub last_used: Instant,
+}
+
+fn key_of(cwd: &Path) -> String {
+    cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()).display().to_string()
 }
 
 static HOSTS: OnceLock<Mutex<HashMap<String, Host>>> = OnceLock::new();
@@ -88,17 +95,17 @@ async fn wait_ready(port: u16, tries: usize) -> bool {
     false
 }
 
-/// 取得（必要时启动）该任务工作区的宿主，返回端口。
-pub async fn ensure(task_id: &str, cwd: &Path) -> Result<u16, String> {
+/// 取得（必要时启动）该工作区的宿主，返回端口。
+pub async fn ensure(cwd: &Path) -> Result<u16, String> {
+    let key = key_of(cwd);
     {
         let mut map = hosts().lock().unwrap();
-        if let Some(h) = map.get_mut(task_id) {
-            if alive(h.pid) && h.cwd == cwd {
+        if let Some(h) = map.get_mut(&key) {
+            if alive(h.pid) {
                 h.last_used = Instant::now();
                 return Ok(h.port);
             }
-            // 进程已死或工作区变了：清掉旧记录
-            let old = map.remove(task_id).unwrap();
+            let old = map.remove(&key).unwrap();
             kill_group(old.pid, "-KILL");
         }
         if map.len() >= max_hosts() {
@@ -128,15 +135,15 @@ pub async fn ensure(task_id: &str, cwd: &Path) -> Result<u16, String> {
 
     let mut map = hosts().lock().unwrap();
     map.insert(
-        task_id.to_string(),
-        Host { task_id: task_id.to_string(), port, pid, cwd: cwd.to_path_buf(), last_used: Instant::now() },
+        key.clone(),
+        Host { key, port, pid, cwd: cwd.to_path_buf(), last_used: Instant::now() },
     );
     Ok(port)
 }
 
-/// 终止并移除某任务的宿主。
-pub fn stop(task_id: &str) {
-    let h = hosts().lock().unwrap().remove(task_id);
+/// 终止并移除某工作区的宿主（工作区回收 / 切分支前调用）。
+pub fn stop(cwd: &Path) {
+    let h = hosts().lock().unwrap().remove(&key_of(cwd));
     if let Some(h) = h {
         kill_group(h.pid, "-TERM");
         std::thread::sleep(Duration::from_millis(300));
@@ -152,7 +159,7 @@ pub fn sweep(idle: Duration) -> usize {
         let stale: Vec<String> = map
             .values()
             .filter(|h| h.last_used.elapsed() > idle || !alive(h.pid))
-            .map(|h| h.task_id.clone())
+            .map(|h| h.key.clone())
             .collect();
         for id in stale {
             if let Some(h) = map.remove(&id) {
@@ -173,8 +180,8 @@ pub fn stop_all() {
     }
 }
 
-pub fn touch(task_id: &str) {
-    if let Some(h) = hosts().lock().unwrap().get_mut(task_id) {
+pub fn touch(cwd: &Path) {
+    if let Some(h) = hosts().lock().unwrap().get_mut(&key_of(cwd)) {
         h.last_used = Instant::now();
     }
 }
@@ -259,8 +266,8 @@ mod tests {
 
     #[test]
     fn map_insert_and_stop_is_idempotent() {
-        stop("no-such-task"); // 不应 panic
-        assert!(hosts().lock().unwrap().get("no-such-task").is_none());
+        stop(Path::new("/no/such/workspace")); // 不应 panic
+        assert!(hosts().lock().unwrap().get("/no/such/workspace").is_none());
     }
 
     #[test]
