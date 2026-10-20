@@ -285,6 +285,22 @@ fn scan(state: &Arc<App>) {
             let _ = conn.execute("UPDATE projects SET status='completed' WHERE id=?1", params![project.id]);
             if let Some(p) = db::get_project(&conn, &project.id) {
                 events::push_event(state, &conn, &project.id, None, "project.completed", json!({}));
+                // ARCH §15 第 4 步：多仓项目完成只保留项目分支，不合回主干。
+                if db::project_is_multi(&conn, &p) {
+                    if let Some(repos) = p
+                        .baseline
+                        .as_ref()
+                        .and_then(|b| b.get("repos"))
+                        .and_then(|v| v.as_object())
+                        .filter(|m| !m.is_empty())
+                    {
+                        events::push_event(state, &conn, &project.id, None,
+                            "project.branches_preserved",
+                            json!({"repos": repos, "note": "项目分支已保留，未合回主干"}));
+                        tracing::info!(project = %p.id, repos = repos.len(),
+                            "multi-repo project completed; branches preserved (not merged to main)");
+                    }
+                }
                 events::send_project(state, &p);
                 // M3 项目总结报告：COMPLETED 时自动触发一次（无报告才生成，
                 // 失败靠前端/API 手工重试，不在此处循环重试）。

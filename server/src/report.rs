@@ -432,6 +432,7 @@ pub fn build_facts(
             "status": project.status,
             "status_label": project_status_label(&project.status),
             "workspace": project.workspace,
+            "baseline": project.baseline,
             "created_at": project.created_at,
         },
         "generated_at": generated_at,
@@ -466,6 +467,7 @@ fn is_key_event(kind: &str) -> bool {
         kind,
         "project.created" | "project.confirmed" | "project.completed" | "project.cancelled"
             | "project.reopened" | "project.paused" | "project.resumed"
+            | "project.branches_preserved"
     ) || kind.starts_with("milestone.")
         || kind.starts_with("replan.")
         || kind.starts_with("report.")
@@ -477,6 +479,7 @@ fn event_summary(e: &Event) -> String {
         "project.created" => format!("项目创建：{}", p["name"].as_str().unwrap_or("")),
         "project.confirmed" => "规划确认，项目进入运行".into(),
         "project.completed" => "全部任务终态且无未决 gate → 项目完成".into(),
+        "project.branches_preserved" => "项目分支已保留，未合回主干".into(),
         "project.cancelled" => "项目归档（取消）".into(),
         "project.reopened" => "项目从 completed 回到 running（有新工作）".into(),
         "milestone.created" => format!("里程碑创建：{}", p["name"].as_str().unwrap_or("")),
@@ -544,6 +547,34 @@ pub fn compose_markdown(project: &Project, facts: &Value, narrative: &str) -> St
         s.push_str(&format!("- 工作区：{desc}\n"));
     } else {
         s.push_str("- 工作区：（未设置）\n");
+    }
+    // 项目基线：多仓逐仓列出“repo → branch”，并明确不自动合回主干（ARCH §15 第 4 步）。
+    let baseline = facts["project"]["baseline"].as_object();
+    let repo_branches = baseline
+        .and_then(|b| b.get("repos"))
+        .and_then(|v| v.as_object());
+    if let Some(repos) = repo_branches.filter(|m| !m.is_empty()) {
+        s.push_str("- 项目基线：\n");
+        for (rel, branch) in repos {
+            s.push_str(&format!(
+                "  - {} → {}\n",
+                rel,
+                branch.as_str().unwrap_or("（未知分支）")
+            ));
+        }
+        s.push_str("- 分支处理：项目分支已保留，**未合回主干**；是否合回由人事后决定。\n");
+    } else if let Some(branch) = baseline
+        .and_then(|b| b.get("branch"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        s.push_str(&format!("- 项目基线：{branch}（分支已保留）\n"));
+    } else if let Some(commit) = baseline
+        .and_then(|b| b.get("commit"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        s.push_str(&format!("- 项目基线：提交 {commit}（未建立项目分支）\n"));
     }
     s.push_str(&format!(
         "- 任务总数：{}（完成 {} / 取消 {} / 进行中 {}）\n",
@@ -887,6 +918,18 @@ mod tests {
         ] {
             assert!(md.contains(needle), "report markdown missing {needle:?}\n{md}");
         }
+    }
+
+    #[test]
+    fn report_lists_repo_branches_and_keeps_them_unmerged() {
+        let mut p = project();
+        p.baseline = Some(json!({"repos": {"api": "domo/iter_a", "web": "domo/iter_a"}}));
+        let facts = build_facts(&p, &[], &[], &[], 0);
+        assert_eq!(facts["project"]["baseline"]["repos"]["api"], "domo/iter_a");
+        let md = compose_markdown(&p, &facts, "");
+        assert!(md.contains("api → domo/iter_a"));
+        assert!(md.contains("web → domo/iter_a"));
+        assert!(md.contains("未合回主干"));
     }
 
     #[test]

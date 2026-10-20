@@ -301,6 +301,7 @@ export function ProjectsView() {
             const engKind = p.engineering_id
               ? engineerings.find(e => e.id === p.engineering_id)?.workspace_kind
               : undefined;
+            const repoBranches = Object.entries(p.baseline?.repos ?? {});
             return (
               <div key={p.id} className="card project-card">
                 <div className="card-head">
@@ -344,6 +345,16 @@ export function ProjectsView() {
                     </button>
                   )}
                 </div>
+                {repoBranches.length > 0 && (p.status === 'completed' || p.status === 'archived') && (
+                  <div className="muted" style={{ width: '100%', fontSize: 12, marginTop: 4 }}>
+                    {repoBranches.map(([rel, branch]) => (
+                      <div key={rel}>
+                        {rel} → {branch}
+                      </div>
+                    ))}
+                    <div>分支已保留，未合回主干</div>
+                  </div>
+                )}
                 <div className="progress-row">
                   <div className="progress">
                     <div className="progress-fill" style={{ width: `${pct}%` }} />

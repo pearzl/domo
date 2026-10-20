@@ -110,6 +110,27 @@ def task_events(pid, tid, kind):
     return [e for e in events(pid) if e.get("task_id") == tid and e.get("type") == kind]
 
 
+def wait_project(pid, wanted, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        s, r = req("GET", f"/projects/{pid}")
+        if ((r or {}).get("project") or {}).get("status") in wanted:
+            return r
+        time.sleep(0.2)
+    return None
+
+
+def wait_report(pid, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        s, r = req("GET", f"/projects/{pid}/report")
+        rep = (r or {}).get("report")
+        if rep and rep.get("status") in {"ready", "failed"}:
+            return rep
+        time.sleep(0.2)
+    return None
+
+
 def make_ready():
     for repo in ("api", "web"):
         d = os.path.join(WS, repo)
@@ -138,6 +159,8 @@ def chmod_writable(path):
 
 
 make_ready()
+main_refs = {repo: (branch(os.path.join(WS, repo)), git(os.path.join(WS, repo), "rev-parse", "HEAD"))
+             for repo in ("api", "web")}
 
 s, e = req("POST", "/engineerings", {"name": "多仓基线冒烟", "workspace_kind": "multi", "workspace_path": WS})
 check("create multi engineering", s == 200, f"{s} {e}")
@@ -333,6 +356,32 @@ check("failed C leaves api on A branch", branch(os.path.join(WS, "api")) == ba, 
 check("failed C creates no C branch", subprocess.run(
     ["git", "-C", os.path.join(WS, "api"), "rev-parse", "--verify", "--quiet", f"refs/heads/{bc}"],
     capture_output=True).returncode != 0)
+
+# 项目完成：保留分支、不合回主干；卡片/报告能展示 repo → branch。
+s, r = req("POST", f"/projects/{pa}/resume", {})
+check("resume A for completion", s == 200, f"{s} {r}")
+s, all_inbox = req("GET", "/inbox")
+failed_item = next((i for i in (all_inbox or []) if i.get("status") == "open"
+                    and (i.get("payload") or {}).get("reason") == "multi_commit_failed"
+                    and (i.get("payload") or {}).get("task_id") == t3.get("id")), None)
+check("commit-failure inbox item is actionable", failed_item and any(
+    a.get("id") == "abandon" for a in failed_item.get("actions", [])), failed_item)
+s, r = req("POST", f"/inbox/{failed_item.get('id')}/resolve", {"resolution": "abandon"})
+check("abandon failed commit task from inbox", s == 200, f"{s} {r}")
+rj = wait_project(pa, {"completed"}, timeout=30)
+check("multi project completes after all tasks terminal", (rj or {}).get("project", {}).get("status") == "completed", rj)
+preserved = [e for e in events(pa) if e.get("type") == "project.branches_preserved"]
+check("completion records branches preserved", preserved and (preserved[-1].get("payload") or {}).get("repos"), preserved)
+check("project baseline kept after completion", (((rj or {}).get("project") or {}).get("baseline") or {}).get("repos", {}).get("api") == ba, rj)
+rep = wait_report(pa)
+check("completion report ready", (rep or {}).get("status") == "ready", rep)
+content = (rep or {}).get("content") or ""
+check("report lists repo -> branch", f"api → {ba}" in content and f"web → {ba}" in content, content[:500])
+check("report says branches not merged", "未合回主干" in content, content[:500])
+for repo in ("api", "web"):
+    main_branch, main_sha = main_refs[repo]
+    check(f"main branch unchanged in {repo}", git(os.path.join(WS, repo), "rev-parse", main_branch) == main_sha)
+    check(f"project branch preserved in {repo}", branch(os.path.join(WS, repo)) == ba)
 
 failed_checks = [n for n, ok in CHECKS if not ok]
 print(f"\n[baseline-smoke] {len(CHECKS) - len(failed_checks)}/{len(CHECKS)} checks passed")
