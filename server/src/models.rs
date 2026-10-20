@@ -56,6 +56,10 @@ pub struct Project {
     /// M4: 项目工作区内登记的 git 仓库（[{rel, main}]，confirm 时扫描）
     #[serde(default)]
     pub repos: Vec<RepoRef>,
+    /// 项目基线（ARCH §15）：单仓 `{branch}` / detached 时 `{commit}`；
+    /// 多仓 `{repos: {rel: branch}}`。确认项目成功后写入。
+    #[serde(default)]
+    pub baseline: Option<Value>,
     pub created_at: i64,
 }
 

@@ -1761,6 +1761,7 @@ mod tests {
             workspace: None,
             agent_pool: None,
             repos: Vec::new(),
+            baseline: None,
             created_at: 0,
         };
         let task = Task {

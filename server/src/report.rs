@@ -774,6 +774,7 @@ mod tests {
             workspace: Some(json!({"kind": "local", "path": "/tmp/ws"})),
             agent_pool: None,
             repos: Vec::new(),
+            baseline: None,
             created_at: 0,
         }
     }

@@ -1,5 +1,6 @@
 mod agents;
 mod api;
+mod baseline;
 mod db;
 mod events;
 mod host;

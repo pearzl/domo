@@ -84,6 +84,13 @@ export interface Engineering {
   created_at: number;
 }
 
+/** 项目基线：单仓记录确认时的分支（detached 时记录提交）；多仓记录每仓迭代分支 */
+export interface ProjectBaseline {
+  branch?: string;
+  commit?: string;
+  repos?: Record<string, string>;
+}
+
 export interface Project {
   id: string;
   /** 所属工程；null = 未归属（旧数据） */
@@ -93,6 +100,8 @@ export interface Project {
   status: ProjectStatus;
   plan?: { confirmed_at?: number | null; content?: unknown } | null;
   workspace: Workspace | null;
+  /** 确认项目时写入的项目基线 */
+  baseline?: ProjectBaseline | null;
   /** 项目 agent 池（null/缺省=全部已配置 agent；规划台可显式选择） */
   agent_pool?: string[] | null;
   created_at: number;

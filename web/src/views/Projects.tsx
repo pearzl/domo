@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useDomo } from '../store';
-import type { InboxItem, Project, Workspace } from '../types';
+import type { InboxItem, Project, ProjectBaseline, Workspace } from '../types';
 import { Badge, ConfirmDialog, Empty, MILESTONE_STATUS_LABEL, Modal, StatusBadge, fmtTime } from '../ui';
 import { ReportModal } from './Report';
 
@@ -95,6 +95,33 @@ function WorkspaceBadge({ ws }: { ws: Workspace }) {
       <Badge tone={ws.kind === 'local' ? 'blue' : 'purple'}>{workspaceBrief(ws)}</Badge>
     </span>
   );
+}
+
+/** 项目基线徽章：多仓展示「仓数 → 分支」，单仓展示分支或提交 */
+function BaselineBadge({ baseline }: { baseline?: ProjectBaseline | null }) {
+  if (!baseline) return null;
+  const repos = Object.entries(baseline.repos ?? {});
+  if (repos.length > 0) {
+    const branch = repos[0][1];
+    return (
+      <span title={repos.map(([rel, b]) => `${rel} → ${b}`).join('\n')}>
+        <Badge tone="green">
+          基线：{repos.length} 仓 · {branch}
+        </Badge>
+      </span>
+    );
+  }
+  if (baseline.branch) {
+    return <Badge tone="green">基线：{baseline.branch}</Badge>;
+  }
+  if (baseline.commit) {
+    return (
+      <span title={baseline.commit}>
+        <Badge tone="green">基线：{baseline.commit.slice(0, 8)}</Badge>
+      </span>
+    );
+  }
+  return null;
 }
 
 /** 找到某里程碑当前 open 的 gate 收件箱条目（用于「去确认」一键跳转） */
@@ -291,6 +318,7 @@ export function ProjectsView() {
                   ) : (
                     <span className="ws-hint">将使用默认工作区 ~/.domo/workspace/{p.id}（确认规划时自动创建）</span>
                   )}
+                  <BaselineBadge baseline={p.baseline} />
                   {open && (
                     <button
                       className="btn"

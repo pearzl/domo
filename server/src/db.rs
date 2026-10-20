@@ -155,6 +155,8 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "agent_pool", "TEXT");
     // M4: 项目工作区内登记的 git 仓库（JSON [{rel,main}]）
     add_column_if_missing(c, "projects", "repos", "TEXT");
+    // M8/ARCH §15：项目基线（单仓 {branch|commit}；多仓 {repos:{rel:branch}}）
+    add_column_if_missing(c, "projects", "baseline", "TEXT");
     // M4: 任务涉及的仓库 scope（JSON rel 数组）
     add_column_if_missing(c, "tasks", "scope_repos", "TEXT");
     // M5：agent 运行原始输出归档（模型输出已由我们获得 → 自行存档，供审计回放与结论复核）
@@ -300,6 +302,11 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    let baseline = r
+        .get::<_, Option<String>>("baseline")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
     Ok(Project {
         id: r.get("id")?,
         engineering_id: r.get("engineering_id").ok().flatten(),
@@ -310,6 +317,7 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         workspace: workspace.and_then(|s| serde_json::from_str(&s).ok()),
         agent_pool,
         repos,
+        baseline,
         created_at: r.get("created_at")?,
     })
 }
@@ -1326,6 +1334,22 @@ mod tests {
         migrate(&c);
         assert!(table_has_column(&c, "tasks", "milestone_id"));
         assert!(table_has_column(&c, "projects", "workspace"));
+        assert!(table_has_column(&c, "projects", "baseline"));
+    }
+
+    #[test]
+    fn project_baseline_roundtrip() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        seed_project(&c, "prj_base");
+        assert!(get_project(&c, "prj_base").unwrap().baseline.is_none());
+
+        let b = serde_json::json!({"repos": {"api": "domo/iter_base", "web": "domo/iter_base"}});
+        set_project_baseline(&c, "prj_base", Some(&b));
+        assert_eq!(get_project(&c, "prj_base").unwrap().baseline, Some(b));
+
+        set_project_baseline(&c, "prj_base", None);
+        assert!(get_project(&c, "prj_base").unwrap().baseline.is_none());
     }
 
     #[test]
@@ -1588,6 +1612,12 @@ pub fn set_project_repos(c: &Connection, id: &str, repos: &[crate::models::RepoR
         "UPDATE projects SET repos=?2 WHERE id=?1",
         params![id, serde_json::to_string(repos).unwrap_or_else(|_| "[]".into())],
     );
+}
+
+/// ARCH §15：写入项目基线（None 清除）。
+pub fn set_project_baseline(c: &Connection, id: &str, baseline: Option<&Value>) {
+    let s = baseline.map(|v| v.to_string());
+    let _ = c.execute("UPDATE projects SET baseline=?2 WHERE id=?1", params![id, s]);
 }
 
 /// M4：读取项目登记的仓库列表。
