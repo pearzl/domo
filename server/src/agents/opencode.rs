@@ -1430,24 +1430,31 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
     }
     let session = accept_session(&task.id, task.attempt);
 
-    let out = run_cli_ext(
-        &state,
-        Some(&task.id),
-        Some(&cwd),
-        &session,
-        model_of(&agent).as_deref(),
-        timeout_of(&agent),
-        &prompt,
-        None,
-        Some(PersistCtx {
-            logical: session.clone(),
-            task_id: Some(task.id.clone()),
-            phase: Some("accept".into()),
-            attempt: Some(task.attempt),
-        }),
-    )
-    .await
-    .map_err(|e| format!("{INFRA_ACCEPT_ERROR_PREFIX}{e}"))?;
+    let out = match run_via_host(
+        &state, &task, &cwd, &session, &prompt,
+        model_of(&agent).as_deref(), timeout_of(&agent),
+    ).await {
+        Ok(Some(o)) => o,
+        Ok(None) => run_cli_ext(
+            &state,
+            Some(&task.id),
+            Some(&cwd),
+            &session,
+            model_of(&agent).as_deref(),
+            timeout_of(&agent),
+            &prompt,
+            None,
+            Some(PersistCtx {
+                logical: session.clone(),
+                task_id: Some(task.id.clone()),
+                phase: Some("accept".into()),
+                attempt: Some(task.attempt),
+            }),
+        )
+        .await
+        .map_err(|e| format!("{INFRA_ACCEPT_ERROR_PREFIX}{e}"))?,
+        Err(e) => return Err(format!("{INFRA_ACCEPT_ERROR_PREFIX}{e}")),
+    };
 
     // M4：验收输出中的 REPLAN 块 → 登记规划修改建议
     if let Some(changes) = crate::replan::parse_replan_block(&out.text) {
