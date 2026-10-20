@@ -417,7 +417,7 @@ export function ProjectsView() {
                           className="btn btn-danger-ghost"
                           title="立即终止全部在途会话并转到已暂停（当前尝试的进度会丢失）"
                           onClick={() => {
-                            if (window.confirm('强制暂停将立即终止全部在途 agent 会话，当前尝试的进度会丢失。确定？')) {
+                            if (window.confirm('强制暂停将立即终止本项目全部在途 agent 会话，当前尝试的进度会丢失；其他项目不受影响。确定？')) {
                               void projectAction(p.id, 'pause', true);
                             }
                           }}

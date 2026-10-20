@@ -1605,13 +1605,28 @@ async fn pause_project(
             .any(|t| st.has_live_handle(&t.id))
     };
     if force && has_live {
-        // 强制暂停：终止全部在途会话并释放占用，立即进入已暂停
+        // 强制暂停：只终止**本项目**的在途会话并释放占用，立即进入已暂停。
         let tids: Vec<String> = {
             let c = st.db.lock().unwrap();
             db::list_tasks(&c, &id).into_iter().map(|t| t.id).collect()
         };
+        let aborted: Vec<String> = {
+            let c = st.db.lock().unwrap();
+            db::list_tasks(&c, &id)
+                .into_iter()
+                .filter(|t| st.has_live_handle(&t.id))
+                .map(|t| t.id)
+                .collect()
+        };
         st.abort_project_handles(&tids);
         {
+            let c = st.db.lock().unwrap();
+            events::push_event(
+                &st, &c, &id, None, "project.pause_applied",
+                json!({"mode": "force", "scope": "project", "aborted_attempts": aborted.len(),
+                       "task_ids": aborted,
+                       "note": "强制暂停只取消本项目的在途会话，其他项目不受影响"}),
+            );
             let c = st.db.lock().unwrap();
             for tid in &tids {
                 if let Some(t) = db::get_task(&c, tid) {
