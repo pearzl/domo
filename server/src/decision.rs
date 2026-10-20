@@ -333,20 +333,6 @@ pub fn apply_ruling(
             let action = r.action.clone().unwrap_or_else(|| if r.approve { "rebase".into() } else { "manual".into() });
             let proj = db::get_project(conn, &t.project_id);
             match (action.as_str(), proj) {
-                ("rebase", Some(p)) => {
-                    match crate::sandbox::retry_merge_with_rebase(state, conn, &p, &t) {
-                        crate::sandbox::MergeResult::Ok(_) => {
-                            effect = json!({"effect": "merge_conflict_resolved_by_rebase"});
-                            let _ = events::status_changed(state, conn, &t, "done", "merge_conflict_resolved");
-                        }
-                        crate::sandbox::MergeResult::Conflict { repo, detail } => {
-                            effect = json!({"effect": "merge_conflict_retry_failed", "repo": repo, "detail": detail});
-                            escalate_to_human(state, conn, d, &["merge_conflict_retry_failed".into()],
-                                &format!("决策者重试合并仍冲突（{repo}），转人工处理"));
-                            let _ = events::status_changed(state, conn, &t, "suspended", "merge_conflict_manual");
-                        }
-                    }
-                }
                 ("rework", _) => {
                     effect = json!({"effect": "merge_conflict_rework"});
                     crate::api::add_guidance_internal(conn, &t.id,

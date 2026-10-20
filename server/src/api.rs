@@ -32,6 +32,11 @@ use crate::{
 pub fn router(state: Arc<App>) -> Router {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/engineerings", get(list_engineerings).post(create_engineering))
+        .route(
+            "/api/engineerings/{id}",
+            get(get_engineering_detail).patch(patch_engineering),
+        )
         .route("/api/projects/{id}", get(get_project).patch(patch_project))
         .route("/api/projects/{id}/confirm", post(confirm_project))
         .route("/api/projects/{id}/pool", get(get_project_pool).put(put_project_pool))
@@ -98,6 +103,115 @@ fn ok<T: serde::Serialize>(v: T) -> Response {
 
 const ROLES: [&str; 4] = ["planner", "executor", "acceptor", "decision_maker"];
 
+// ---------- engineerings（工程层） ----------
+
+fn valid_workspace_kind(k: &str) -> bool {
+    matches!(k, "single" | "multi" | "plain")
+}
+
+async fn list_engineerings(State(st): State<Arc<App>>) -> Response {
+    let c = st.db.lock().unwrap();
+    ok(db::list_engineerings(&c))
+}
+
+async fn create_engineering(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(name) = body["name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return err(StatusCode::BAD_REQUEST, "name is required");
+    };
+    let kind = body["workspace_kind"].as_str().unwrap_or("single").trim().to_string();
+    if !valid_workspace_kind(&kind) {
+        return err(StatusCode::BAD_REQUEST, "workspace_kind must be single | multi | plain");
+    }
+    let path = body["workspace_path"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(p) = &path {
+        let pb = std::path::Path::new(p);
+        if !pb.is_dir() {
+            return err(StatusCode::BAD_REQUEST, "workspace_path does not exist or is not a directory");
+        }
+    }
+    if kind != "plain" && path.is_none() {
+        return err(StatusCode::BAD_REQUEST, "workspace_path is required for single/multi engineering");
+    }
+    let pool = body.get("default_agent_pool").and_then(|v| v.as_array()).map(|a| {
+        a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()
+    });
+    let e = Engineering {
+        id: db::new_id("eng_"),
+        name: name.to_string(),
+        brief: body["brief"].as_str().unwrap_or("").to_string(),
+        workspace_kind: kind,
+        workspace_path: path,
+        default_agent_pool: pool.filter(|p| !p.is_empty()),
+        constraints: body["constraints"].as_str().map(String::from).filter(|s| !s.trim().is_empty()),
+        created_at: db::now(),
+    };
+    {
+        let c = st.db.lock().unwrap();
+        db::insert_engineering(&c, &e);
+        events::push_event(&st, &c, "", None, "engineering.created", json!({"engineering_id": e.id, "name": e.name}));
+    }
+    st.send("engineering", serde_json::to_value(&e).unwrap_or(json!({})));
+    ok(e)
+}
+
+async fn get_engineering_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let c = st.db.lock().unwrap();
+    let Some(e) = db::get_engineering(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "engineering not found");
+    };
+    ok(json!({ "engineering": e, "projects": db::list_projects_of(&c, &id) }))
+}
+
+async fn patch_engineering(
+    State(st): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let c = st.db.lock().unwrap();
+    let Some(mut e) = db::get_engineering(&c, &id) else {
+        return err(StatusCode::NOT_FOUND, "engineering not found");
+    };
+    if let Some(v) = body["name"].as_str() {
+        if v.trim().is_empty() {
+            return err(StatusCode::BAD_REQUEST, "name must not be empty");
+        }
+        e.name = v.trim().into();
+    }
+    if let Some(v) = body["brief"].as_str() {
+        e.brief = v.into();
+    }
+    if let Some(v) = body["workspace_kind"].as_str() {
+        if !valid_workspace_kind(v) {
+            return err(StatusCode::BAD_REQUEST, "workspace_kind must be single | multi | plain");
+        }
+        e.workspace_kind = v.into();
+    }
+    if let Some(v) = body.get("workspace_path") {
+        e.workspace_path = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        if let Some(p) = &e.workspace_path {
+            if !std::path::Path::new(p).is_dir() {
+                return err(StatusCode::BAD_REQUEST, "workspace_path does not exist or is not a directory");
+            }
+        }
+    }
+    if let Some(v) = body.get("constraints") {
+        e.constraints = v.as_str().map(String::from).filter(|s| !s.trim().is_empty());
+    }
+    if let Some(v) = body.get("default_agent_pool") {
+        e.default_agent_pool = v.as_array().map(|a| {
+            a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()
+        }).filter(|p| !p.is_empty());
+    }
+    db::update_engineering(&c, &e);
+    events::push_event(&st, &c, "", None, "engineering.updated", json!({"engineering_id": e.id}));
+    st.send("engineering", serde_json::to_value(&e).unwrap_or(json!({})));
+    ok(e)
+}
+
 // ---------- projects ----------
 
 async fn list_projects(State(st): State<Arc<App>>) -> Response {
@@ -109,8 +223,25 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
     let name = body["name"].as_str().filter(|s| !s.trim().is_empty());
     let Some(name) = name else { return err(StatusCode::BAD_REQUEST, "name is required"); };
     let brief = body["brief"].as_str().unwrap_or("");
+    let engineering_id = body["engineering_id"]
+        .as_str()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // 工程是项目的归属容器：显式指定时必须存在
+    let engineering = match &engineering_id {
+        Some(eid) => {
+            let c = st.db.lock().unwrap();
+            match db::get_engineering(&c, eid) {
+                Some(e) => Some(e),
+                None => return err(StatusCode::BAD_REQUEST, "engineering_id not found"),
+            }
+        }
+        None => None,
+    };
     let mut p = Project {
         id: db::new_id("prj_"),
+        engineering_id,
         name: name.trim().into(),
         brief: brief.into(),
         status: "initializing".into(),
@@ -123,8 +254,8 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
     {
         let c = st.db.lock().unwrap();
         c.execute(
-            "INSERT INTO projects (id,name,brief,status,plan_content,confirmed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![p.id, p.name, p.brief, p.status, Option::<String>::None, Option::<i64>::None, p.created_at],
+            "INSERT INTO projects (id,engineering_id,name,brief,status,plan_content,confirmed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![p.id, p.engineering_id, p.name, p.brief, p.status, Option::<String>::None, Option::<i64>::None, p.created_at],
         ).unwrap();
         events::push_event(&st, &c, &p.id, None, "project.created",
             json!({"name": p.name, "brief": p.brief}));
@@ -134,6 +265,14 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
             if !ids.is_empty() {
                 db::set_project_agent_pool(&c, &p.id, Some(&ids));
                 p.agent_pool = Some(ids);
+            }
+        } else if let Some(e) = &engineering {
+            // 工程默认团队：项目未显式选择时继承（团队配置逐层继承的最小实现）
+            if let Some(pool) = &e.default_agent_pool {
+                if !pool.is_empty() {
+                    db::set_project_agent_pool(&c, &p.id, Some(pool));
+                    p.agent_pool = Some(pool.clone());
+                }
             }
         }
         // M2.5 修复：创建时携带的工作区直接落库（此前被忽略，逼用户再编辑一次）
@@ -244,6 +383,18 @@ async fn patch_project(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
     }
     if let Some(n) = body["name"].as_str() { p.name = n.to_string(); }
     if let Some(b) = body["brief"].as_str() { p.brief = b.to_string(); }
+    // 工程归属：可在非归档状态调整（null / 空串 = 解除归属）
+    let mut eng_changed: Option<Option<String>> = None;
+    if let Some(v) = body.get("engineering_id") {
+        let eid = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        if let Some(e) = &eid {
+            if db::get_engineering(&c, e).is_none() {
+                return err(StatusCode::BAD_REQUEST, "engineering_id not found");
+            }
+        }
+        p.engineering_id = eid.clone();
+        eng_changed = Some(eid);
+    }
     // M2.5: agent 池（显式选择本项目可用 agent；null=全部）。
     // 只约束「新分配」（规划/介入/建任务）；已有任务指派不受影响。
     let mut pool_json: Option<Option<String>> = None;
@@ -282,8 +433,12 @@ async fn patch_project(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
         }
         let _ = c.execute(&sql, bind.as_slice());
     }
+    if let Some(eid) = &eng_changed {
+        db::set_project_engineering(&c, &p.id, eid.as_deref());
+    }
     events::push_event(&st, &c, &p.id, None, "project.updated",
-        json!({"name": p.name, "brief": p.brief, "workspace": p.workspace, "agent_pool": p.agent_pool}));
+        json!({"name": p.name, "brief": p.brief, "workspace": p.workspace,
+               "agent_pool": p.agent_pool, "engineering_id": p.engineering_id}));
     drop(c);
     st.wake();
     ok(p)
@@ -3295,6 +3450,7 @@ async fn list_events(State(st): State<Arc<App>>, Query(q): Query<std::collection
 fn snapshot(st: &Arc<App>) -> Value {
     let c = st.db.lock().unwrap();
     json!({
+        "engineerings": db::list_engineerings(&c),
         "projects": db::list_projects(&c),
         "agents": db::list_agents(&c),
         "inbox": db::list_inbox(&c),

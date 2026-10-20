@@ -766,6 +766,7 @@ mod tests {
     fn project() -> Project {
         Project {
             id: "prj_1".into(),
+            engineering_id: None,
             name: "演示项目".into(),
             brief: "交付一个可验收的东西".into(),
             status: "completed".into(),

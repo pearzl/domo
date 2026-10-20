@@ -31,7 +31,10 @@ pub fn open(path: &str) -> Connection {
         }
     }
     let conn = Connection::open(path).expect("open sqlite db");
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    let _ = conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+         PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+    );
     migrate(&conn);
     // M4：启动期三档恢复标记——没有 worker 能跨重启存活，把「中断的执行中任务」
     // 与「第三档人工重建挂起的任务」置为待恢复（实际派发仍受项目 paused 冻结约束）。
@@ -51,6 +54,11 @@ fn migrate(c: &Connection) {
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL, plan_content TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS engineerings (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
+            workspace_kind TEXT NOT NULL DEFAULT 'single', workspace_path TEXT,
+            default_agent_pool TEXT, constraints TEXT, created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS milestones (
             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -124,6 +132,10 @@ fn migrate(c: &Connection) {
 
     // M2: projects.workspace (TEXT JSON, nullable) — idempotent column add
     add_column_if_missing(c, "projects", "workspace", "TEXT");
+    // M6 工程层：项目归属工程（旧数据为 NULL，后续由人迁移）
+    add_column_if_missing(c, "projects", "engineering_id", "TEXT");
+    c.execute_batch("CREATE INDEX IF NOT EXISTS idx_projects_engineering ON projects(engineering_id);")
+        .ok();
     // M2.5: 项目 agent 池（JSON 数组；NULL=全部 agent）
     add_column_if_missing(c, "projects", "agent_pool", "TEXT");
     // M4: 项目工作区内登记的 git 仓库（JSON [{rel,main}]）
@@ -275,6 +287,7 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         .unwrap_or_default();
     Ok(Project {
         id: r.get("id")?,
+        engineering_id: r.get("engineering_id").ok().flatten(),
         name: r.get("name")?,
         brief: r.get("brief")?,
         status: r.get("status")?,
@@ -284,6 +297,83 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         repos,
         created_at: r.get("created_at")?,
     })
+}
+
+// ---------- 工程（engineering） ----------
+
+fn engineering_row(r: &Row) -> rusqlite::Result<Engineering> {
+    let pool: Option<String> = r.get("default_agent_pool").ok().flatten();
+    Ok(Engineering {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        brief: r.get("brief")?,
+        workspace_kind: r.get("workspace_kind")?,
+        workspace_path: r.get("workspace_path")?,
+        default_agent_pool: pool.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
+        constraints: r.get("constraints")?,
+        created_at: r.get("created_at")?,
+    })
+}
+
+pub fn list_engineerings(c: &Connection) -> Vec<Engineering> {
+    let mut st = c
+        .prepare("SELECT * FROM engineerings ORDER BY created_at, id")
+        .unwrap();
+    st.query_map([], engineering_row)
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .collect()
+}
+
+pub fn get_engineering(c: &Connection, id: &str) -> Option<Engineering> {
+    c.query_row("SELECT * FROM engineerings WHERE id=?1", params![id], engineering_row)
+        .optional()
+        .ok()
+        .flatten()
+}
+
+pub fn insert_engineering(c: &Connection, e: &Engineering) {
+    let pool = e
+        .default_agent_pool
+        .as_ref()
+        .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into()));
+    c.execute(
+        "INSERT INTO engineerings (id,name,brief,workspace_kind,workspace_path,default_agent_pool,constraints,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![e.id, e.name, e.brief, e.workspace_kind, e.workspace_path, pool, e.constraints, e.created_at],
+    )
+    .expect("insert engineering");
+}
+
+pub fn update_engineering(c: &Connection, e: &Engineering) {
+    let pool = e
+        .default_agent_pool
+        .as_ref()
+        .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into()));
+    c.execute(
+        "UPDATE engineerings SET name=?2, brief=?3, workspace_kind=?4, workspace_path=?5,
+                                 default_agent_pool=?6, constraints=?7 WHERE id=?1",
+        params![e.id, e.name, e.brief, e.workspace_kind, e.workspace_path, pool, e.constraints],
+    )
+    .expect("update engineering");
+}
+
+/// 某工程下的项目（按创建时间）。
+pub fn list_projects_of(c: &Connection, engineering_id: &str) -> Vec<Project> {
+    let mut st = c
+        .prepare("SELECT * FROM projects WHERE engineering_id=?1 ORDER BY created_at, id")
+        .unwrap();
+    st.query_map(params![engineering_id], project_row)
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .collect()
+}
+
+pub fn set_project_engineering(c: &Connection, project_id: &str, engineering_id: Option<&str>) {
+    let _ = c.execute(
+        "UPDATE projects SET engineering_id=?2 WHERE id=?1",
+        params![project_id, engineering_id],
+    );
 }
 
 fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -1120,6 +1210,40 @@ mod tests {
     }
 
     #[test]
+    fn engineering_crud_and_project_link() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        let e = Engineering {
+            id: "eng_1".into(),
+            name: "演示工程".into(),
+            brief: "b".into(),
+            workspace_kind: "multi".into(),
+            workspace_path: Some("/tmp".into()),
+            default_agent_pool: Some(vec!["a1".into()]),
+            constraints: Some("禁改 vendor".into()),
+            created_at: 1,
+        };
+        insert_engineering(&c, &e);
+        assert_eq!(list_engineerings(&c).len(), 1);
+        let mut got = get_engineering(&c, "eng_1").unwrap();
+        assert_eq!(got.name, "演示工程");
+        assert_eq!(got.default_agent_pool.as_deref(), Some(&["a1".to_string()][..]));
+
+        seed_project(&c, "prj_link");
+        set_project_engineering(&c, "prj_link", Some("eng_1"));
+        assert_eq!(get_project(&c, "prj_link").unwrap().engineering_id.as_deref(), Some("eng_1"));
+        assert_eq!(list_projects_of(&c, "eng_1").len(), 1);
+
+        got.brief = "b2".into();
+        update_engineering(&c, &got);
+        assert_eq!(get_engineering(&c, "eng_1").unwrap().brief, "b2");
+
+        set_project_engineering(&c, "prj_link", None);
+        assert!(get_project(&c, "prj_link").unwrap().engineering_id.is_none());
+        assert!(list_projects_of(&c, "eng_1").is_empty());
+    }
+
+    #[test]
     fn migrate_is_idempotent() {
         let c = Connection::open_in_memory().unwrap();
         migrate(&c);
@@ -1127,6 +1251,23 @@ mod tests {
         migrate(&c);
         assert!(table_has_column(&c, "tasks", "milestone_id"));
         assert!(table_has_column(&c, "projects", "workspace"));
+    }
+
+    #[test]
+    fn open_sets_concurrency_pragmas() {
+        let path = std::env::temp_dir().join(format!("domo-pragma-{}-{}.db", std::process::id(), now()));
+        let p = path.to_string_lossy().to_string();
+        let c = open(&p);
+        let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let busy: i64 = c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        let fk: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        drop(c);
+        assert_eq!(mode.to_lowercase(), "wal");
+        assert_eq!(busy, 5000);
+        assert_eq!(fk, 1);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{p}{suffix}"));
+        }
     }
 
     #[test]

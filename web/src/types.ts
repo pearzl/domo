@@ -70,8 +70,24 @@ export interface Workspace {
   branch?: string; // kind=git，可选
 }
 
+export type WorkspaceKind = 'single' | 'multi' | 'plain';
+
+/** 工程（完整产品）：承载工作区锚点、默认团队与防跑偏约束；不含目标与进度 */
+export interface Engineering {
+  id: string;
+  name: string;
+  brief: string;
+  workspace_kind: WorkspaceKind;
+  workspace_path: string | null;
+  default_agent_pool: string[] | null;
+  constraints: string | null;
+  created_at: number;
+}
+
 export interface Project {
   id: string;
+  /** 所属工程；null = 未归属（旧数据） */
+  engineering_id?: string | null;
   name: string;
   brief: string;
   status: ProjectStatus;

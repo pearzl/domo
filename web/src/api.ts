@@ -10,6 +10,7 @@ import type {
   Adapter,
   ApplyResult,
   AuditEvent,
+  Engineering,
   InboxItem,
   KnowledgeEntry,
   LogLine,
@@ -24,6 +25,7 @@ import type {
   TaskDetail,
   TaskFormValue,
   Workspace,
+  WorkspaceKind,
 } from './types';
 
 const API_BASE = '/api';
@@ -73,12 +75,26 @@ function normalizeTaskDetail(raw: unknown): TaskDetail {
 }
 
 export const api = {
+  listEngineerings: () => request<Engineering[]>('/engineerings'),
+  createEngineering: (body: {
+    name: string;
+    brief: string;
+    workspace_kind: WorkspaceKind;
+    workspace_path?: string | null;
+    constraints?: string | null;
+    default_agent_pool?: string[] | null;
+  }) => request<Engineering>('/engineerings', 'POST', body),
+  updateEngineering: (id: string, body: Partial<Omit<Engineering, 'id' | 'created_at'>>) =>
+    request<Engineering>(`/engineerings/${id}`, 'PATCH', body),
+  getEngineering: (id: string) =>
+    request<{ engineering: Engineering; projects: Project[] }>(`/engineerings/${id}`),
+
   listProjects: () => request<Project[]>('/projects'),
-  createProject: (body: { name: string; brief: string; workspace?: Workspace | null }) =>
+  createProject: (body: { name: string; brief: string; workspace?: Workspace | null; engineering_id?: string | null; agent_pool?: string[] | null }) =>
     request<Project>('/projects', 'POST', body),
   getProject: (id: string) => request<ProjectDetailPayload>(`/projects/${id}`),
   /** PATCH 支持任意状态（archived 拒绝 409） */
-  updateProject: (id: string, body: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null }) =>
+  updateProject: (id: string, body: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; engineering_id?: string | null }) =>
     request<Project>(`/projects/${id}`, 'PATCH', body),
   projectAction: (id: string, action: 'confirm' | 'pause' | 'resume' | 'cancel', force?: boolean) =>
     request<Project>(`/projects/${id}/${action}`, 'POST', force ? { force: true } : {}),

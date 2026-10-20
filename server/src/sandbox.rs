@@ -28,6 +28,12 @@ use crate::{
     state::App,
 };
 
+/// 只在需要读写数据库时短暂持锁：**任何 git / 文件 IO 都不得在锁内执行**。
+fn with_db<R>(state: &Arc<App>, f: impl FnOnce(&Connection) -> R) -> R {
+    let c = state.db.lock().unwrap();
+    f(&c)
+}
+
 /// DOMO 管辖的项目沙盒根：<workspace_root>/<project_id>。
 pub fn sandbox_root(project_id: &str) -> PathBuf {
     crate::api::workspace_root().join(project_id)
@@ -134,16 +140,22 @@ fn task_scope(task: &Task, repos: &[(String, bool)]) -> Vec<String> {
 }
 
 /// 准备（幂等）任务沙盒并返回 agent 的 cwd。
-pub fn prepare(state: &Arc<App>, conn: &Connection, project: &Project, task: &Task) -> Result<Sandbox, String> {
-    let source_root = db::project_workdir(conn, project)
-        .ok_or_else(|| "project has no workspace (set a workspace or use the default one)".to_string())?;
+///
+/// 只做必要的短锁读取；创建 worktree 等 git 操作全部在锁外执行。
+pub fn prepare(state: &Arc<App>, project: &Project, task: &Task) -> Result<Sandbox, String> {
+    let (source_root, repos) = with_db(state, |c| {
+        (
+            db::project_workdir(c, project),
+            db::project_repos(c, &project.id)
+                .iter()
+                .map(|r| (r.rel.clone(), r.main))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let source_root =
+        source_root.ok_or_else(|| "project has no workspace (set a workspace or use the default one)".to_string())?;
     let root = sandbox_root(&project.id);
     let ts = short_id(&task.id);
-    let repos = db::project_repos(conn, &project.id);
-    let repos: Vec<(String, bool)> = repos
-        .iter()
-        .map(|r| (r.rel.clone(), r.main))
-        .collect();
 
     if repos.is_empty() {
         // 工作区内没有登记到 git 仓库：
@@ -156,9 +168,11 @@ pub fn prepare(state: &Arc<App>, conn: &Connection, project: &Project, task: &Ta
             .map(|w| w.get("default").and_then(|d| d.as_bool()).unwrap_or(false) == false)
             .unwrap_or(false);
         if explicit_non_default {
-            events::push_event(state, conn, &project.id, Some(&task.id), "task.sandbox_ready",
-                json!({"cwd": source_root.display().to_string(), "mode": "direct_non_git",
-                       "hint": "显式指定的非 git 工作区：任务直接在其中工作（无隔离）；建议 git init 以获得 worktree 隔离"}));
+            with_db(state, |c| {
+                events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_ready",
+                    json!({"cwd": source_root.display().to_string(), "mode": "direct_non_git",
+                           "hint": "显式指定的非 git 工作区：任务直接在其中工作（无隔离）；建议 git init 以获得 worktree 隔离"}));
+            });
             return Ok(Sandbox { cwd: source_root.clone(), worktrees: vec![], source_root });
         }
         let dir = root.join("tasks").join(ts);
@@ -196,8 +210,10 @@ pub fn prepare(state: &Arc<App>, conn: &Connection, project: &Project, task: &Ta
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-            events::push_event(state, conn, &project.id, Some(&task.id), "task.sandbox_created",
-                json!({"repo": rel, "worktree": wt.display().to_string(), "branch": branch}));
+            with_db(state, |c| {
+                events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_created",
+                    json!({"repo": rel, "worktree": wt.display().to_string(), "branch": branch}));
+            });
         }
         worktrees.push((rel.clone(), wt, branch));
     }
@@ -211,8 +227,10 @@ pub fn prepare(state: &Arc<App>, conn: &Connection, project: &Project, task: &Ta
 
     // 违规基线：scope 外源仓库的脏文件集合（快速比对用）
     let baseline = violation_snapshot(&source_root, &repos, &scope);
-    events::push_event(state, conn, &project.id, Some(&task.id), "task.sandbox_ready",
-        json!({"cwd": cwd.display().to_string(), "scope": scope, "baseline": baseline}));
+    with_db(state, |c| {
+        events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_ready",
+            json!({"cwd": cwd.display().to_string(), "scope": scope, "baseline": baseline}));
+    });
 
     Ok(Sandbox { cwd, worktrees, source_root })
 }
@@ -234,24 +252,31 @@ fn violation_snapshot(source_root: &Path, repos: &[(String, bool)], scope: &[Str
 }
 
 /// 每轮执行后检测 scope 外源仓库是否出现**新增**脏文件（agent 绕过沙盒直写）。
-pub fn detect_violations(state: &Arc<App>, conn: &Connection, project: &Project, task: &Task) -> Vec<String> {
-    let Some(source_root) = db::project_workdir(conn, project) else { return vec![] };
-    let repos: Vec<(String, bool)> = db::project_repos(conn, &project.id)
-        .iter()
-        .map(|r| (r.rel.clone(), r.main))
-        .collect();
+pub fn detect_violations(state: &Arc<App>, project: &Project, task: &Task) -> Vec<String> {
+    let (source_root, repos) = with_db(state, |c| {
+        (
+            db::project_workdir(c, project),
+            db::project_repos(c, &project.id)
+                .iter()
+                .map(|r| (r.rel.clone(), r.main))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let Some(source_root) = source_root else { return vec![] };
     if repos.is_empty() {
         return vec![];
     }
     let scope = task_scope(task, &repos);
     let now = violation_snapshot(&source_root, &repos, &scope);
     // 基线来自最近一次 sandbox_ready 事件
-    let baseline = db::list_events(conn, None, Some(&task.id))
-        .into_iter()
-        .rev()
-        .find(|e| e.kind == "task.sandbox_ready")
-        .and_then(|e| e.payload.get("baseline").cloned())
-        .unwrap_or(json!({}));
+    let baseline = with_db(state, |c| {
+        db::list_events(c, None, Some(&task.id))
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == "task.sandbox_ready")
+            .and_then(|e| e.payload.get("baseline").cloned())
+            .unwrap_or(json!({}))
+    });
     let mut violations: Vec<String> = Vec::new();
     if let Some(map) = now.as_object() {
         for (rel, files) in map {
@@ -268,8 +293,10 @@ pub fn detect_violations(state: &Arc<App>, conn: &Connection, project: &Project,
         }
     }
     if !violations.is_empty() {
-        events::push_event(state, conn, &project.id, Some(&task.id), "sandbox.violation",
-            json!({"violations": violations, "hint": "agent 直接修改了 scope 外的源仓库（应只在 worktree 内工作）"}));
+        with_db(state, |c| {
+            events::push_event(state, c, &project.id, Some(&task.id), "sandbox.violation",
+                json!({"violations": violations, "hint": "agent 直接修改了 scope 外的源仓库（应只在 worktree 内工作）"}));
+        });
     }
     violations
 }
@@ -283,8 +310,8 @@ pub enum MergeResult {
 }
 
 /// 把所有 worktree 分支 merge 回源仓库（--no-ff），并清理 worktree 与分支。
-pub fn merge_all(state: &Arc<App>, conn: &Connection, project: &Project, task: &Task, remove: bool) -> MergeResult {
-    let Some(sb) = prepare(state, conn, project, task).ok() else {
+pub fn merge_all(state: &Arc<App>, project: &Project, task: &Task, remove: bool) -> MergeResult {
+    let Some(sb) = prepare(state, project, task).ok() else {
         return MergeResult::Ok(vec![]);
     };
     let mut merged: Vec<String> = Vec::new();
@@ -303,12 +330,16 @@ pub fn merge_all(state: &Arc<App>, conn: &Connection, project: &Project, task: &
         if !out.status.success() {
             let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let _ = git(&src, &["merge", "--abort"]);
-            events::push_event(state, conn, &project.id, Some(&task.id), "task.merge_conflict",
-                json!({"repo": rel, "branch": branch, "detail": detail}));
+            with_db(state, |c| {
+                events::push_event(state, c, &project.id, Some(&task.id), "task.merge_conflict",
+                    json!({"repo": rel, "branch": branch, "detail": detail}));
+            });
             return MergeResult::Conflict { repo: rel.clone(), detail };
         }
-        events::push_event(state, conn, &project.id, Some(&task.id), "task.merged",
-            json!({"repo": rel, "branch": branch}));
+        with_db(state, |c| {
+            events::push_event(state, c, &project.id, Some(&task.id), "task.merged",
+                json!({"repo": rel, "branch": branch}));
+        });
         merged.push(rel.clone());
         if remove {
             let _ = git(&src, &["worktree", "remove", "--force", wt.to_str().unwrap_or("")]);
@@ -316,29 +347,4 @@ pub fn merge_all(state: &Arc<App>, conn: &Connection, project: &Project, task: &
         }
     }
     MergeResult::Ok(merged)
-}
-
-/// merge 冲突的决策者动作「rebase」：在 worktree 内 rebase 到源仓库当前 HEAD，
-/// 再重试合并；仍冲突则返回 Conflict。
-pub fn retry_merge_with_rebase(state: &Arc<App>, conn: &Connection, project: &Project, task: &Task) -> MergeResult {
-    let Some(sb) = prepare(state, conn, project, task).ok() else {
-        return MergeResult::Ok(vec![]);
-    };
-    for (rel, wt, branch) in &sb.worktrees {
-        let src = if rel == "." { sb.source_root.clone() } else { sb.source_root.join(rel) };
-        let main_head = git_ok(&src, &["rev-parse", "HEAD"]).unwrap_or_default();
-        if !main_head.trim().is_empty() {
-            let out = match git(wt, &["rebase", main_head.trim()]) {
-                Ok(o) => o,
-                Err(e) => return MergeResult::Conflict { repo: rel.clone(), detail: e },
-            };
-            if !out.status.success() {
-                let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                let _ = git(wt, &["rebase", "--abort"]);
-                return MergeResult::Conflict { repo: rel.clone(), detail };
-            }
-        }
-        let _ = branch;
-    }
-    merge_all(state, conn, project, task, true)
 }

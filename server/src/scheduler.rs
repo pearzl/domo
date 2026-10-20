@@ -1169,104 +1169,104 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
             events::send_agent(&state, &a);
         }
     }
-    {
+    // 先做快照与校验（短锁）；合入等长操作一律在锁外执行。
+    let fresh = {
         let conn = state.db.lock().unwrap();
-        let fresh = match db::get_task(&conn, &task.id) {
-            Some(t) => t,
-            None => return,
-        };
-        if fresh.status != "awaiting_acceptance" {
+        let Some(t) = db::get_task(&conn, &task.id) else { return };
+        if t.status != "awaiting_acceptance" {
             return; // cancelled / human already decided
         }
-        let proj_status = db::get_project(&conn, &task.project_id)
+        let proj_status = db::get_project(&conn, &t.project_id)
             .map(|p| p.status)
             .unwrap_or_else(|| "archived".into());
         if proj_status == "archived" {
             return;
         }
-        match outcome {
-            Ok(()) => {
+        t
+    };
+
+    match outcome {
+        Ok(()) => {
+            {
+                let conn = state.db.lock().unwrap();
                 events::push_event(
                     &state, &conn, &fresh.project_id, Some(&fresh.id), "acceptance.recorded",
                     json!({"verdict": "approved", "by": "agent", "acceptor": acceptor_id, "comment": null}),
                 );
-                // M4 沙盒：验收通过 → 系统把 worktree 分支 merge 回源仓库；
-                // 冲突则不置 done，交决策者先试（见 merge_conflict 裁决），失败转人工。
-                let merge = {
-                    let proj = db::get_project(&conn, &fresh.project_id);
-                    match proj {
-                        Some(p) => crate::sandbox::merge_all(&state, &conn, &p, &fresh, true),
-                        None => crate::sandbox::MergeResult::Ok(vec![]),
+            }
+            let project = {
+                let conn = state.db.lock().unwrap();
+                db::get_project(&conn, &fresh.project_id)
+            };
+            // 合入与越权检测都要跑 git：必须在数据库锁之外
+            let merge = match &project {
+                Some(p) => crate::sandbox::merge_all(&state, p, &fresh, true),
+                None => crate::sandbox::MergeResult::Ok(vec![]),
+            };
+            let violations = match &project {
+                Some(p) => crate::sandbox::detect_violations(&state, p, &fresh),
+                None => vec![],
+            };
+
+            let conn = state.db.lock().unwrap();
+            let Some(fresh2) = db::get_task(&conn, &fresh.id) else { return };
+            if fresh2.status != "awaiting_acceptance" {
+                return; // 合入期间被人取消或接管
+            }
+            if !violations.is_empty() {
+                events::new_inbox_item(&state, &conn, &fresh2.project_id, "escalation",
+                    json!({"task_id": fresh2.id, "reason": "sandbox_violation",
+                           "detail": format!("任务《{}》执行期间发现 scope 外源仓库被直接修改（绕过沙盒）", fresh2.title),
+                           "violations": violations}));
+            }
+            match merge {
+                crate::sandbox::MergeResult::Ok(merged_repos) => {
+                    if !merged_repos.is_empty() {
+                        events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                            "task.merge_completed", json!({"repos": merged_repos}));
                     }
-                };
-                match merge {
-                    crate::sandbox::MergeResult::Ok(merged_repos) => {
-                        // M4：违规检测（scope 外源仓库被直写）
-                        {
-                            let proj = db::get_project(&conn, &fresh.project_id);
-                            if let Some(p) = proj {
-                                let v = crate::sandbox::detect_violations(&state, &conn, &p, &fresh);
-                                if !v.is_empty() {
-                                    events::new_inbox_item(&state, &conn, &fresh.project_id, "escalation",
-                                        json!({"task_id": fresh.id, "reason": "sandbox_violation",
-                                               "detail": format!("任务《{}》执行期间发现 scope 外源仓库被直接修改（绕过沙盒）", fresh.title),
-                                               "violations": v}));
-                                }
-                            }
-                        }
-                        if !merged_repos.is_empty() {
-                            events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id),
-                                "task.merge_completed", json!({"repos": merged_repos}));
-                        }
-                        let _ = events::status_changed(&state, &conn, &fresh, "done", "acceptance_passed");
-                    }
-                    crate::sandbox::MergeResult::Conflict { repo, detail } => {
-                        // 冲突：决策者先试（kind=merge_conflict，战术自决）→ 动作 rebase/rework/manual
-                        let request = json!({
-                            "task_id": fresh.id, "task_title": fresh.title,
-                            "repo": repo, "detail": detail,
-                            "hint": "请裁定处理方式：effect.action = rebase（系统自动 rebase 后重试合并）/ rework（退回执行者解决冲突）/ manual（转人工）",
-                        });
-                        let d = decision::request_scoped(&state, &conn, &fresh.project_id,
-                            Some(&fresh.id), "merge_conflict", "tactical", request);
-                        events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id),
-                            "task.merge_conflict", json!({"repo": repo, "detail": detail,
-                                "decision_id": d.id,
-                                "hint": "已提交决策者裁决合并方式；决策者不可用时转人工收件箱"}));
-                        // 任务保持在 awaiting_acceptance，由裁决推进（done / executing / suspended）
-                    }
+                    let _ = events::status_changed(&state, &conn, &fresh2, "done", "acceptance_passed");
+                }
+                crate::sandbox::MergeResult::Conflict { repo, detail } => {
+                    // 设计：合并冲突一律交人，不再自动 rebase 重试
+                    events::push_event(&state, &conn, &fresh2.project_id, Some(&fresh2.id),
+                        "task.merge_conflict", json!({"repo": repo, "detail": detail}));
+                    events::new_inbox_item(&state, &conn, &fresh2.project_id, "escalation",
+                        json!({"task_id": fresh2.id, "reason": "merge_conflict",
+                               "detail": format!("任务《{}》合入仓库 {} 时冲突，需人工处理（worktree 已保留）", fresh2.title, repo),
+                               "repo": repo, "conflict": detail}));
                 }
             }
-            Err(comment) => {
-                // An infrastructure failure of the acceptor run (spawn error,
-                // rate limit, timeout...) is NOT an acceptance verdict. Counting
-                // it as a rejection used to escalate tasks to the human inbox
-                // although no acceptor ever disagreed; those retries should be
-                // handled like execution failures instead.
-                if comment.starts_with(opencode::INFRA_ACCEPT_ERROR_PREFIX) {
-                    if handle_agent_failure(&state, &conn, &fresh, "acceptor", "accept", &comment) {
-                        events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "acceptance.run_failed",
-                            json!({"error": comment, "attempt": fresh.attempt, "failover": true}));
-                    } else {
-                        let fc = fresh.failure_count + 1;
-                        set_counts(&state, &conn, &fresh.id, "failure_count", fc);
-                        let mut f2 = fresh;
-                        f2.failure_count = fc;
-                        events::push_event(
-                            &state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
-                            json!({"error": comment, "attempt": f2.attempt, "failure_count": fc}),
-                        );
-                        if fc >= 3 {
-                            suspend(&state, &conn, &f2, "accept");
-                        }
+        }
+        Err(comment) => {
+            let conn = state.db.lock().unwrap();
+            let Some(fresh) = db::get_task(&conn, &fresh.id) else { return };
+            // An infrastructure failure of the acceptor run (spawn error,
+            // rate limit, timeout...) is NOT an acceptance verdict. Counting
+            // it as a rejection used to escalate tasks to the human inbox
+            // although no acceptor ever disagreed; those retries should be
+            // handled like execution failures instead.
+            if comment.starts_with(opencode::INFRA_ACCEPT_ERROR_PREFIX) {
+                if handle_agent_failure(&state, &conn, &fresh, "acceptor", "accept", &comment) {
+                    events::push_event(&state, &conn, &fresh.project_id, Some(&fresh.id), "acceptance.run_failed",
+                        json!({"error": comment, "attempt": fresh.attempt, "failover": true}));
+                } else {
+                    let fc = fresh.failure_count + 1;
+                    set_counts(&state, &conn, &fresh.id, "failure_count", fc);
+                    let mut f2 = fresh;
+                    f2.failure_count = fc;
+                    events::push_event(
+                        &state, &conn, &f2.project_id, Some(&f2.id), "acceptance.run_failed",
+                        json!({"error": comment, "attempt": f2.attempt, "failure_count": fc}),
+                    );
+                    if fc >= 3 {
+                        suspend(&state, &conn, &f2, "accept");
                     }
-                    // otherwise status stays "awaiting_acceptance": the scan
-                    // re-dispatches the acceptor once it is free again,
-                    // mirroring the execution retry semantics.
-                    drop(guard);
-                    state.wake();
-                    return;
                 }
+                // otherwise status stays "awaiting_acceptance": the scan
+                // re-dispatches the acceptor once it is free again,
+                // mirroring the execution retry semantics.
+            } else {
                 let rc = fresh.rejection_count + 1;
                 set_counts(&state, &conn, &fresh.id, "rejection_count", rc);
                 let mut f2 = fresh;
@@ -1277,9 +1277,7 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
                 );
                 if rc >= 2 {
                     escalate(&state, &conn, &f2, "acceptance");
-                }
-                // otherwise status stays "awaiting_acceptance" -> back to executing via re-dispatch below
-                else {
+                } else {
                     let _ = events::status_changed(&state, &conn, &f2, "executing", "rejection_returned");
                 }
             }

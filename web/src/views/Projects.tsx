@@ -110,6 +110,7 @@ function gateItemFor(inbox: InboxItem[], milestoneId: string): InboxItem | undef
 export function ProjectsView() {
   const {
     projects,
+    engineerings,
     tasksByProject,
     milestonesByProject,
     inbox,
@@ -126,6 +127,12 @@ export function ProjectsView() {
 
   const [name, setName] = useState('');
   const [brief, setBrief] = useState('');
+  // 所属工程（默认选第一个；留空 = 未归属，用于兼容旧数据）
+  const [engineeringId, setEngineeringId] = useState('');
+  useEffect(() => {
+    if (!engineeringId && engineerings.length > 0) setEngineeringId(engineerings[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineerings.length]);
   const [ws, setWs] = useState<WsFields>({ kind: 'local', path: '', url: '', branch: '' });
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState<Project | null>(null);
@@ -162,7 +169,7 @@ export function ProjectsView() {
       return;
     }
     setBusy(true);
-    const ok = await createProject(name.trim(), brief.trim(), w);
+    const ok = await createProject(name.trim(), brief.trim(), w, engineeringId || null);
     setBusy(false);
     if (ok) {
       setName('');
@@ -216,6 +223,17 @@ export function ProjectsView() {
             placeholder="项目目标（必填：交给团队的完整说明）"
             required
           />
+          <label className="ws-kind">
+            所属工程
+            <select value={engineeringId} onChange={e => setEngineeringId(e.target.value)}>
+              <option value="">未归属</option>
+              {engineerings.map(e => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <WorkspaceFields f={ws} set={patch => setWs(prev => ({ ...prev, ...patch }))} />
           <button
             className="btn btn-primary"
@@ -267,6 +285,11 @@ export function ProjectsView() {
                 </div>
                 <p className="card-brief">{p.brief || '（未设置目标）'}</p>
                 <div className="badge-row">
+                  {p.engineering_id && (
+                    <Badge tone="purple">
+                      工程：{engineerings.find(e => e.id === p.engineering_id)?.name ?? p.engineering_id}
+                    </Badge>
+                  )}
                   {p.workspace ? (
                     <WorkspaceBadge ws={p.workspace} />
                   ) : (

@@ -24,8 +24,27 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Engineering {
+    pub id: String,
+    pub name: String,
+    pub brief: String,
+    /// 工作区类型：single（单仓 git）| multi（多仓目录）| plain（普通目录）
+    pub workspace_kind: String,
+    /// 工作区锚点（绝对路径；single 为仓库根，multi 为多仓父目录，plain 为普通目录）
+    pub workspace_path: Option<String>,
+    /// 工程默认团队（角色 → agent id 列表）；项目未显式设置时继承
+    pub default_agent_pool: Option<Vec<String>>,
+    /// 防跑偏约束（技术栈 / 目录约定 / 禁改范围）
+    pub constraints: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Project {
     pub id: String,
+    /// 所属工程；旧数据/未归属时为 None
+    #[serde(default)]
+    pub engineering_id: Option<String>,
     pub name: String,
     pub brief: String,
     pub status: String,

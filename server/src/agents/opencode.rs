@@ -499,10 +499,7 @@ fn task_cwd(state: &Arc<App>, task: &Task) -> Result<PathBuf, String> {
         events::log_line_state(state, &task.id, &format!("未设置工作区或路径无效（workspace path does not exist: {}）; task attempt failed", source.display()));
         return Err(format!("workspace path does not exist: {}", source.display()));
     }
-    let sandbox = {
-        let c = state.db.lock().unwrap();
-        crate::sandbox::prepare(state, &c, &project, task)
-    };
+    let sandbox = crate::sandbox::prepare(state, &project, task);
     match sandbox {
         Ok(sb) => Ok(sb.cwd),
         Err(e) => {
@@ -1657,6 +1654,7 @@ mod tests {
     fn knowledge_injected_into_all_role_prompts() {
         let proj = Project {
             id: "prj1".into(),
+            engineering_id: None,
             name: "P".into(),
             brief: "brief".into(),
             status: "running".into(),

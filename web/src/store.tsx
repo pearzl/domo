@@ -22,6 +22,7 @@ import type {
   AgentFormValue,
   ApplyResult,
   AuditEvent,
+  Engineering,
   InterveneResult,
   InboxItem,
   LogLine,
@@ -37,7 +38,7 @@ import type {
 } from './types';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
-export type ViewId = 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge';
+export type ViewId = 'engineering' | 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge';
 /** 任务视图呈现方式：看板 / DAG 图（提升到 store，切页再切回不丢失） */
 export type TasksViewMode = 'kanban' | 'dag';
 /** DAG 布局方向：tb=上下（里程碑横泳道）/ lr=左右（同上看板流向）——同样跨视图保持 */
@@ -67,6 +68,7 @@ export interface DomoStore {
   setError: (e: string | null) => void;
 
   projects: Project[];
+  engineerings: Engineering[];
   agents: Agent[];
   inbox: InboxItem[];
   events: AuditEvent[];
@@ -95,7 +97,15 @@ export interface DomoStore {
   closeTask: () => void;
   refreshEvents: (projectId?: string) => Promise<void>;
 
-  createProject: (name: string, brief: string, workspace?: Workspace | null) => Promise<boolean>;
+  createProject: (name: string, brief: string, workspace?: Workspace | null, engineeringId?: string | null) => Promise<boolean>;
+  createEngineering: (body: {
+    name: string;
+    brief: string;
+    workspace_kind: 'single' | 'multi' | 'plain';
+    workspace_path?: string | null;
+    constraints?: string | null;
+  }) => Promise<Engineering | null>;
+  updateEngineering: (id: string, body: Partial<Omit<Engineering, 'id' | 'created_at'>>) => Promise<boolean>;
   updateProject: (
     id: string,
     value: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null },
@@ -171,10 +181,11 @@ function mergeEvents(list: AuditEvent[], incoming: AuditEvent[]): AuditEvent[] {
 
 export function DomoProvider({ children }: { children: ReactNode }) {
   const [conn, setConn] = useState<ConnState>('connecting');
-  const [view, setViewRaw] = useState<ViewId>('projects');
+  const [view, setViewRaw] = useState<ViewId>('engineering');
   const [error, setError] = useState<string | null>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
+  const [engineerings, setEngineerings] = useState<Engineering[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -272,7 +283,8 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     es.onopen = () => setConn('open');
     es.onerror = () => setConn('closed'); // 浏览器自动重连
 
-    on('snapshot', (d: { projects?: Project[]; agents?: Agent[]; inbox?: InboxItem[] }) => {
+    on('snapshot', (d: { engineerings?: Engineering[]; projects?: Project[]; agents?: Agent[]; inbox?: InboxItem[] }) => {
+      if (d.engineerings) setEngineerings(d.engineerings);
       if (d.projects) setProjects(d.projects);
       if (d.agents) setAgents(d.agents);
       if (d.inbox) setInbox(d.inbox);
@@ -285,6 +297,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
       }
     });
     on('project', (d: Project) => setProjects(p => upsertById(p, d)));
+    on('engineering', (d: Engineering) => setEngineerings(list => upsertById(list, d)));
     on('task', (d: Task) => applyTaskUpdate(d));
     on('log', (d: { task_id: string; ts: number; line: string }) =>
       setLogsByTask(m => ({
@@ -377,13 +390,53 @@ export function DomoProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createProject = useCallback(
-    async (name: string, brief: string, workspace?: Workspace | null) => {
+    async (name: string, brief: string, workspace?: Workspace | null, engineeringId?: string | null) => {
       try {
-        const p = await api.createProject({ name, brief, workspace });
+        const p = await api.createProject({
+          name,
+          brief,
+          workspace,
+          ...(engineeringId ? { engineering_id: engineeringId } : {}),
+        });
         setProjects(list => upsertById(list, p));
         return true;
       } catch (e) {
         setError(errMsg(e));
+        return false;
+      }
+    },
+    [],
+  );
+
+  /** 工程（完整产品）：创建 / 更新；成功后并入本地缓存 */
+  const createEngineering = useCallback(
+    async (body: {
+      name: string;
+      brief: string;
+      workspace_kind: 'single' | 'multi' | 'plain';
+      workspace_path?: string | null;
+      constraints?: string | null;
+    }) => {
+      try {
+        const e = await api.createEngineering(body);
+        setEngineerings(list => upsertById(list, e));
+        return e;
+      } catch (err) {
+        setError(errMsg(err));
+        return null;
+      }
+    },
+    [],
+  );
+
+  const updateEngineering = useCallback(
+    async (id: string, body: Partial<Omit<Engineering, 'id' | 'created_at'>>) => {
+      try {
+        const e = await api.updateEngineering(id, body);
+        setEngineerings(list => upsertById(list, e));
+        return true;
+      } catch (err) {
+        setError(errMsg(err));
         return false;
       }
     },
@@ -669,6 +722,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     error,
     setError,
     projects,
+    engineerings,
     agents,
     inbox,
     events,
@@ -694,6 +748,8 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     closeTask,
     refreshEvents,
     createProject,
+    createEngineering,
+    updateEngineering,
     updateProject,
     projectAction,
     planProject,

@@ -1,5 +1,6 @@
 import { Component, useState, type ReactNode } from 'react';
 import { AuditView } from './views/Audit';
+import { EngineeringView } from './views/Engineering';
 import { InboxView } from './views/Inbox';
 import { KnowledgeView } from './views/Knowledge';
 import { OrgView } from './views/Org';
@@ -8,6 +9,7 @@ import { TaskFormModal as TasksFormModal, TasksView, type TaskFormState } from '
 import { DomoProvider, useDomo, type ViewId } from './store';
 
 const VIEW_TITLES: Record<ViewId, string> = {
+  engineering: '工程总览',
   projects: '项目总览',
   tasks: '任务视图',
   org: '组织视图',
@@ -20,6 +22,7 @@ function Sidebar() {
   const { view, setView, inbox, selectedProjectId } = useDomo();
   const openCount = inbox.filter(i => i.status === 'open').length;
   const items: { id: ViewId; label: string; badge?: number; dot?: boolean }[] = [
+    { id: 'engineering', label: '工程总览' },
     { id: 'projects', label: '项目总览' },
     { id: 'tasks', label: '任务视图', dot: !!selectedProjectId },
     { id: 'org', label: '组织视图' },
@@ -113,6 +116,7 @@ function Shell() {
         </header>
         <div className="content">
           <ViewErrorBoundary>
+            {view === 'engineering' && <EngineeringView />}
             {view === 'projects' && <ProjectsView />}
             {view === 'tasks' && <TasksView onOpenForm={setTaskForm} />}
             {view === 'org' && <OrgView />}
