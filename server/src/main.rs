@@ -2,6 +2,7 @@ mod agents;
 mod api;
 mod db;
 mod events;
+mod host;
 mod decision;
 mod knowledge;
 mod models;
@@ -106,6 +107,12 @@ async fn main() {
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind port");
+    // Ctrl-C：先回收执行宿主（进程组），再退出，避免留下孤儿 server
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        crate::host::stop_all();
+        std::process::exit(0);
+    });
     println!("domo-server listening on http://{addr} (db: {db_path})");
     axum::serve(listener, router).await.expect("server");
 }
