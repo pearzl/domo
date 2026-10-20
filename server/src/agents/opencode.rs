@@ -39,6 +39,20 @@ pub const DECIDE_TIMEOUT_MS: u64 = 600_000;
 /// tell it apart from a genuine `VERDICT: reject` produced by the acceptor.
 pub const INFRA_ACCEPT_ERROR_PREFIX: &str = "acceptance run failed: ";
 
+/// 按进程组发送信号（pid 前加 `-`）：CLI 与它拉起的私有 server 一起回收。
+fn kill_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args([signal, &format!("-{pid}")])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, signal);
+    }
+}
+
 pub fn timeout_of(agent: &Agent) -> u64 {
     agent
         .config
@@ -641,6 +655,9 @@ async fn run_cli_once(
     }
     let prompt_owned = cap_prompt_arg(prompt);
     let mut cmd = tokio::process::Command::new("opencode");
+    // 独立进程组：终止时按组回收（CLI 会拉起私有 server 子进程，杀单个 pid 会留下孤儿）
+    #[cfg(unix)]
+    cmd.process_group(0);
     // --standalone: private per-run server, so `cwd` is honored as the
     // project workdir (the shared background service pins its own directory).
     cmd.args(["run", "--standalone", "--auto", "--format", "json"]);
@@ -699,10 +716,11 @@ async fn run_cli_once(
                     tracing::warn!(target: "opencode", session = %session_name, idle_ms,
                         "opencode run idle for {idle_ms}ms (no output) — treating as stuck, terminating");
                     if let Some(pid) = child_pid {
-                        // 先 TERM 给一次收尾机会，3 秒后仍在则 KILL
-                        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+                        // 先 TERM 给一次收尾机会，3 秒后仍在则 KILL；按**进程组**终止，
+                        // 避免私有 server 子进程残留继续消耗资源。
+                        kill_group(pid, "-TERM");
                         tokio::time::sleep(Duration::from_secs(3)).await;
-                        let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+                        kill_group(pid, "-KILL");
                     }
                     break;
                 }
@@ -714,6 +732,7 @@ async fn run_cli_once(
         Ok(st) => st,
         Err(e) => {
             watchdog.abort();
+            if let Some(pid) = child.id() { kill_group(pid, "-KILL"); }
             let _ = child.kill().await;
             r_err.abort();
             r_out.abort();
