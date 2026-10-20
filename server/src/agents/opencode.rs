@@ -575,6 +575,42 @@ pub async fn run_cli(
 /// `run_cli` 的扩展（M4 三档恢复）：`resume_session` 显式指定要续接的真实会话 id
 /// （第一档原生 resume，失败即视为该档失败）；`persist` 声明本次执行的真实 id
 /// 持久化上下文（执行派发专用，落 SQLite 供重启后恢复）。
+/// 宿主模式：在工作区宿主里建会话、发消息。返回 `None` 表示未启用或宿主不可用
+/// （调用方回退到 CLI 独立进程路径）。
+async fn run_via_host(
+    state: &Arc<App>,
+    task: &Task,
+    cwd: &Path,
+    logical: &str,
+    prompt: &str,
+    model: Option<&str>,
+    timeout_ms: u64,
+) -> Result<Option<RunOutcome>, String> {
+    if !crate::host::enabled() {
+        return Ok(None);
+    }
+    let port = match crate::host::ensure(cwd).await {
+        Ok(p) => p,
+        Err(e) => {
+            events::log_line_state(state, &task.id, &format!("宿主不可用，回退独立进程模式：{e}"));
+            return Ok(None);
+        }
+    };
+    let sid = match crate::host::create_session(port, &format!("{}·{}", task.title, logical)) {
+        Ok(s) => s,
+        Err(e) => {
+            events::log_line_state(state, &task.id, &format!("创建会话失败，回退独立进程模式：{e}"));
+            return Ok(None);
+        }
+    };
+    crate::host::touch(cwd);
+    let (text, raw) = crate::host::send_message(
+        port, &sid, prompt, model, (timeout_ms / 1000).max(30),
+    )?;
+    events::log_line_state(state, &task.id, &format!("HTTP 会话完成（session {sid}），输出 {} 字", text.chars().count()));
+    Ok(Some(RunOutcome { raw: raw.to_string(), text, session_id: Some(sid) }))
+}
+
 pub async fn run_cli_ext(
     state: &Arc<App>,
     log_task: Option<&str>,
@@ -1177,23 +1213,30 @@ pub async fn run_execution(
         _ => None,
     };
 
-    let out = run_cli_ext(
-        &state,
-        Some(&task.id),
-        Some(&cwd),
-        &logical,
-        model_of(&agent).as_deref(),
-        timeout_of(&agent),
-        &prompt,
-        resume,
-        Some(PersistCtx {
-            logical: logical.clone(),
-            task_id: Some(task.id.clone()),
-            phase: Some("execute".into()),
-            attempt: Some(task.attempt),
-        }),
-    )
-    .await?;
+    let out = if let Some(o) = run_via_host(
+        &state, &task, &cwd, &logical, &prompt,
+        model_of(&agent).as_deref(), timeout_of(&agent),
+    ).await? {
+        o
+    } else {
+        run_cli_ext(
+            &state,
+            Some(&task.id),
+            Some(&cwd),
+            &logical,
+            model_of(&agent).as_deref(),
+            timeout_of(&agent),
+            &prompt,
+            resume,
+            Some(PersistCtx {
+                logical: logical.clone(),
+                task_id: Some(task.id.clone()),
+                phase: Some("execute".into()),
+                attempt: Some(task.attempt),
+            }),
+        )
+        .await?
+    };
 
     {
         let c = state.db.lock().unwrap();
