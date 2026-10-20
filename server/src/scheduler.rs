@@ -33,7 +33,7 @@ pub async fn run(state: Arc<App>) {
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = interval.tick() => {}
+            _ = interval.tick() => { crate::host::sweep(Duration::from_secs(1800)); }
             _ = state.wake.notified() => {}
         }
         scan(&state);

@@ -342,6 +342,8 @@ pub fn merge_all(state: &Arc<App>, project: &Project, task: &Task, remove: bool)
         });
         merged.push(rel.clone());
         if remove {
+            // 工作区销毁前先停宿主：宿主以 cwd 为键，避免路径复用后拿到旧实例
+            crate::host::stop(wt);
             let _ = git(&src, &["worktree", "remove", "--force", wt.to_str().unwrap_or("")]);
             let _ = git(&src, &["branch", "-D", branch]);
         }
