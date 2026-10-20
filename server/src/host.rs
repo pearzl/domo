@@ -132,6 +132,14 @@ pub async fn ensure(cwd: &Path) -> Result<u16, String> {
         kill_group(pid, "-KILL");
         return Err("opencode serve 未在 10s 内就绪".into());
     }
+    // 能力探测：只认 /global/health 明确 healthy 的宿主；接口不兼容时调用方回退 CLI
+    let healthy = curl(port, "GET", "/global/health", None, 5)
+        .map(|v| v.get("healthy").and_then(|b| b.as_bool()).unwrap_or(false))
+        .unwrap_or(false);
+    if !healthy {
+        kill_group(pid, "-KILL");
+        return Err("opencode serve 健康检查失败（/global/health），回退独立进程模式".into());
+    }
 
     let mut map = hosts().lock().unwrap();
     map.insert(
