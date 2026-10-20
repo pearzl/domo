@@ -102,7 +102,6 @@ export interface DomoStore {
   createEngineering: (body: {
     name: string;
     brief: string;
-    workspace_kind: 'single' | 'multi' | 'plain';
     workspace_path?: string | null;
     constraints?: string | null;
   }) => Promise<Engineering | null>;
@@ -414,7 +413,6 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     async (body: {
       name: string;
       brief: string;
-      workspace_kind: 'single' | 'multi' | 'plain';
       workspace_path?: string | null;
       constraints?: string | null;
     }) => {

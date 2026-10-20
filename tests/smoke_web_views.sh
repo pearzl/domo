@@ -69,7 +69,7 @@ SSE_PID=$!
 sleep 0.3
 
 python3 - "$PORT" "$WS" "$SSE" <<'PY'
-import json, re, sys, time, urllib.request, urllib.error
+import json, os, re, subprocess, sys, time, urllib.request, urllib.error
 
 PORT, WS, SSE_FILE = sys.argv[1], sys.argv[2], sys.argv[3]
 BASE = f"http://127.0.0.1:{PORT}"
@@ -163,10 +163,20 @@ check("3 个 agent 注册成功（A/B 含并行上限）", s == 200 and s2 == 20
 A_id, B_id, C_id = A.get("id"), B.get("id"), C.get("id")
 
 print("[web-smoke] 2) 项目 + 两个里程碑 + 5 个带依赖任务")
-s, proj = post("/api/projects", {"name": "前端三视图冒烟", "brief": "web views smoke"})
+# 方案 B：共享目录串行；并行负载视图必须用 Git 仓库工程（worktree）验证。
+os.makedirs(WS, exist_ok=True)
+subprocess.run(["git", "-C", WS, "init", "-q"], check=True)
+with open(os.path.join(WS, "README.md"), "w") as f:
+    f.write("web views smoke\n")
+subprocess.run(["git", "-C", WS, "add", "-A"], check=True)
+subprocess.run(["git", "-C", WS, "-c", "user.name=domo", "-c", "user.email=domo@example.invalid",
+                "commit", "-q", "-m", "init"], check=True)
+s, eng = post("/api/engineerings", {"name": "前端三视图工程", "workspace_path": WS})
+check("Git 仓库工程自动识别", s == 200 and eng.get("workspace_kind") == "single", eng)
+s, proj = post("/api/projects", {"name": "前端三视图冒烟", "brief": "web views smoke",
+                                 "engineering_id": eng.get("id")})
 pid = proj.get("id")
 check("项目创建", s == 200 and pid, f"{s} {proj}")
-patch(f"/api/projects/{pid}", {"workspace": {"kind": "local", "path": WS}})
 post(f"/api/projects/{pid}/confirm", {})
 check("项目进入 running", get(f"/api/projects/{pid}")[1].get("project", {}).get("status") == "running")
 

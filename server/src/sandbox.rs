@@ -9,11 +9,11 @@
 //! 隔离边界：执行/验收都在沙盒内；每轮执行结束后对「scope 外的源仓库」做脏文件
 //! 基线比对，发现 agent 绕过沙盒直写源仓库 → `sandbox.violation` 事件 + 收件箱。
 //!
-//! 合入规则：**先同步项目基线 → 再合入**；冲突一律交人（`task.merge_conflict` + 收件箱），
+//! 合入规则：单仓验收通过后把任务分支合回；冲突一律交人（`task.merge_conflict` + 收件箱），
 //! 已 abort 的 merge 保留 worktree 供人工处置，**禁止**静默强制覆盖或丢弃 agent 改动。
 //!
-//! 多仓工程不使用本模块的 worktree：直接在工程目录的项目分支上串行工作
-//! （暂停 → 逐仓检查干净 → 逐仓切分支 → 恢复，见 DESIGN §4.2）。
+//! 共享目录（多仓父目录 / 非 git 目录）不使用 worktree：直接在工程目录内串行工作，
+//! git 分支与提交由用户管理（方案 B，见 DESIGN §4.2）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,6 +67,30 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 fn is_git_repo(dir: &Path) -> bool {
     dir.is_dir() && git(dir, &["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// 方案 B 自动识别：锚点本身是 git 仓库根 → `single`（任务 worktree 并行）；
+/// 其余（多仓父目录、非 git 目录、仓库子目录）→ `plain`（共享目录，串行）。
+///
+/// 只读 git 元数据，不创建分支、不修改仓库。
+pub fn detect_workspace_kind(path: &Path) -> &'static str {
+    if !path.is_dir() {
+        return "plain";
+    }
+    let Ok(out) = git(path, &["rev-parse", "--show-toplevel"]) else {
+        return "plain";
+    };
+    if !out.status.success() {
+        return "plain";
+    }
+    let top_raw = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let here = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let top = top_raw.canonicalize().unwrap_or(top_raw);
+    if here == top {
+        "single"
+    } else {
+        "plain"
+    }
 }
 
 /// 项目工作区内登记的仓库：rel（相对工作区）+ main。
@@ -156,19 +180,19 @@ pub fn prepare(state: &Arc<App>, project: &Project, task: &Task) -> Result<Sandb
         source_root.ok_or_else(|| "project has no workspace (set a workspace or use the default one)".to_string())?;
     let root = sandbox_root(&project.id);
     let ts = short_id(&task.id);
-    // 多仓工程：直接在工程目录工作（项目/任务串行；不用 worktree，也不做跨仓合入编排）
-    // 多仓工程直接在工程目录工作；单仓/普通目录走各自逻辑
+    // 方案 B：单仓工程走 worktree；共享目录（multi/plain/legacy）直接在工程目录工作
+    // （项目/任务串行；不用 worktree，不创建/切换项目分支，也不做跨仓合入编排）。
     let direct_mode = project
         .engineering_id
         .as_deref()
         .and_then(|eid| with_db(state, |c| db::get_engineering(c, eid)))
-        .map(|e| e.workspace_kind == "multi")
+        .map(|e| e.workspace_kind != "single")
         .unwrap_or(false);
     if direct_mode {
         with_db(state, |c| {
             events::push_event(state, c, &project.id, Some(&task.id), "task.sandbox_ready",
                 json!({"cwd": source_root.display().to_string(), "mode": "direct_workspace",
-                       "hint": "多仓工程：直接在工程目录的项目分支上工作"}));
+                       "hint": "共享目录：直接在工程目录工作（项目/任务串行，git 分支由用户管理）"}));
         });
         return Ok(Sandbox { cwd: source_root.clone(), worktrees: vec![], source_root });
     }
@@ -365,4 +389,57 @@ pub fn merge_all(state: &Arc<App>, project: &Project, task: &Task, remove: bool)
         }
     }
     MergeResult::Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Tmp(PathBuf);
+
+    impl Tmp {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "domo-sandbox-{tag}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Tmp(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git_init(dir: &Path) {
+        let out = Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
+        assert!(out.status.success());
+    }
+
+    #[test]
+    fn workspace_kind_is_detected_from_anchor() {
+        let tmp = Tmp::new("kind");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(detect_workspace_kind(&plain), "plain");
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_init(&repo);
+        assert_eq!(detect_workspace_kind(&repo), "single");
+        // 仓库子目录不是锚点根 → 共享目录
+        let sub = repo.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(detect_workspace_kind(&sub), "plain");
+
+        // 多仓父目录 → 共享目录
+        assert_eq!(detect_workspace_kind(tmp.path()), "plain");
+    }
 }

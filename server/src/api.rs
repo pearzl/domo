@@ -112,10 +112,6 @@ fn validate_check(v: &Value) -> Result<(), String> {
 
 // ---------- engineerings（工程层） ----------
 
-fn valid_workspace_kind(k: &str) -> bool {
-    matches!(k, "single" | "multi" | "plain")
-}
-
 async fn list_engineerings(State(st): State<Arc<App>>) -> Response {
     let c = st.db.lock().unwrap();
     ok(db::list_engineerings(&c))
@@ -125,10 +121,8 @@ async fn create_engineering(State(st): State<Arc<App>>, Json(body): Json<Value>)
     let Some(name) = body["name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         return err(StatusCode::BAD_REQUEST, "name is required");
     };
-    let kind = body["workspace_kind"].as_str().unwrap_or("single").trim().to_string();
-    if !valid_workspace_kind(&kind) {
-        return err(StatusCode::BAD_REQUEST, "workspace_kind must be single | multi | plain");
-    }
+    // 方案 B：类型自动识别，不再由用户选择。锚点是 git 仓库根 → single；
+    // 其余目录（多仓父目录、非 git 目录）→ plain（共享目录，串行）。
     let path = body["workspace_path"]
         .as_str()
         .map(str::trim)
@@ -140,9 +134,11 @@ async fn create_engineering(State(st): State<Arc<App>>, Json(body): Json<Value>)
             return err(StatusCode::BAD_REQUEST, "workspace_path does not exist or is not a directory");
         }
     }
-    if kind != "plain" && path.is_none() {
-        return err(StatusCode::BAD_REQUEST, "workspace_path is required for single/multi engineering");
-    }
+    let kind = path
+        .as_deref()
+        .map(|p| crate::sandbox::detect_workspace_kind(std::path::Path::new(p)))
+        .unwrap_or("plain")
+        .to_string();
     let pool = body.get("default_agent_pool").and_then(|v| v.as_array()).map(|a| {
         a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()
     });
@@ -178,6 +174,14 @@ async fn patch_engineering(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
+    // 自动识别需要跑 git，必须在数据库锁之外完成。
+    let detected_kind = body
+        .get("workspace_path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|p| std::path::Path::new(p).is_dir())
+        .map(|p| crate::sandbox::detect_workspace_kind(std::path::Path::new(p)));
     let c = st.db.lock().unwrap();
     let Some(mut e) = db::get_engineering(&c, &id) else {
         return err(StatusCode::NOT_FOUND, "engineering not found");
@@ -191,18 +195,16 @@ async fn patch_engineering(
     if let Some(v) = body["brief"].as_str() {
         e.brief = v.into();
     }
-    if let Some(v) = body["workspace_kind"].as_str() {
-        if !valid_workspace_kind(v) {
-            return err(StatusCode::BAD_REQUEST, "workspace_kind must be single | multi | plain");
-        }
-        e.workspace_kind = v.into();
-    }
     if let Some(v) = body.get("workspace_path") {
         e.workspace_path = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         if let Some(p) = &e.workspace_path {
             if !std::path::Path::new(p).is_dir() {
                 return err(StatusCode::BAD_REQUEST, "workspace_path does not exist or is not a directory");
             }
+            // 路径变化时重新自动识别；旧 multi 值会在下一次保存时收敛为 single/plain。
+            e.workspace_kind = detected_kind.unwrap_or("plain").into();
+        } else {
+            e.workspace_kind = "plain".into();
         }
     }
     if let Some(v) = body.get("constraints") {
@@ -246,11 +248,11 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
         }
         None => None,
     };
-    // 工程锚点：项目未显式给工作区时，默认落在工程工作区（多仓 = 直接在该目录工作）
+    // 工程锚点：项目未显式给工作区时，默认落在工程工作区（共享目录 = 直接在该目录工作）
     let default_ws: Option<Value> = if body.get("workspace").map(|v| v.is_null()).unwrap_or(true) {
         engineering.as_ref().and_then(|e| {
             e.workspace_path.as_ref().map(|path| {
-                let mode = if e.workspace_kind == "multi" { "direct" } else { "worktree" };
+                let mode = if e.workspace_kind == "single" { "worktree" } else { "direct" };
                 json!({"kind": "local", "path": path, "mode": mode})
             })
         })
@@ -267,7 +269,6 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
         workspace: None,
         agent_pool: None,
         repos: Vec::new(),
-        baseline: None,
         created_at: db::now(),
     };
     {
@@ -508,69 +509,9 @@ fn set_project_status(st: &Arc<App>, id: &str, status: &str, what: &str) -> Resp
     ok(p)
 }
 
-fn switch_failure_response(err: crate::baseline::SwitchError) -> Response {
-    match err {
-        crate::baseline::SwitchError::Dirty(d) => (StatusCode::CONFLICT, Json(d)).into_response(),
-        crate::baseline::SwitchError::Baseline(b) => (StatusCode::CONFLICT, Json(b)).into_response(),
-    }
-}
-
-/// 多仓确认/切换共用：检查干净 → 停宿主 → 逐仓切目标分支 → 写基线 + 事件。
-#[allow(clippy::result_large_err)] // Err 直接是 HTTP Response，避免额外包装层
-async fn switch_project_repos(
-    st: &Arc<App>,
-    project: &Project,
-    root: &std::path::Path,
-    repos: Vec<crate::models::RepoRef>,
-    event_kind: &str,
-) -> Result<Value, Response> {
-    if repos.is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "多仓工程目录内没有发现 git 仓库（每个仓库需是工作区本身或其一级/二级子目录）",
-        ));
-    }
-    let targets = crate::baseline::target_branches(&project.id, project.baseline.as_ref(), &repos);
-    // 切分支前停掉共享宿主：宿主以工程目录为键，不能让旧分支的宿主继续服务。
-    crate::host::stop(root);
-    let (root2, repos2, targets2) = (root.to_path_buf(), repos.clone(), targets);
-    let outcome = match tokio::task::spawn_blocking(move || {
-        crate::baseline::switch_multi(&root2, &repos2, &targets2)
-    })
-    .await
-    {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(switch_failure_response(e)),
-        Err(e) => {
-            return Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("项目切换任务失败: {e}"),
-            ))
-        }
-    };
-    {
-        let c = st.db.lock().unwrap();
-        db::set_project_repos(&c, &project.id, &repos);
-        db::set_project_baseline(&c, &project.id, Some(&outcome.baseline));
-        events::push_event(
-            st,
-            &c,
-            &project.id,
-            None,
-            event_kind,
-            json!({
-                "baseline": outcome.baseline,
-                "switches": outcome.switches,
-                "mode": "multi",
-            }),
-        );
-    }
-    Ok(outcome.baseline)
-}
-
 async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
-    // 状态 + 多仓串行检查：必须在任何分支切换动作之前拒绝（A running → B confirm 409）。
-    let (project, engineering_kind): (Project, String) = {
+    // 方案 B：不再切项目分支。共享目录（非单仓 worktree）只做项目级串行检查。
+    let (project, engineering_kind): (Project, Option<String>) = {
         let c = st.db.lock().unwrap();
         let Some(project) = db::get_project(&c, &id) else {
             return err(StatusCode::NOT_FOUND, "project not found");
@@ -579,21 +520,11 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
             "initializing" | "pending_confirm" => {}
             _ => return err(StatusCode::CONFLICT, "project already confirmed"),
         }
-        let mut kind = String::new();
-        if let Some(eid) = project.engineering_id.as_deref() {
-            if let Some(e) = db::get_engineering(&c, eid) {
-                kind = e.workspace_kind.clone();
-                if kind == "multi" {
-                    let busy = db::list_projects_of(&c, eid)
-                        .into_iter()
-                        .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
-                    if busy {
-                        return err(StatusCode::CONFLICT,
-                            "多仓工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
-                    }
-                }
-            }
-        }
+        let kind = project
+            .engineering_id
+            .as_deref()
+            .and_then(|eid| db::get_engineering(&c, eid))
+            .map(|e| e.workspace_kind);
         (project, kind)
     };
     let ws: Option<Value> = project.workspace.clone();
@@ -660,7 +591,7 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
             }
             other => return err(StatusCode::BAD_REQUEST, format!("workspace.kind must be 'local' or 'git' (got '{other}')")),
     }
-    // 工作目录：工作区属于工程（多仓 = 工程目录），扫描 git 仓库在锁外执行。
+    // 工作目录：工作区属于工程（共享目录 = 工程目录），扫描 git 仓库在锁外执行。
     let root = {
         let c = st.db.lock().unwrap();
         db::project_workdir(&c, &project)
@@ -668,49 +599,32 @@ async fn confirm_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
     let Some(root) = root else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
     };
-    let found = crate::sandbox::scan_repos(&root);
-    let repos: Vec<crate::models::RepoRef> = found
+    let repos: Vec<crate::models::RepoRef> = crate::sandbox::scan_repos(&root)
         .into_iter()
         .map(|(rel, main)| crate::models::RepoRef { rel, main })
         .collect();
-
-    // 多仓项目基线（ARCH §15 第 1~2 步）：先检查全部仓库（含干净），再逐仓切换。
-    if engineering_kind == "multi" {
-        match switch_project_repos(&st, &project, &root, repos.clone(), "project.baseline_set").await {
-            Ok(_) => {}
-            Err(resp) => return resp,
-        }
-        tracing::info!(project = %id, repos = repos.len(), "multi-repo project baseline created/checked out");
-    } else {
-        // 单仓：只记录确认时的基线，不切分支（任务仍从基线开 worktree）。
-        let mut baseline: Option<Value> = None;
-        if engineering_kind != "plain" {
-            if let Some(repo) = repos.iter().find(|r| r.main).or_else(|| repos.first()) {
-                let rel = repo.rel.as_str();
-                match crate::baseline::single_baseline(&root, rel) {
-                    Ok(b) => baseline = Some(b),
-                    Err(e) => {
-                        return err(StatusCode::CONFLICT,
-                            format!("读取项目基线失败（{rel}）：{e}（项目保持未确认）"));
-                    }
-                }
-            }
-        }
+    {
         let c = st.db.lock().unwrap();
         if !repos.is_empty() {
             db::set_project_repos(&c, &id, &repos);
             events::push_event(&st, &c, &id, None, "project.repos_scanned",
                 json!({"repos": repos.iter().map(|r| json!({"rel": r.rel, "main": r.main})).collect::<Vec<_>>()}));
-            tracing::info!(project = %id, repos = repos.len(), "workspace repos registered for sandbox isolation");
         }
-        if let Some(b) = &baseline {
-            db::set_project_baseline(&c, &id, Some(b));
-            events::push_event(&st, &c, &id, None, "project.baseline_set",
-                json!({"baseline": b, "mode": "single"}));
+        let p2 = db::get_project(&c, &id).unwrap_or(project);
+        let shared = engineering_kind.as_deref() != Some("single")
+            && !(engineering_kind.is_none() && p2.repos.len() == 1 && p2.repos[0].rel == ".");
+        if shared {
+            if let Some(eid) = p2.engineering_id.as_deref() {
+                let busy = db::list_projects_of(&c, eid)
+                    .into_iter()
+                    .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
+                if busy {
+                    return err(StatusCode::CONFLICT,
+                        "共享目录工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
+                }
+            }
         }
     }
-
-    // M4 流程：确认即进入运行（验收标准协商机制已退场，任务直接进入计划制定阶段）。
     set_project_status(&st, &id, "running", "confirmed")
 }
 
@@ -1800,7 +1714,7 @@ async fn pause_project(
 }
 
 async fn resume_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
-    let project = {
+    {
         let c = st.db.lock().unwrap();
         let Some(project) = db::get_project(&c, &id) else {
             return err(StatusCode::NOT_FOUND, "project not found");
@@ -1810,52 +1724,17 @@ async fn resume_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> R
             "paused" | "pausing" => {}
             _ => return err(StatusCode::CONFLICT, "project is not paused"),
         }
-        project
-    };
-    // pausing → 取消暂停：仍在原项目分支上，不切分支。
-    if project.status == "pausing" {
-        return set_project_status(&st, &id, "running", "resumed");
-    }
-    // paused → 多仓需要把工程目录逐仓切回目标项目分支（ARCH §15 第 2 步）。
-    let mut engineering_kind = String::new();
-    {
-        let c = st.db.lock().unwrap();
-        if let Some(eid) = project.engineering_id.as_deref() {
-            if let Some(e) = db::get_engineering(&c, eid) {
-                engineering_kind = e.workspace_kind.clone();
-                if engineering_kind == "multi" {
-                    let busy = db::list_projects_of(&c, eid)
-                        .into_iter()
-                        .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
-                    if busy {
-                        return err(StatusCode::CONFLICT,
-                            "多仓工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
-                    }
+        if project.status == "paused" && db::project_requires_serial(&c, &project) {
+            if let Some(eid) = project.engineering_id.as_deref() {
+                let busy = db::list_projects_of(&c, eid)
+                    .into_iter()
+                    .any(|x| x.id != id && (x.status == "running" || x.status == "pausing"));
+                if busy {
+                    return err(StatusCode::CONFLICT,
+                        "共享目录工程同一时刻只能运行一个项目：请先暂停或归档其他项目");
                 }
             }
         }
-    }
-    if engineering_kind == "multi" {
-        let (root, repos) = {
-            let c = st.db.lock().unwrap();
-            (db::project_workdir(&c, &project), db::project_repos(&c, &id))
-        };
-        let Some(root) = root else {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
-        };
-        let repos = if repos.is_empty() {
-            crate::sandbox::scan_repos(&root)
-                .into_iter()
-                .map(|(rel, main)| crate::models::RepoRef { rel, main })
-                .collect()
-        } else {
-            repos
-        };
-        match switch_project_repos(&st, &project, &root, repos, "project.repos_switched").await {
-            Ok(_) => {}
-            Err(resp) => return resp,
-        }
-        tracing::info!(project = %id, "multi-repo project switched and resumed");
     }
     set_project_status(&st, &id, "running", "resumed")
 }
@@ -2722,74 +2601,9 @@ fn human_verdict(st: &Arc<App>, id: &str, accept: bool, comment: Option<&str>) -
     drop(c);
 
     if accept {
-        let is_multi = {
-            let c = st.db.lock().unwrap();
-            events::push_event(st, &c, &t.project_id, Some(&t.id), "acceptance.recorded",
-                json!({"verdict": "approved", "by": "human", "comment": comment}));
-            db::get_project(&c, &t.project_id)
-                .map(|p| db::project_is_multi(&c, &p))
-                .unwrap_or(false)
-        };
-        if is_multi {
-            // ARCH §15 第 3 步：多仓任务在项目分支上提交，不建 worktree、不做跨仓合并。
-            let (root, repos, baseline) = {
-                let c = st.db.lock().unwrap();
-                match db::get_project(&c, &t.project_id) {
-                    Some(p) => (
-                        db::project_workdir(&c, &p),
-                        db::project_repos(&c, &t.project_id),
-                        p.baseline,
-                    ),
-                    None => (None, Vec::new(), None),
-                }
-            };
-            let Some(root) = root else {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "project has no working directory");
-            };
-            let repos = if repos.is_empty() {
-                crate::sandbox::scan_repos(&root)
-                    .into_iter()
-                    .map(|(rel, main)| crate::models::RepoRef { rel, main })
-                    .collect()
-            } else {
-                repos
-            };
-            let targets = crate::baseline::target_branches(&t.project_id, baseline.as_ref(), &repos);
-            let outcome = crate::baseline::commit_multi_task(&root, &repos, &targets, &t.id, &t.title);
-            let c = st.db.lock().unwrap();
-            let t2 = if outcome.is_ok() {
-                if !outcome.commits.is_empty() {
-                    events::push_event(st, &c, &t.project_id, Some(&t.id),
-                        "task.commit_completed", json!({"commits": outcome.commits}));
-                }
-                if !outcome.skipped.is_empty() {
-                    events::push_event(st, &c, &t.project_id, Some(&t.id),
-                        "task.commit_skipped", json!({"repos": outcome.skipped, "reason": "no_changes"}));
-                }
-                events::status_changed(st, &c, &t, "done", "human_accepted")
-            } else {
-                let detail = outcome.failures.iter()
-                    .map(|f| format!("{}: {}", f.repo, f.error))
-                    .collect::<Vec<_>>().join("; ");
-                events::push_event(st, &c, &t.project_id, Some(&t.id),
-                    "task.commit_failed", json!({"failures": outcome.failures,
-                                                 "commits": outcome.commits,
-                                                 "skipped": outcome.skipped}));
-                let t2 = events::status_changed(st, &c, &t, "escalated", "multi_commit_failed");
-                events::push_event(st, &c, &t.project_id, Some(&t.id),
-                    "escalation.raised", json!({"task_id": t.id, "reason": "multi_commit_failed",
-                                                "phase": "acceptance", "detail": detail}));
-                events::new_inbox_item(st, &c, &t.project_id, "escalation",
-                    json!({"task_id": t.id, "reason": "multi_commit_failed", "phase": "acceptance",
-                           "detail": format!("任务《{}》人工验收通过，但项目分支提交失败：{}", t.title, detail),
-                           "failures": outcome.failures}));
-                t2
-            };
-            drop(c);
-            st.wake();
-            return ok(t2);
-        }
         let c = st.db.lock().unwrap();
+        events::push_event(st, &c, &t.project_id, Some(&t.id), "acceptance.recorded",
+            json!({"verdict": "approved", "by": "human", "comment": comment}));
         let t2 = events::status_changed(st, &c, &t, "done", "human_accepted");
         drop(c);
         st.wake();

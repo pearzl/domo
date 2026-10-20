@@ -4,38 +4,26 @@ import type { WorkspaceKind } from '../types';
 import { Badge, Empty, StatusBadge } from '../ui';
 
 const KIND_LABEL: Record<WorkspaceKind, string> = {
-  single: '单仓',
-  multi: '多仓',
-  plain: '普通目录',
-};
-
-const KIND_HINT: Record<WorkspaceKind, string> = {
-  single: '一个 git 仓库；任务用 worktree 隔离，可并行',
-  multi: '多个仓库的父目录；项目与任务串行，按项目分支切换',
-  plain: '非 git 目录；任务可并行，但没有版本控制保护',
+  single: 'Git 仓库',
+  multi: '共享目录',
+  plain: '共享目录',
 };
 
 export function EngineeringView() {
-  const { engineerings, projects, createEngineering, selectProject, setView, setError } = useDomo();
+  const { engineerings, projects, createEngineering, selectProject, setView } = useDomo();
 
   const [name, setName] = useState('');
   const [brief, setBrief] = useState('');
-  const [kind, setKind] = useState<WorkspaceKind>('single');
   const [path, setPath] = useState('');
   const [constraints, setConstraints] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     if (!name.trim()) return;
-    if (kind !== 'plain' && !path.trim()) {
-      setError('单仓 / 多仓工程必须填写已存在的工作区目录。');
-      return;
-    }
     setBusy(true);
     const e = await createEngineering({
       name: name.trim(),
       brief: brief.trim(),
-      workspace_kind: kind,
       workspace_path: path.trim() || null,
       constraints: constraints.trim() || null,
     });
@@ -68,25 +56,10 @@ export function EngineeringView() {
             onChange={e => setBrief(e.target.value)}
             placeholder="简介（这是什么产品）"
           />
-          <label className="ws-kind">
-            工作区类型
-            <select value={kind} onChange={e => setKind(e.target.value as WorkspaceKind)}>
-              <option value="single">单仓（git 仓库）</option>
-              <option value="multi">多仓（父目录）</option>
-              <option value="plain">普通目录</option>
-            </select>
-          </label>
           <input
             value={path}
             onChange={e => setPath(e.target.value)}
-            placeholder={
-              kind === 'multi'
-                ? '多仓父目录绝对路径（已存在）'
-                : kind === 'single'
-                  ? '仓库绝对路径（已存在）'
-                  : '目录绝对路径（可选）'
-            }
-            required={kind !== 'plain'}
+            placeholder="工作区绝对路径（git 仓库根 / 共享目录；留空用默认工作区）"
           />
           <input
             value={constraints}
@@ -98,7 +71,7 @@ export function EngineeringView() {
           </button>
         </form>
         <p className="muted" style={{ marginBottom: 0 }}>
-          {KIND_HINT[kind]}
+          类型自动识别：锚点是 git 仓库根 → 任务用 worktree 隔离、可并行；其余目录 → 共享目录，项目与任务串行，不创建/切换项目分支。
         </p>
       </section>
 
@@ -116,7 +89,7 @@ export function EngineeringView() {
               <section key={e.id} className="panel">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
                   <h3 className="panel-title" style={{ margin: 0 }}>{e.name}</h3>
-                  <Badge tone={e.workspace_kind === 'multi' ? 'purple' : e.workspace_kind === 'plain' ? 'blue' : 'green'}>
+                  <Badge tone={e.workspace_kind === 'single' ? 'green' : 'blue'}>
                     {KIND_LABEL[e.workspace_kind]}
                   </Badge>
                 </div>

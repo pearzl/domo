@@ -28,9 +28,10 @@ pub struct Engineering {
     pub id: String,
     pub name: String,
     pub brief: String,
-    /// 工作区类型：single（单仓 git）| multi（多仓目录）| plain（普通目录）
+    /// 工作区类型：single（锚点是 git 仓库根，任务 worktree）| plain（共享目录，串行）；
+    /// multi 为旧数据 legacy 值，行为等同 plain。
     pub workspace_kind: String,
-    /// 工作区锚点（绝对路径；single 为仓库根，multi 为多仓父目录，plain 为普通目录）
+    /// 工作区锚点（绝对路径；single 为仓库根，其余为共享目录/默认工作区）
     pub workspace_path: Option<String>,
     /// 工程默认团队（角色 → agent id 列表）；项目未显式设置时继承
     pub default_agent_pool: Option<Vec<String>>,
@@ -56,10 +57,6 @@ pub struct Project {
     /// M4: 项目工作区内登记的 git 仓库（[{rel, main}]，confirm 时扫描）
     #[serde(default)]
     pub repos: Vec<RepoRef>,
-    /// 项目基线（ARCH §15）：单仓 `{branch}` / detached 时 `{commit}`；
-    /// 多仓 `{repos: {rel: branch}}`。确认项目成功后写入。
-    #[serde(default)]
-    pub baseline: Option<Value>,
     pub created_at: i64,
 }
 

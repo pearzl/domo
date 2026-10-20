@@ -148,10 +148,15 @@ patch(f"/projects/{pid}", {"workspace": {"kind": "local", "path": WS}})
 post(f"/projects/{pid}/confirm", {})
 check("project running", project(pid).get("project", {}).get("status") == "running", project(pid).get("project"))
 
-# a long-running task keeps reporting tasks non-terminal, so they stay reportable.
-s, G = post(f"/projects/{pid}/tasks", {"title": "SLOW-GATE", "description": "stays executing",
-                                       "executor_agent_id": slow["id"], "acceptor_agent_id": acc["id"]})
-check("slow gate task created", s == 200 and G.get("id"), (s, G))
+# 方案 B：共享目录项目串行，不能再用长时间执行的任务挡路。
+# 用「计划连续被打回 → escalated」的阻塞任务保持项目非终态：它不占在途句柄，
+# 无依赖的新任务仍可串行执行。
+s, G = post(f"/projects/{pid}/tasks", {"title": "SLOW-GATE", "description": "[reject_plan_always] stays blocked",
+                                       "executor_agent_id": ex["id"], "acceptor_agent_id": acc["id"]})
+check("blocked gate task created", s == 200 and G.get("id"), (s, G))
+gate = wait_until(lambda: (task_by_id(pid, G["id"]) or {}).get("status") == "escalated", 30)
+check("blocked gate task is non-terminal and holds no worker", gate is not None,
+      (task_by_id(pid, G["id"]) or {}).get("status"))
 
 # ---------------------------------------------------------------- 1) approve (reporter changes)
 print("[smoke] 1) tactical approve — reporter-proposed new task carries acceptance & gets scheduled")

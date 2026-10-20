@@ -155,8 +155,6 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "agent_pool", "TEXT");
     // M4: 项目工作区内登记的 git 仓库（JSON [{rel,main}]）
     add_column_if_missing(c, "projects", "repos", "TEXT");
-    // M8/ARCH §15：项目基线（单仓 {branch|commit}；多仓 {repos:{rel:branch}}）
-    add_column_if_missing(c, "projects", "baseline", "TEXT");
     // M4: 任务涉及的仓库 scope（JSON rel 数组）
     add_column_if_missing(c, "tasks", "scope_repos", "TEXT");
     // M5：agent 运行原始输出归档（模型输出已由我们获得 → 自行存档，供审计回放与结论复核）
@@ -305,11 +303,6 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let baseline = r
-        .get::<_, Option<String>>("baseline")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok());
     Ok(Project {
         id: r.get("id")?,
         engineering_id: r.get("engineering_id").ok().flatten(),
@@ -320,7 +313,6 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         workspace: workspace.and_then(|s| serde_json::from_str(&s).ok()),
         agent_pool,
         repos,
-        baseline,
         created_at: r.get("created_at")?,
     })
 }
@@ -1141,7 +1133,7 @@ pub fn set_project_workspace(c: &Connection, id: &str, ws: Option<&Value>) {
 /// Effective agent working directory for a project (DESIGN §13):
 /// local → the configured absolute path; git → data/workspaces/<project_id>.
 pub fn project_workdir(c: &Connection, p: &Project) -> Option<std::path::PathBuf> {
-    // 工作区属于工程：项目只声明基线。项目不再持有自己的工作区。
+    // 工作区属于工程：项目不再持有自己的工作区。
     if let Some(eid) = p.engineering_id.as_deref() {
         if let Some(e) = get_engineering(c, eid) {
             if let Some(path) = e.workspace_path {
@@ -1423,7 +1415,45 @@ mod tests {
         assert!(table_has_column(&c, "tasks", "milestone_id"));
         assert!(table_has_column(&c, "tasks", "version"));
         assert!(table_has_column(&c, "projects", "workspace"));
-        assert!(table_has_column(&c, "projects", "baseline"));
+    }
+
+    #[test]
+    fn shared_directory_requires_serial() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c);
+        let mut e = Engineering {
+            id: "eng_s".into(),
+            name: "s".into(),
+            brief: String::new(),
+            workspace_kind: "single".into(),
+            workspace_path: Some("/tmp".into()),
+            default_agent_pool: None,
+            constraints: None,
+            created_at: 1,
+        };
+        insert_engineering(&c, &e);
+        seed_project(&c, "prj_single");
+        set_project_engineering(&c, "prj_single", Some("eng_s"));
+        assert!(!project_requires_serial(&c, &get_project(&c, "prj_single").unwrap()));
+
+        e.workspace_kind = "plain".into();
+        update_engineering(&c, &e);
+        assert!(project_requires_serial(&c, &get_project(&c, "prj_single").unwrap()));
+
+        // legacy multi 与 plain 同行为
+        e.workspace_kind = "multi".into();
+        update_engineering(&c, &e);
+        assert!(project_requires_serial(&c, &get_project(&c, "prj_single").unwrap()));
+
+        // 未归属工程的旧数据：单仓库根仍按 worktree；其余按共享目录
+        seed_project(&c, "prj_legacy");
+        let mut p = get_project(&c, "prj_legacy").unwrap();
+        p.repos = vec![RepoRef { rel: ".".into(), main: true }];
+        assert!(!project_requires_serial(&c, &p));
+        p.repos.push(RepoRef { rel: "web".into(), main: false });
+        assert!(project_requires_serial(&c, &p));
+        p.repos.clear();
+        assert!(project_requires_serial(&c, &p));
     }
 
     #[test]
@@ -1471,21 +1501,6 @@ mod tests {
         assert_eq!(open.len(), 2);
         assert!(open.iter().any(|i| i.payload["reason"] == "failure_limit"));
         assert!(open.iter().any(|i| i.payload["reason"] == "rejection_limit"));
-    }
-
-    #[test]
-    fn project_baseline_roundtrip() {
-        let c = Connection::open_in_memory().unwrap();
-        migrate(&c);
-        seed_project(&c, "prj_base");
-        assert!(get_project(&c, "prj_base").unwrap().baseline.is_none());
-
-        let b = serde_json::json!({"repos": {"api": "domo/iter_base", "web": "domo/iter_base"}});
-        set_project_baseline(&c, "prj_base", Some(&b));
-        assert_eq!(get_project(&c, "prj_base").unwrap().baseline, Some(b));
-
-        set_project_baseline(&c, "prj_base", None);
-        assert!(get_project(&c, "prj_base").unwrap().baseline.is_none());
     }
 
     #[test]
@@ -1750,19 +1765,18 @@ pub fn set_project_repos(c: &Connection, id: &str, repos: &[crate::models::RepoR
     );
 }
 
-/// 工程是否为多仓目录（不依赖项目仓库数量，单仓工程不受影响）。
-pub fn project_is_multi(c: &Connection, p: &Project) -> bool {
-    p.engineering_id
-        .as_deref()
-        .and_then(|eid| get_engineering(c, eid))
-        .map(|e| e.workspace_kind == "multi")
-        .unwrap_or(false)
-}
-
-/// ARCH §15：写入项目基线（None 清除）。
-pub fn set_project_baseline(c: &Connection, id: &str, baseline: Option<&Value>) {
-    let s = baseline.map(|v| v.to_string());
-    let _ = c.execute("UPDATE projects SET baseline=?2 WHERE id=?1", params![id, s]);
+/// 方案 B：共享目录（非「锚点本身是 git 仓库」）的项目与任务都串行。
+///
+/// - 有工程：`workspace_kind == "single"` 才走 worktree；`multi` 是 legacy，
+///   与 `plain` 一样按共享目录处理。
+/// - 无工程（旧数据）：工作区只有单一仓库时仍按单仓 worktree；其余按共享目录。
+pub fn project_requires_serial(c: &Connection, p: &Project) -> bool {
+    if let Some(eid) = p.engineering_id.as_deref() {
+        if let Some(e) = get_engineering(c, eid) {
+            return e.workspace_kind != "single";
+        }
+    }
+    !(p.repos.len() == 1 && p.repos[0].rel == ".")
 }
 
 /// M4：读取项目登记的仓库列表。

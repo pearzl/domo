@@ -70,6 +70,7 @@ export interface Workspace {
   branch?: string; // kind=git，可选
 }
 
+/** single = 锚点是 git 仓库根（worktree 并行）；multi 为 legacy，与 plain 同为共享目录（串行） */
 export type WorkspaceKind = 'single' | 'multi' | 'plain';
 
 /** 工程（完整产品）：承载工作区锚点、默认团队与防跑偏约束；不含目标与进度 */
@@ -84,13 +85,6 @@ export interface Engineering {
   created_at: number;
 }
 
-/** 项目基线：单仓记录确认时的分支（detached 时记录提交）；多仓记录每仓迭代分支 */
-export interface ProjectBaseline {
-  branch?: string;
-  commit?: string;
-  repos?: Record<string, string>;
-}
-
 export interface Project {
   id: string;
   /** 所属工程；null = 未归属（旧数据） */
@@ -100,8 +94,6 @@ export interface Project {
   status: ProjectStatus;
   plan?: { confirmed_at?: number | null; content?: unknown } | null;
   workspace: Workspace | null;
-  /** 确认项目时写入的项目基线 */
-  baseline?: ProjectBaseline | null;
   /** 项目 agent 池（null/缺省=全部已配置 agent；规划台可显式选择） */
   agent_pool?: string[] | null;
   created_at: number;

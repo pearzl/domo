@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useDomo } from '../store';
-import type { InboxItem, Project, ProjectBaseline, Workspace } from '../types';
+import type { InboxItem, Project, Workspace } from '../types';
 import { Badge, ConfirmDialog, Empty, MILESTONE_STATUS_LABEL, Modal, StatusBadge, fmtTime } from '../ui';
 import { ReportModal } from './Report';
 
@@ -95,33 +95,6 @@ function WorkspaceBadge({ ws }: { ws: Workspace }) {
       <Badge tone={ws.kind === 'local' ? 'blue' : 'purple'}>{workspaceBrief(ws)}</Badge>
     </span>
   );
-}
-
-/** 项目基线徽章：多仓展示「仓数 → 分支」，单仓展示分支或提交 */
-function BaselineBadge({ baseline }: { baseline?: ProjectBaseline | null }) {
-  if (!baseline) return null;
-  const repos = Object.entries(baseline.repos ?? {});
-  if (repos.length > 0) {
-    const branch = repos[0][1];
-    return (
-      <span title={repos.map(([rel, b]) => `${rel} → ${b}`).join('\n')}>
-        <Badge tone="green">
-          基线：{repos.length} 仓 · {branch}
-        </Badge>
-      </span>
-    );
-  }
-  if (baseline.branch) {
-    return <Badge tone="green">基线：{baseline.branch}</Badge>;
-  }
-  if (baseline.commit) {
-    return (
-      <span title={baseline.commit}>
-        <Badge tone="green">基线：{baseline.commit.slice(0, 8)}</Badge>
-      </span>
-    );
-  }
-  return null;
 }
 
 /** 找到某里程碑当前 open 的 gate 收件箱条目（用于「去确认」一键跳转） */
@@ -298,10 +271,6 @@ export function ProjectsView() {
             const projInbox = inbox.filter(i => i.project_id === p.id && i.status === 'open').length;
             const open = OPEN_STATUSES.includes(p.status);
             const planning = planningId === p.id;
-            const engKind = p.engineering_id
-              ? engineerings.find(e => e.id === p.engineering_id)?.workspace_kind
-              : undefined;
-            const repoBranches = Object.entries(p.baseline?.repos ?? {});
             return (
               <div key={p.id} className="card project-card">
                 <div className="card-head">
@@ -322,7 +291,6 @@ export function ProjectsView() {
                   ) : (
                     <span className="ws-hint">将使用默认工作区 ~/.domo/workspace/{p.id}（确认规划时自动创建）</span>
                   )}
-                  <BaselineBadge baseline={p.baseline} />
                   {open && (
                     <button
                       className="btn"
@@ -345,16 +313,6 @@ export function ProjectsView() {
                     </button>
                   )}
                 </div>
-                {repoBranches.length > 0 && (p.status === 'completed' || p.status === 'archived') && (
-                  <div className="muted" style={{ width: '100%', fontSize: 12, marginTop: 4 }}>
-                    {repoBranches.map(([rel, branch]) => (
-                      <div key={rel}>
-                        {rel} → {branch}
-                      </div>
-                    ))}
-                    <div>分支已保留，未合回主干</div>
-                  </div>
-                )}
                 <div className="progress-row">
                   <div className="progress">
                     <div className="progress-fill" style={{ width: `${pct}%` }} />
@@ -465,15 +423,7 @@ export function ProjectsView() {
                       </>
                     )}
                     {p.status === 'paused' && (
-                      <button
-                        className="btn"
-                        title={
-                          engKind === 'multi'
-                            ? '切换到本项目分支并恢复；工作区有未提交改动时会阻止并列出仓库与文件'
-                            : '恢复运行'
-                        }
-                        onClick={() => void projectAction(p.id, 'resume')}
-                      >
+                      <button className="btn" onClick={() => void projectAction(p.id, 'resume')}>
                         恢复
                       </button>
                     )}
