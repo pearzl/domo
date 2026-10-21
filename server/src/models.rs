@@ -57,6 +57,9 @@ pub struct Project {
     /// M4: 项目工作区内登记的 git 仓库（[{rel, main}]，confirm 时扫描）
     #[serde(default)]
     pub repos: Vec<RepoRef>,
+    /// P1 队列人工调序：项目整体优先级（越大越先；默认 0）
+    #[serde(default)]
+    pub queue_priority: i64,
     pub created_at: i64,
 }
 
@@ -146,6 +149,9 @@ pub struct Task {
     /// 状态条件更新（CAS）版本号：每次状态变更 +1，派发时校验，防重复派发。
     #[serde(default)]
     pub version: i64,
+    /// P1 队列人工调序：任务优先级（越大越先；默认 0）
+    #[serde(default)]
+    pub queue_priority: i64,
     pub attempt: i64,
     pub rejection_count: i64,
     pub failure_count: i64,

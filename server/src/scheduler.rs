@@ -1372,6 +1372,7 @@ mod tests {
             acceptance_required: true,
             acceptance_criteria: None,
             version: 0,
+            queue_priority: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),

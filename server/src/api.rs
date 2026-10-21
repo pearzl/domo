@@ -72,6 +72,7 @@ pub fn router(state: Arc<App>) -> Router {
         }).patch(patch_agent).delete(delete_agent))
         .route("/api/inbox", get(list_inbox))
         .route("/api/inbox/{id}/resolve", post(resolve_inbox))
+        .route("/api/usage", get(get_usage))
         .route("/api/events", get(list_events))
         .route("/api/stream", get(stream))
         .with_state(state)
@@ -265,6 +266,7 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
         workspace: None,
         agent_pool: None,
         repos: Vec::new(),
+        queue_priority: 0,
         created_at: db::now(),
     };
     {
@@ -309,14 +311,78 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
     ok(p)
 }
 
+/// P1「为什么还没开始」：只对 planned / ready 任务给出明确原因。
+fn waiting_reason(
+    st: &Arc<App>,
+    c: &rusqlite::Connection,
+    project: &Project,
+    tasks: &[Task],
+    task: &Task,
+) -> Option<String> {
+    if task.status != "planned" && task.status != "ready" {
+        return None;
+    }
+    match project.status.as_str() {
+        "paused" => return Some("项目已暂停".into()),
+        "pausing" => return Some("项目正在暂停".into()),
+        "archived" => return Some("项目已归档".into()),
+        "completed" => return Some("项目已完成，等待新工作触发重开".into()),
+        _ => {}
+    }
+    let unmet: Vec<String> = task
+        .depends_on
+        .iter()
+        .filter_map(|id| tasks.iter().find(|t| &t.id == id))
+        .filter(|t| t.status != "done")
+        .map(|t| t.title.clone())
+        .collect();
+    if !unmet.is_empty() {
+        return Some(format!("等待依赖：{}", unmet.join("、")));
+    }
+    if let Some(mid) = task.milestone_id.as_deref() {
+        if let Some(m) = db::get_milestone(c, mid) {
+            if m.status == "awaiting_confirm" {
+                return Some(format!("里程碑 gate 待确认：{}", m.name));
+            }
+            if m.status == "failed" {
+                return Some(format!("里程碑已退回，等待重规划：{}", m.name));
+            }
+        }
+    }
+    if db::project_requires_serial(c, project) {
+        if let Some(live) = tasks.iter().find(|t| t.id != task.id && st.has_live_handle(&t.id)) {
+            return Some(format!("共享目录串行：等待「{}」结束", live.title));
+        }
+    }
+    match crate::pool::resolve_role(st, c, &project.id, task, "executor") {
+        None => Some("团队池没有可用执行者".into()),
+        Some(agent_id) => {
+            if !db::agent_free(c, &agent_id) {
+                let name = db::get_agent(c, &agent_id).map(|a| a.name).unwrap_or(agent_id);
+                Some(format!("等待执行者空闲：{name}"))
+            } else {
+                Some("等待调度器派发".into())
+            }
+        }
+    }
+}
+
 async fn get_project(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let c = st.db.lock().unwrap();
     let Some(p) = db::get_project(&c, &id) else { return err(StatusCode::NOT_FOUND, "project not found"); };
     // keep the stored task_ids mirror consistent with tasks.milestone_id
     db::sync_milestone_task_ids(&c, &id);
+    let tasks = db::list_tasks(&c, &id);
+    let tasks_json: Vec<Value> = tasks.iter().map(|t| {
+        let mut v = serde_json::to_value(t).unwrap_or(json!({}));
+        if let Some(reason) = waiting_reason(&st, &c, &p, &tasks, t) {
+            v["waiting_reason"] = json!(reason);
+        }
+        v
+    }).collect();
     let body = json!({
         "project": p,
-        "tasks": db::list_tasks(&c, &id),
+        "tasks": tasks_json,
         "milestones": db::list_milestones(&c, &id),
         "agents": db::list_agents(&c),
         "inbox_open_count": db::inbox_open_count(&c, &id),
@@ -451,6 +517,11 @@ async fn patch_project(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
     }
     if let Some(eid) = &eng_changed {
         db::set_project_engineering(&c, &p.id, eid.as_deref());
+    }
+    if let Some(q) = body["queue_priority"].as_i64() {
+        let _ = c.execute("UPDATE projects SET queue_priority=?2 WHERE id=?1",
+            rusqlite::params![p.id, q]);
+        p.queue_priority = q;
     }
     events::push_event(&st, &c, &p.id, None, "project.updated",
         json!({"name": p.name, "brief": p.brief, "workspace": p.workspace,
@@ -1128,6 +1199,7 @@ async fn plan_project(
                     tried_agents: serde_json::json!({}),
                     status: "planned".into(),
                     version: 0,
+                    queue_priority: 0,
                     attempt: 0,
                     rejection_count: 0,
                     failure_count: 0,
@@ -1438,6 +1510,7 @@ pub(crate) fn apply_replan_changes(
                     tried_agents: serde_json::json!({}),
                     status: "planned".into(),
                     version: 0,
+                    queue_priority: 0,
                     attempt: 0,
                     rejection_count: 0,
                     failure_count: 0,
@@ -2072,6 +2145,7 @@ async fn create_task(
             tried_agents: serde_json::json!({}),
             status: "planned".into(),
             version: 0,
+            queue_priority: 0,
             attempt: 0,
             rejection_count: 0,
             failure_count: 0,
@@ -2247,6 +2321,11 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
                 t.agent_pinned as i64
             ],
         );
+        if let Some(q) = body["queue_priority"].as_i64() {
+            let _ = c.execute("UPDATE tasks SET queue_priority=?2 WHERE id=?1",
+                rusqlite::params![t.id, q]);
+            t.queue_priority = q;
+        }
         if let Some(arr) = body["acceptance_checks"].as_array() {
             for chk in arr {
                 if let Err(e) = validate_check(chk) {
@@ -3226,6 +3305,77 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
     drop(c);
     st.wake();
     ok(resolved)
+}
+
+// ---------- usage / cost (P1) ----------
+
+/// GET /api/usage[?project_id=]：按项目 / agent / 任务汇总 tokens、费用与时长。
+/// 数据来自每次 agent 尝试（adapter 提供真实 usage 时用真实值，mock 为估算）。
+async fn get_usage(
+    State(st): State<Arc<App>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use std::collections::BTreeMap;
+    let c = st.db.lock().unwrap();
+    let rows = db::list_usage(&c, q.get("project_id").map(|s| s.as_str()));
+    let mut totals = json!({"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "duration_ms": 0});
+    let mut by_project: BTreeMap<String, Value> = BTreeMap::new();
+    let mut by_agent: BTreeMap<String, Value> = BTreeMap::new();
+    let mut by_task: BTreeMap<String, Value> = BTreeMap::new();
+    let bump = |m: &mut BTreeMap<String, Value>, key: String, label: String, row: &Value| {
+        let e = m.entry(key).or_insert_with(|| json!({
+            "key": label, "calls": 0, "input_tokens": 0, "output_tokens": 0,
+            "cost_usd": 0.0, "duration_ms": 0
+        }));
+        let add = |e: &mut Value, k: &str, v: f64| {
+            let cur = e[k].as_f64().unwrap_or(0.0);
+            e[k] = if k.ends_with("tokens") || k == "duration_ms" || k == "calls" {
+                json!(cur as i64 + v as i64)
+            } else {
+                json!(cur + v)
+            };
+        };
+        add(e, "calls", 1.0);
+        add(e, "input_tokens", row["input_tokens"].as_f64().unwrap_or(0.0));
+        add(e, "output_tokens", row["output_tokens"].as_f64().unwrap_or(0.0));
+        add(e, "cost_usd", row["cost_usd"].as_f64().unwrap_or(0.0));
+        add(e, "duration_ms", row["duration_ms"].as_f64().unwrap_or(0.0));
+    };
+    for r in &rows {
+        let mut add_total = |k: &str, v: f64| {
+            let cur = totals[k].as_f64().unwrap_or(0.0);
+            totals[k] = if k.ends_with("tokens") || k == "duration_ms" || k == "calls" {
+                json!(cur as i64 + v as i64)
+            } else {
+                json!(cur + v)
+            };
+        };
+        add_total("calls", 1.0);
+        add_total("input_tokens", r["input_tokens"].as_f64().unwrap_or(0.0));
+        add_total("output_tokens", r["output_tokens"].as_f64().unwrap_or(0.0));
+        add_total("cost_usd", r["cost_usd"].as_f64().unwrap_or(0.0));
+        add_total("duration_ms", r["duration_ms"].as_f64().unwrap_or(0.0));
+        let pid = r["project_id"].as_str().unwrap_or("");
+        let pname = db::get_project(&c, pid).map(|p| p.name).unwrap_or_else(|| pid.to_string());
+        bump(&mut by_project, pid.into(), pname, r);
+        let aid = r["agent_id"].as_str().unwrap_or("");
+        let aname = db::get_agent(&c, aid).map(|a| a.name).unwrap_or_else(|| if aid.is_empty() { "（未知）".into() } else { aid.into() });
+        bump(&mut by_agent, aid.into(), aname, r);
+        let tid = r["task_id"].as_str().unwrap_or("");
+        let tname = db::get_task(&c, tid).map(|t| t.title).unwrap_or_else(|| if tid.is_empty() { "（无任务）".into() } else { tid.into() });
+        bump(&mut by_task, tid.into(), tname, r);
+    }
+    let budget = std::env::var("DOMO_BUDGET_USD").ok().and_then(|s| s.parse::<f64>().ok());
+    let cost = totals["cost_usd"].as_f64().unwrap_or(0.0);
+    ok(json!({
+        "totals": totals,
+        "by_project": by_project.into_values().collect::<Vec<_>>(),
+        "by_agent": by_agent.into_values().collect::<Vec<_>>(),
+        "by_task": by_task.into_values().collect::<Vec<_>>(),
+        "budget_usd": budget,
+        "over_budget": budget.map(|b| cost > b).unwrap_or(false),
+        "note": "tokens 由 adapter 提供的 usage 或本地估算；费用按 adapter 返回值汇总",
+    }))
 }
 
 // ---------- events & stream ----------

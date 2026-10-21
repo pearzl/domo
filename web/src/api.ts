@@ -24,6 +24,7 @@ import type {
   Task,
   TaskDetail,
   TaskFormValue,
+  UsageSummary,
   Workspace,
 } from './types';
 
@@ -102,6 +103,9 @@ export const api = {
     request<{ engineering: Engineering; projects: Project[] }>(`/engineerings/${id}`),
 
   listProjects: () => request<Project[]>('/projects'),
+  /** P1 成本与用量汇总（可按项目过滤） */
+  getUsage: (projectId?: string) =>
+    request<UsageSummary>(`/usage${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
   createProject: (body: { name: string; brief: string; workspace?: Workspace | null; engineering_id?: string | null; agent_pool?: string[] | null }) =>
     request<Project>('/projects', 'POST', body),
   getProject: (id: string) => request<ProjectDetailPayload>(`/projects/${id}`),
@@ -133,6 +137,8 @@ export const api = {
 
   createTask: (projectId: string, body: TaskFormValue) =>
     request<Task>(`/projects/${projectId}/tasks`, 'POST', body),
+  setTaskPriority: (id: string, priority: number) =>
+    request<Task>(`/tasks/${id}`, 'PATCH', { queue_priority: priority }),
   updateTask: (id: string, body: Partial<TaskFormValue>) =>
     request<Task>(`/tasks/${id}`, 'PATCH', body),
   getTaskDetail: async (id: string): Promise<TaskDetail> =>

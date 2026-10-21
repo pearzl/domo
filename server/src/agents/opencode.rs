@@ -413,6 +413,17 @@ pub struct RunOutcome {
     pub text: String,
     /// real opencode session id if discovered in the stream
     pub session_id: Option<String>,
+    /// adapter-reported token/cost usage (best effort; absent in older CLIs)
+    pub usage: Usage,
+    /// wall-clock duration of the run
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
 }
 
 /// Whether this CLI build accepts arbitrary `--session <custom-id>` values.
@@ -497,7 +508,7 @@ async fn run_via_host(
         return Ok(None);
     }
     events::log_line_state(state, &task.id, &format!("HTTP 会话完成（session {sid}），输出 {} 字", text.chars().count()));
-    Ok(Some(RunOutcome { raw: raw.to_string(), text, session_id: Some(sid) }))
+    Ok(Some(RunOutcome { raw: raw.to_string(), text, session_id: Some(sid), usage: Usage::default(), duration_ms: 0 }))
 }
 
 pub async fn run_cli_ext(
@@ -608,9 +619,11 @@ async fn run_cli_once(
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 
+    let started = std::time::Instant::now();
     let raw = Arc::new(Mutex::new(String::new()));
     let text = Arc::new(Mutex::new(String::new()));
     let sid = Arc::new(Mutex::new(None::<String>));
+    let usage = Arc::new(Mutex::new(Usage::default()));
     let errb = Arc::new(Mutex::new(String::new()));
     let emsg = Arc::new(Mutex::new(None::<String>));
     // M5：不再限制总时长，改为**空闲看门狗**——按输出间隔判卡死（阈值复用配置的超时）
@@ -618,7 +631,7 @@ async fn run_cli_once(
 
     tracing::info!(target: "opencode", session = %session, custom_session, model = model.unwrap_or("<default>"), timeout_ms, "opencode run spawn");
 
-    let r_out = tokio::spawn(stream_json(stdio_ok(stdout), state.clone(), log_task.map(String::from), raw.clone(), text.clone(), sid.clone(), emsg.clone(), persist.clone(), last_activity.clone()));
+    let r_out = tokio::spawn(stream_json(stdio_ok(stdout), state.clone(), log_task.map(String::from), raw.clone(), text.clone(), sid.clone(), usage.clone(), emsg.clone(), persist.clone(), last_activity.clone()));
     let r_err = tokio::spawn(stream_stderr(stdio_ok(stderr), state.clone(), log_task.map(String::from), errb.clone(), last_activity.clone()));
 
     // 空闲看门狗：只要 agent 持续产出（stdout/stderr 有行）就继续跑，不做总时长限制；
@@ -680,6 +693,8 @@ async fn run_cli_once(
         raw: raw.lock().unwrap().clone(),
         text: text.lock().unwrap().clone(),
         session_id: sid.lock().unwrap().clone(),
+        usage: usage.lock().unwrap().clone(),
+        duration_ms: started.elapsed().as_millis() as i64,
     };
     tracing::info!(target: "opencode", session = %session, exit = %status, text_len = out.text.len(), ok = status.success(), "opencode run finished");
 
@@ -788,6 +803,31 @@ fn archive_agent_output(
             raw: &raw,
         },
     );
+    // P1 用量：真实 usage 优先；缺失时按输入/输出字符估算（source 标记区分）。
+    let task = persist.and_then(|p| p.task_id.as_deref()).and_then(|tid| db::get_task(&c, tid));
+    let phase = persist.and_then(|p| p.phase.as_deref()).unwrap_or("");
+    let agent_id = task.as_ref().and_then(|t| match phase {
+        "execute" | "plan_task" => t.executor_agent_id.clone(),
+        "accept" | "plan_review" => t.acceptor_agent_id.clone(),
+        _ => None,
+    });
+    let input_chars = task.as_ref().map(|t| {
+        t.title.chars().count() + t.description.chars().count()
+            + t.acceptance_criteria.as_deref().map(|s| s.chars().count()).unwrap_or(0)
+    }).unwrap_or(0);
+    let estimated = out.usage.input_tokens == 0 && out.usage.output_tokens == 0;
+    db::insert_usage(&c, &db::UsageRecord {
+        project_id: &project_id,
+        task_id: persist.and_then(|p| p.task_id.as_deref()),
+        agent_id: agent_id.as_deref(),
+        phase,
+        attempt: persist.and_then(|p| p.attempt).unwrap_or(0),
+        input_tokens: if estimated { (input_chars / 4).max(1) as i64 } else { out.usage.input_tokens },
+        output_tokens: if estimated { (out.text.chars().count() / 4).max(1) as i64 } else { out.usage.output_tokens },
+        cost_usd: out.usage.cost_usd,
+        duration_ms: out.duration_ms,
+        source: if estimated { "estimate" } else { "adapter" },
+    });
 }
 
 /// Belt-and-braces guard before spawn: if the prompt still exceeds the argv
@@ -848,6 +888,7 @@ async fn stream_json(
     raw: Arc<Mutex<String>>,
     text: Arc<Mutex<String>>,
     sid: Arc<Mutex<Option<String>>>,
+    usage: Arc<Mutex<Usage>>,
     emsg: Arc<Mutex<Option<String>>>,
     persist: Option<PersistCtx>,
     last_activity: Arc<Mutex<std::time::Instant>>,
@@ -910,6 +951,19 @@ async fn stream_json(
             if let Some(tid) = &task_id {
                 let c = state.db.lock().unwrap();
                 events::log_line(&state, &c, tid, &format!("[opencode error] {shown}"));
+            }
+            continue;
+        }
+        // 适配器真实 usage：step_finish/step-finish 的 part.tokens / cost（旧版可能没有）
+        if matches!(parsed["type"].as_str(), Some("step_finish") | Some("step-finish")) {
+            let tokens = if parsed["part"]["tokens"].is_object() { &parsed["part"]["tokens"] } else { &parsed["tokens"] };
+            if tokens.is_object() {
+                let mut u = usage.lock().unwrap();
+                u.input_tokens += tokens["input"].as_i64().unwrap_or(0);
+                u.output_tokens += tokens["output"].as_i64().unwrap_or(0)
+                    + tokens["reasoning"].as_i64().unwrap_or(0);
+                u.cost_usd += parsed["part"]["cost"].as_f64()
+                    .or_else(|| parsed["cost"].as_f64()).unwrap_or(0.0);
             }
             continue;
         }
@@ -1410,6 +1464,7 @@ mod tests {
             workspace: None,
             agent_pool: None,
             repos: Vec::new(),
+            queue_priority: 0,
             created_at: 0,
         };
         let task = Task {
@@ -1425,6 +1480,7 @@ mod tests {
             acceptance_required: true,
             acceptance_criteria: Some("c".into()),
             version: 0,
+            queue_priority: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),

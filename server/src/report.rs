@@ -774,6 +774,7 @@ mod tests {
             workspace: Some(json!({"kind": "local", "path": "/tmp/ws"})),
             agent_pool: None,
             repos: Vec::new(),
+            queue_priority: 0,
             created_at: 0,
         }
     }
@@ -792,6 +793,7 @@ mod tests {
             acceptance_required: true,
             acceptance_criteria: None,
             version: 0,
+            queue_priority: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),

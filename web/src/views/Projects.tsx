@@ -286,6 +286,7 @@ export function ProjectsView() {
                       工程：{engineerings.find(e => e.id === p.engineering_id)?.name ?? p.engineering_id}
                     </Badge>
                   )}
+                  {(p.queue_priority ?? 0) > 0 && <Badge tone="amber">优先级 {p.queue_priority}</Badge>}
                   {p.workspace ? (
                     <WorkspaceBadge ws={p.workspace} />
                   ) : (
@@ -429,6 +430,21 @@ export function ProjectsView() {
                     )}
                     {open && (
                       <>
+                        <button
+                          className="btn"
+                          title="项目整体置顶（越大越先）"
+                          onClick={() => {
+                            const top = Math.max(0, ...projects.map(x => x.queue_priority ?? 0)) + 1;
+                            void updateProject(p.id, { queue_priority: top });
+                          }}
+                        >
+                          ↑ 置顶
+                        </button>
+                        {(p.queue_priority ?? 0) !== 0 && (
+                          <button className="btn" title="恢复默认优先级" onClick={() => void updateProject(p.id, { queue_priority: 0 })}>
+                            默认
+                          </button>
+                        )}
                         <button className="btn btn-danger-ghost" onClick={() => setConfirmCancel(p)}>
                           归档
                         </button>

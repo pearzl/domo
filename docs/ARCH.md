@@ -195,7 +195,11 @@ WHERE id=? AND version=? AND status IN ('planned','ready');
 - 完整 agent 输出入库；超过 1MB 的正文落文件，库里只存指针与摘要。
 - 在线保留期默认 90 天；超出导出为按月压缩文件，界面透明查询；归档只增不改。
 
-### 7.5 备份与升级
+### 7.5 用量与成本
+
+每次 agent 尝试写入 `usage` 表：项目 / 任务 / agent / 阶段 / attempt / 输入输出 tokens / 费用 / 时长 / 来源（adapter 实测或本地估算）。`GET /api/usage` 在 Rust 侧按项目、agent、任务聚合；`DOMO_BUDGET_USD` 用于超预算提示。用量是审计事实，不修改任务状态。
+
+### 7.6 备份与升级
 
 - 启动 `quick_check`，失败则拒绝启动并提示恢复。
 - 备份：启动前、迁移前、每 6 小时、每日；保留 7 份 + 每周 1 份。

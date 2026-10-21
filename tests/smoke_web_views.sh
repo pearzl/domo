@@ -310,6 +310,12 @@ role_counts = {r: sum(1 for a in agents() if r in (a.get("roles") or []))
 check("角色分布口径（executor 2 / acceptor 1）",
       role_counts["executor"] == 2 and role_counts["acceptor"] == 1, role_counts)
 
+# ---------------------------------------------------------------- usage
+s, usage = get(f"/api/usage?project_id={pid}")
+check("成本与用量：项目汇总包含 mock 调用", s == 200 and (usage.get("totals") or {}).get("calls", 0) > 0, usage)
+check("成本与用量：按 agent 汇总", s == 200 and len(usage.get("by_agent") or []) > 0, usage)
+check("成本与用量：按任务汇总", s == 200 and len(usage.get("by_task") or []) > 0, usage)
+
 # ---------------------------------------------------------------- SSE realtime
 print("[web-smoke] 9) SSE 实时推送（前端图/负载实时刷新的数据源）")
 frames = sse_frames()
@@ -344,7 +350,8 @@ for p in js_paths:
 for marker, label in [("DAG 图", "任务视图 DAG 切换"), ("待确认 · 去收件箱", "总览 gate 跳转按钮"),
                       ("占用", "负载占用比"), ("队列空", "队列长度"), ("角色分布", "角色分布"),
                       ("规划台", "规划台"), ("方案摘要", "方案摘要"), ("验收一屏", "验收一屏"),
-                      ("工程 / 项目", "三级导航")]:
+                      ("工程 / 项目", "三级导航"), ("任务回放", "审计回放"),
+                      ("成本与用量", "成本与用量"), ("通知", "通知中心")]:
     check(f"bundle 含「{label}」标记：{marker}", marker in bundle)
 
 failed = [n for n, ok in CHECKS if not ok]

@@ -39,7 +39,7 @@ import type {
 } from './types';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
-export type ViewId = 'engineering' | 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge';
+export type ViewId = 'engineering' | 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge' | 'usage';
 /** 任务视图呈现方式：看板 / DAG 图（提升到 store，切页再切回不丢失） */
 export type TasksViewMode = 'kanban' | 'dag';
 /** DAG 布局方向：tb=上下（里程碑横泳道）/ lr=左右（同上看板流向）——同样跨视图保持 */
@@ -110,7 +110,7 @@ export interface DomoStore {
   updateEngineering: (id: string, body: Partial<Omit<Engineering, 'id' | 'created_at'>>) => Promise<boolean>;
   updateProject: (
     id: string,
-    value: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null },
+    value: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; queue_priority?: number },
   ) => Promise<boolean>;
   projectAction: (id: string, action: 'confirm' | 'pause' | 'resume' | 'cancel', force?: boolean) => Promise<void>;
   /** M3 项目总结报告：拉取详情（未生成时返回 null） */
@@ -120,6 +120,8 @@ export interface DomoStore {
   /** 自动规划：长等待（LLM 可能数分钟）。成功返回新增任务数，失败返回 -1 并弹错误 toast */
   planProject: (id: string, opts?: { planner_agent_id?: string; executor_agent_id?: string; acceptor_agent_id?: string; feedback?: string }) => Promise<number>;
   submitTaskForm: (projectId: string, value: TaskFormValue, editTaskId?: string) => Promise<boolean>;
+  /** P1 队列人工调序：设置任务优先级（越大越先；0=默认） */
+  setTaskPriority: (taskId: string, priority: number) => Promise<boolean>;
   /** 人工介入：规划者分析并给出调整方案（探讨用），返回方案 */
   intervene: (projectId: string, note: string) => Promise<InterveneResult | null>;
   /** 采纳方案：逐项应用 changes */
@@ -662,6 +664,22 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     [reloadTaskDetail],
   );
 
+  const setTaskPriority = useCallback(async (taskId: string, priority: number) => {
+    try {
+      const t = await api.setTaskPriority(taskId, priority);
+      setTasksByProject(m => {
+        const list = m[t.project_id];
+        if (!list) return m;
+        return { ...m, [t.project_id]: upsertById(list, t) };
+      });
+      if (selectedTaskId === taskId) setTaskDetail(d => (d && d.id === taskId ? { ...d, ...t } : d));
+      return true;
+    } catch (e) {
+      setError(errMsg(e));
+      return false;
+    }
+  }, [selectedTaskId]);
+
   const createAgent = useCallback(async (value: AgentFormValue) => {
     try {
       const adapter: Adapter = value.adapter === 'opencode' ? 'opencode' : 'mock';
@@ -781,6 +799,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     generateReport,
     planning,
     submitTaskForm,
+    setTaskPriority,
     sendGuidance,
     reviewTask,
     reportReplan,

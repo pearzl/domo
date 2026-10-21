@@ -91,6 +91,8 @@ export interface Project {
   workspace: Workspace | null;
   /** 项目 agent 池（null/缺省=全部已配置 agent；规划台可显式选择） */
   agent_pool?: string[] | null;
+  /** P1 队列人工调序：项目整体优先级（越大越先） */
+  queue_priority?: number;
   created_at: number;
 }
 
@@ -115,6 +117,10 @@ export interface Task {
   status: TaskStatus;
   /** 条件更新版本号（ARCH A2；前端只读展示/排查） */
   version?: number;
+  /** P1「为什么还没开始」：项目详情接口给 planned/ready 任务附带的等待原因 */
+  waiting_reason?: string;
+  /** P1 队列人工调序：任务优先级（越大越先） */
+  queue_priority?: number;
   attempt: number;
   rejection_count: number;
   failure_count: number;
@@ -322,4 +328,24 @@ export interface PoolView {
   }[];
   pool: Record<string, string[]>;
   circuits: { agent_id: string; class: string; remaining_ms: number }[];
+}
+
+/** P1 成本与用量：一次汇总的 bucket（项目 / agent / 任务） */
+export interface UsageBucket {
+  key: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  duration_ms: number;
+}
+
+export interface UsageSummary {
+  totals: Omit<UsageBucket, 'key'>;
+  by_project: UsageBucket[];
+  by_agent: UsageBucket[];
+  by_task: UsageBucket[];
+  budget_usd: number | null;
+  over_budget: boolean;
+  note: string;
 }

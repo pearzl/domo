@@ -53,7 +53,8 @@ fn migrate(c: &Connection) {
         r#"
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL, plan_content TEXT, confirmed_at INTEGER, created_at INTEGER NOT NULL
+            status TEXT NOT NULL, plan_content TEXT, confirmed_at INTEGER,
+            queue_priority INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS engineerings (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
@@ -73,6 +74,7 @@ fn migrate(c: &Connection) {
             acceptance_required INTEGER NOT NULL DEFAULT 1,
             acceptance_criteria TEXT,
             status TEXT NOT NULL DEFAULT 'planned',
+            queue_priority INTEGER NOT NULL DEFAULT 0,
             attempt INTEGER NOT NULL DEFAULT 0,
             rejection_count INTEGER NOT NULL DEFAULT 0,
             failure_count INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +125,8 @@ fn migrate(c: &Connection) {
     add_column_if_missing(c, "projects", "workspace", "TEXT");
     // M6 工程层：项目归属工程（旧数据为 NULL，后续由人迁移）
     add_column_if_missing(c, "projects", "engineering_id", "TEXT");
+    add_column_if_missing(c, "projects", "queue_priority", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(c, "tasks", "queue_priority", "INTEGER NOT NULL DEFAULT 0");
     c.execute_batch("CREATE INDEX IF NOT EXISTS idx_projects_engineering ON projects(engineering_id);")
         .ok();
     // M7 验收机械检查（只支持 file_exists / file_not_exists / command 三类结构）
@@ -208,6 +212,30 @@ fn migrate(c: &Connection) {
         "#,
     )
     .expect("milestone indexes");
+
+    // P1 成本与用量：每次 agent 尝试的 tokens / 费用 / 时长。
+    c.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            project_id TEXT NOT NULL,
+            task_id TEXT,
+            agent_id TEXT,
+            phase TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_project ON usage(project_id, id);
+        CREATE INDEX IF NOT EXISTS idx_usage_task ON usage(task_id, id);
+        CREATE INDEX IF NOT EXISTS idx_usage_agent ON usage(agent_id, id);
+        "#,
+    )
+    .expect("usage");
 
     // M5 项目知识库：人工指导沉淀的项目规范条目（随 SQLite 持久化）。
     //   scope:      'project'=仅来源项目可见 | 'global'=全部项目可见（跨项目复用）
@@ -299,6 +327,7 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         workspace: workspace.and_then(|s| serde_json::from_str(&s).ok()),
         agent_pool,
         repos,
+        queue_priority: r.get("queue_priority").unwrap_or(0),
         created_at: r.get("created_at")?,
     })
 }
@@ -365,7 +394,7 @@ pub fn update_engineering(c: &Connection, e: &Engineering) {
 /// 某工程下的项目（按创建时间）。
 pub fn list_projects_of(c: &Connection, engineering_id: &str) -> Vec<Project> {
     let mut st = c
-        .prepare("SELECT * FROM projects WHERE engineering_id=?1 ORDER BY created_at, id")
+        .prepare("SELECT * FROM projects WHERE engineering_id=?1 ORDER BY queue_priority DESC, created_at, id")
         .unwrap();
     st.query_map(params![engineering_id], project_row)
         .unwrap()
@@ -412,6 +441,7 @@ fn task_row(r: &Row) -> rusqlite::Result<Task> {
             .unwrap_or_else(|| serde_json::json!({})),
         status: r.get("status")?,
         version: r.get("version").unwrap_or(0),
+        queue_priority: r.get("queue_priority").unwrap_or(0),
         attempt: r.get("attempt")?,
         rejection_count: r.get("rejection_count")?,
         failure_count: r.get("failure_count")?,
@@ -504,7 +534,7 @@ pub fn get_project(c: &Connection, id: &str) -> Option<Project> {
     c.query_row("SELECT * FROM projects WHERE id=?1", params![id], project_row).optional().ok().flatten()
 }
 pub fn list_projects(c: &Connection) -> Vec<Project> {
-    let mut st = c.prepare("SELECT * FROM projects ORDER BY created_at, id").unwrap();
+    let mut st = c.prepare("SELECT * FROM projects ORDER BY queue_priority DESC, created_at, id").unwrap();
     let v = st.query_map([], project_row).unwrap().filter_map(|x| x.ok()).collect();
     v
 }
@@ -555,7 +585,7 @@ pub fn latest_acceptance_evidence(c: &Connection, task_id: &str) -> Option<Value
     .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-pub fn list_tasks(c: &Connection, project_id: &str) -> Vec<Task> {    let mut st = c.prepare("SELECT * FROM tasks WHERE project_id=?1 ORDER BY created_at, id").unwrap();
+pub fn list_tasks(c: &Connection, project_id: &str) -> Vec<Task> {    let mut st = c.prepare("SELECT * FROM tasks WHERE project_id=?1 ORDER BY queue_priority DESC, created_at, id").unwrap();
     let v = st.query_map(params![project_id], task_row).unwrap().filter_map(|x| x.ok()).collect();
     v
 }
@@ -1748,6 +1778,60 @@ pub fn set_task_agent(c: &Connection, task_id: &str, role: &str, agent_id: Optio
         &format!("UPDATE tasks SET {col}=?2, agent_pinned=?3, version=version+1 WHERE id=?1"),
         params![task_id, agent_id, pinned as i64],
     );
+}
+
+pub struct UsageRecord<'a> {
+    pub project_id: &'a str,
+    pub task_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub phase: &'a str,
+    pub attempt: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub duration_ms: i64,
+    pub source: &'a str,
+}
+
+pub fn insert_usage(c: &Connection, r: &UsageRecord) {
+    let _ = c.execute(
+        "INSERT INTO usage (ts,project_id,task_id,agent_id,phase,attempt,input_tokens,output_tokens,cost_usd,duration_ms,source)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![now(), r.project_id, r.task_id, r.agent_id, r.phase, r.attempt,
+                r.input_tokens, r.output_tokens, r.cost_usd, r.duration_ms, r.source],
+    );
+}
+
+/// 用量明细（按时间正序；可按项目过滤）。本地单用户规模，聚合在 Rust 侧完成。
+pub fn list_usage(c: &Connection, project_id: Option<&str>) -> Vec<Value> {
+    let sql = match project_id {
+        Some(_) => "SELECT * FROM usage WHERE project_id=?1 ORDER BY id",
+        None => "SELECT * FROM usage ORDER BY id",
+    };
+    let mut st = match c.prepare(sql) {
+        Ok(st) => st,
+        Err(_) => return vec![],
+    };
+    let map = |r: &Row| -> rusqlite::Result<Value> {
+        Ok(serde_json::json!({
+            "id": r.get::<_, i64>("id")?,
+            "ts": r.get::<_, i64>("ts")?,
+            "project_id": r.get::<_, String>("project_id")?,
+            "task_id": r.get::<_, Option<String>>("task_id")?,
+            "agent_id": r.get::<_, Option<String>>("agent_id")?,
+            "phase": r.get::<_, String>("phase")?,
+            "attempt": r.get::<_, i64>("attempt")?,
+            "input_tokens": r.get::<_, i64>("input_tokens")?,
+            "output_tokens": r.get::<_, i64>("output_tokens")?,
+            "cost_usd": r.get::<_, f64>("cost_usd")?,
+            "duration_ms": r.get::<_, i64>("duration_ms")?,
+            "source": r.get::<_, String>("source")?,
+        }))
+    };
+    match project_id {
+        Some(p) => st.query_map(params![p], map).map(|rows| rows.filter_map(|x| x.ok()).collect()).unwrap_or_default(),
+        None => st.query_map([], map).map(|rows| rows.filter_map(|x| x.ok()).collect()).unwrap_or_default(),
+    }
 }
 
 /// M5：归档一次 agent 运行的完整输出（模型输出已由 DOMO 获得 → 自行存档）。

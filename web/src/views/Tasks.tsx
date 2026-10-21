@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDomo } from '../store';
 import type { Agent, ApplyResult, AuditEvent, InterveneResult, ReplanReportResult, Task, TaskDetail, TaskFormValue, TaskStatus } from '../types';
 import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
@@ -482,12 +482,18 @@ function TaskCard({
   const executor = agents.find(a => a.id === task.executor_agent_id);
   return (
     <button className={`task-card ${active ? 'active' : ''}`} onClick={onClick}>
-      <div className="task-card-title">{task.title}</div>
+      <div className="task-card-title">
+        {task.title}
+        {(task.queue_priority ?? 0) > 0 && <span className="task-priority">P{task.queue_priority}</span>}
+      </div>
       {['plan_drafting', 'plan_review', 'executing'].includes(task.status) && (
         <div className="task-running">
           <span className="spinner" />
           {task.status === 'executing' ? '执行中…' : task.status === 'plan_review' ? '计划审查中…' : '制定计划中…'}
         </div>
+      )}
+      {['planned', 'ready'].includes(task.status) && task.waiting_reason && (
+        <div className="task-waiting">⏳ {task.waiting_reason}</div>
       )}
       <div className="task-card-meta">
         <span className="muted">依赖 {task.depends_on?.length ?? 0}</span>
@@ -549,7 +555,7 @@ function TaskDetailDrawer({
   onClose: () => void;
   onEdit: () => void;
 }) {
-  const { tasksByProject, agents, logsByTask, sendGuidance, reviewTask, reportReplan, distillGuidance } = useDomo();
+  const { tasksByProject, agents, logsByTask, sendGuidance, reviewTask, reportReplan, distillGuidance, setTaskPriority } = useDomo();
   const siblings = tasksByProject[task.project_id] ?? [];
 
   const [guidance, setGuidance] = useState('');
@@ -560,6 +566,7 @@ function TaskDetailDrawer({
   const [replanDetail, setReplanDetail] = useState('');
   const [replanResult, setReplanResult] = useState<ReplanReportResult | null>(null);
   const [replanErr, setReplanErr] = useState('');
+  const [replayOpen, setReplayOpen] = useState(false);
 
   const logs = logsByTask[task.id] ?? task.logs;
   const executor = agents.find(a => a.id === task.executor_agent_id);
@@ -636,9 +643,12 @@ function TaskDetailDrawer({
               )}
             </div>
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="关闭">
-            ✕
-          </button>
+          <div className="btn-row">
+            <button className="btn btn-sm" onClick={() => setReplayOpen(true)} title="按事件时间线回放任务全过程">
+              ↺ 回放
+            </button>
+            <button className="icon-btn" onClick={onClose} aria-label="关闭">✕</button>
+          </div>
         </div>
 
         {localErr && <div className="form-error">{localErr}</div>}
@@ -659,6 +669,30 @@ function TaskDetailDrawer({
                 <span>⚠ 执行与验收同一实例（独立性有限）</span>
               </>
             )}
+            {task.waiting_reason && (
+              <>
+                <span className="muted">等待原因</span><span>{task.waiting_reason}</span>
+              </>
+            )}
+            <span className="muted">队列优先级</span>
+            <span>
+              {task.queue_priority ?? 0}
+              <button
+                className="btn btn-sm"
+                style={{ marginLeft: 8 }}
+                onClick={() => {
+                  const top = Math.max(0, ...siblings.map(t => t.queue_priority ?? 0)) + 1;
+                  void setTaskPriority(task.id, top);
+                }}
+              >
+                ↑ 置顶
+              </button>
+              {(task.queue_priority ?? 0) !== 0 && (
+                <button className="btn btn-sm" style={{ marginLeft: 6 }} onClick={() => void setTaskPriority(task.id, 0)}>
+                  默认
+                </button>
+              )}
+            </span>
             <span className="muted">创建时间</span><span>{fmtTime(task.created_at)}</span>
           </div>
         </section>
@@ -921,7 +955,78 @@ function TaskDetailDrawer({
           <span className="muted">仅未开始的任务可编辑</span>
         </div>
       </aside>
+      {replayOpen && <TaskReplayModal task={task} onClose={() => setReplayOpen(false)} />}
     </div>
+  );
+}
+
+/** P1 审计回放：按事件时间线逐步回放，展示事件负载与截至当时的日志。 */
+function TaskReplayModal({ task, onClose }: { task: TaskDetail; onClose: () => void }) {
+  const events = useMemo(() => [...(task.events ?? [])].sort((a, b) => a.id - b.id), [task.events]);
+  const logs = useMemo(() => [...(task.logs ?? [])].sort((a, b) => a.ts - b.ts), [task.logs]);
+  const [idx, setIdx] = useState(Math.max(0, events.length - 1));
+  const [playing, setPlaying] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!playing || events.length === 0) return;
+    timer.current = window.setInterval(() => {
+      setIdx(i => {
+        if (i >= events.length - 1) { setPlaying(false); return i; }
+        return i + 1;
+      });
+    }, 900);
+    return () => {
+      if (timer.current) window.clearInterval(timer.current);
+      timer.current = null;
+    };
+  }, [playing, events.length]);
+
+  const cur = events[idx];
+  const visibleLogs = cur ? logs.filter(l => l.ts <= cur.ts).slice(-120) : [];
+  return (
+    <Modal title={`任务回放 · ${task.title}`} onClose={onClose}>
+      <div className="stack">
+        <div className="toolbar">
+          <button className="btn" onClick={() => setPlaying(p => !p)} disabled={events.length === 0}>
+            {playing ? '⏸ 暂停' : '▶ 播放'}
+          </button>
+          <span className="muted">事件 {events.length === 0 ? 0 : idx + 1} / {events.length}</span>
+          <input type="range" min={0} max={Math.max(0, events.length - 1)} value={idx}
+            onChange={e => { setPlaying(false); setIdx(Number(e.target.value)); }} style={{ flex: 1 }} />
+          <button className="btn" onClick={() => setIdx(0)}>回到开始</button>
+        </div>
+        <div className="replay-grid">
+          <div className="replay-events">
+            {events.map((e, i) => (
+              <button key={e.id} className={`replay-event ${i === idx ? 'active' : ''}`}
+                onClick={() => { setPlaying(false); setIdx(i); }}>
+                <span className="mono muted">{fmtTime(e.ts)}</span><span>{e.type}</span>
+              </button>
+            ))}
+          </div>
+          <div className="stack" style={{ minWidth: 0 }}>
+            {cur ? (
+              <>
+                <div className="summary-card">
+                  <h4>{cur.type}</h4>
+                  <div className="muted">#{cur.id} · {fmtTime(cur.ts)} · task {cur.task_id ?? '—'}</div>
+                  <pre className="json-pre">{JSON.stringify(cur.payload, null, 2)}</pre>
+                </div>
+                <div className="summary-card">
+                  <h4>截至此刻的日志（{visibleLogs.length}）</h4>
+                  <div className="replay-logs">
+                    {visibleLogs.map((l, i) => (
+                      <div key={i}><span className="mono muted">{fmtTime(l.ts)}</span> {l.line}</div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : <Empty text="暂无事件。" />}
+          </div>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

@@ -12,6 +12,26 @@ impl AdapterCapabilities for MockAdapter {
     fn supports_observe(&self) -> bool { true }
 }
 
+/// mock 用量估算：本地演示/回归用，明确标记 source=mock_estimate。
+fn record_usage(state: &Arc<App>, task: &Task, agent: &Agent, phase: &str, out_chars: usize, duration_ms: i64) {
+    let input_chars = task.title.chars().count()
+        + task.description.chars().count()
+        + task.acceptance_criteria.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+    let c = state.db.lock().unwrap();
+    db::insert_usage(&c, &db::UsageRecord {
+        project_id: &task.project_id,
+        task_id: Some(&task.id),
+        agent_id: Some(&agent.id),
+        phase,
+        attempt: task.attempt,
+        input_tokens: (input_chars / 4).max(1) as i64,
+        output_tokens: (out_chars / 4).max(1) as i64,
+        cost_usd: 0.0,
+        duration_ms,
+        source: "mock_estimate",
+    });
+}
+
 fn duration_of(agent: &Agent) -> u64 {
     agent
         .config
@@ -81,6 +101,7 @@ pub async fn run_execution(
         let conn = state.db.lock().unwrap();
         events::log_line(&state, &conn, &task.id, &format!("mock execution succeeded for task '{}' ({}ms), artifact: {}", task.title, dur, artifact));
     }
+    record_usage(&state, &task, &agent, "execute", artifact.chars().count(), dur as i64);
     Ok(super::ExecOutcome { artifacts: vec![artifact], session_id: None })
 }
 
@@ -152,10 +173,12 @@ pub async fn run_task_plan(
     if task.description.contains("[fail_plan]") {
         return Err("[fail_plan] simulated plan drafting failure".into());
     }
-    Ok(format!(
+    let plan = format!(
         "## 任务计划（mock）\n\n1. 读取任务描述与验收标准\n2. 产出交付物（模拟）\n3. 自检并报告\n\n验收对齐：{}",
         task.acceptance_criteria.as_deref().unwrap_or("(未指定)")
-    ))
+    );
+    record_usage(&state, &task, &agent, "plan_task", plan.chars().count(), 200);
+    Ok(plan)
 }
 
 /// M4 计划阶段（mock）：审查计划；`[reject_plan]` 触发打回（可带轮次控制：
@@ -189,8 +212,10 @@ pub async fn run_plan_review(state: Arc<App>, task: Task, agent: Agent) -> Resul
     if task.description.contains("[reject_plan_always]")
         || (task.description.contains("[reject_plan]") && task.plan_rejection_count == 0)
     {
+        record_usage(&state, &task, &agent, "plan_review", 40, 50);
         return Err("[reject_plan] mock 计划审查打回：请补充验证方式与产物清单（模拟）".into());
     }
+    record_usage(&state, &task, &agent, "plan_review", 80, 50);
     Ok(())
 }
 
@@ -241,6 +266,7 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
         let conn = state.db.lock().unwrap();
         events::log_line(&state, &conn, &task.id, &format!("mock acceptance PASSED task '{}' (2s review)", task.title));
     }
+    record_usage(&state, &task, &agent, "accept", 120, 2000);
     Ok(())
 }
 

@@ -337,7 +337,7 @@ mod tests {
             acceptor_agent_id: None, acceptance_required: true, acceptance_criteria: None,
             execution_plan: None, plan_rejection_count: 0, scope_repos: vec![],
             agent_pinned: false, tried_agents: json!({}), status: "executing".into(),
-            version: 0, attempt: 1, rejection_count: 0, failure_count: 0,
+            version: 0, queue_priority: 0, attempt: 1, rejection_count: 0, failure_count: 0,
             artifacts: vec![], created_at: 0,
         };
         assert_eq!(classify(Some(&t), &json!({"reason": "x"})).0, "tactical");

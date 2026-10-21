@@ -3,10 +3,12 @@ import { AuditView } from './views/Audit';
 import { EngineeringView } from './views/Engineering';
 import { InboxView } from './views/Inbox';
 import { KnowledgeView } from './views/Knowledge';
+import { UsageView } from './views/Usage';
 import { OrgView } from './views/Org';
 import { ProjectsView } from './views/Projects';
 import { TaskFormModal as TasksFormModal, TasksView, type TaskFormState } from './views/Tasks';
 import { DomoProvider, useDomo, type ViewId } from './store';
+import { INBOX_TYPE_LABEL } from './ui';
 
 const VIEW_TITLES: Record<ViewId, string> = {
   engineering: '工程总览',
@@ -16,6 +18,7 @@ const VIEW_TITLES: Record<ViewId, string> = {
   inbox: '收件箱',
   audit: '审计日志',
   knowledge: '项目知识库',
+  usage: '成本与用量',
 };
 
 function Sidebar() {
@@ -32,6 +35,7 @@ function Sidebar() {
     { id: 'inbox', label: '收件箱', badge: openCount },
     { id: 'knowledge', label: '知识库' },
     { id: 'audit', label: '审计' },
+    { id: 'usage', label: '成本与用量' },
   ];
   return (
     <aside className="sidebar">
@@ -100,6 +104,84 @@ function ConnStatus() {
     <div className={`conn ${meta.cls}`}>
       <span className="dot" />
       {meta.text}
+    </div>
+  );
+}
+
+function NotificationCenter() {
+  const { inbox, events, projects, setView, focusInbox } = useDomo();
+  const KEY = 'domo_notice_seen_at';
+  const [seen, setSeen] = useState<number>(() => Number(localStorage.getItem(KEY) || 0));
+  const [open, setOpen] = useState(false);
+  const projectName = (id: string) => projects.find(p => p.id === id)?.name ?? '未知项目';
+  const notices = [
+    ...inbox.filter(i => i.status === 'open').map(i => ({
+      id: `inbox:${i.id}`,
+      ts: i.created_at,
+      kind: 'inbox' as const,
+      title: `待处理 · ${INBOX_TYPE_LABEL[i.type] ?? i.type}`,
+      detail: projectName(i.project_id),
+      inboxId: i.id,
+    })),
+    ...events
+      .filter(e => ['project.completed', 'escalation.raised', 'report.requested'].includes(e.type))
+      .slice(-20)
+      .map(e => ({
+        id: `event:${e.id}`,
+        ts: e.ts,
+        kind: 'event' as const,
+        title: e.type === 'project.completed' ? '项目完成'
+          : e.type === 'escalation.raised' ? '任务升级待裁决' : '报告生成',
+        detail: projectName(e.project_id),
+        inboxId: null as string | null,
+      })),
+  ].sort((a, b) => b.ts - a.ts).slice(0, 20);
+  const unread = notices.filter(n => n.ts > seen).length;
+
+  function markSeen() {
+    const now = Date.now();
+    setSeen(now);
+    localStorage.setItem(KEY, String(now));
+  }
+
+  return (
+    <div className="notice-wrap">
+      <button
+        className="notice-btn"
+        aria-label="通知中心"
+        onClick={() => { setOpen(o => !o); if (!open) markSeen(); }}
+      >
+        🔔
+        {unread > 0 && <span className="nav-badge">{unread}</span>}
+      </button>
+      {open && (
+        <div className="notice-pop">
+          <div className="notice-head">
+            <strong>通知</strong>
+            <button className="btn btn-sm" onClick={() => setOpen(false)}>关闭</button>
+          </div>
+          {notices.length === 0 ? (
+            <p className="muted">暂无通知。</p>
+          ) : notices.map(n => (
+            <button
+              key={n.id}
+              className={`notice-item ${n.ts > seen ? 'unread' : ''}`}
+              onClick={() => {
+                setOpen(false);
+                if (n.kind === 'inbox') {
+                  if (n.inboxId) focusInbox(n.inboxId);
+                  setView('inbox');
+                } else {
+                  setView('projects');
+                }
+              }}
+            >
+              <div>{n.title}</div>
+              <div className="muted">{n.detail}</div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -178,6 +260,7 @@ function Shell() {
         <header className="topbar">
           <Breadcrumbs />
           <span className="topbar-view">{VIEW_TITLES[view]}</span>
+          <NotificationCenter />
         </header>
         <div className="content">
           <ViewErrorBoundary>
@@ -188,6 +271,7 @@ function Shell() {
             {view === 'inbox' && <InboxView />}
             {view === 'knowledge' && <KnowledgeView />}
             {view === 'audit' && <AuditView />}
+            {view === 'usage' && <UsageView />}
           </ViewErrorBoundary>
         </div>
       </main>

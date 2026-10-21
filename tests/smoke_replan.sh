@@ -76,6 +76,20 @@ s, gate = req("POST", f"/projects/{pid}/tasks", {
 gate = wait(lambda: (task_by_title(pid, "GATE") or {}).get("status") == "escalated" and task_by_title(pid, "GATE"), 30)
 check("gate task escalated (non-terminal, no worker)", gate is not None, task_by_title(pid, "GATE"))
 
+# 「为什么还没开始」+ 队列人工调序
+s, blocked = req("POST", f"/projects/{pid}/tasks", {
+    "title": "等待依赖任务", "description": "blocked", "depends_on": [gate["id"]],
+    "executor_agent_id": ex["id"], "acceptor_agent_id": acc["id"],
+})
+bid = (blocked or {}).get("id", "")
+time.sleep(0.5)
+bt = next((t for t in tasks(pid) if t.get("id") == bid), None)
+check("planned task explains why not started", bool((bt or {}).get("waiting_reason")) and "等待依赖" in (bt.get("waiting_reason") or ""), bt)
+s, pr = req("PATCH", f"/tasks/{bid}", {"queue_priority": 7})
+check("task queue priority set", s == 200 and (pr or {}).get("queue_priority") == 7, (s, pr))
+first = tasks(pid)[0] if tasks(pid) else {}
+check("task list honors queue priority", first.get("id") == bid, first.get("title"))
+
 # ---- 批准路径 ----
 s, rep = req("POST", f"/tasks/{gate['id']}/replan", {
     "reason": "拆分遗漏了准备步骤", "reported_by": "executor",
