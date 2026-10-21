@@ -20,16 +20,11 @@ export type TaskStatus =
   | 'done'
   | 'cancelled';
 
-export type Role = 'planner' | 'executor' | 'acceptor' | 'decision_maker';
+export type Role = 'planner' | 'executor' | 'acceptor';
 
 export type Adapter = 'mock' | 'opencode';
 
-export type InboxType =
-  | 'escalation'
-  | 'replan'
-  | 'negotiation_failed'
-  | 'decision_maker_down'
-  | 'milestone_gate';
+export type InboxType = 'escalation' | 'replan' | 'milestone_gate';
 
 export type MilestoneStatus = 'pending' | 'awaiting_confirm' | 'passed' | 'failed';
 
@@ -113,8 +108,6 @@ export interface Task {
   acceptance_criteria: string | null;
   /** 机械检查项（详情接口返回；列表可能缺省） */
   acceptance_checks?: AcceptanceCheck[];
-  negotiation_status?: string;
-  negotiation_round?: number;
   /** M4 任务计划（执行者产出，验收者审查） */
   execution_plan?: string | null;
   /** M4 计划审查打回轮数 */
@@ -222,34 +215,6 @@ export interface InboxAgentBrief {
   duration_ms?: number | null;
 }
 
-/** 单条协商轮次记录（executor 提案 / acceptor 审核） */
-export interface NegotiationRound {
-  round: number;
-  role: 'executor' | 'acceptor';
-  /** executor 轮：提案内容 */
-  proposal?: string;
-  /** acceptor 轮：是否同意 */
-  agree?: boolean;
-  /** acceptor 轮：意见 / 拒绝理由 */
-  comment?: string;
-  /** acceptor 轮：若同意可直接给出最终标准 */
-  criteria?: string | null;
-  /** 本轮携带的上轮 acceptor 意见 */
-  carried_feedback?: string | null;
-  agent_id?: string;
-  /** 事件时间戳（由后端从事件流补充） */
-  ts?: number;
-}
-
-/** 任务详情页附带的协商全貌（后端从事件流重建，跨重启不丢） */
-export interface Negotiation {
-  status: string;
-  round: number;
-  max_rounds: number;
-  acceptance_criteria: string | null;
-  rounds: NegotiationRound[];
-}
-
 export type AcceptanceCheck =
   | { type: 'file_exists'; path: string }
   | { type: 'file_not_exists'; path: string }
@@ -283,7 +248,6 @@ export interface TaskDetail extends Task {
     text: string;
     raw_len: number;
   }[];
-  negotiation?: Negotiation;
 }
 
 export type ReportStatus = 'pending' | 'generating' | 'ready' | 'failed';
@@ -313,9 +277,9 @@ export interface Report {
   generated_at?: number | null;
 }
 
-/** 重规划上报结果：decision 为后端登记（或命中的未决）决策请求 */
+/** 重规划上报结果：后端写入人工收件箱（或命中未决请求） */
 export interface ReplanReportResult {
-  decision: { id: string; kind: string; status: string; scope: string };
+  inbox: InboxItem;
   reasons: string[];
   scope: 'tactical' | 'strategic';
   deduplicated?: boolean;

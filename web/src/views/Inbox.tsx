@@ -3,24 +3,18 @@ import { useDomo } from '../store';
 import type { ApplyResult, InboxAgentBrief, InboxContext, InboxItem, ReplanChange, Task } from '../types';
 import {
   Badge, Empty, fmtTime, INBOX_TYPE_LABEL, RESOLUTION_LABEL, shortId, ROLE_LABEL, Pager,
-  DECISION_KIND_LABEL, DECISION_SCOPE_LABEL, MILESTONE_STATUS_LABEL, StatusBadge,
+  MILESTONE_STATUS_LABEL, StatusBadge,
 } from '../ui';
 
 const TERMINAL_STATUS = ['done', 'cancelled'];
 
 function resolutionLabel(resolution: InboxItem['resolution']): string {
-  // 后端 resolution 是 JSON 对象 {resolution, note?, agent_id?, decision?}
+  // 后端 resolution 是 JSON 对象 {resolution, note?, agent_id?}
   const raw = typeof resolution === 'object' && resolution !== null
     ? (resolution as Record<string, unknown>).resolution
     : resolution;
   let label = RESOLUTION_LABEL[typeof raw === 'string' ? raw : ''];
-  // 决策类条目：补充 approve/deny/retry/auto_closed 的裁决结果
-  if (typeof raw === 'string' && ['approve', 'deny', 'retry'].includes(raw)) {
-    label = RESOLUTION_LABEL[raw];
-  }
   if (typeof resolution === 'object' && resolution !== null) {
-    const dec = (resolution as Record<string, unknown>).decision;
-    if (dec === 'auto_closed') label = '已随裁定自动关闭';
     // 更换动作附带的 agent 摘要
     if (typeof raw === 'string' && (raw === 'reassign' || raw === 'reassign_acceptor')) {
       const ag = (resolution as Record<string, unknown>).agent_id;
@@ -52,7 +46,7 @@ export function InboxView() {
   return (
     <div className="stack">
       {open.length === 0 ? (
-        <Empty text="决策收件箱是空的，当前没有待人事项。" />
+        <Empty text="收件箱是空的，当前没有待人事项。" />
       ) : (
         open.map(item => (
           <InboxRow
@@ -132,8 +126,7 @@ function ContextPanel({ ctx }: { ctx: InboxContext }) {
 
 /** 收件箱行分派：里程碑 gate 有专属的「通过 / 退回」裁决；
  *  退回后重开的里程碑窗口（replan + payload.kind="milestone_window"）走窗口重规划；
- *  决策类条目（带 payload.decision_id）走「批准 / 否决 / 重试」；
- *  其余 replan 走普通重规划提示，升级类条目走升级裁决。 */
+ *  重规划请求走「批准 / 否决」；其余 replan 走普通重规划提示，升级类条目走升级裁决。 */
 function InboxRow({
   item,
   projectName,
@@ -151,8 +144,8 @@ function InboxRow({
   if (item.type === 'replan' && payload.kind === 'milestone_window') {
     return <WindowRow item={item} projectName={projectName} focused={focused} />;
   }
-  if (typeof payload.decision_id === 'string') {
-    return <DecisionRow item={item} projectName={projectName} focused={focused} />;
+  if (item.type === 'replan' && payload.kind === 'replan_report') {
+    return <ReplanReportRow item={item} projectName={projectName} focused={focused} />;
   }
   // 普通重规划提示（无决策请求，如放弃任务后提示下游需重规划）：确认知悉即可关闭
   if (item.type === 'replan') {
@@ -229,9 +222,8 @@ function PlainReplanRow({
   );
 }
 
-/** 决策收件箱条目（战略升级 / 决策者故障降级）：人工 approve/deny 直接裁定，
- *  retry 则把故障/降级的决策放回待裁定队列（恢复决策者实例后）。 */
-function DecisionRow({
+/** 重规划请求：人批准后由规划者产出调整并落地；否决则维持原规划。 */
+function ReplanReportRow({
   item,
   projectName,
   focused,
@@ -242,116 +234,67 @@ function DecisionRow({
 }) {
   const { resolveInboxItem, selectProject, openTask, setView } = useDomo();
   const payload = (item.payload ?? {}) as Record<string, unknown>;
-  const kind = typeof payload.kind === 'string' ? payload.kind : '';
-  const scope = typeof payload.scope === 'string' ? payload.scope : '';
   const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
+  const title = typeof payload.task_title === 'string' ? payload.task_title : '';
   const detail = typeof payload.detail === 'string' ? payload.detail : '';
-  const reasons = Array.isArray(payload.reasons)
-    ? (payload.reasons as unknown[]).filter((r): r is string => typeof r === 'string')
-    : [];
-  const request = payload.request;
-
-  const [resolution, setResolution] = useState<'approve' | 'deny' | 'retry'>('approve');
+  const reason = typeof payload.reason === 'string' ? payload.reason : '';
+  const scope = typeof payload.scope === 'string' ? payload.scope : '';
+  const changes = Array.isArray(payload.proposed_changes) ? payload.proposed_changes : [];
+  const planning = typeof payload.planning === 'string' ? payload.planning : '';
+  const [resolution, setResolution] = useState<'approve' | 'deny'>('approve');
   const [note, setNote] = useState('');
-  const [criteria, setCriteria] = useState('');
   const [busy, setBusy] = useState(false);
-
-  // 协商失败裁决：批准时可附上建议的验收标准
-  const needsCriteria = kind === 'negotiation_failed';
 
   async function submit() {
     setBusy(true);
-    const ok = await resolveInboxItem(
-      item.id,
-      resolution,
-      note.trim(),
-      undefined,
-      needsCriteria && criteria.trim() ? criteria.trim() : undefined,
-    );
+    const ok = await resolveInboxItem(item.id, resolution, note.trim());
     setBusy(false);
-    if (ok) {
-      setNote('');
-      setCriteria('');
-    }
-  }
-
-  function jumpToTask() {
-    if (!taskId) return;
-    selectProject(item.project_id);
-    void openTask(taskId);
-    setView('tasks');
+    if (ok) setNote('');
   }
 
   return (
     <div id={`inbox-${item.id}`} className={`panel inbox-item${focused ? ' inbox-focus' : ''}`}>
       <div className="inbox-head">
-        <Badge tone="purple">{INBOX_TYPE_LABEL[item.type] ?? item.type}</Badge>
-        {kind && <Badge tone="blue">{DECISION_KIND_LABEL[kind] ?? kind}</Badge>}
-        {scope && (
-          <Badge tone={scope === 'strategic' ? 'amber' : 'gray'}>
-            {DECISION_SCOPE_LABEL[scope] ?? scope}
-          </Badge>
-        )}
+        <Badge tone="purple">{INBOX_TYPE_LABEL.replan}</Badge>
+        <Badge tone="amber">{planning === 'applied' ? '已落地' : planning === 'pending' ? '规划中' : '待裁决'}</Badge>
         <span>{projectName}</span>
         <span className="muted">{fmtTime(item.created_at)}</span>
         <span className="spacer" />
-        <Badge tone="amber">待裁决</Badge>
+        {scope === 'strategic' && <Badge tone="amber">触及里程碑/项目目标</Badge>}
       </div>
-
       <div className="stack" style={{ borderLeft: '3px solid var(--line, #ccc)', paddingLeft: 10 }}>
-        <div>
-          <strong>决策请求：</strong>
-          {kind ? DECISION_KIND_LABEL[kind] ?? kind : '—'}
-          <span className="mono muted"> #{shortId(payload.decision_id as string | undefined)}</span>
-        </div>
-        {taskId && (
-          <div className="muted">
-            关联任务 <span className="mono">#{shortId(taskId)}</span>
-          </div>
-        )}
-        {reasons.length > 0 && <div className="muted">触发原因：{reasons.join('、')}</div>}
+        <div><strong>上报：</strong>{reason || '规划需要调整'}</div>
+        {title && <div className="muted">关联任务：{title} <span className="mono">#{shortId(taskId)}</span></div>}
         {detail && <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>💡 {detail}</p>}
-        {request != null && (
+        {changes.length > 0 && (
           <details className="json">
-            <summary>request</summary>
-            <pre>{JSON.stringify(request, null, 2)}</pre>
+            <summary>上报者建议的调整（{changes.length} 项）</summary>
+            <pre>{JSON.stringify(changes, null, 2)}</pre>
           </details>
         )}
         <p className="muted" style={{ margin: 0 }}>
-          批准 = 按该请求裁定通过（重规划随后进入规划落地）；否决 = 关闭请求；重试 = 恢复决策者后重新自动裁决。
+          批准后由规划者复核并落地（新增任务带验收、成环依赖跳过）；否决则维持原规划。
         </p>
       </div>
-
       {taskId && (
         <div className="row-end">
-          <button className="btn" onClick={jumpToTask}>
-            查看任务详情 / 日志 →
+          <button className="btn" onClick={() => { selectProject(item.project_id); void openTask(taskId); setView('tasks'); }}>
+            查看任务详情 →
           </button>
         </div>
       )}
-
-      <div className="resolve-row">
-        <select
-          value={resolution}
-          onChange={e => setResolution(e.target.value as 'approve' | 'deny' | 'retry')}
-          className="select"
-        >
-          <option value="approve">{RESOLUTION_LABEL.approve}</option>
-          <option value="deny">{RESOLUTION_LABEL.deny}</option>
-          <option value="retry">{RESOLUTION_LABEL.retry}</option>
-        </select>
-        {needsCriteria && resolution === 'approve' && (
-          <input
-            value={criteria}
-            onChange={e => setCriteria(e.target.value)}
-            placeholder="建议验收标准（可选）"
-          />
-        )}
-        <input value={note} onChange={e => setNote(e.target.value)} placeholder="裁决备注（可选）" />
-        <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? '处理中…' : '处理'}
-        </button>
-      </div>
+      {(!planning || planning === 'rejected') && (
+        <div className="resolve-row">
+          <select value={resolution} onChange={e => setResolution(e.target.value as 'approve' | 'deny')} className="select">
+            <option value="approve">{RESOLUTION_LABEL.approve}</option>
+            <option value="deny">{RESOLUTION_LABEL.deny}</option>
+          </select>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="裁决备注（可选）" />
+          <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+            {busy ? '处理中…' : '处理'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -822,8 +765,6 @@ function EscalationRow({
   const candidates = wantRole === 'executor'
     ? agents.filter(a => a.roles.includes('executor'))
     : agents.filter(a => a.roles.includes('acceptor'));
-  // 允许执行与验收同一实例（设计如此），仅排除决策者下场
-  const dmIds = agents.filter(a => a.roles.includes('decision_maker')).map(a => a.id);
   // 切换裁决动作时，预选当前任务对应的 agent（方便只改最小项）
   function pickDefaultAgent(res: string) {
     const role = actions.find(a => a.id === res)?.needs_agent;
@@ -870,7 +811,7 @@ function EscalationRow({
         {wantRole && (
           <select value={agentId} onChange={e => setAgentId(e.target.value)} className="select">
             <option value="">选择{wantRole === 'executor' ? '执行者' : '验收者'}…</option>
-            {candidates.filter(a => !dmIds.includes(a.id)).map(a => (
+            {candidates.map(a => (
               <option key={a.id} value={a.id}>
                 {a.name}（{a.roles.map(r => ROLE_LABEL[r] ?? r).join('/')} · {a.status === 'busy' ? '忙碌' : '空闲'}
                 {a.adapter === 'opencode' && a.config?.model ? ` · ${a.config.model}` : ''})

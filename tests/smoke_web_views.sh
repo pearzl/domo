@@ -306,7 +306,7 @@ idle_a, idle_b = wait_until(lambda: (agent_by(A_id) or {}).get("status") == "idl
 check("执行者 A 释放：0/3（0%）· idle", idle_a is not None and load(agent_by(A_id))["occupied"] == 0)
 check("执行者 B 释放：0/2（0%）· idle", idle_b is not None and load(agent_by(B_id))["occupied"] == 0)
 role_counts = {r: sum(1 for a in agents() if r in (a.get("roles") or []))
-               for r in ("planner", "executor", "acceptor", "decision_maker")}
+               for r in ("planner", "executor", "acceptor")}
 check("角色分布口径（executor 2 / acceptor 1）",
       role_counts["executor"] == 2 and role_counts["acceptor"] == 1, role_counts)
 

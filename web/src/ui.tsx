@@ -14,9 +14,9 @@ export const PROJECT_STATUS_LABEL: Record<string, { label: string; tone: string 
 
 /** 项目状态悬停说明 */
 export const PROJECT_STATUS_DESC: Record<string, string> = {
-  initializing: '规划/验收标准协商阶段：规划者可生成与调整任务，协商一致后自动进入运行',
-  pending_confirm: '规划已生成，等待你确认后开始协商/执行',
-  running: '调度器自动派发：协商 → 执行 → 验收',
+  initializing: '规划阶段：规划者可生成与调整任务，确认后进入运行',
+  pending_confirm: '规划已生成，等待你确认后开始执行',
+  running: '调度器自动派发：计划 → 执行 → 验收',
   pausing: '暂停请求已受理，在途会话跑完当前尝试后自动转为已暂停（不派发新工作）',
   paused: '全部会话已停止；可恢复继续，人工裁决不受暂停限制',
   completed: '全部任务达到终态，已产出项目总结报告',
@@ -46,8 +46,8 @@ export const TASK_STATUS_DESC: Record<string, string> = {
   executing: '执行者 agent 正在处理本任务（会话进行中）',
   recovering: '上一轮会话被中断（如服务重启），等待三档恢复续跑；agent 忙时在此排队',
   awaiting_acceptance: '执行已完成，等待验收者（或人工）审核产出',
-  escalated: '验收多次退回，已升级到决策收件箱等待人裁决',
-  suspended: '多次执行失败已挂起；到决策收件箱处理后可恢复重派',
+  escalated: '验收多次退回，已升级到收件箱等待人裁决',
+  suspended: '多次执行失败已挂起；到收件箱处理后可恢复重派',
   done: '执行与验收均通过，任务完成',
   cancelled: '已取消（人工放弃或随项目归档），不可再操作',
 };
@@ -56,14 +56,11 @@ export const ROLE_LABEL: Record<string, string> = {
   planner: '规划者',
   executor: '执行者',
   acceptor: '验收者',
-  decision_maker: '决策者',
 };
 
 export const INBOX_TYPE_LABEL: Record<string, string> = {
   escalation: '执行升级',
   replan: '重规划',
-  negotiation_failed: '协商失败',
-  decision_maker_down: '决策者离线',
   milestone_gate: '里程碑确认',
 };
 
@@ -84,24 +81,10 @@ export const RESOLUTION_LABEL: Record<string, string> = {
   passed: '里程碑通过',
   reject: '退回',
   failed: '里程碑退回',
-  approve: '批准（自动裁决通过）',
+  approve: '批准',
   deny: '否决',
-  retry: '恢复决策者后重试自动裁决',
   applied: '窗口方案已应用',
   close: '已确认处理',
-};
-
-/** 决策收件箱条目的决策类型标签（payload.decision_id 存在时使用） */
-export const DECISION_KIND_LABEL: Record<string, string> = {
-  exemption: '验收豁免申请',
-  negotiation_failed: '验收标准协商失败裁决',
-  change_review: '任务变更复核',
-  replan: '执行中重规划（常规纠偏）',
-};
-
-export const DECISION_SCOPE_LABEL: Record<string, string> = {
-  tactical: '战术事项（决策者可自决）',
-  strategic: '战略事项（触及里程碑/项目目标，须人工）',
 };
 
 export function fmtTime(ts: number | undefined | null): string {

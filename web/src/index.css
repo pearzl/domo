@@ -1316,22 +1316,6 @@ textarea {
   text-overflow: ellipsis;
 }
 
-/* 协商中徽标（任务卡） */
-.nego-badge {
-  display: inline-block;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--purple, #a37ff0) 18%, transparent);
-  color: var(--purple, #a37ff0);
-  border: 1px solid color-mix(in srgb, var(--purple, #a37ff0) 45%, transparent);
-}
-.nego-badge.nego-failed {
-  background: color-mix(in srgb, var(--danger, #e5534b) 15%, transparent);
-  color: var(--danger, #e5534b);
-  border-color: color-mix(in srgb, var(--danger, #e5534b) 45%, transparent);
-}
-
 /* 全局任务跳转链接 */
 .task-link {
   background: none;

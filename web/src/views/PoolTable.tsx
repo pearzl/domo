@@ -3,7 +3,7 @@ import { api } from '../api';
 import type { PoolView } from '../types';
 import { ROLE_LABEL } from '../ui';
 
-const ROLES = ['executor', 'acceptor', 'planner', 'decision_maker'] as const;
+const ROLES = ['executor', 'acceptor', 'planner'] as const;
 
 /**
  * M4.5 项目 agent 池表格：

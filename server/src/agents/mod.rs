@@ -13,18 +13,6 @@
 pub mod mock;
 pub mod opencode;
 
-/// M3 协商：acceptor 对 executor 提出的验收标准的审核结论。
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // M4 协商退场
-pub struct Review {
-    /// 是否同意该标准（一致）
-    pub agree: bool,
-    /// 审核意见（不同意时为反对理由，同意时可为空）
-    pub comment: String,
-    /// 同意时可给出最终采用的标准（缺省则采用 executor 的提案）
-    pub criteria: Option<String>,
-}
-
 /// 一次执行派发的结果（适配器统一返回）。
 #[derive(Debug, Clone, Default)]
 pub struct ExecOutcome {

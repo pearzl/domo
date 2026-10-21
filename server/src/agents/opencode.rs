@@ -32,7 +32,6 @@ impl AdapterCapabilities for OpenCodeAdapter {
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_600_000;
 pub const PLAN_TIMEOUT_MS: u64 = 3_600_000;
-pub const DECIDE_TIMEOUT_MS: u64 = 600_000;
 
 /// Every infrastructure failure of an acceptor run (spawn error, rate limit,
 /// timeout, auth error...) is wrapped with this prefix so the scheduler can
@@ -102,23 +101,9 @@ pub fn plan_session(project_id: &str) -> String {
     format!("planner-{project_id}")
 }
 
-/// Decision session id, one per decision request.
-pub fn decide_session(decision_id: &str) -> String {
-    format!("decide-{decision_id}")
-}
-
 /// M3 报告会话 id，每项目固定复用（报告可重试，保留上下文）。
 pub fn report_session(project_id: &str) -> String {
     format!("report-{project_id}")
-}
-
-/// M3 协商会话 id（每任务固定复用，跨轮次保留上下文）：executor 提案 / acceptor 审核。
-pub fn negotiate_exec_session(task_id: &str) -> String {
-    format!("{task_id}_negotiate_exec")
-}
-
-pub fn negotiate_acc_session(task_id: &str) -> String {
-    format!("{task_id}_negotiate_acc")
 }
 
 // ---------- prompts ----------
@@ -209,9 +194,9 @@ pub fn exec_prompt(project: Option<&Project>, task: &Task, guidance: Option<&str
     s
 }
 
-/// M4：告知 agent 可用 REPLAN 块提出规划修改（由决策者裁决）。
+/// M4：告知 agent 可用 REPLAN 块提出规划修改（提交人工收件箱）。
 fn replan_hint() -> &'static str {
-    "\n如果你在执行中发现现有规划需要调整（新增/合并/删除/修改任务或依赖），\n     请在回复末尾**单独一行**输出：REPLAN: {\"reason\":\"简短理由\",\"changes\":[{\"op\":\"add\",\"task\":{...}}|{\"op\":\"update\",\"task_id\":\"...\",\"fields\":{...}}|{\"op\":\"cancel\",\"task_id\":\"...\"}]}\n     该建议将提交决策者裁决（批准后应用）；确无必要请不要输出。\n"
+    "\n如果你在执行中发现现有规划需要调整（新增/合并/删除/修改任务或依赖），\n     请在回复末尾**单独一行**输出：REPLAN: {\"reason\":\"简短理由\",\"changes\":[{\"op\":\"add\",\"task\":{...}}|{\"op\":\"update\",\"task_id\":\"...\",\"fields\":{...}}|{\"op\":\"cancel\",\"task_id\":\"...\"}]}\n     该建议将提交人工收件箱，由人批准或否决；确无必要请不要输出。\n"
 }
 
 /// M4 三档恢复·第二档：原执行提示词 + 结构化交接书（目标/已完成/剩余/约束/产物路径）。
@@ -247,77 +232,6 @@ pub fn accept_prompt(project: &Project, task: &Task, log_tail: &str, knowledge: 
     s.push_str("输出要求：你的回复中必须包含明确的验收结论行：`VERDICT: pass` 或 `VERDICT: reject`（大小写不限）。");
     s.push_str("若结论为 reject，请在结论行的下一行写明拒收理由。\n");
     s.push_str(replan_hint());
-    s
-}
-
-// ---------- M3 验收标准协商（executor ↔ acceptor 多轮）----------
-
-/// executor 提案提示词：携带任务上下文 + 历史轮次与上轮 acceptor 意见，输出可检验标准。
-pub fn negotiate_propose_prompt(
-    project: Option<&Project>,
-    task: &Task,
-    round: i64,
-    feedback: Option<&str>,
-    history: &[Value],
-    knowledge: Option<&str>,
-) -> String {
-    let mut s = String::new();
-    push_knowledge_section(&mut s, knowledge);
-    s.push_str("你是项目的执行者 agent（executor）。项目处于规划阶段，你需要与验收者（acceptor）就【验收标准】进行协商，直到双方一致。\n");
-    s.push_str("验收标准必须具体、可检验（可对照产物/文件/行为判定通过或退回）。\n\n");
-    if let Some(p) = project {
-        s.push_str(&format!("项目名称：{}\n项目简介：{}\n\n", p.name, p.brief));
-    }
-    s.push_str(&format!("任务标题：{}\n任务描述：\n{}\n\n", task.title, task.description));
-    if !history.is_empty() {
-        s.push_str("历史协商轮次（较早在上）：\n");
-        for h in history {
-            let r = h["round"].as_i64().unwrap_or(0);
-            match h["role"].as_str() {
-                Some("executor") => s.push_str(&format!(
-                    "- 第 {r} 轮 executor 提案：{}\n",
-                    h["proposal"].as_str().unwrap_or("")
-                )),
-                Some("acceptor") => {
-                    let agree = h["agree"].as_bool().unwrap_or(false);
-                    s.push_str(&format!(
-                        "- 第 {r} 轮 acceptor 结论：{}｜意见：{}\n",
-                        if agree { "同意" } else { "反对" },
-                        h["comment"].as_str().unwrap_or("")
-                    ));
-                }
-                _ => {}
-            }
-        }
-        s.push('\n');
-    }
-    if let Some(f) = feedback.filter(|f| !f.trim().is_empty()) {
-        s.push_str(&format!("验收者上一轮的意见（本轮必须据此修订）：{f}\n\n"));
-    }
-    s.push_str(&format!("这是第 {round} 轮提案。\n"));
-    s.push_str("输出要求：只输出【修订后的验收标准】本身（若干条可检验条目，可用换行或分号分隔），不要输出 JSON、不要输出解释或寒暄。\n");
-    s
-}
-
-/// acceptor 审核提示词：判定该轮提案是否可接受；同意可给出最终标准。
-pub fn negotiate_review_prompt(
-    project: Option<&Project>,
-    task: &Task,
-    round: i64,
-    proposal: &str,
-    knowledge: Option<&str>,
-) -> String {
-    let mut s = String::new();
-    push_knowledge_section(&mut s, knowledge);
-    s.push_str("你是项目的验收者 agent（acceptor）。执行者已就【验收标准】给出提案，请你审核其是否具体、可检验、能覆盖任务目标。\n\n");
-    if let Some(p) = project {
-        s.push_str(&format!("项目名称：{}\n项目简介：{}\n\n", p.name, p.brief));
-    }
-    s.push_str(&format!("任务标题：{}\n任务描述：\n{}\n\n", task.title, task.description));
-    s.push_str(&format!("第 {round} 轮验收标准提案：\n{proposal}\n\n"));
-    s.push_str("输出要求（务必严格遵守）：只输出一个 JSON 对象，首字符 '{'，末字符 '}'，不要输出 Markdown、代码围栏或任何解释。\n");
-    s.push_str("格式：{\"agree\":true|false,\"comment\":\"简短意见（不同意时给出需要补充/修订的点）\",\"criteria\":\"同意时可选：最终采用的验收标准\"}\n");
-    s.push_str("判断标准：标准是否可检验、是否覆盖任务目标、是否存在歧义或不可验证项。\n");
     s
 }
 
@@ -455,45 +369,6 @@ pub async fn report_narrative(
         return Err(format!("报告生成失败（planner '{}' 输出为空）", agent.name));
     }
     Ok(text)
-}
-
-pub fn decide_prompt(
-    project: Option<&Project>,
-    task: Option<&Task>,
-    decision: &crate::models::Decision,
-) -> String {
-    let mut s = String::new();
-    s.push_str("你是项目的决策者 agent（decision_maker）。请根据决策请求作出客观裁定，不要随意升级到人。\n\n");
-    if let Some(p) = project {
-        s.push_str(&format!("项目名称：{}\n\n", p.name));
-    }
-    if let Some(t) = task {
-        s.push_str(&format!(
-            "关联任务：标题={} 状态={} 尝试={} 退回={} 失败={}\n描述：{}\n验收标准：{}\n\n",
-            t.title,
-            t.status,
-            t.attempt,
-            t.rejection_count,
-            t.failure_count,
-            t.description,
-            t.acceptance_criteria.as_deref().unwrap_or("(未指定)")
-        ));
-    }
-    s.push_str(&format!("决策类型：{}（scope={}）\n", decision.kind, decision.scope));
-    s.push_str(&format!("决策请求：{}\n\n", serde_json::to_string_pretty(&decision.request).unwrap_or_default()));
-    s.push_str("权限分层（必须遵守）：\n");
-    s.push_str("- 战术事项由你自决并留痕：豁免（免验收）裁定、验收标准协商失败裁决、不触及已确认里程碑/项目目标的任务级变更。\n");
-    s.push_str("- 战略事项一律转人工（系统已直接把它们放进决策收件箱，不会派给你）：触及已确认里程碑/项目目标的变更、新增角色或启用新 agent、卡死升级（执行失败 ≥3 次 / 验收退回 ≥2 轮）。\n");
-    s.push_str("- 若请求实际触及上述战略事项，不要自批：给 approve=false，并在 rationale 里写明「应转人工」及原因。\n");
-    s.push_str("输出要求：\n");
-    s.push_str("- 只输出一个 JSON 对象，首字符 '{'，末字符 '}'。\n");
-    s.push_str("- 格式：{\"approve\":true|false,\"rationale\":\"简短理由\",\"criteria\":\"可选：协商失败时可给出建议的验收标准\"}\n");
-    s.push_str("- 建议按最小改动原则裁定；不触及里程碑/项目目标/新增 agent 的任务级变更优先 approve。\n");
-    if decision.kind == "replan" {
-        s.push_str("- 这是执行中上报的「规划问题」重规划请求：仅当问题确实成立、且调整不改变项目目标时才 approve；\n");
-        s.push_str("  批准后系统会复用规划会话重新产出任务调整（新增任务默认带验收、插入 DAG 前做环校验）。\n");
-    }
-    s
 }
 
 // ---------- workspace resolution ----------
@@ -1093,85 +968,6 @@ async fn stream_stderr(
     }
 }
 
-pub async fn run_adjudication(
-    state: Arc<App>,
-    task: Option<Task>,
-    decision: crate::models::Decision,
-    agent: Agent,
-) -> Result<crate::decision::Ruling, String> {
-    {
-        let c = state.db.lock().unwrap();
-        let log_tid = decision.task_id.as_deref().unwrap_or("-");
-        events::log_line(
-            &state,
-            &c,
-            log_tid,
-            &format!(
-                "opencode 决策者 '{}' 开始裁定决策请求 {}（kind={}，session {}）",
-                agent.name,
-                decision.id,
-                decision.kind,
-                decide_session(&decision.id)
-            ),
-        );
-    }
-    let cwd = match task {
-        Some(ref t) => task_cwd(&state, t).ok(),
-        None => None,
-    };
-    let project = {
-        let c = state.db.lock().unwrap();
-        db::get_project(&c, &decision.project_id)
-    };
-    let prompt = decide_prompt(project.as_ref(), task.as_ref(), &decision);
-    let session = decide_session(&decision.id);
-    let log_tid = decision.task_id.as_deref();
-    let out = run_cli(
-        &state,
-        log_tid,
-        cwd.as_deref(),
-        &session,
-        model_of(&agent).as_deref(),
-        DECIDE_TIMEOUT_MS,
-        &prompt,
-    )
-    .await?;
-    let v = crate::api::extract_json_value(&out.text)
-        .ok_or_else(|| "决策者输出中没有可解析的 JSON 对象".to_string())?;
-    let approve = v["approve"].as_bool().unwrap_or(false);
-    let rationale = v["rationale"].as_str().unwrap_or("").trim().to_string();
-    if rationale.is_empty() {
-        return Err("决策者未提供 rationale".into());
-    }
-    let criteria = v["criteria"].as_str().filter(|s| !s.is_empty()).map(String::from);
-    // M4 合并冲突裁定：可选机械动作（rebase | rework | manual）
-    let parsed_action = v["effect"]["action"]
-        .as_str()
-        .or_else(|| v["action"].as_str())
-        .filter(|a| matches!(*a, "rebase" | "rework" | "manual"))
-        .map(String::from);
-    {
-        let c = state.db.lock().unwrap();
-        let log_tid = decision.task_id.as_deref().unwrap_or("-");
-        events::log_line(
-            &state,
-            &c,
-            log_tid,
-            &format!("决策者裁定：approve={} rationale={rationale}", approve),
-        );
-    }
-    Ok(crate::decision::Ruling { approve, rationale, criteria, action: parsed_action })
-}
-
-// ---------- task entry points (mirror mock::run_execution / run_acceptance) ----------
-
-/// Execute one attempt with the real CLI. Workspace is mandatory (DESIGN §13):
-/// a missing/invalid workspace fails the attempt immediately.
-///
-/// M4 三档恢复：`mode` 决定会话形态——`Fresh`=新会话（attempt+1 由调度器负责）；
-/// `Resume`=用同一真实 id 原生续作（attempt 不自增、逻辑会话名不变）；`Handoff`=新会话
-/// + 交接书提示词（真实 id 必然 ≠ 原 id）。执行派发解析到的真实会话 id 立即落 SQLite
-/// （`persist`），kill -9 重启后据此恢复。
 pub async fn run_execution(
     state: Arc<App>,
     task: Task,
@@ -1265,7 +1061,7 @@ pub async fn run_execution(
             ),
         );
     }
-    // M4：执行输出中若含 REPLAN 块 → 登记规划修改建议（决策者裁决；失败不影响主流程）
+    // M4：执行输出中若含 REPLAN 块 → 登记规划修改建议（人工收件箱；失败不影响主流程）
     if let Some(changes) = crate::replan::parse_replan_block(&out.text) {
         let reason = changes.get("reason").and_then(|r| r.as_str()).unwrap_or("agent 在执行中发现规划需调整");
         let change_list = changes.get("changes").cloned().filter(|v| v.is_array()).unwrap_or(json!([]));
@@ -1275,7 +1071,7 @@ pub async fn run_execution(
                 &state, &c, &task, &agent.id, reason,
                 "执行者 agent 在执行过程中提出的规划变更建议", change_list,
             );
-            events::log_line(&state, &c, &task.id, "已按 REPLAN 块登记规划修改建议，提交决策者裁决");
+            events::log_line(&state, &c, &task.id, "已按 REPLAN 块登记规划修改建议，提交人工收件箱");
         }
     }
     // output artifacts live in the workspace; no synthetic artifact path is recorded
@@ -1480,7 +1276,7 @@ pub async fn run_acceptance(state: Arc<App>, task: Task, agent: Agent) -> Result
                 &state, &c, &task, &agent.id, reason,
                 "验收者 agent 在验收过程中提出的规划变更建议", change_list,
             );
-            events::log_line(&state, &c, &task.id, "已按 REPLAN 块登记规划修改建议，提交决策者裁决");
+            events::log_line(&state, &c, &task.id, "已按 REPLAN 块登记规划修改建议，提交人工收件箱");
         }
     }
 
@@ -1491,134 +1287,6 @@ fn opencode_accept_prompt_inner(p: &Project, t: &Task, log_tail: &str, knowledge
     accept_prompt(p, t, log_tail, knowledge)
 }
 
-/// M3 协商：executor 用真实 CLI 提出/修订验收标准。会话按任务复用（memory 连续），
-/// 提示词同时显式携带历史轮次与上轮意见，输出为标准正文（非 JSON）。
-pub async fn negotiate_propose(
-    state: Arc<App>,
-    task: Task,
-    agent: Agent,
-    round: i64,
-    feedback: Option<&str>,
-) -> Result<String, String> {
-    {
-        let c = state.db.lock().unwrap();
-        events::log_line(
-            &state, &c, &task.id,
-            &format!(
-                "opencode executor '{}' 提出第 {round} 轮验收标准（session {}）",
-                agent.name, negotiate_exec_session(&task.id)
-            ),
-        );
-    }
-    let cwd = task_cwd(&state, &task)?;
-    let (project, history) = {
-        let c = state.db.lock().unwrap();
-        (db::get_project(&c, &task.project_id), crate::negotiation::history(&c, &task.id))
-    };
-    let prompt = crate::knowledge::assemble(&state, &task.project_id, Some(&task.id), "executor", "negotiate", |k| {
-        negotiate_propose_prompt(project.as_ref(), &task, round, feedback, &history, k)
-    });
-    let session = negotiate_exec_session(&task.id);
-    let out = run_cli(
-        &state,
-        Some(&task.id),
-        Some(&cwd),
-        &session,
-        model_of(&agent).as_deref(),
-        timeout_of(&agent),
-        &prompt,
-    )
-    .await
-    .map_err(|e| format!("协商提案运行失败（executor '{}'）：{e}", agent.name))?;
-    let text = strip_fences(out.text.trim());
-    if text.is_empty() {
-        return Err(format!("executor '{}' 未输出验收标准", agent.name));
-    }
-    Ok(cap_chars(&text, 4000))
-}
-
-/// M3 协商：acceptor 用真实 CLI 审核提案，必须输出 JSON `{agree, comment, criteria}`。
-pub async fn negotiate_review(
-    state: Arc<App>,
-    task: Task,
-    agent: Agent,
-    proposal: &str,
-) -> Result<crate::agents::Review, String> {
-    {
-        let c = state.db.lock().unwrap();
-        events::log_line(
-            &state, &c, &task.id,
-            &format!(
-                "opencode acceptor '{}' 审核提案（session {}）",
-                agent.name, negotiate_acc_session(&task.id)
-            ),
-        );
-    }
-    let cwd = task_cwd(&state, &task)?;
-    let (project, round) = {
-        let c = state.db.lock().unwrap();
-        let round = db::get_task(&c, &task.id)
-            .map(|t| t.negotiation_round.max(0))
-            .unwrap_or(0)
-            + 1;
-        (db::get_project(&c, &task.project_id), round)
-    };
-    let prompt = crate::knowledge::assemble(&state, &task.project_id, Some(&task.id), "acceptor", "negotiate", |k| {
-        negotiate_review_prompt(project.as_ref(), &task, round, proposal, k)
-    });
-    let session = negotiate_acc_session(&task.id);
-    let out = run_cli(
-        &state,
-        Some(&task.id),
-        Some(&cwd),
-        &session,
-        model_of(&agent).as_deref(),
-        timeout_of(&agent),
-        &prompt,
-    )
-    .await
-    .map_err(|e| format!("协商审核运行失败（acceptor '{}'）：{e}", agent.name))?;
-    let v = crate::api::extract_json_value(&out.text)
-        .ok_or_else(|| "acceptor 协商输出中没有可解析的 JSON 对象".to_string())?;
-    let agree = v["agree"].as_bool().unwrap_or(false);
-    let comment = v["comment"].as_str().unwrap_or("").trim().to_string();
-    let criteria = v["criteria"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    Ok(crate::agents::Review { agree, comment, criteria })
-}
-
-/// 去掉可能的 Markdown 代码围栏，保留正文。
-fn strip_fences(s: &str) -> String {
-    let t = s.trim();
-    if !t.starts_with("```") {
-        return t.to_string();
-    }
-    let mut lines = t.lines();
-    let _ = lines.next(); // 开围栏
-    let mut body: Vec<&str> = Vec::new();
-    for l in lines {
-        if l.trim_start().starts_with("```") {
-            break;
-        }
-        body.push(l);
-    }
-    body.join("\n").trim().to_string()
-}
-
-fn cap_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
-}
-
-/// ASCII-only case fold: preserves byte offsets (unicode lowering may change
-/// byte widths), so reason slices keep their original text.
 fn fold_lower(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c })
@@ -1728,25 +1396,6 @@ mod tests {
         assert!(parse_verdict("VERDICT: reject").is_err());
     }
 
-    #[test]
-    fn decide_prompt_contains_request() {        let d = crate::models::Decision {
-            id: "dec_x".into(),
-            project_id: "p".into(),
-            task_id: Some("t".into()),
-            kind: "exemption".into(),
-            request: serde_json::json!({"reason": "simple"}),
-            scope: "tactical".into(),
-            status: "pending".into(),
-            ruling: None,
-            attempt: 0,
-            created_at: 0,
-            resolved_at: None,
-        };
-        let s = decide_prompt(None, None, &d);
-        assert!(s.contains("exemption"));
-        assert!(s.contains("simple"));
-    }
-
     /// M5：知识段注入——planner/executor/acceptor 三类提示词在有条目时开头含规范段，
     /// 无条目时不含；正文在段内可检索。
     #[test]
@@ -1775,9 +1424,7 @@ mod tests {
             acceptor_agent_id: None,
             acceptance_required: true,
             acceptance_criteria: Some("c".into()),
-            negotiation_status: "agreed".into(),
             version: 0,
-            negotiation_round: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),

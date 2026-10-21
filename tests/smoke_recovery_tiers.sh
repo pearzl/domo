@@ -267,8 +267,7 @@ def mk_project(name, brief):
 def mk_task(pid, title, desc, ex, acc):
     s, b = post(f"/projects/{pid}/tasks", {
         "title": title, "description": desc,
-        "executor_agent_id": ex, "acceptor_agent_id": acc,
-        "negotiation_status": "agreed"})
+        "executor_agent_id": ex, "acceptor_agent_id": acc})
     return b.get("id") if s == 200 else None
 
 REAL_DESC = ("在当前工作目录创建文件 {f}，内容为 12 行：第 1 行到第 12 行，"

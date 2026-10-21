@@ -122,31 +122,7 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
         )}
       </div>
 
-      {/* 协商标识：确认规划后项目保持初始化，直到全部协商一致（自动转运行） */}
-      {project.status === 'initializing' && project.plan?.confirmed_at ? (
-        <section className="panel">
-          <h2 className="panel-title">验收标准协商中</h2>
-          <div className="stack">
-            <p className="muted" style={{ margin: 0 }}>
-              规划已确认。执行者与验收者正在就每个任务的验收标准协商，全部一致后项目自动进入运行：
-              {tasks.length > 0 && (
-                <>
-                  {' '}{tasks.filter(t => !t.acceptance_required || (t.negotiation_status ?? 'agreed') !== 'pending').length}/{tasks.length} 已完成协商。
-                </>
-              )}
-            </p>
-            <div className="badge-row">
-              {tasks.filter(t => t.negotiation_status === 'pending').map(t => (
-                <TaskLink key={t.id} taskId={t.id} projectId={project.id}>
-                  💬 {t.title}（第 {t.negotiation_round ?? 0} 轮）
-                </TaskLink>
-              ))}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {/* 初始化规划台：目标文本框（与规划者/执行 agent 协商用）+ agent 池 + 指定规划者/执行/验收 + 生成/确认规划 */}
+      {/* 初始化规划台：目标文本框（与规划者/执行 agent 讨论用）+ agent 池 + 指定规划者/执行/验收 + 生成/确认规划 */}
       {project.status === 'initializing' && !project.plan?.confirmed_at && (
         <section className="panel">
           <h2 className="panel-title">规划台（初始化项目）</h2>
@@ -445,14 +421,6 @@ function TaskCard({
     <button className={`task-card ${active ? 'active' : ''}`} onClick={onClick}>
       <div className="task-card-title">{task.title}</div>
       <div className="task-card-meta">
-        {task.status === 'planned' && task.negotiation_status === 'pending' && (
-          <span className="nego-badge" title="执行者与验收者正在协商验收标准，一致后才开始执行">
-            💬 协商中 · 第 {task.negotiation_round ?? 0} 轮
-          </span>
-        )}
-        {task.status === 'planned' && task.negotiation_status === 'failed' && (
-          <span className="nego-badge nego-failed" title="协商多轮未达成一致，已交决策者裁决">⚠ 协商失败（待裁决）</span>
-        )}
         <span className="muted">依赖 {task.depends_on?.length ?? 0}</span>
         <span className="muted">
           尝试 {task.attempt} · 退回 {task.rejection_count}
@@ -527,7 +495,6 @@ function TaskDetailDrawer({
   const logs = logsByTask[task.id] ?? task.logs;
   const executor = agents.find(a => a.id === task.executor_agent_id);
   const acceptor = agents.find(a => a.id === task.acceptor_agent_id);
-  const negotiation = task.negotiation;
   // M5：本任务最新一条人工指导事件（一键「沉淀为规范」的来源）
   const latestGuidanceEv = [...(task.events ?? [])]
     .reverse()
@@ -552,7 +519,7 @@ function TaskDetailDrawer({
     if (ok) setGuidance('');
   }
 
-  /** 上报「发现规划问题」：executor/acceptor 的纠偏请求，交由决策者复核。 */
+  /** 上报「发现规划问题」：写入人工收件箱，由人批准或否决。 */
   async function doReportReplan() {
     if (!replanReason.trim()) return;
     setBusy(true);
@@ -609,7 +576,6 @@ function TaskDetailDrawer({
                 <span>⚠ 执行与验收同一实例（独立性有限）</span>
               </>
             )}
-            <span className="muted">协商状态</span><span>{task.negotiation_status ?? '—'}</span>
             <span className="muted">创建时间</span><span>{fmtTime(task.created_at)}</span>
           </div>
         </section>
@@ -696,54 +662,6 @@ function TaskDetailDrawer({
             <p className="muted">（尚未制定；任务进入「制定计划中」后产出）</p>
           )}
         </section>
-
-        {negotiation && (
-          <section className="drawer-section">
-            <h4>
-              协商过程（{negotiation.rounds.length} 条 · 轮次 {negotiation.round}/{negotiation.max_rounds}
-              {negotiation.status === 'agreed'
-                ? ' · 已一致'
-                : negotiation.status === 'failed'
-                  ? ' · 未达成'
-                  : ' · 进行中'}）
-            </h4>
-            {negotiation.rounds.length === 0 ? (
-              <p className="muted">尚无轮次记录（协商尚未开始，或该任务无需验收）。</p>
-            ) : (
-              <ul className="timeline negotiation-rounds">
-                {negotiation.rounds.map((r, i) => (
-                  <li key={i}>
-                    <div className="timeline-line">
-                      <span className="mono muted">{r.ts ? fmtTime(r.ts) : `#${i + 1}`}</span>
-                      <span className="ev-type">
-                        第 {r.round} 轮 ·{' '}
-                        {r.role === 'executor' ? '执行者提案' : r.agree ? '验收者同意' : '验收者反对'}
-                      </span>
-                    </div>
-                    {r.role === 'executor' ? (
-                      <p className="pre-wrap">{r.proposal || '（无提案）'}</p>
-                    ) : (
-                      <>
-                        {r.comment && <p className="muted">{r.comment}</p>}
-                        {r.criteria && <p className="pre-wrap">定稿：{r.criteria}</p>}
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {negotiation.status === 'agreed' && negotiation.acceptance_criteria && (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                ✓ 协商一致，验收标准已写入任务。
-              </p>
-            )}
-            {negotiation.status === 'failed' && (
-              <p className="muted" style={{ marginBottom: 0 }}>
-                ⚠ 协商未达成一致，已提交决策者裁决（裁定前不派发执行）。
-              </p>
-            )}
-          </section>
-        )}
 
         <section className="drawer-section">
           <h4>依赖（{task.depends_on?.length ?? 0}）</h4>
@@ -840,19 +758,15 @@ function TaskDetailDrawer({
           <section className="drawer-section">
             <h4>报告规划问题</h4>
             <p className="muted" style={{ margin: 0 }}>
-              执行/验收中若发现规划本身有问题，上报后由决策者复核：不触及里程碑/项目目标的调整由决策者裁定，
-              触及里程碑或项目目标的请求自动升级到决策收件箱等待人工裁决。批准后由规划者产出调整并落地。
+              执行/验收中若发现规划本身有问题，可上报到收件箱；由你批准或否决。
+              批准后由规划者复核并落地（新增任务带验收、成环依赖跳过）。
             </p>
             {replanResult ? (
               <div className="stack">
-                {replanResult.scope === 'strategic' ? (
-                  <p style={{ margin: 0 }}>
-                    ⚠ 已升级到决策收件箱等待人工裁决
-                    {replanResult.reasons.length > 0 ? `（触发原因：${replanResult.reasons.join('、')}）` : ''}。
-                  </p>
-                ) : (
-                  <p style={{ margin: 0 }}>✓ 已提交决策者复核（战术事项，决策者将自动裁定）。</p>
-                )}
+                <p style={{ margin: 0 }}>
+                  ✓ 已写入收件箱，等待你批准或否决
+                  {replanResult.reasons.length > 0 ? `（触发原因：${replanResult.reasons.join('、')}）` : ''}。
+                </p>
                 <div className="row-end">
                   <button className="btn" onClick={() => setReplanResult(null)}>
                     再报一条
@@ -880,7 +794,7 @@ function TaskDetailDrawer({
                     disabled={busy || !replanReason.trim()}
                     onClick={() => void doReportReplan()}
                   >
-                    上报给决策者
+                    上报到收件箱
                   </button>
                 </div>
               </>
@@ -931,9 +845,7 @@ function groupLogsByAttempt(task: TaskDetail, logs: { ts: number; line: string }
     key: `${s.phase}-${s.role}-${s.attempt}-${s.ts}`,
     label:
       s.phase === 'accept' ? `验收 · 第 ${s.attempt} 轮`
-      : s.phase === 'negotiate' ? `协商 · ${s.role === 'acceptor' ? '验收者评审' : '执行者提案'}`
       : s.phase === 'plan' ? '规划会话'
-      : s.phase === 'decide' ? '决策裁定'
       : `执行 · 第 ${s.attempt} 轮`,
     start: s.ts,
     end: starts[i + 1]?.ts ?? Number.MAX_SAFE_INTEGER,
@@ -947,7 +859,7 @@ function groupLogsByAttempt(task: TaskDetail, logs: { ts: number; line: string }
     if (!groups.has(key)) groups.set(key, { label, start: w?.start ?? 0, lines: [] });
     groups.get(key)!.lines.push(l);
   }
-  // 全部轮次按开始时间倒序（最新在前）；同一起点内执行/验收优先于协商
+  // 全部轮次按开始时间倒序（最新在前）
   return [...groups.entries()]
     .sort((a, b) => b[1].start - a[1].start)
     .map(([key, g]) => ({ key, ...g }));
@@ -995,8 +907,6 @@ const EV_GROUPS: { key: string; label: string; prefix: string }[] = [
   { key: 'acceptance', label: '验收', prefix: 'acceptance.' },
   { key: 'session', label: 'agent 会话', prefix: 'agent.' },
   { key: 'escalation', label: '升级', prefix: 'escalation.' },
-  { key: 'negotiation', label: '协商', prefix: 'negotiation.' },
-  { key: 'decision', label: '决策', prefix: 'decision.' },
   { key: 'guidance', label: '指导', prefix: 'task.guidance' },
 ];
 
@@ -1210,7 +1120,7 @@ export function TaskFormModal({
             rows={2}
             value={value.acceptance_criteria}
             onChange={e => set('acceptance_criteria', e.target.value)}
-            placeholder="可检验的条目（M1 视为协商一致）"
+            placeholder="可检验的条目（如：输出文件存在、命令返回 0）"
           />
         </label>
         <label>

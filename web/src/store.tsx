@@ -133,7 +133,7 @@ export interface DomoStore {
   planning: { projectId: string; startedAt: number } | null;
   sendGuidance: (taskId: string, text: string) => Promise<boolean>;
   reviewTask: (taskId: string, verdict: 'accept' | 'reject', comment: string) => Promise<boolean>;
-  /** 上报规划问题（executor/acceptor → 重规划请求）；成功返回决策信息用于提示 */
+  /** 上报规划问题（executor/acceptor → 人工收件箱）；成功返回收件箱条目 */
   reportReplan: (
     taskId: string,
     body: { reason: string; detail?: string; proposed_changes?: ReplanChange[] },

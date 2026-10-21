@@ -154,7 +154,7 @@ export const api = {
     request<unknown>(`/tasks/${id}/accept`, 'POST', { comment }),
   rejectTask: (id: string, comment: string) =>
     request<unknown>(`/tasks/${id}/reject`, 'POST', { comment }),
-  /** 上报「发现规划问题」→ 生成 replan 决策请求（战略事项转人工收件箱） */
+  /** 上报「发现规划问题」→ 写入人工收件箱，由人批准/否决 */
   reportReplan: (
     id: string,
     body: {

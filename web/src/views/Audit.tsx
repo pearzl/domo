@@ -15,7 +15,6 @@ const TYPE_GROUPS: { key: string; label: string; prefix: string }[] = [
   { key: 'escalation', label: '升级', prefix: 'escalation.' },
   { key: 'replan', label: '重规划', prefix: 'replan.' },
   { key: 'milestone', label: '里程碑', prefix: 'milestone.' },
-  { key: 'decision', label: '决策', prefix: 'decision.' },
   { key: 'report', label: '报告', prefix: 'report.' },
   { key: 'project', label: '项目', prefix: 'project.' },
 ];

@@ -14,11 +14,8 @@ use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
 use crate::{
     agents::{mock, opencode, ExecMode, ExecOutcome},
     db,
-    decision,
     events,
     models::*,
-
-    negotiation,
     recovery::{self, TIER_HANDOFF, TIER_NATIVE},
     replan,
     report,
@@ -49,7 +46,6 @@ pub async fn run(state: Arc<App>) {
     if !state.is_stopping() {
         crate::host::sweep(Duration::from_secs(1800));
         scan(&state);
-        decision::scan(&state);
         replan::scan(&state);
     }
     loop {
@@ -68,7 +64,6 @@ pub async fn run(state: Arc<App>) {
         if state.is_stopping() {
             break;
         }
-        decision::scan(&state);
         replan::scan(&state);
     }
     tracing::info!("scheduler stopped");
@@ -90,8 +85,7 @@ fn scan(state: &Arc<App>) {
     let conn = state.db.lock().unwrap();
 
     // M3.5 状态机：
-    // - running：完整调度（协商/执行/验收派发）
-    // - initializing + 已确认：仅派发验收标准协商；协商全部完成后自动转 running
+    // - running：完整调度（计划/执行/验收派发）
     // - pausing：冻结派发，仅在途会话全部结束后转 paused
     let projects: Vec<_> = db::list_projects(&conn)
         .into_iter()
@@ -123,16 +117,12 @@ fn scan(state: &Arc<App>) {
 
         let mut map: HashMap<String, Task> = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
 
-        // planned -> ready：协商一致（criteria_agreed_auto）或豁免已获决策者裁定
-        // 才放行；协商失败 / 豁免待裁 → 保持 planned（decision::scan 负责派发裁定）。
+        // planned 直接进入 ready，由依赖与团队池决定何时执行。
         for t in tasks.clone() {
             if t.status == "planned" {
-                if let Some(reason) = decision::planned_gate(&conn, &t) {
-                    events::status_changed(state, &conn, &t, "ready", reason);
-                    // 状态已变化 → 立即再跑一轮（本轮的 tasks 快照仍是 planned）。
-                    state.wake();
-                    map.entry(t.id.clone()).and_modify(|m| m.status = "ready".into());
-                }
+                events::status_changed(state, &conn, &t, "ready", "dependencies_ready");
+                state.wake();
+                map.entry(t.id.clone()).and_modify(|m| m.status = "ready".into());
             }
         }
 
@@ -194,15 +184,6 @@ fn scan(state: &Arc<App>) {
                 continue; // frozen behind an unconfirmed milestone gate
             }
             match t.status.as_str() {
-                // M3 协商：需验收的 planned 任务先由 executor↔acceptor 协商验收标准，
-                // 一致后才由 planned_gate 放行；协商未完成的任务不会被派发执行。
-                "planned" if !state.has_live_handle(&t.id) && negotiation::needs_dispatch(t) => {
-                    if negotiation::dispatch(state, &conn, t) {
-                        drop(conn);
-                        state.wake();
-                        return;
-                    }
-                }
                 "ready" => {
                     if deps_met(&map, t) && !state.has_live_handle(&t.id) {
                         // M4 流程：先制定任务计划（执行者）→ 验收者审查 → 才进入执行
@@ -1390,9 +1371,7 @@ mod tests {
             acceptor_agent_id: None,
             acceptance_required: true,
             acceptance_criteria: None,
-            negotiation_status: "agreed".into(),
             version: 0,
-            negotiation_round: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),

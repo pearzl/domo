@@ -13,7 +13,7 @@ const VIEW_TITLES: Record<ViewId, string> = {
   projects: '项目总览',
   tasks: '任务视图',
   org: '组织视图',
-  inbox: '决策收件箱',
+  inbox: '收件箱',
   audit: '审计日志',
   knowledge: '项目知识库',
 };
@@ -26,7 +26,7 @@ function Sidebar() {
     { id: 'projects', label: '项目总览' },
     { id: 'tasks', label: '任务视图', dot: !!selectedProjectId },
     { id: 'org', label: '组织视图' },
-    { id: 'inbox', label: '决策收件箱', badge: openCount },
+    { id: 'inbox', label: '收件箱', badge: openCount },
     { id: 'knowledge', label: '知识库' },
     { id: 'audit', label: '审计' },
   ];

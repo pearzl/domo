@@ -451,8 +451,8 @@ mod tests {
         )
         .unwrap();
         c.execute(
-            "INSERT INTO tasks (id,project_id,title,description,acceptance_required,negotiation_status,status,attempt,artifacts,created_at)
-             VALUES ('t1','p1','标题','描述正文',1,'agreed','executing',1,'[\"a.txt\"]',1)",
+            "INSERT INTO tasks (id,project_id,title,description,acceptance_required,status,attempt,artifacts,created_at)
+             VALUES ('t1','p1','标题','描述正文',1,'executing',1,'[\"a.txt\"]',1)",
             [],
         )
         .unwrap();

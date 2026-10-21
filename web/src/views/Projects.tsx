@@ -326,7 +326,7 @@ export function ProjectsView() {
                     <span className="spinner" /> 规划中…已等待 {elapsed}s · LLM 规划可能需要几分钟
                   </div>
                 )}
-                {projInbox > 0 && <div className="risk-line">⚠ {projInbox} 项待决策</div>}
+                {projInbox > 0 && <div className="risk-line">⚠ {projInbox} 项待处理</div>}
                 {milestones.length > 0 && (
                   <div className="milestone-list">
                     {milestones.map(m => {
@@ -362,7 +362,7 @@ export function ProjectsView() {
                           {gate ? (
                             <button
                               className="btn btn-sm btn-primary milestone-gate-btn"
-                              title="跳转到决策收件箱的里程碑确认项"
+                              title="跳转到收件箱的里程碑确认项"
                               onClick={() => focusInbox(gate.id)}
                             >
                               待确认 · 去收件箱 →

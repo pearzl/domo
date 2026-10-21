@@ -199,14 +199,6 @@ pub fn resolve_role(
         if a.status == "deleted" || !a.roles.iter().any(|r| r == role) {
             continue;
         }
-        // 角色隔离（裁判不下场）：决策者实例不得被动态选为执行者/验收者。
-        // DOMO_DM_ROLE_OVERLAP=1 时用户已显式打开例外，不再跳过。
-        if (role == "executor" || role == "acceptor")
-            && crate::roles::is_decision_maker(&a.roles)
-            && !crate::roles::overlap_allowed()
-        {
-            continue;
-        }
         if circuit_open(state, &id) {
             continue;
         }

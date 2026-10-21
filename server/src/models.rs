@@ -2,7 +2,7 @@
 //!
 //! - 层级：工程（完整产品）→ 项目（project，即产品文档中的"项目/迭代"）→ 任务。
 //! - 角色：规划者（planner，**兼该任务的验收者**）与执行者（executor）；
-//!   没有决策者 agent，一切裁决由人（收件箱）完成。
+//!   一切裁决由人（收件箱）完成，没有决策者 agent 或验收标准协商。
 //! - 任务状态：planned / ready / plan_drafting / plan_review / executing /
 //!   awaiting_acceptance / done / escalated / suspended / recovering。
 //!   `recovering` = 进程重启中断、等待恢复，**不得**统计或展示为"执行中"。
@@ -129,9 +129,6 @@ pub struct Task {
     pub acceptor_agent_id: Option<String>,
     pub acceptance_required: bool,
     pub acceptance_criteria: Option<String>,
-    pub negotiation_status: String,
-    /// M3 协商：已完成的协商轮次（持久化，重启后从此轮继续）
-    pub negotiation_round: i64,
     /// M4：执行者产出的任务计划（plan_drafting → plan_review → executing 使用）
     pub execution_plan: Option<String>,
     /// M4：计划审查打回次数（≥2 → escalated）
@@ -166,25 +163,6 @@ pub struct InboxItem {
     pub status: String,
     pub resolution: Option<Value>,
     pub created_at: i64,
-}
-
-/// M3 决策者自动裁决请求（DESIGN §6 权限分层）。
-/// kind: exemption | negotiation_failed | change_review
-/// scope: tactical（决策者自决）| strategic（必须升级到人）
-/// status: pending | ruled | escalated | down
-#[derive(Debug, Clone, Serialize)]
-pub struct Decision {
-    pub id: String,
-    pub project_id: String,
-    pub task_id: Option<String>,
-    pub kind: String,
-    pub request: Value,
-    pub scope: String,
-    pub status: String,
-    pub ruling: Option<Value>,
-    pub attempt: i64,
-    pub created_at: i64,
-    pub resolved_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

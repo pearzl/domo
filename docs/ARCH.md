@@ -298,7 +298,7 @@ server/src/
 | `scheduler.rs` 内直接 SQL 与直接起进程 | `app/*` + `ports/*`，状态只走一个出口 |
 | `sandbox.rs` | `adapters/git` + `app/workspace_mgr`（术语改为任务工作区） |
 | `agents/opencode.rs` | `adapters/opencode`：HTTP 宿主为一等公民，CLI 为降级 |
-| `decision.rs` / `negotiation.rs` | 删除，不保留兼容层 |
+| `decision.rs` / `negotiation.rs` | 已删除（决策者与验收协商退场，无兼容层） |
 | `api.rs` 单文件 | `api/` 按资源拆分 |
 
 ## 13. 实施阶段

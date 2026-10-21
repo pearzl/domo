@@ -1,24 +1,14 @@
-//! M3 动态重规划双轨之「常规纠偏」通道（DESIGN §6/§8）。
+//! 动态重规划：agent / 人上报规划问题 → 人工收件箱 → 批准后规划并落地。
 //!
-//! 链路：executor/acceptor 上报「发现规划问题」→ 生成 `replan.proposed` 事件与
-//! 一条 kind=`replan` 的决策请求 → 决策者复核：
-//!
-//! - **tactical（不触及里程碑/项目目标）**：由持有 decision_maker 角色的 agent 自决；
-//! - **strategic（触及已确认里程碑/项目目标）**：`decision::escalate_to_human`
-//!   直接投递人工收件箱，决策者不得自决。
-//!
-//! 批准（agent 或人）只把决策置为 ruled 并写 `replan.approved`，随后 `scan`
-//! 派发规划 worker：
-//! - 有真实 planner → 复用 `planner-<prj_id>` 规划会话（memory 连续）产出 changes；
-//! - 否则采用上报者给出的 `proposed_changes`，再无则生成一条带验收的兜底补充任务；
-//! - changes 经 `api::apply_replan_changes` 逐项落地：新任务默认带验收、
-//!   插入 DAG 前做环校验（成环项跳过）、单项失败不影响其余项；
-//! - 落地结果写入 `replan.applied`，新任务进入调度。
-//!
-//! 拒绝 → 写 `replan.rejected` 并通知上报者，原任务流程不动。
-//!
-//! 批准后若进程重启（规划尚未落地），`scan` 会从 "planning=pending" 的决策
-//! 继续派发，保证可恢复。
+//! 目标设计没有决策者 agent：所有批准/否决都由人完成。
+//! - 上报：executor/acceptor 的 `REPLAN:` 块或 `POST /tasks/:id/replan` 创建一条
+//!   `kind=replan` 的收件箱条目（payload.kind=`replan_report`，含请求与建议变更）。
+//! - 批准：收件箱把 payload 置为 `approved=true, planning=pending`，`scan` 派发规划 worker；
+//! - 规划：有真实 planner 时复用 `planner-<prj_id>` 会话，否则采用上报者建议，再否则生成
+//!   一条带验收的兜底补充任务；
+//! - 落地：`api::apply_replan_changes` 逐项应用（新任务带验收、DAG 环校验、单项失败跳过）；
+//!   完成后写 `replan.applied` 并把收件箱 payload 的 planning 置为 applied，可跨重启续跑。
+//! - 否决：关闭条目、写 `replan.rejected`，原任务流程不动。
 
 use std::sync::Arc;
 
@@ -27,8 +17,8 @@ use serde_json::{json, Value};
 
 use crate::{
     agents::opencode,
-    api, db, decision, events,
-    models::{Decision, Task},
+    api, db, events,
+    models::{InboxItem, Task},
     state::{App, HandleGuard},
 };
 
@@ -36,18 +26,25 @@ use crate::{
 fn touches_strategic_key(v: &Value) -> bool {
     match v {
         Value::Object(map) => map.iter().any(|(k, val)| {
-            (decision::STRATEGIC_KEYS.contains(&k.as_str()) && !val.is_null())
-                || touches_strategic_key(val)
+            (STRATEGIC_KEYS.contains(&k.as_str()) && !val.is_null()) || touches_strategic_key(val)
         }),
         Value::Array(arr) => arr.iter().any(touches_strategic_key),
         _ => false,
     }
 }
 
-/// 重规划请求分类：(scope, reasons)。
-///
-/// 保守策略：任务只要挂在任意里程碑下即视为「触及里程碑目标」；请求体里出现
-/// 里程碑/项目目标相关键同样升级。战略事项一律转人工收件箱。
+/// 仍保留的分类，仅用于收件箱上下文展示（不再决定由谁裁决）。
+pub const STRATEGIC_KEYS: [&str; 8] = [
+    "milestone_id",
+    "milestone",
+    "milestones",
+    "project_goal",
+    "goal",
+    "brief",
+    "new_agent",
+    "project",
+];
+
 pub fn classify(task: Option<&Task>, request: &Value) -> (String, Vec<String>) {
     let mut reasons: Vec<String> = Vec::new();
     if let Some(t) = task {
@@ -65,8 +62,46 @@ pub fn classify(task: Option<&Task>, request: &Value) -> (String, Vec<String>) {
     }
 }
 
-/// M4：agent（执行者/验收者）在执行/验收输出中提出规划修改建议（`REPLAN:` 块）。
-/// 与人工上报共用同一条链路：幂等去重 → replan.proposed → 决策者复核（战略事项转人工）。
+fn is_report(i: &InboxItem) -> bool {
+    i.kind == "replan"
+        && (i.payload.get("kind").and_then(|v| v.as_str()) == Some("replan_report")
+            || (i.payload.get("task_id").is_some()
+                && i.payload.get("milestone_id").is_none()
+                && i.payload.get("downstream").is_none()
+                && i.payload.get("abandoned_task_id").is_none()))
+}
+
+/// 登记一条重规划请求（同一任务的 open 请求幂等复用）。
+pub fn open_request(
+    st: &Arc<App>,
+    c: &Connection,
+    project_id: &str,
+    task: &Task,
+    request: Value,
+    scope: &str,
+) -> (InboxItem, bool) {
+    if let Some(existing) = db::list_inbox(c).into_iter().find(|i| {
+        i.status == "open"
+            && i.kind == "replan"
+            && i.project_id == project_id
+            && i.payload.get("kind").and_then(|v| v.as_str()) == Some("replan_report")
+            && i.payload.get("task_id").and_then(|v| v.as_str()) == Some(task.id.as_str())
+    }) {
+        return (existing, true);
+    }
+    let mut payload = request;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("kind".into(), json!("replan_report"));
+        obj.insert("scope".into(), json!(scope));
+        obj.insert("task_id".into(), json!(task.id));
+        obj.insert("task_title".into(), json!(task.title));
+        obj.insert("approved".into(), json!(false));
+    }
+    let item = events::new_inbox_item(st, c, project_id, "replan", payload);
+    (item, false)
+}
+
+/// agent（执行者/验收者）在执行/验收输出中提出规划修改建议（`REPLAN:` 块）。
 pub fn propose_from_agent(
     st: &Arc<App>,
     c: &Connection,
@@ -75,12 +110,12 @@ pub fn propose_from_agent(
     reason: &str,
     detail: &str,
     changes: Value,
-) -> Option<Decision> {
-    // 幂等：同一任务已有未决重规划请求 → 不重复登记
-    if db::list_decisions(c, Some(&task.project_id)).into_iter().any(|d| {
-        d.kind == "replan"
-            && d.task_id.as_deref() == Some(task.id.as_str())
-            && (d.status == "pending" || d.status == "escalated")
+) -> Option<InboxItem> {
+    if db::list_inbox(c).into_iter().any(|i| {
+        i.status == "open"
+            && i.kind == "replan"
+            && i.payload.get("kind").and_then(|v| v.as_str()) == Some("replan_report")
+            && i.payload.get("task_id").and_then(|v| v.as_str()) == Some(task.id.as_str())
     }) {
         return None;
     }
@@ -89,8 +124,6 @@ pub fn propose_from_agent(
         "detail": detail,
         "reported_by": "agent",
         "reporter_agent_id": reporter_agent_id,
-        "task_id": task.id,
-        "task_title": task.title,
         "proposed_changes": changes,
         "snapshot": {
             "status": task.status,
@@ -111,15 +144,9 @@ pub fn propose_from_agent(
             "task_title": task.title,
             "scope": scope,
         }));
-    let d = decision::request_scoped(st, c, &task.project_id, Some(&task.id), "replan", &scope, request);
-    if scope == "strategic" {
-        let detail = format!(
-            "agent 提出的重规划触及里程碑/项目目标（{}），决策者不得自决，转人工裁决",
-            reasons.join(", ")
-        );
-        decision::escalate_to_human(st, c, &d, &reasons, &detail);
-    }
-    db::get_decision(c, &d.id).or(Some(d))
+    let (item, _) = open_request(st, c, &task.project_id, task, request, &scope);
+    tracing::info!(task = %task.id, inbox = %item.id, reasons = ?reasons, "replan request submitted to inbox");
+    Some(item)
 }
 
 /// 从 agent 输出尾部解析 `REPLAN: {json}` 块（容错：任意位置、可带代码围栏）。
@@ -129,190 +156,108 @@ pub fn parse_replan_block(text: &str) -> Option<Value> {
     api::extract_json_value_pub(tail)
 }
 
-/// 决策已批准、等待 planner 产出并落地调整（含进程重启后的续跑）。
-pub fn planning_pending(d: &Decision) -> bool {
-    d.kind == "replan"
-        && d.status == "ruled"
-        && d.ruling
-            .as_ref()
-            .and_then(|r| r.get("effect"))
-            .and_then(|e| e.get("planning"))
-            .and_then(|v| v.as_str())
-            == Some("pending")
-}
-
-/// 是否属于「决策者 agent 自决的战术批准」——只有这种批准才可能被 planner 产出
-/// 悄悄带上战略改动，需要二次护栏；人工裁定或本就战略的请求不在此列。
-fn tactical_agent_approval(d: &Decision) -> bool {
-    if d.scope != "tactical" {
-        return false;
-    }
-    let by = d.ruling.as_ref().and_then(|r| r.get("by")).and_then(|v| v.as_str());
-    by != Some("human")
-}
-
-/// 调整方案是否触及里程碑/项目目标：新增任务挂到里程碑、或变更字段含战略键。
-fn changes_touch_strategic(changes: &[Value]) -> bool {
-    changes.iter().any(|ch| match ch["op"].as_str().unwrap_or("") {
-        "add" => {
-            touches_strategic_key(ch.get("task").unwrap_or(&Value::Null)) || touches_strategic_key(ch)
-        }
-        "update" => touches_strategic_key(ch.get("fields").unwrap_or(&Value::Null)),
-        _ => false,
-    })
-}
-
-/// 规划产出触及战略目标：撤销「自动落地」，转人工收件箱裁决（复用决策升级通道）。
-/// 决策从 ruled 置为 escalated，人工裁定后 replan::scan 会重新派发规划并落地。
-fn escalate_planning(state: &Arc<App>, d: &Decision, changes: &[Value]) {
-    let conn = state.db.lock().unwrap();
-    let reasons = vec!["planner_changes_touch:milestone_or_project_goal".to_string()];
-    let mut escalated = d.clone();
-    if let Some(obj) = escalated.request.as_object_mut() {
-        obj.insert("planner_changes".into(), json!(changes));
-    }
-    decision::escalate_to_human(
-        state,
-        &conn,
-        &escalated,
-        &reasons,
-        "决策者已批准的战术重规划，其规划产出触及里程碑/项目目标，自动升级人工裁决",
-    );
-    events::push_event(
-        state,
-        &conn,
-        &d.project_id,
-        d.task_id.as_deref(),
-        "replan.escalated",
-        json!({"decision_id": d.id, "changes": changes.len(), "reasons": reasons}),
-    );
-}
-
-/// 调度器扫描：找到「已批准但尚未规划落地」的重规划请求并派发规划 worker。
+/// 调度器扫描：已获人批准、尚未落地的重规划请求 → 派发规划 worker（可跨重启续跑）。
 pub fn scan(state: &Arc<App>) {
-    let conn = state.db.lock().unwrap();
-    let pending: Vec<Decision> = db::list_decisions(&conn, None)
-        .into_iter()
-        .filter(planning_pending)
-        .collect();
-    for d in pending {
-        if state.has_live_handle(&d.id) {
-            continue; // 规划 worker 正在跑（或决策 worker 尚未释放句柄）
+    let pending: Vec<InboxItem> = {
+        let conn = state.db.lock().unwrap();
+        db::list_inbox(&conn)
+            .into_iter()
+            .filter(|i| {
+                is_report(i)
+                    && i.payload.get("approved").and_then(|v| v.as_bool()) == Some(true)
+                    && i.payload.get("planning").and_then(|v| v.as_str()) == Some("pending")
+            })
+            .collect()
+    };
+    for item in pending {
+        let conn = state.db.lock().unwrap();
+        if state.has_live_handle(&item.id) {
+            continue;
         }
-        // 冻结语义（与 scheduler::scan / decision::scan 对齐）：暂停/归档只冻结
-        // 「自动」规划派发——人工或 agent 的裁定（decisions 已 ruled）仍立即生效，
-        // 但由此触发的 planner 派发延后到项目恢复后再续跑（planning=pending 即恢复锚点）。
-        // completed 不在此列：批准后若项目已 auto-completed，由 apply_replan_changes 的
-        // reopen_if_completed 重新拉起（保持原有可恢复行为，避免裁定悬空）。
-        match db::get_project(&conn, &d.project_id).map(|p| p.status) {
-            None => continue, // project missing
-            Some(s) if s == "paused" || s == "pausing" || s == "archived" => continue, // 冻结自动流程（暂停中同样冻结）
+        match db::get_project(&conn, &item.project_id).map(|p| p.status) {
+            None => continue,
+            Some(s) if s == "paused" || s == "pausing" || s == "archived" => continue,
             Some(_) => {}
         }
-        dispatch(state, &conn, &d);
+        events::push_event(state, &conn, &item.project_id,
+            item.payload.get("task_id").and_then(|v| v.as_str()),
+            "replan.planning_started", json!({"inbox_id": item.id}));
+        let state2 = state.clone();
+        let hid = state.alloc_handle_id();
+        let item2 = item.clone();
+        let h = tokio::spawn(async move { worker(state2, item2, hid).await });
+        state.register_handle(&item.id, hid, h);
         drop(conn);
         state.wake();
         return;
     }
 }
 
-fn dispatch(state: &Arc<App>, conn: &Connection, d: &Decision) {
-    events::push_event(
-        state,
-        conn,
-        &d.project_id,
-        d.task_id.as_deref(),
-        "replan.planning_started",
-        json!({"decision_id": d.id}),
-    );
-    let state2 = state.clone();
-    let d2 = d.clone();
-    let hid = state.alloc_handle_id();
-    let h = tokio::spawn(async move { worker(state2, d2, hid).await });
-    state.register_handle(&d.id, hid, h);
-}
-
-async fn worker(state: Arc<App>, d: Decision, hid: u64) {
-    let guard = HandleGuard { state: state.clone(), task_id: d.id.clone(), id: hid };
-    let (source, changes) = build_changes(&state, &d).await;
-
-    // 战略护栏：批准得到的调整若触及里程碑/项目目标，而该决策本身是「战术」、且由
-    // 决策者 agent 自决，则不得自动落地——planner 产出可能替上报者补出跨里程碑的
-    // 调整，绕过上报时的战略分类。此时自动升级到人工收件箱等待裁决（与上报触及战略
-    // 目标即升级一致）；人工已裁定过的批准不再升级，避免循环。
-    if tactical_agent_approval(&d) && changes_touch_strategic(&changes) {
-        escalate_planning(&state, &d, &changes);
-        drop(guard);
-        state.wake();
-        return;
-    }
-
+async fn worker(state: Arc<App>, item: InboxItem, hid: u64) {
+    let guard = HandleGuard { state: state.clone(), task_id: item.id.clone(), id: hid };
+    let (source, changes) = build_changes(&state, &item.project_id, &item.payload).await;
     let (applied, skipped) =
-        api::apply_replan_changes(&state, &d.project_id, &changes, None, "replan");
+        api::apply_replan_changes(&state, &item.project_id, &changes, None, "replan");
     {
         let conn = state.db.lock().unwrap();
-        if let Some(mut fresh) = db::get_decision(&conn, &d.id) {
-            let mut ruling = fresh.ruling.take().unwrap_or_else(|| json!({}));
-            if let Some(obj) = ruling.as_object_mut() {
-                let effect = obj.entry("effect").or_insert_with(|| json!({}));
-                if let Some(eff) = effect.as_object_mut() {
-                    eff.insert("planning".into(), json!("applied"));
-                    eff.insert("source".into(), json!(source));
-                    eff.insert("changes".into(), json!(changes.len()));
-                    eff.insert("applied".into(), json!(applied));
-                    eff.insert("skipped".into(), json!(skipped));
-                }
+        if let Some(mut fresh) = db::get_inbox(&conn, &item.id) {
+            if let Some(obj) = fresh.payload.as_object_mut() {
+                obj.insert("planning".into(), json!("applied"));
+                obj.insert("source".into(), json!(source));
+                obj.insert("applied".into(), json!(applied.len()));
+                obj.insert("skipped".into(), json!(skipped.len()));
+            }
+            let mut resolution = fresh.resolution.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = resolution.as_object_mut() {
+                obj.insert("planning".into(), json!("applied"));
+                obj.insert("source".into(), json!(source));
             }
             let _ = conn.execute(
-                "UPDATE decisions SET ruling=?2 WHERE id=?1",
-                rusqlite::params![d.id, ruling.to_string()],
+                "UPDATE inbox SET payload=?2, resolution=?3 WHERE id=?1",
+                rusqlite::params![item.id, fresh.payload.to_string(), resolution.to_string()],
             );
         }
         events::push_event(
-            &state,
-            &conn,
-            &d.project_id,
-            d.task_id.as_deref(),
+            &state, &conn, &item.project_id,
+            item.payload.get("task_id").and_then(|v| v.as_str()),
             "replan.applied",
             json!({
-                "decision_id": d.id,
+                "inbox_id": item.id,
                 "source": source,
                 "changes": changes.len(),
                 "applied": applied,
                 "skipped": skipped,
             }),
         );
+        if let Some(fresh) = db::get_inbox(&conn, &item.id) {
+            events::send_inbox(&state, &fresh);
+        }
     }
     drop(guard);
     state.wake();
-    tracing::info!(
-        decision = %d.id,
-        project = %d.project_id,
-        source,
-        changes = changes.len(),
-        "replan planning worker finished"
-    );
+    tracing::info!(inbox = %item.id, project = %item.project_id, source, changes = changes.len(),
+        "replan worker finished");
 }
 
 /// 产出调整方案：真实 planner 优先（复用规划会话 memory）→ 上报者建议 → 兜底补充任务。
-async fn build_changes(state: &Arc<App>, d: &Decision) -> (String, Vec<Value>) {
+async fn build_changes(state: &Arc<App>, project_id: &str, request: &Value) -> (String, Vec<Value>) {
     let (project, tasks, planner) = {
         let c = state.db.lock().unwrap();
-        let project = db::get_project(&c, &d.project_id);
-        let tasks = db::list_tasks(&c, &d.project_id);
+        let project = db::get_project(&c, project_id);
+        let tasks = project.as_ref().map(|p| db::list_tasks(&c, &p.id)).unwrap_or_default();
         let planner = db::list_agents(&c)
             .into_iter()
             .find(|a| a.adapter == "opencode" && a.roles.iter().any(|r| r == "planner"));
         (project, tasks, planner)
     };
 
-    // 1) 真实 planner：与生成规划 / 人工介入共用 planner-<prj_id> 会话 → memory 连续
     if let (Some(project), Some(planner)) = (project.as_ref(), planner.as_ref()) {
-        let note = compose_note(&d.request);
-        let prompt = crate::knowledge::assemble(state, &d.project_id, d.task_id.as_deref(), "planner", "intervene", |k| {
+        let note = compose_note(request);
+        let task_id = request["task_id"].as_str();
+        let prompt = crate::knowledge::assemble(state, &project.id, task_id, "planner", "intervene", |k| {
             opencode::intervene_prompt(project, &tasks, &note, k)
         });
-        let session = opencode::plan_session(&d.project_id);
+        let session = opencode::plan_session(&project.id);
         let call = opencode::run_cli(
             state,
             None,
@@ -332,22 +277,20 @@ async fn build_changes(state: &Arc<App>, d: &Decision) -> (String, Vec<Value>) {
                         }
                     }
                 }
-                tracing::warn!(target: "planner", decision = %d.id, "replan: planner returned no changes; falling back");
+                tracing::warn!(target: "planner", inbox_project = %project.id, "replan: planner returned no changes; falling back");
             }
             Err(e) => {
-                tracing::warn!(target: "planner", decision = %d.id, "replan: planner failed: {e}; falling back");
+                tracing::warn!(target: "planner", inbox_project = %project.id, "replan: planner failed: {e}; falling back");
             }
         }
     }
 
-    // 2) 回退：采用上报者随请求给出的建议调整
-    if let Some(arr) = d.request["proposed_changes"].as_array().filter(|a| !a.is_empty()) {
+    if let Some(arr) = request["proposed_changes"].as_array().filter(|a| !a.is_empty()) {
         return ("reporter".into(), arr.clone());
     }
 
-    // 3) 兜底：生成一条带验收的补充任务，保证批准后确有推进并进入调度
-    let title = d.request["task_title"].as_str().unwrap_or("任务");
-    let reason = d.request["reason"].as_str().unwrap_or("");
+    let title = request["task_title"].as_str().unwrap_or("任务");
+    let reason = request["reason"].as_str().unwrap_or("");
     let change = json!({
         "op": "add",
         "task": {
@@ -385,125 +328,26 @@ fn compose_note(request: &Value) -> String {
 mod tests {
     use super::*;
 
-    fn task(milestone: Option<&str>) -> Task {
-        Task {
-            id: "tsk_1".into(),
-            project_id: "prj_1".into(),
-            milestone_id: milestone.map(String::from),
-            title: "t".into(),
-            description: String::new(),
-            depends_on: vec![],
-            assignee_role: "executor".into(),
-            executor_agent_id: None,
-            acceptor_agent_id: None,
-            acceptance_required: true,
-            acceptance_criteria: None,
-            negotiation_status: "agreed".into(),
-            negotiation_round: 0,
-            execution_plan: None,
-            plan_rejection_count: 0,
-            scope_repos: Vec::new(),
-            agent_pinned: false,
-            tried_agents: serde_json::json!({}),
-            status: "executing".into(),
-            version: 0,
-            attempt: 1,
-            rejection_count: 0,
-            failure_count: 0,
-            artifacts: vec![],
-            created_at: 0,
-        }
-    }
-
     #[test]
-    fn free_task_replan_is_tactical() {
-        let (scope, reasons) = classify(
-            Some(&task(None)),
-            &json!({"reason": "依赖顺序不合理", "proposed_changes": [{"op": "add", "task": {"title": "x"}}]}),
-        );
-        assert_eq!(scope, "tactical", "{reasons:?}");
-    }
-
-    #[test]
-    fn milestone_task_replan_is_strategic() {
-        let (scope, reasons) = classify(Some(&task(Some("mst_1"))), &json!({"reason": "x"}));
-        assert_eq!(scope, "strategic");
-        assert!(reasons.contains(&"task_belongs_to_milestone".to_string()));
-    }
-
-    #[test]
-    fn milestone_or_goal_keys_inside_nested_changes_are_strategic() {
-        let nested = json!({
-            "reason": "调整归属",
-            "proposed_changes": [{"op": "update", "fields": {"milestone_id": "mst_9"}}]
-        });
-        let (scope, reasons) = classify(Some(&task(None)), &nested);
-        assert_eq!(scope, "strategic", "{reasons:?}");
-
-        let project = json!({"proposed_changes": [{"op": "update", "fields": {"project": {"brief": "改目标"}}}]});
-        assert_eq!(classify(Some(&task(None)), &project).0, "strategic");
-    }
-
-    #[test]
-    fn null_strategic_keys_do_not_escalate() {
-        let req = json!({"reason": "x", "snapshot": {"milestone_id": null}, "milestone_id": null});
-        assert_eq!(classify(Some(&task(None)), &req).0, "tactical");
-    }
-
-    #[test]
-    fn planning_pending_detection() {
-        let mut d = Decision {
-            id: "dec_1".into(),
-            project_id: "prj_1".into(),
-            task_id: Some("tsk_1".into()),
-            kind: "replan".into(),
-            request: json!({}),
-            scope: "tactical".into(),
-            status: "ruled".into(),
-            ruling: Some(json!({"decision": "approve", "effect": {"effect": "replan_approved", "planning": "pending"}})),
-            attempt: 1,
-            created_at: 0,
-            resolved_at: Some(1),
+    fn tactical_task_is_classified_tactical() {
+        let t = Task {
+            id: "t1".into(), project_id: "p".into(), milestone_id: None,
+            title: "t".into(), description: String::new(), depends_on: vec![],
+            assignee_role: "executor".into(), executor_agent_id: None,
+            acceptor_agent_id: None, acceptance_required: true, acceptance_criteria: None,
+            execution_plan: None, plan_rejection_count: 0, scope_repos: vec![],
+            agent_pinned: false, tried_agents: json!({}), status: "executing".into(),
+            version: 0, attempt: 1, rejection_count: 0, failure_count: 0,
+            artifacts: vec![], created_at: 0,
         };
-        assert!(planning_pending(&d));
-        d.ruling = Some(json!({"decision": "approve", "effect": {"effect": "replan_approved", "planning": "applied"}}));
-        assert!(!planning_pending(&d));
-        d.status = "escalated".into();
-        assert!(!planning_pending(&d));
+        assert_eq!(classify(Some(&t), &json!({"reason": "x"})).0, "tactical");
+        assert_eq!(classify(Some(&t), &json!({"milestone": "m"})).0, "strategic");
     }
 
     #[test]
-    fn planner_changes_touching_milestone_are_detected() {
-        let plain = json!([{"op": "add", "task": {"title": "x", "depends_on": []}}]);
-        assert!(!changes_touch_strategic(&[plain[0].clone()]));
-        let with_ms = json!([{"op": "add", "task": {"title": "x", "milestone_id": "mst_1"}}]);
-        assert!(changes_touch_strategic(&[with_ms[0].clone()]));
-        let upd = json!([{"op": "update", "task_id": "t", "fields": {"milestone": "M1"}}]);
-        assert!(changes_touch_strategic(&[upd[0].clone()]));
-        let null_ms = json!([{"op": "add", "task": {"title": "x", "milestone_id": null}}]);
-        assert!(!changes_touch_strategic(&[null_ms[0].clone()]));
-    }
-
-    #[test]
-    fn only_agent_approved_tactical_replans_get_the_guard() {
-        let mut d = Decision {
-            id: "dec_1".into(),
-            project_id: "prj_1".into(),
-            task_id: Some("tsk_1".into()),
-            kind: "replan".into(),
-            request: json!({}),
-            scope: "tactical".into(),
-            status: "ruled".into(),
-            ruling: Some(json!({"decision": "approve", "by": "agent"})),
-            attempt: 1,
-            created_at: 0,
-            resolved_at: Some(1),
-        };
-        assert!(tactical_agent_approval(&d));
-        d.ruling = Some(json!({"decision": "approve", "by": "human"}));
-        assert!(!tactical_agent_approval(&d));
-        d.scope = "strategic".into();
-        d.ruling = Some(json!({"decision": "approve", "by": "agent"}));
-        assert!(!tactical_agent_approval(&d));
+    fn replan_block_parser_finds_last_json() {
+        let text = "说明\nREPLAN: {\"reason\":\"r\",\"changes\":[{\"op\":\"add\"}]}\n";
+        let v = parse_replan_block(text).unwrap();
+        assert_eq!(v["reason"], "r");
     }
 }

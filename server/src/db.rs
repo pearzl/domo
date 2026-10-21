@@ -71,8 +71,7 @@ fn migrate(c: &Connection) {
             assignee_role TEXT NOT NULL DEFAULT 'executor',
             executor_agent_id TEXT, acceptor_agent_id TEXT,
             acceptance_required INTEGER NOT NULL DEFAULT 1,
-            acceptance_criteria TEXT, negotiation_status TEXT NOT NULL DEFAULT 'agreed',
-            negotiation_round INTEGER NOT NULL DEFAULT 0,
+            acceptance_criteria TEXT,
             status TEXT NOT NULL DEFAULT 'planned',
             attempt INTEGER NOT NULL DEFAULT 0,
             rejection_count INTEGER NOT NULL DEFAULT 0,
@@ -102,14 +101,6 @@ fn migrate(c: &Connection) {
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
             ts INTEGER NOT NULL, line TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS decisions (
-            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT,
-            kind TEXT NOT NULL, request TEXT NOT NULL DEFAULT '{}',
-            scope TEXT NOT NULL DEFAULT 'tactical',
-            status TEXT NOT NULL DEFAULT 'pending',
-            ruling TEXT, attempt INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL, resolved_at INTEGER
-        );
         CREATE TABLE IF NOT EXISTS reports (
             id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'pending',
@@ -123,8 +114,6 @@ fn migrate(c: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
         CREATE INDEX IF NOT EXISTS idx_logs_task ON logs(task_id);
-        CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
-        CREATE INDEX IF NOT EXISTS idx_decisions_task ON decisions(task_id);
         CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project_id);
         "#,
     )
@@ -181,9 +170,6 @@ fn migrate(c: &Connection) {
     // M3: tasks.milestone_id (TEXT, nullable) — idempotent column add. The base
     // CREATE TABLE above already includes it for fresh DBs; older DBs get it here.
     add_column_if_missing(c, "tasks", "milestone_id", "TEXT");
-
-    // M3 协商：tasks.negotiation_round（已完成轮次）— 幂等列添加。
-    add_column_if_missing(c, "tasks", "negotiation_round", "INTEGER NOT NULL DEFAULT 0");
 
     // ARCH A2：任务状态条件更新版本号（每次状态变更 +1，派发前 CAS 校验）。
     add_column_if_missing(c, "tasks", "version", "INTEGER NOT NULL DEFAULT 0");
@@ -409,7 +395,6 @@ fn task_row(r: &Row) -> rusqlite::Result<Task> {
         acceptor_agent_id: r.get("acceptor_agent_id")?,
         acceptance_required: r.get::<_, i64>("acceptance_required")? != 0,
         acceptance_criteria: r.get("acceptance_criteria")?,
-        negotiation_status: r.get("negotiation_status")?,
         execution_plan: r.get("execution_plan").ok().flatten(),
         plan_rejection_count: r.get("plan_rejection_count").ok().unwrap_or(0),
         scope_repos: r
@@ -425,7 +410,6 @@ fn task_row(r: &Row) -> rusqlite::Result<Task> {
             .flatten()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .unwrap_or_else(|| serde_json::json!({})),
-        negotiation_round: r.get("negotiation_round").unwrap_or(0),
         status: r.get("status")?,
         version: r.get("version").unwrap_or(0),
         attempt: r.get("attempt")?,
@@ -493,24 +477,6 @@ fn event_row(r: &Row) -> rusqlite::Result<Event> {
         task_id: r.get("task_id")?,
         kind: r.get("type")?,
         payload: serde_json::from_str(&p).unwrap_or_else(|_| serde_json::json!({})),
-    })
-}
-
-fn decision_row(r: &Row) -> rusqlite::Result<Decision> {
-    let req: String = r.get("request")?;
-    let ruling: Option<String> = r.get("ruling")?;
-    Ok(Decision {
-        id: r.get("id")?,
-        project_id: r.get("project_id")?,
-        task_id: r.get("task_id")?,
-        kind: r.get("kind")?,
-        request: serde_json::from_str(&req).unwrap_or_else(|_| serde_json::json!({})),
-        scope: r.get("scope")?,
-        status: r.get("status")?,
-        ruling: ruling.and_then(|s| serde_json::from_str(&s).ok()),
-        attempt: r.get("attempt")?,
-        created_at: r.get("created_at")?,
-        resolved_at: r.get("resolved_at")?,
     })
 }
 
@@ -710,7 +676,7 @@ pub fn get_agent(c: &Connection, id: &str) -> Option<Agent> {
 }
 /// ARCH §8.3 启动对账：合并重复的 open 收件箱条目。
 ///
-/// 同一项目、同一类型、同一目标（task / milestone / decision）且同一 reason 的 open
+/// 同一项目、同一类型、同一目标（task / milestone）且同一 reason 的 open
 /// 条目只保留最早一条；其余标记为 resolved（resolution 记录去重原因）。幂等。
 pub fn dedupe_open_inbox(c: &Connection) -> usize {
     let mut seen = std::collections::HashSet::new();
@@ -718,12 +684,11 @@ pub fn dedupe_open_inbox(c: &Connection) -> usize {
     for i in list_inbox(c).into_iter().filter(|i| i.status == "open") {
         let field = |k: &str| i.payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
         let key = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             i.project_id,
             i.kind,
             field("task_id"),
             field("milestone_id"),
-            field("decision_id"),
             field("reason"),
         );
         // 没有目标信息的条目无法可靠判定重复 → 一律保留。
@@ -981,54 +946,6 @@ pub fn save_report(c: &Connection, rep: &Report) {
     .expect("save report");
 }
 
-pub fn get_decision(c: &Connection, id: &str) -> Option<Decision> {
-    c.query_row("SELECT * FROM decisions WHERE id=?1", params![id], decision_row)
-        .optional()
-        .ok()
-        .flatten()
-}
-pub fn list_decisions(c: &Connection, project_id: Option<&str>) -> Vec<Decision> {
-    match project_id {
-        Some(p) => {
-            let mut st = c
-                .prepare("SELECT * FROM decisions WHERE project_id=?1 ORDER BY created_at, id")
-                .unwrap();
-            st.query_map(params![p], decision_row)
-                .unwrap()
-                .filter_map(|x| x.ok())
-                .collect()
-        }
-        None => {
-            let mut st = c.prepare("SELECT * FROM decisions ORDER BY created_at, id").unwrap();
-            st.query_map([], decision_row).unwrap().filter_map(|x| x.ok()).collect()
-        }
-    }
-}
-/// 某任务某类裁定请求（取最近一条，用于闸门判断与幂等保护）
-pub fn task_decision(c: &Connection, task_id: &str, kind: &str) -> Option<Decision> {
-    c.query_row(
-        "SELECT * FROM decisions WHERE task_id=?1 AND kind=?2 ORDER BY created_at DESC, id DESC LIMIT 1",
-        params![task_id, kind],
-        decision_row,
-    )
-    .optional()
-    .ok()
-    .flatten()
-}
-/// 决策者实例列表：全局 agent 池中持有 decision_maker 角色的实例
-pub fn list_decision_makers(c: &Connection) -> Vec<Agent> {
-    list_agents(c)
-        .into_iter()
-        .filter(|a| a.roles.iter().any(|r| r == "decision_maker"))
-        .collect()
-}
-
-/// 决策者实例解析：全局 agent 池中持有 decision_maker 角色的第一个实例
-#[allow(dead_code)]
-pub fn find_decision_maker(c: &Connection) -> Option<Agent> {
-    list_decision_makers(c).into_iter().next()
-}
-
 // ---------- write ----------
 
 pub fn jstring(v: &Value) -> String {
@@ -1076,31 +993,6 @@ pub fn set_task_plan(c: &Connection, task_id: &str, plan: Option<&str>) {
 /// M4：计划审查打回计数。
 pub fn set_plan_rejection_count(c: &Connection, task_id: &str, n: i64) {
     let _ = c.execute("UPDATE tasks SET plan_rejection_count=?2 WHERE id=?1", params![task_id, n]);
-}
-
-/// M3 协商：更新协商状态 / 已完成轮次（可选写入验收标准）。
-#[allow(dead_code)] // M4 协商退场
-pub fn set_task_negotiation(
-    c: &Connection,
-    task_id: &str,
-    status: &str,
-    round: i64,
-    criteria: Option<&str>,
-) {
-    match criteria {
-        Some(v) => {
-            let _ = c.execute(
-                "UPDATE tasks SET negotiation_status=?2, negotiation_round=?3, acceptance_criteria=?4 WHERE id=?1",
-                params![task_id, status, round, v],
-            );
-        }
-        None => {
-            let _ = c.execute(
-                "UPDATE tasks SET negotiation_status=?2, negotiation_round=?3 WHERE id=?1",
-                params![task_id, status, round],
-            );
-        }
-    }
 }
 
 /// Recompute each milestone's stored task_ids from tasks.milestone_id. Keeping
@@ -1168,20 +1060,6 @@ pub fn insert_agent(c: &Connection, a: &Agent) {
             serde_json::to_string(&a.current_task_ids).unwrap()
         ],
     ).unwrap();
-}
-
-pub fn insert_decision(c: &Connection, d: &Decision) {
-    c.execute(
-        "INSERT INTO decisions (id, project_id, task_id, kind, request, scope, status, ruling, attempt, created_at, resolved_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-        params![
-            d.id, d.project_id, d.task_id, d.kind,
-            d.request.to_string(), d.scope, d.status,
-            d.ruling.as_ref().map(|v| v.to_string()),
-            d.attempt, d.created_at, d.resolved_at
-        ],
-    )
-    .expect("insert decision");
 }
 
 pub fn occupancy_add(c: &Connection, agent_id: &str, task_id: &str) {
@@ -1532,31 +1410,6 @@ mod tests {
         migrate(&c); // idempotent repeat
         // milestones table exists and is queryable
         assert!(list_milestones(&c, "prj_x").is_empty());
-    }
-
-    #[test]
-    fn negotiation_round_column_and_persistence() {
-        let c = Connection::open_in_memory().unwrap();
-        migrate(&c);
-        migrate(&c); // idempotent: negotiation_round column add must not error twice
-        assert!(table_has_column(&c, "tasks", "negotiation_round"));
-        seed_project(&c, "prj1");
-        c.execute(
-            "INSERT INTO tasks (id,project_id,title,acceptance_required,acceptance_criteria,negotiation_status,negotiation_round,status,created_at)
-             VALUES ('t1','prj1','a',1,'draft criteria','pending',0,'planned',1)",
-            [],
-        ).unwrap();
-        let t = get_task(&c, "t1").unwrap();
-        assert_eq!(t.negotiation_status, "pending");
-        assert_eq!(t.negotiation_round, 0);
-
-        // rounds/status survive a "restart" (state lives in the DB, not memory)
-        set_task_negotiation(&c, "t1", "pending", 2, None);
-        set_task_negotiation(&c, "t1", "agreed", 2, Some("agreed criteria"));
-        let t = get_task(&c, "t1").unwrap();
-        assert_eq!(t.negotiation_status, "agreed");
-        assert_eq!(t.negotiation_round, 2);
-        assert_eq!(t.acceptance_criteria.as_deref(), Some("agreed criteria"));
     }
 
     #[test]

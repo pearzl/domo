@@ -21,9 +21,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{
     agents::{mock, opencode},
-    db, decision, events, knowledge,
+    db, events, knowledge,
     models::*,
-    negotiation,
     replan,
     report,
     state::App,
@@ -48,8 +47,6 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/projects/{id}/cancel", post(cancel_project))
         .route("/api/projects/{id}/report", get(get_project_report).post(generate_project_report))
         .route("/api/projects/{id}/tasks", post(create_task))
-        .route("/api/projects/{id}/decisions", get(get_project_decisions).post(post_project_decision))
-        .route("/api/tasks/{id}/decisions", post(post_task_decision))
         .route("/api/projects/{id}/milestones", post(create_milestone))
         .route("/api/milestones/{id}", get(get_milestone_detail).patch(patch_milestone))
         .route("/api/milestones/{id}/confirm", post(confirm_milestone))
@@ -62,7 +59,6 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/projects/{id}/knowledge", get(list_project_knowledge).post(create_knowledge))
         .route("/api/knowledge/{id}", get(get_knowledge).patch(patch_knowledge).delete(delete_knowledge))
         .route("/api/knowledge/{id}/promote", post(promote_knowledge))
-        .route("/api/tasks/{id}/negotiation", post(negotiate_task))
         .route("/api/tasks/{id}/accept", post(task_accept))
         .route("/api/tasks/{id}/reject", post(task_reject))
         .route("/api/tasks/{id}/replan", post(report_task_replan))
@@ -101,7 +97,7 @@ fn ok<T: serde::Serialize>(v: T) -> Response {
     Json(v).into_response()
 }
 
-const ROLES: [&str; 4] = ["planner", "executor", "acceptor", "decision_maker"];
+const ROLES: [&str; 3] = ["planner", "executor", "acceptor"];
 
 /// 机械检查项结构校验（与 `verification::Check` 共用同一套结构）。
 fn validate_check(v: &Value) -> Result<(), String> {
@@ -921,22 +917,6 @@ async fn put_project_pool(State(st): State<Arc<App>>, Path(id): Path<String>, Js
                 }
             }
         }
-        // 角色隔离：决策者实例不得进入 executor / acceptor 优先级列表（裁判不下场）
-        if !crate::roles::overlap_allowed() {
-            for role in ["executor", "acceptor"] {
-                if let Some(ids) = pool.get(role) {
-                    for aid in ids {
-                        if let Some(a) = db::get_agent(&c, aid) {
-                            if crate::roles::is_decision_maker(&a.roles) {
-                                return err(StatusCode::BAD_REQUEST, format!(
-                                    "agent '{}' holds the decision_maker role and may not be enabled as '{role}' in the project pool (裁判不下场); use a separate instance or set DOMO_DM_ROLE_OVERLAP=1",
-                                    a.name));
-                            }
-                        }
-                    }
-                }
-            }
-        }
         db::set_project_pool(&c, &id, &pool);
         events::push_event(&st, &c, &id, None, "project.pool_updated",
             json!({"pool": serde_json::to_value(&pool).unwrap_or(json!({}))}));
@@ -977,11 +957,7 @@ async fn plan_project(
         let a = db::get_agent(&st.db.lock().unwrap(), fid);
         let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "executor") && in_pool(&a.id)).unwrap_or(false);
         if !ok {
-            return err(StatusCode::BAD_REQUEST, "executor_agent_id is not an executor-capable agent (or is a decision_maker, or not in the project agent pool)");
-        }
-        // 角色隔离：决策者不得担任执行者（裁判不下场）
-        if a.as_ref().map(|a| crate::roles::agent_forbidden_for(&a.roles)).unwrap_or(false) {
-            return err(StatusCode::BAD_REQUEST, "executor_agent_id must not be a decision_maker instance (裁判不下场)");
+            return err(StatusCode::BAD_REQUEST, "executor_agent_id is not an executor-capable agent or not in the project agent pool");
         }
     }
     let forced_acceptor: Option<String> = body["acceptor_agent_id"].as_str().map(String::from);
@@ -989,11 +965,7 @@ async fn plan_project(
         let a = db::get_agent(&st.db.lock().unwrap(), fid);
         let ok = a.as_ref().map(|a| a.roles.iter().any(|r| r == "acceptor") && in_pool(&a.id)).unwrap_or(false);
         if !ok {
-            return err(StatusCode::BAD_REQUEST, "acceptor_agent_id is not an acceptor-capable agent (or is a decision_maker, or not in the project agent pool)");
-        }
-        // 角色隔离：决策者不得担任验收者（裁判不下场）
-        if a.as_ref().map(|a| crate::roles::agent_forbidden_for(&a.roles)).unwrap_or(false) {
-            return err(StatusCode::BAD_REQUEST, "acceptor_agent_id must not be a decision_maker instance (裁判不下场)");
+            return err(StatusCode::BAD_REQUEST, "acceptor_agent_id is not an acceptor-capable agent or not in the project agent pool");
         }
         if forced_executor.as_deref() == Some(fid) {
             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
@@ -1105,8 +1077,7 @@ async fn plan_project(
     }
 
     // Role assignment by contract: executor rotation among executor-role
-    // instances; acceptor among acceptor-role instances != the task's executor;
-    // decision_maker instances never act as executor/acceptor (DESIGN §6).
+    // instances; acceptor among acceptor-role instances != the task's executor.
     // Missing roles → 400, nothing is written.
     // M4.5：规划**不绑定 agent**——任务执行时按「角色 + 项目池优先级」动态解析；
     // 只有人类显式指定（规划台选择 / 任务编辑）才固定（agent_pinned）。
@@ -1123,8 +1094,6 @@ async fn plan_project(
     // any failure rolls the whole proposal back.
     let mut created: Vec<Task> = {
         let c = st.db.lock().unwrap();
-        // M3：项目具备执行者/验收者角色候选时，需验收的规划任务进入协商
-        let negotiable = crate::negotiation::possible(&c, &id);
         let run = || -> Result<Vec<Task>, Response> {
             let tx = c.unchecked_transaction()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("begin transaction: {e}")))?;
@@ -1152,9 +1121,6 @@ async fn plan_project(
                     acceptor_agent_id: acceptor.clone(),
                     acceptance_required: pt.acceptance_required,
                     acceptance_criteria: pt.criteria.clone(),
-                    // M3：需验收的规划任务进入协商（executor↔acceptor），一致后才 READY
-                    negotiation_status: if pt.acceptance_required && negotiable { "pending".into() } else { "agreed".into() },
-                    negotiation_round: 0,
                     execution_plan: None,
                     plan_rejection_count: 0,
                     scope_repos: pt.scope_repos.clone(),
@@ -1169,13 +1135,13 @@ async fn plan_project(
                     created_at: db::now(),
                 };
                 c.execute(
-                    "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                    "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                     rusqlite::params![
                         t.id, t.project_id, t.milestone_id, t.title, t.description,
                         db::jstring(&Value::Array(t.depends_on.iter().map(|d| Value::String(d.clone())).collect())),
                         t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
-                        t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
+                        t.acceptance_required as i64, t.acceptance_criteria,
                         t.status, t.attempt, t.rejection_count, t.failure_count,
                         db::jstring(&Value::Array(Vec::new())), t.created_at, t.agent_pinned as i64
                     ],
@@ -1453,11 +1419,6 @@ pub(crate) fn apply_replan_changes(
                 }
                 let (executor, acceptor) = (None::<String>, None::<String>);
                 let _ = rot;
-                // M3：项目具备执行者/验收者候选时，需验收的新增任务进入协商
-                let negotiable = {
-                    let c = st.db.lock().unwrap();
-                    crate::negotiation::possible(&c, &id)
-                };
                 let t = Task {
                     id: db::new_id("tsk_"),
                     project_id: id.to_string(),
@@ -1470,9 +1431,6 @@ pub(crate) fn apply_replan_changes(
                     acceptor_agent_id: acceptor,
                     acceptance_required,
                     acceptance_criteria: criteria,
-                    // M3：重规划新增任务默认进入协商（executor↔acceptor）
-                    negotiation_status: if acceptance_required && negotiable { "pending".into() } else { "agreed".into() },
-                    negotiation_round: 0,
                     execution_plan: None,
                     plan_rejection_count: 0,
                     scope_repos: Vec::new(),
@@ -1501,10 +1459,6 @@ pub(crate) fn apply_replan_changes(
                     }
                     events::push_event(&st, &c, &id, Some(&t.id), "task.created",
                         json!({"title": t.title, "source": source, "depends_on": t.depends_on}));
-                    if !t.acceptance_required {
-                        decision::ensure(&st, &c, &t, "exemption",
-                            json!({"reason": "task requests acceptance exemption (acceptance_required=false)", "title": t.title.clone()}));
-                    }
                     // 重规划可能在项目 completed 后补入新任务：回到 running 让调度器接管
                     reopen_if_completed(&st, &c, &id);
                 }
@@ -1560,10 +1514,6 @@ pub(crate) fn apply_replan_changes(
                         rusqlite::params![t.id, t.title, t.description, db::jstring(&Value::Array(t.depends_on.iter().map(|d| Value::String(d.clone())).collect())),
                                 t.acceptance_required as i64, t.acceptance_criteria],
                     ).map_err(|e| format!("update failed: {e}"))?;
-                    if !t.acceptance_required {
-                        decision::ensure(&st, &c, &t, "exemption",
-                            json!({"reason": "task requests acceptance exemption (acceptance_required=false)", "title": t.title.clone(), "source": source}));
-                    }
                     events::push_event(&st, &c, &t.project_id, Some(&t.id), "task.updated",
                         json!({"source": source}));
                     Ok(t)
@@ -1635,13 +1585,13 @@ async fn intervene_apply(
 
 fn insert_task_row(c: &rusqlite::Connection, t: &Task) -> Result<(), String> {
     c.execute(
-        "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+        "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         rusqlite::params![
             t.id, t.project_id, t.milestone_id, t.title, t.description,
             db::jstring(&Value::Array(t.depends_on.iter().map(|d| Value::String(d.clone())).collect())),
             t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
-            t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
+            t.acceptance_required as i64, t.acceptance_criteria,
             t.status, t.attempt, t.rejection_count, t.failure_count,
             db::jstring(&Value::Array(Vec::new())), t.created_at, t.agent_pinned as i64
         ],
@@ -2013,19 +1963,12 @@ fn validate_dep_ids(c: &rusqlite::Connection, project_id: &str, deps: &[String])
 }
 
 fn validate_agent_roles(c: &rusqlite::Connection, executor: Option<&str>, acceptor: Option<&str>) -> Result<(), String> {
-    // 角色隔离优先报错：决策者实例即使被授予了 executor/acceptor 角色也绝不下场
     if let Some(e) = executor {
         let Some(a) = db::get_agent(c, e) else { return Err("executor agent not found".into()); };
-        if crate::roles::agent_forbidden_for(&a.roles) {
-            return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", a.name));
-        }
         if !a.roles.iter().any(|r| r == "executor") { return Err("executor agent lacks 'executor' role".into()); }
     }
     if let Some(a) = acceptor {
         let Some(ag) = db::get_agent(c, a) else { return Err("acceptor agent not found".into()); };
-        if crate::roles::agent_forbidden_for(&ag.roles) {
-            return Err(format!("agent '{}' holds the decision_maker role: a decision maker may not execute or accept tasks in the same project (裁判不下场); register a separate instance or set DOMO_DM_ROLE_OVERLAP=1", ag.name));
-        }
         if !ag.roles.iter().any(|r| r == "acceptor") { return Err("acceptor agent lacks 'acceptor' role".into()); }
     }
     if let (Some(e), Some(a)) = (executor, acceptor) {
@@ -2082,22 +2025,6 @@ async fn create_task(
                 None => return err(StatusCode::BAD_REQUEST, "milestone not found"),
             }
         }
-        let negotiation_status = match body["negotiation_status"].as_str() {
-            Some(v @ ("pending" | "agreed" | "failed")) => v.to_string(),
-            Some(_) => return err(StatusCode::BAD_REQUEST, "negotiation_status must be pending|agreed|failed"),
-            // M3 默认：需验收且具备协商条件 → 进入协商（PLANNED=协商中）；
-            // 无需验收 / 项目缺少执行者或验收者角色（无法协商）→ 视为一致。
-            None => {
-                if accept_required
-                    && ((executor.is_some() && acceptor.is_some())
-                        || crate::negotiation::possible(&c, &id))
-                {
-                    "pending".to_string()
-                } else {
-                    "agreed".to_string()
-                }
-            }
-        };
         let pinned = executor.is_some();
         let t = Task {
             id: db::new_id("tsk_"),
@@ -2111,8 +2038,6 @@ async fn create_task(
             acceptor_agent_id: acceptor,
             acceptance_required: accept_required,
             acceptance_criteria: body["acceptance_criteria"].as_str().map(String::from),
-            negotiation_status,
-            negotiation_round: 0,
             execution_plan: None,
             plan_rejection_count: 0,
             scope_repos: Vec::new(),
@@ -2127,13 +2052,13 @@ async fn create_task(
             created_at: db::now(),
         };
         c.execute(
-            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,negotiation_status,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+            "INSERT INTO tasks (id,project_id,milestone_id,title,description,depends_on,assignee_role,executor_agent_id,acceptor_agent_id,acceptance_required,acceptance_criteria,status,attempt,rejection_count,failure_count,artifacts,created_at,agent_pinned)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             rusqlite::params![
                 t.id, t.project_id, t.milestone_id, t.title, t.description,
                 db::jstring(&serde_json::to_value(&t.depends_on).unwrap()),
                 t.assignee_role, t.executor_agent_id, t.acceptor_agent_id,
-                t.acceptance_required as i64, t.acceptance_criteria, t.negotiation_status,
+                t.acceptance_required as i64, t.acceptance_criteria,
                 t.status, t.attempt, t.rejection_count, t.failure_count,
                 db::jstring(&serde_json::to_value(&t.artifacts).unwrap()), t.created_at,
                 t.agent_pinned as i64
@@ -2147,24 +2072,8 @@ async fn create_task(
             }
             db::set_task_checks(&c, &t.id, arr);
         }
-        // 协商机制已退场（DESIGN §9）：新建任务的标准由人/规划直接给出，不再阻塞在 PLANNED
-        let _ = c.execute("UPDATE tasks SET negotiation_status='agreed' WHERE id=?1", rusqlite::params![t.id]);
-        let mut t = t;
-        t.negotiation_status = "agreed".into();
         events::push_event(&st, &c, &id, Some(&t.id), "task.created",
             json!({"title": t.title, "depends_on": t.depends_on}));
-        if !t.acceptance_required {
-            // 免验收不是自授特权：登记豁免裁定请求，由决策者 agent 裁定（DESIGN §6）
-            decision::ensure(&st, &c, &t, "exemption",
-                json!({"reason": "task requests acceptance exemption (acceptance_required=false)", "title": t.title.clone()}));
-        }
-        if t.negotiation_status == "failed" {
-            // 验收标准协商失败：决策者给出最终标准（或否决），未裁定前不开工
-            decision::ensure(&st, &c, &t, "negotiation_failed",
-                json!({"reason": "acceptance criteria negotiation failed",
-                       "proposed_criteria": body["acceptance_criteria"].clone(),
-                       "title": t.title.clone()}));
-        }
         if let Some(mid) = &t.milestone_id {
             db::sync_milestone_task_ids(&c, &id);
             events::push_event(&st, &c, &id, Some(&t.id), "milestone.task_linked",
@@ -2189,8 +2098,6 @@ async fn get_agent_output(State(st): State<Arc<App>>, Path(id): Path<String>) ->
 async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let c = st.db.lock().unwrap();
     let Some(t) = db::get_task(&c, &id) else { return err(StatusCode::NOT_FOUND, "task not found"); };
-    // M3 协商：把轮次记录随详情返回，前端据此在任务详情展示协商过程
-    let rounds = negotiation::history(&c, &id);
     let rec = db::recovery_state(&c, &id);
     // M5：归档的 agent 原始输出（模型输出已由 DOMO 获得 → 自行存档，供审计回放与结论复核）
     let outputs: Vec<Value> = db::list_agent_outputs(&c, &id, 10)
@@ -2204,18 +2111,10 @@ async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
             o
         })
         .collect();
-    let negotiation = json!({
-        "status": t.negotiation_status,
-        "round": t.negotiation_round,
-        "max_rounds": negotiation::MAX_NEGOTIATION_ROUNDS,
-        "acceptance_criteria": t.acceptance_criteria,
-        "rounds": rounds,
-    });
     let body = json!({
         "task": t, "logs": db::task_logs(&c, &id), "agent_outputs": outputs,
         "events": db::list_events(&c, None, Some(&id)),
         "guidance": db::list_guidance(&c, &id),
-        "negotiation": negotiation,
         "acceptance_checks": db::get_task_checks(&c, &id),
         "acceptance_evidence": db::latest_acceptance_evidence(&c, &id),
         // M4：三档恢复状态 + 当前在途 worker 句柄数（同一 task 恒 ≤1）
@@ -2243,19 +2142,9 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
         let role_edit = body["executor_agent_id"].is_string() || body["acceptor_agent_id"].is_string();
         let text_edit = body["title"].is_string() || body["description"].is_string()
             || body["acceptance_criteria"].is_string() || !body["depends_on"].is_null()
-            || body.get("milestone_id").is_some() || body["negotiation_status"].is_string();
+            || body.get("milestone_id").is_some();
         if text_edit && t.status != "planned" && t.status != "ready" {
-            return err(StatusCode::CONFLICT, "title/description/depends_on/acceptance_criteria/negotiation_status are only editable before execution starts (use inbox adjudication for suspended/escalated tasks)");
-        }
-        if let Some(v) = body["negotiation_status"].as_str() {
-            if !matches!(v, "pending" | "agreed" | "failed") {
-                return err(StatusCode::BAD_REQUEST, "negotiation_status must be pending|agreed|failed");
-            }
-            // 重新进入协商则清零已完成轮次，让协商从头开始（历史事件仍保留可回放）
-            if v == "pending" && t.negotiation_status != "pending" {
-                t.negotiation_round = 0;
-            }
-            t.negotiation_status = v.to_string();
+            return err(StatusCode::CONFLICT, "title/description/depends_on/acceptance_criteria are only editable before execution starts (use inbox adjudication for suspended/escalated tasks)");
         }
         if !body["depends_on"].is_null() {
             let new_deps: Vec<String> = body["depends_on"].as_array()
@@ -2323,20 +2212,14 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
         if let Some(v) = body["description"].as_str() { t.description = v.to_string(); }
         if let Some(v) = body["acceptance_criteria"].as_str() { t.acceptance_criteria = Some(v.to_string()); }
         let _ = c.execute(
-            "UPDATE tasks SET title=?2, description=?3, depends_on=?4, executor_agent_id=?5, acceptor_agent_id=?6, acceptance_criteria=?7, milestone_id=?8, negotiation_status=?9, negotiation_round=?10, agent_pinned=?11 WHERE id=?1",
+            "UPDATE tasks SET title=?2, description=?3, depends_on=?4, executor_agent_id=?5, acceptor_agent_id=?6, acceptance_criteria=?7, milestone_id=?8, agent_pinned=?9 WHERE id=?1",
             rusqlite::params![
                 t.id, t.title, t.description,
                 db::jstring(&serde_json::to_value(&t.depends_on).unwrap()),
                 t.executor_agent_id, t.acceptor_agent_id, t.acceptance_criteria, t.milestone_id,
-                t.negotiation_status, t.negotiation_round, t.agent_pinned as i64
+                t.agent_pinned as i64
             ],
         );
-        if t.negotiation_status == "failed" {
-            decision::ensure(&st, &c, &t, "negotiation_failed",
-                json!({"reason": "acceptance criteria negotiation failed",
-                       "proposed_criteria": body["acceptance_criteria"].clone(),
-                       "title": t.title.clone(), "source": "patch"}));
-        }
         if let Some(arr) = body["acceptance_checks"].as_array() {
             for chk in arr {
                 if let Err(e) = validate_check(chk) {
@@ -2355,20 +2238,6 @@ async fn patch_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bod
         st.wake();
     }
     ok(t)
-}
-
-/// 内部写指导（决策者裁定回传等场景；不校验 HTTP 层条件）。
-pub fn add_guidance_internal(conn: &rusqlite::Connection, task_id: &str, text: &str) {
-    let g = crate::models::Guidance {
-        id: db::new_id("gd_"),
-        task_id: task_id.to_string(),
-        text: text.to_string(),
-        created_at: db::now(),
-    };
-    let _ = conn.execute(
-        "INSERT INTO guidance (id,task_id,text,created_at) VALUES (?1,?2,?3,?4)",
-        rusqlite::params![g.id, g.task_id, g.text, g.created_at],
-    );
 }
 
 async fn add_guidance(State(st): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
@@ -2524,63 +2393,6 @@ async fn promote_knowledge(State(st): State<Arc<App>>, Path(id): Path<String>) -
     ok(k2)
 }
 
-/// 验收标准协商：failed → 决策者裁决（任务在裁定前不开工）；
-/// agreed → 协商一致放行（可同时写入 acceptance_criteria）。
-async fn negotiate_task(State(st): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
-    let status = body["status"].as_str().unwrap_or("failed");
-    if !matches!(status, "pending" | "agreed" | "failed") {
-        return err(StatusCode::BAD_REQUEST, "status must be pending|agreed|failed");
-    }
-    let criteria = body["acceptance_criteria"].as_str().map(String::from);
-    let c = st.db.lock().unwrap();
-    let Some(t) = db::get_task(&c, &id) else { return err(StatusCode::NOT_FOUND, "task not found"); };
-    if db::get_project(&c, &t.project_id).map(|p| p.status) == Some("archived".into()) {
-        return err(StatusCode::CONFLICT, "project is archived (read-only)");
-    }
-    reopen_if_completed(&st, &c, &t.project_id);
-    if t.status == "done" || t.status == "cancelled" {
-        return err(StatusCode::CONFLICT, "terminal tasks are read-only");
-    }
-    if status == "failed" && (t.status != "planned" && t.status != "ready") {
-        return err(StatusCode::CONFLICT, "negotiation can only fail before execution starts");
-    }
-    let reset_round = status == "pending" && t.negotiation_status != "pending";
-    let _ = c.execute(
-        "UPDATE tasks SET negotiation_status=?2, acceptance_criteria=?3, negotiation_round=CASE WHEN ?4 THEN 0 ELSE negotiation_round END WHERE id=?1",
-        rusqlite::params![t.id, status, criteria.clone().or(t.acceptance_criteria.clone()), reset_round],
-    );
-    let mut t2 = t.clone();
-    t2.negotiation_status = status.into();
-    if reset_round {
-        t2.negotiation_round = 0;
-    }
-    if criteria.is_some() {
-        t2.acceptance_criteria = criteria;
-    }
-    events::push_event(&st, &c, &t.project_id, Some(&t.id), "task.negotiation_changed",
-        json!({"negotiation_status": status, "acceptance_criteria": t2.acceptance_criteria, "by": "human"}));
-    let decision = if status == "failed" {
-        let existing = db::task_decision(&c, &t.id, "negotiation_failed");
-        if existing.is_none() {
-            let d = decision::request(&st, &c, &t.project_id, Some(&t.id), "negotiation_failed",
-                json!({"reason": "acceptance criteria negotiation failed",
-                       "proposed_criteria": t2.acceptance_criteria, "title": t.title}));
-            events::send_task(&st, &t2);
-            drop(c);
-            st.wake();
-            return ok(json!({"task": t2, "decision": d}));
-        }
-        existing
-    } else {
-        None
-    };
-    events::send_task(&st, &t2);
-    drop(c);
-    st.wake();
-    ok(json!({"task": t2, "decision": decision}))
-}
-
-/// shared path for human accept / reject: mirrors agent acceptance semantics
 fn human_verdict(st: &Arc<App>, id: &str, accept: bool, comment: Option<&str>) -> Response {
     let c = st.db.lock().unwrap();
     let Some(t) = db::get_task(&c, id) else { return err(StatusCode::NOT_FOUND, "task not found"); };
@@ -2645,59 +2457,11 @@ async fn task_reject(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bo
     human_verdict(&st, &id, false, Some(comment))
 }
 
-// ---------- decisions (M3 决策者自动裁决通道) ----------
 
-/// GET /api/projects/{id}/decisions[?status=&kind=]：决策请求全量（可查审计）。
-async fn get_project_decisions(
-    State(st): State<Arc<App>>,
-    Path(id): Path<String>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let c = st.db.lock().unwrap();
-    if db::get_project(&c, &id).is_none() {
-        return err(StatusCode::NOT_FOUND, "project not found");
-    }
-    let out: Vec<Value> = db::list_decisions(&c, Some(&id))
-        .into_iter()
-        .filter(|d| q.get("status").map(|s| s == &d.status).unwrap_or(true))
-        .filter(|d| q.get("kind").map(|s| s == &d.kind).unwrap_or(true))
-        .map(|d| serde_json::to_value(&d).unwrap_or(json!({})))
-        .collect();
-    ok(out)
-}
-
-/// POST /api/tasks/{id}/decisions：以任务为上下文登记裁定请求
-/// （豁免 / 协商失败 / 任务级变更复核），战略事项直接转人工。
-async fn post_task_decision(
-    State(st): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    let c = st.db.lock().unwrap();
-    let Some(t) = db::get_task(&c, &id) else {
-        return err(StatusCode::NOT_FOUND, "task not found");
-    };
-    if db::get_project(&c, &t.project_id).map(|p| p.status) == Some("archived".into()) {
-        return err(StatusCode::CONFLICT, "project is archived (read-only)");
-    }
-    match submit_decision(&st, &c, &t.project_id, Some(&t), &body) {
-        Ok(v) => {
-            drop(c);
-            st.wake();
-            ok(v)
-        }
-        Err((status, msg)) => err(status, msg),
-    }
-}
-
-/// POST /api/tasks/{id}/replan：executor/acceptor 上报「发现规划问题」，请求重规划。
+/// POST /api/tasks/{id}/replan：executor/acceptor 上报「发现规划问题」。
 ///
-/// 生成一条 kind=`replan` 的决策请求并写入 `replan.proposed`：
-/// - tactical（不触及里程碑/项目目标）→ pending，交决策者 agent 自决；
-/// - strategic（任务挂里程碑 或 请求/建议变更触及里程碑/项目目标）→ 落库即转人工收件箱。
-///
-/// 批准后由 `replan::scan` 派发规划并落地（新任务带验收 + DAG 环校验 + 复用规划会话）；
-/// 拒绝则关闭请求、通知上报者，原任务流程不动。同一任务的未决重规划请求幂等去重。
+/// 生成一条 kind=`replan` 的人工收件箱条目（payload.kind=replan_report）；人批准后
+/// `replan::scan` 派发规划并落地，否决则关闭请求。同一任务的未决请求幂等去重。
 async fn report_task_replan(
     State(st): State<Arc<App>>,
     Path(id): Path<String>,
@@ -2716,14 +2480,6 @@ async fn report_task_replan(
     let reason = body["reason"].as_str().map(str::trim).unwrap_or("");
     if reason.is_empty() {
         return err(StatusCode::BAD_REQUEST, "reason is required");
-    }
-    // 幂等：同一任务已有未决（pending/escalated）的重规划请求 → 直接返回，避免重复登记
-    if let Some(existing) = db::list_decisions(&c, Some(&t.project_id)).into_iter().find(|d| {
-        d.kind == "replan"
-            && d.task_id.as_deref() == Some(t.id.as_str())
-            && (d.status == "pending" || d.status == "escalated")
-    }) {
-        return ok(json!({"decision": existing, "deduplicated": true}));
     }
     let proposed_changes = body
         .get("proposed_changes")
@@ -2757,132 +2513,10 @@ async fn report_task_replan(
             "task_title": t.title,
             "scope": scope,
         }));
-    let d = decision::request_scoped(&st, &c, &t.project_id, Some(&t.id), "replan", &scope, request);
-    if scope == "strategic" {
-        let detail = format!(
-            "执行中重规划触及里程碑/项目目标（{}），决策者不得自决，转人工裁决",
-            reasons.join(", ")
-        );
-        decision::escalate_to_human(&st, &c, &d, &reasons, &detail);
-    }
-    let fresh = db::get_decision(&c, &d.id).unwrap_or(d);
+    let (item, deduplicated) = replan::open_request(&st, &c, &t.project_id, &t, request, &scope);
     drop(c);
     st.wake();
-    ok(json!({"decision": fresh, "reasons": reasons, "scope": scope}))
-}
-
-/// POST /api/projects/{id}/decisions：项目级决策请求（task_id 可选）。
-/// 没有任务归属的变更复核一律按战略事项转人工。
-async fn post_project_decision(
-    State(st): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    let c = st.db.lock().unwrap();
-    let Some(p) = db::get_project(&c, &id) else {
-        return err(StatusCode::NOT_FOUND, "project not found");
-    };
-    if p.status == "archived" {
-        return err(StatusCode::CONFLICT, "project is archived (read-only)");
-    }
-    let task = body["task_id"]
-        .as_str()
-        .map(String::from)
-        .and_then(|tid| db::get_task(&c, &tid))
-        .filter(|t| t.project_id == id);
-    if body["task_id"].is_string() && task.is_none() {
-        return err(StatusCode::BAD_REQUEST, "task_id does not belong to this project");
-    }
-    match submit_decision(&st, &c, &id, task.as_ref(), &body) {
-        Ok(v) => {
-            drop(c);
-            st.wake();
-            ok(v)
-        }
-        Err((status, msg)) => err(status, msg),
-    }
-}
-
-/// 登记 + 权限分层：战术事项 pending 等待决策者 agent 裁定；
-/// 战略事项（触及已确认里程碑/项目目标/新增 agent，或无任务归属）
-/// 落库即 escalated 并投递决策收件箱，决策者不得自决。
-fn submit_decision(
-    st: &Arc<App>,
-    c: &rusqlite::Connection,
-    project_id: &str,
-    task: Option<&Task>,
-    body: &Value,
-) -> Result<Value, (StatusCode, String)> {
-    const KINDS: [&str; 3] = ["exemption", "negotiation_failed", "change_review"];
-    reopen_if_completed(st, c, project_id);
-    let kind = body["kind"].as_str().unwrap_or("change_review");
-    if !KINDS.contains(&kind) {
-        return Err((StatusCode::BAD_REQUEST, "kind must be exemption|negotiation_failed|change_review".into()));
-    }
-    let task_terminal = task
-        .map(|t| t.status == "done" || t.status == "cancelled")
-        .unwrap_or(false);
-    if task_terminal && kind != "change_review" {
-        return Err((StatusCode::CONFLICT, format!("task '{}' is terminal", task.map(|t| t.title.as_str()).unwrap_or(""))));
-    }
-    let proposal = body
-        .get("proposal")
-        .filter(|v| v.is_object())
-        .cloned()
-        .or_else(|| body.get("request").filter(|v| v.is_object()).cloned())
-        .unwrap_or_else(|| body.clone());
-
-    if kind == "change_review" {
-        let (mut scope, mut reasons) = decision::classify_change(task, &proposal);
-        if task.is_none() && scope == "tactical" {
-            scope = "strategic".into();
-            reasons.push("no_task_reference".into());
-        }
-        if scope == "tactical" && task_terminal {
-            return Err((StatusCode::CONFLICT, "task is terminal: nothing left to review".into()));
-        }
-        // decision.request 形如 {"proposal": {...}} —— 裁定落地（apply_change）按此读取
-        let request = json!({"proposal": proposal, "reasons": reasons});
-        let d = decision::request_scoped(
-            st,
-            c,
-            project_id,
-            task.map(|t| t.id.as_str()),
-            kind,
-            &scope,
-            request,
-        );
-        if scope == "strategic" {
-            let detail = format!(
-                "任务级变更复核触及战略事项（{}），决策者不得自决，转人工裁决",
-                reasons.join(", ")
-            );
-            decision::escalate_to_human(st, c, &d, &reasons, &detail);
-        }
-        let fresh = db::get_decision(c, &d.id).unwrap_or(d);
-        return Ok(json!({"decision": fresh, "reasons": reasons}));
-    }
-
-    // 豁免 / 协商失败：按任务幂等登记（已有裁定请求则直接返回）
-    let Some(t) = task else {
-        return Err((StatusCode::BAD_REQUEST, format!("{kind} decisions require a task_id")));
-    };
-    if let Some(existing) = db::task_decision(c, &t.id, kind) {
-        return Ok(json!({"decision": existing, "deduplicated": true}));
-    }
-    let req = match kind {
-        "exemption" => json!({
-            "reason": "task requests acceptance exemption (acceptance_required=false)",
-            "title": t.title,
-        }),
-        _ => json!({
-            "reason": "acceptance criteria negotiation failed",
-            "proposed_criteria": proposal.get("proposed_criteria").cloned().unwrap_or(json!(null)),
-            "title": t.title,
-        }),
-    };
-    let d = decision::request(st, c, project_id, Some(&t.id), kind, req);
-    Ok(json!({"decision": d, "deduplicated": false}))
+    ok(json!({"inbox": item, "deduplicated": deduplicated, "reasons": reasons, "scope": scope}))
 }
 
 // ---------- agents ----------
@@ -2926,10 +2560,6 @@ async fn create_agent(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Re
     if adapter == "opencode" && !body["capabilities"]["supports_resume"].is_boolean() {
         capabilities.supports_resume = true;
     }
-    // 角色隔离：决策者不得同时担任同一项目的 executor 或 acceptor（DOMO_DM_ROLE_OVERLAP=1 可显式打开例外）
-    if let Err(e) = crate::roles::check_roles(&roles) {
-        return err(StatusCode::BAD_REQUEST, e);
-    }
     let a = Agent {
         id: db::new_id("agt_"),
         name: name.trim().into(),
@@ -2954,17 +2584,6 @@ async fn create_agent(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Re
         ).unwrap();
         events::push_event(&st, &c, "-", None, "agent.created",
             json!({"id": a.id, "name": a.name, "roles": a.roles}));
-        // 决策者实例恢复/新登记：把因降级转 down 的裁定请求重新放回待裁定队列
-        if a.roles.iter().any(|r| r == "decision_maker") {
-            let n = c.execute(
-                "UPDATE decisions SET status='pending', attempt=0, resolved_at=NULL WHERE status='down'",
-                [],
-            ).unwrap_or(0);
-            if n > 0 {
-                events::push_event(&st, &c, "-", None, "decision.requeued",
-                    json!({"count": n, "reason": "decision_maker instance registered"}));
-            }
-        }
     }
     st.wake();
     ok(a)
@@ -2986,10 +2605,6 @@ async fn patch_agent(State(st): State<Arc<App>>, Path(id): Path<String>, Json(bo
             .unwrap_or_default();
         if roles.is_empty() || roles.iter().any(|r| !ROLES.contains(&r.as_str())) {
             return err(StatusCode::BAD_REQUEST, format!("roles must be a non-empty subset of {ROLES:?}"));
-        }
-        // 角色隔离：决策者不得与执行/验收角色并存（DOMO_DM_ROLE_OVERLAP=1 例外）
-        if let Err(e) = crate::roles::check_roles(&roles) {
-            return err(StatusCode::BAD_REQUEST, e);
         }
         let roles_set: std::collections::HashSet<String> = roles.iter().cloned().collect();
         // 悬空检查：撤销 executor/acceptor 角色时，不得仍有非终态任务以此身份引用该实例
@@ -3181,13 +2796,6 @@ fn inbox_actions(i: &crate::models::InboxItem) -> Vec<Value> {
     if i.kind == "milestone_gate" {
         return vec![act("pass", "确认通过"), act("reject", "退回重规划")];
     }
-    if i.payload.get("decision_id").and_then(|v| v.as_str()).is_some() {
-        let kind = i.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        return match kind {
-            "merge_conflict" => vec![act("approve", "退回执行者解决冲突"), act("deny", "转人工处理")],
-            _ => vec![act("approve", "批准"), act("deny", "否决"), act("retry", "恢复后重试自动裁决")],
-        };
-    }
     match i.kind.as_str() {
         "escalation" => {
             let reason = i.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("");
@@ -3205,8 +2813,13 @@ fn inbox_actions(i: &crate::models::InboxItem) -> Vec<Value> {
                 json!({"id":"abandon","label":"放弃任务"}),
             ]
         }
-        "replan" => vec![json!({"id":"approve","label":"批准"}), json!({"id":"deny","label":"否决"})],
-        "decision_maker_down" => vec![json!({"id":"retry","label":"重试自动裁决"})],
+        "replan" => {
+            if i.payload.get("planning").and_then(|v| v.as_str()) == Some("pending") {
+                vec![]
+            } else {
+                vec![json!({"id":"approve","label":"批准"}), json!({"id":"deny","label":"否决"})]
+            }
+        }
         _ => vec![json!({"id":"close","label":"确认处理"})],
     }
 }
@@ -3287,58 +2900,49 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
             }
         }
         drop(c);
-    } else if item.payload.get("decision_id").and_then(|v| v.as_str()).is_some() {
-        // 决策收件箱（战略升级 / 决策者故障降级）：人工 approve|deny 直接裁定，
-        // 与 agent 裁定走同一落地路径（decision::human_rule，by=human）。
-        let decision_id = item.payload["decision_id"].as_str().unwrap_or_default().to_string();
-        let approve = match resolution {
-            "approve" | "approved" | "accept" | "accepted" | "confirm" | "pass" => Some(true),
-            "deny" | "denied" | "reject" | "rejected" => Some(false),
-            "retry" => None,
+    } else if item.kind == "replan"
+        && (item.payload.get("kind").and_then(|v| v.as_str()) == Some("replan_report")
+            || (item.payload.get("task_id").is_some()
+                && item.payload.get("milestone_id").is_none()
+                && item.payload.get("downstream").is_none()
+                && item.payload.get("abandoned_task_id").is_none()))
+    {
+        // 重规划请求：所有批准/否决都由人做（没有决策者 agent）。
+        match resolution {
+            "approve" | "approved" | "accept" | "accepted" | "pass" => {
+                let mut p = item.payload.clone();
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("approved".into(), json!(true));
+                    obj.insert("approved_by".into(), json!("human"));
+                    obj.insert("note".into(), json!(note));
+                    obj.insert("planning".into(), json!("pending"));
+                }
+                let _ = c.execute(
+                    "UPDATE inbox SET payload=?2 WHERE id=?1",
+                    rusqlite::params![item.id, p.to_string()],
+                );
+                events::push_event(&st, &c, &project_id,
+                    item.payload.get("task_id").and_then(|v| v.as_str()),
+                    "replan.approved", json!({"inbox_id": item.id, "by": "human", "note": note}));
+                payload_out["planning"] = json!("pending");
+            }
+            "deny" | "denied" | "reject" | "rejected" => {
+                if let Some(t) = task.as_ref() {
+                    events::log_line(&st, &c, &t.id, "重规划请求被人否决，维持原规划");
+                }
+                events::push_event(&st, &c, &project_id,
+                    item.payload.get("task_id").and_then(|v| v.as_str()),
+                    "replan.rejected", json!({"inbox_id": item.id, "by": "human", "note": note}));
+                payload_out["planning"] = json!("rejected");
+            }
             other => {
-                if_error = Some(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("unknown decision resolution: {other} (use approve|deny|retry)"),
-                ));
-                None
-            }
-        };
-        if let Some(approve) = approve {
-            let criteria = body["criteria"].as_str().filter(|s| !s.trim().is_empty());
-            match decision::human_rule(&st, &c, &decision_id, approve, note, criteria) {
-                Ok(()) => {
-                    payload_out["decision_id"] = json!(decision_id);
-                    payload_out["decision"] = json!(if approve { "approve" } else { "deny" });
-                }
-                Err(e) => {
-                    drop(c);
-                    return err(StatusCode::CONFLICT, e);
-                }
-            }
-        } else if if_error.is_none() {
-            // retry：把故障/降级的决策重新放回待裁定队列（恢复决策者实例后）
-            let updated = c.execute(
-                "UPDATE decisions SET status='pending', attempt=0, resolved_at=NULL WHERE id=?1 AND status IN ('down','escalated','pending')",
-                rusqlite::params![decision_id],
-            );
-            match updated {
-                Ok(n) if n > 0 => {
-                    payload_out["decision_id"] = json!(decision_id);
-                    payload_out["decision"] = json!("retry");
-                }
-                Ok(_) => {
-                    drop(c);
-                    return err(StatusCode::CONFLICT, "decision is already ruled (or unknown)");
-                }
-                Err(e) => {
-                    drop(c);
-                    return err(StatusCode::INTERNAL_SERVER_ERROR, format!("decision retry failed: {e}"));
-                }
+                if_error = Some(err(StatusCode::BAD_REQUEST,
+                    format!("unknown replan resolution: {other} (use approve|deny)")));
             }
         }
         drop(c);
     } else if item.kind != "escalation" {
-        // replan / other: just mark resolved (release the lock before the tail re-lock)
+        // milestone window / other: just close (release the lock before the tail re-lock)
         drop(c);
     } else {
         let Some(t) = task else {
@@ -3371,21 +2975,13 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, format!("agent '{}' lacks the 'executor' role", ag.name));
                         }
-                        // 角色隔离：决策者不得担任执行者（裁判不下场）
-                        Some(ag) if crate::roles::agent_forbidden_for(&ag.roles) => {
-                            drop(c);
-                            return err(StatusCode::BAD_REQUEST, format!(
-                                "agent '{}' holds the decision_maker role and may not act as executor (裁判不下场)",
-                                ag.name));
-                        }
                         Some(ag) => Some(ag),
                     },
                     None => {
-                        // auto: pick another idle executor-capable instance（排除决策者，角色隔离）
+                        // auto: pick another idle executor-capable instance
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "executor")
-                                && !crate::roles::agent_forbidden_for(&a.roles)
                                 && a.current_task_ids.is_empty()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {
@@ -3432,13 +3028,6 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "candidate agent lacks 'acceptor' role");
                         }
-                        // 角色隔离：决策者不得担任验收者（裁判不下场）
-                        if crate::roles::agent_forbidden_for(&ag.roles) {
-                            drop(c);
-                            return err(StatusCode::BAD_REQUEST, format!(
-                                "agent '{}' holds the decision_maker role and may not act as acceptor (裁判不下场)",
-                                ag.name));
-                        }
                         if ag.id == t.executor_agent_id.clone().unwrap_or_default() {
                             drop(c);
                             return err(StatusCode::BAD_REQUEST, "acceptor must differ from the executor");
@@ -3446,11 +3035,10 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
                         Some(ag)
                     }
                     None => {
-                        // auto: pick another acceptor-capable instance（排除决策者，角色隔离）
+                        // auto: pick another acceptor-capable instance
                         let mut best: Option<Agent> = None;
                         for a in db::list_agents(&c) {
                             if a.roles.iter().any(|r| r == "acceptor")
-                                && !crate::roles::agent_forbidden_for(&a.roles)
                                 && a.id != t.acceptor_agent_id.clone().unwrap_or_default()
                                 && a.id != t.executor_agent_id.clone().unwrap_or_default()
                             {
@@ -3641,8 +3229,7 @@ mod tests {
     /// 复现真实故障形态：LLM 把说明文字与 JSON 混排，甚至夹带第二个伪 JSON。
     #[test]
     fn extract_json_survives_prose_mixed_output() {
-        let raw = "好的，以下是规划：\n任务依赖与状态，新增任务/改依赖后刷新可见；3) 看板/详情能区分 \
-            negotiating/agreed/豁免任务 {状态: 已同意} 并显示协商过程；\n{\"tasks\":[{\"title\":\"T1\",\
+        let raw = "好的，以下是规划：\n任务依赖与状态，新增任务/改依赖后刷新可见；3) 看板/详情显示状态 {状态: 待执行}；\n{\"tasks\":[{\"title\":\"T1\",\
             \"description\":\"d\",\"depends_on\":[],\"acceptance_required\":true,\"acceptance_criteria\":\"c\"}]}";
         let v = extract_json_value(raw).expect("should extract embedded JSON");
         assert_eq!(v["tasks"].as_array().unwrap().len(), 1);
