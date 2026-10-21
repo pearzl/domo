@@ -1,5 +1,6 @@
 mod agents;
 mod api;
+mod backup;
 mod db;
 mod events;
 mod host;
@@ -81,6 +82,8 @@ async fn main() {
     tracing::info!(%log_path, "domo-server starting");
 
     let db_path = std::env::var("DOMO_DB").unwrap_or_else(|_| "data/domo.db".into());
+    // P2：开库前执行待恢复请求（运行中不允许替换数据库）。
+    let _ = backup::apply_pending_restore(&db_path);
     let conn = db::open(&db_path);
     let port: u16 = std::env::var("DOMO_PORT")
         .ok()

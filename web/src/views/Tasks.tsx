@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDomo } from '../store';
 import type { Agent, ApplyResult, AuditEvent, InterveneResult, ReplanReportResult, Task, TaskDetail, TaskFormValue, TaskStatus } from '../types';
-import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
+import { Badge, Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
 import { formatChecks } from '../checks';
 import { TaskDag } from './Dag';
 import { PoolTable } from './PoolTable';
@@ -809,6 +809,21 @@ function TaskDetailDrawer({
             );
           })()}
         </section>
+
+        {(task.knowledge_injected?.length ?? 0) > 0 && (
+          <section className="drawer-section">
+            <h4>本次注入的知识（{task.knowledge_injected!.length}）</h4>
+            <ul className="dep-list">
+              {task.knowledge_injected!.map(k => (
+                <li key={k.id}>
+                  <Badge tone={k.scope === 'global' ? 'purple' : 'blue'}>{k.scope === 'global' ? '全局' : '项目'}</Badge>{' '}
+                  {k.body}
+                  {k.applies_to ? <span className="muted">（{k.applies_to}）</span> : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         <section className="drawer-section">
           <h4>任务计划摘要（执行者制定 · 验收者审查）</h4>

@@ -73,6 +73,10 @@ pub fn router(state: Arc<App>) -> Router {
         .route("/api/inbox", get(list_inbox))
         .route("/api/inbox/{id}/resolve", post(resolve_inbox))
         .route("/api/usage", get(get_usage))
+        .route("/api/backups", get(list_backups).post(create_backup))
+        .route("/api/backups/{name}", axum::routing::delete(delete_backup))
+        .route("/api/backups/{name}/restore", post(restore_backup))
+        .route("/api/system", get(system_info))
         .route("/api/events", get(list_events))
         .route("/api/stream", get(stream))
         .with_state(state)
@@ -267,6 +271,7 @@ async fn create_project(State(st): State<Arc<App>>, Json(body): Json<Value>) -> 
         agent_pool: None,
         repos: Vec::new(),
         queue_priority: 0,
+        hooks: None,
         created_at: db::now(),
     };
     {
@@ -522,6 +527,14 @@ async fn patch_project(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
         let _ = c.execute("UPDATE projects SET queue_priority=?2 WHERE id=?1",
             rusqlite::params![p.id, q]);
         p.queue_priority = q;
+    }
+    if let Some(v) = body.get("hooks") {
+        let hooks = if v.is_null() { None } else if v.is_object() { Some(v.clone()) } else {
+            return err(StatusCode::BAD_REQUEST, "hooks must be an object or null");
+        };
+        let _ = c.execute("UPDATE projects SET hooks=?2 WHERE id=?1",
+            rusqlite::params![p.id, hooks.as_ref().map(|h| h.to_string())]);
+        p.hooks = hooks;
     }
     events::push_event(&st, &c, &p.id, None, "project.updated",
         json!({"name": p.name, "brief": p.brief, "workspace": p.workspace,
@@ -2212,9 +2225,22 @@ async fn get_task_detail(State(st): State<Arc<App>>, Path(id): Path<String>) -> 
             o
         })
         .collect();
+    let events = db::list_events(&c, None, Some(&id));
+    // P3 知识注入可见性：从 prompt.assembled 事件收集 knowledge_ids，回填条目正文。
+    let injected_ids: std::collections::HashSet<String> = events.iter()
+        .filter(|e| e.kind == "prompt.assembled")
+        .flat_map(|e| e.payload.get("knowledge_ids").and_then(|v| v.as_array()).cloned().unwrap_or_default())
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let knowledge_injected: Vec<Value> = db::list_knowledge(&c, &t.project_id)
+        .into_iter()
+        .filter(|k| injected_ids.contains(&k.id))
+        .map(|k| crate::knowledge::entry_payload(&k))
+        .collect();
     let body = json!({
         "task": t, "logs": db::task_logs(&c, &id), "agent_outputs": outputs,
-        "events": db::list_events(&c, None, Some(&id)),
+        "events": events,
+        "knowledge_injected": knowledge_injected,
         "guidance": db::list_guidance(&c, &id),
         "acceptance_checks": db::get_task_checks(&c, &id),
         "acceptance_evidence": db::latest_acceptance_evidence(&c, &id),
@@ -3375,6 +3401,61 @@ async fn get_usage(
         "budget_usd": budget,
         "over_budget": budget.map(|b| cost > b).unwrap_or(false),
         "note": "tokens 由 adapter 提供的 usage 或本地估算；费用按 adapter 返回值汇总",
+    }))
+}
+
+// ---------- backups / system (P2) ----------
+
+async fn list_backups() -> Response {
+    ok(json!({"backups": crate::backup::list(), "dir": crate::backup::backup_dir().display().to_string()}))
+}
+
+async fn create_backup(State(st): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let engineering = body["engineering_id"].as_str().and_then(|eid| {
+        let c = st.db.lock().unwrap();
+        db::get_engineering(&c, eid)
+    });
+    let include_workspace = body["include_workspace"].as_bool().unwrap_or(false);
+    let c = st.db.lock().unwrap();
+    match crate::backup::create(&c, engineering.as_ref(), include_workspace) {
+        Ok(info) => {
+            events::push_event(&st, &c, "", None, "backup.created", info.clone());
+            ok(info)
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn delete_backup(Path(name): Path<String>) -> Response {
+    match crate::backup::remove(&name) {
+        Ok(()) => ok(json!({"deleted": name})),
+        Err(e) => err(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn restore_backup(State(st): State<Arc<App>>, Path(name): Path<String>) -> Response {
+    match crate::backup::request_restore(&name) {
+        Ok(v) => {
+            let c = st.db.lock().unwrap();
+            events::push_event(&st, &c, "", None, "backup.restore_requested",
+                json!({"backup": name, "restart_required": true}));
+            ok(v)
+        }
+        Err(e) => err(StatusCode::CONFLICT, e),
+    }
+}
+
+async fn system_info() -> Response {
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|s| s.to_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    ok(json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "wsl": is_wsl,
+        "data_dir": db::data_dir().display().to_string(),
+        "backup_dir": crate::backup::backup_dir().display().to_string(),
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 

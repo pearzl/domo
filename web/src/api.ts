@@ -26,6 +26,8 @@ import type {
   TaskFormValue,
   UsageSummary,
   Workspace,
+  BackupInfo,
+  SystemInfo,
 } from './types';
 
 const API_BASE = '/api';
@@ -104,13 +106,21 @@ export const api = {
 
   listProjects: () => request<Project[]>('/projects'),
   /** P1 成本与用量汇总（可按项目过滤） */
+  listBackups: () => request<{ backups: BackupInfo[]; dir: string }>('/backups'),
+  createBackup: (body: { engineering_id?: string | null; include_workspace?: boolean }) =>
+    request<BackupInfo>('/backups', 'POST', body),
+  deleteBackup: (name: string) => request<{ deleted: string }>(`/backups/${encodeURIComponent(name)}`, 'DELETE'),
+  restoreBackup: (name: string) =>
+    request<{ requested: boolean; restart_required: boolean; backup: string }>(
+      `/backups/${encodeURIComponent(name)}/restore`, 'POST', {}),
+  systemInfo: () => request<SystemInfo>('/system'),
   getUsage: (projectId?: string) =>
     request<UsageSummary>(`/usage${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
   createProject: (body: { name: string; brief: string; workspace?: Workspace | null; engineering_id?: string | null; agent_pool?: string[] | null }) =>
     request<Project>('/projects', 'POST', body),
   getProject: (id: string) => request<ProjectDetailPayload>(`/projects/${id}`),
   /** PATCH 支持任意状态（archived 拒绝 409） */
-  updateProject: (id: string, body: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; engineering_id?: string | null }) =>
+  updateProject: (id: string, body: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; engineering_id?: string | null; queue_priority?: number; hooks?: { after_complete?: string } | null }) =>
     request<Project>(`/projects/${id}`, 'PATCH', body),
   projectAction: (id: string, action: 'confirm' | 'pause' | 'resume' | 'cancel', force?: boolean) =>
     request<Project>(`/projects/${id}/${action}`, 'POST', force ? { force: true } : {}),

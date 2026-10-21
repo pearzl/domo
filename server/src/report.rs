@@ -775,6 +775,7 @@ mod tests {
             agent_pool: None,
             repos: Vec::new(),
             queue_priority: 0,
+            hooks: None,
             created_at: 0,
         }
     }

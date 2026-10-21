@@ -93,6 +93,8 @@ export interface Project {
   agent_pool?: string[] | null;
   /** P1 队列人工调序：项目整体优先级（越大越先） */
   queue_priority?: number;
+  /** P2 项目级钩子：{after_complete: "shell command"} */
+  hooks?: { after_complete?: string } | null;
   created_at: number;
 }
 
@@ -243,6 +245,8 @@ export interface TaskDetail extends Task {
   acceptance_checks?: AcceptanceCheck[];
   /** 最近一次机械检查结果 */
   acceptance_evidence?: CheckResult[] | null;
+  /** P3：本次任务提示词实际注入的知识条目 */
+  knowledge_injected?: KnowledgeEntry[];
   /** M5：agent 运行归档输出（模型输出由 DOMO 自行存档，供审计回放） */
   agent_outputs?: {
     id: number;
@@ -348,4 +352,26 @@ export interface UsageSummary {
   budget_usd: number | null;
   over_budget: boolean;
   note: string;
+}
+
+/** P2 备份条目 */
+export interface BackupInfo {
+  name: string;
+  created_at: number;
+  db: string;
+  workspace?: string | null;
+  workspace_parent?: string | null;
+  engineering_id?: string | null;
+  engineering_name?: string | null;
+  size: number;
+  format: number;
+}
+
+export interface SystemInfo {
+  os: string;
+  arch: string;
+  wsl: boolean;
+  data_dir: string;
+  backup_dir: string;
+  version: string;
 }

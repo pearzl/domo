@@ -300,6 +300,22 @@ fn scan(state: &Arc<App>) {
             let _ = conn.execute("UPDATE projects SET status='completed' WHERE id=?1", params![project.id]);
             if let Some(p) = db::get_project(&conn, &project.id) {
                 events::push_event(state, &conn, &project.id, None, "project.completed", json!({}));
+                // P2 项目级钩子：完成后动作（异步，失败进收件箱，不阻塞完成）。
+                if let Some(cmd) = p.hooks.as_ref()
+                    .and_then(|h| h.get("after_complete"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                {
+                    let cwd = db::project_workdir(&conn, &p);
+                    if let Some(cwd) = cwd {
+                        run_completion_hook(state.clone(), p.id.clone(), p.name.clone(), cmd.to_string(), cwd);
+                    } else {
+                        events::new_inbox_item(state, &conn, &p.id, "escalation",
+                            json!({"task_id": null, "reason": "project_hook_failed",
+                                   "detail": "项目完成后钩子无法执行：工程没有工作目录"}));
+                    }
+                }
                 events::send_project(state, &p);
                 // M3 项目总结报告：COMPLETED 时自动触发一次（无报告才生成，
                 // 失败靠前端/API 手工重试，不在此处循环重试）。
@@ -1352,6 +1368,60 @@ async fn accept_worker(state: Arc<App>, task: Task, agent: Agent, hid: u64) {
     }
     drop(guard);
     state.wake();
+}
+
+/// P2 完成后钩子：`sh -c <cmd>` 在工程目录执行，60s 超时；事件与失败收件箱。
+fn run_completion_hook(state: Arc<App>, project_id: String, project_name: String, cmd: String, cwd: std::path::PathBuf) {
+    tokio::spawn(async move {
+        {
+            let c = state.db.lock().unwrap();
+            events::push_event(&state, &c, &project_id, None, "project.hook_started",
+                json!({"hook": "after_complete", "cmd": cmd, "cwd": cwd.display().to_string()}));
+        }
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(&cmd).current_dir(&cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await;
+        let c = state.db.lock().unwrap();
+        match result {
+            Err(_) => {
+                events::push_event(&state, &c, &project_id, None, "project.hook_failed",
+                    json!({"hook": "after_complete", "cmd": cmd, "error": "timeout after 60s"}));
+                events::new_inbox_item(&state, &c, &project_id, "escalation",
+                    json!({"task_id": null, "reason": "project_hook_failed",
+                           "detail": format!("项目《{project_name}》完成后钩子超时（60s）：{cmd}")}));
+            }
+            Ok(Err(e)) => {
+                events::push_event(&state, &c, &project_id, None, "project.hook_failed",
+                    json!({"hook": "after_complete", "cmd": cmd, "error": e.to_string()}));
+                events::new_inbox_item(&state, &c, &project_id, "escalation",
+                    json!({"task_id": null, "reason": "project_hook_failed",
+                           "detail": format!("项目《{project_name}》完成后钩子无法启动：{e}")}));
+            }
+            Ok(Ok(out)) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let tail = |s: &str| s.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect::<String>();
+                if out.status.success() {
+                    events::push_event(&state, &c, &project_id, None, "project.hook_completed",
+                        json!({"hook": "after_complete", "cmd": cmd, "exit": out.status.code(), "stdout": tail(&stdout)}));
+                } else {
+                    events::push_event(&state, &c, &project_id, None, "project.hook_failed",
+                        json!({"hook": "after_complete", "cmd": cmd, "exit": out.status.code(),
+                               "stdout": tail(&stdout), "stderr": tail(&stderr)}));
+                    events::new_inbox_item(&state, &c, &project_id, "escalation",
+                        json!({"task_id": null, "reason": "project_hook_failed",
+                               "detail": format!("项目《{project_name}》完成后钩子失败（exit {:?}）：{cmd}", out.status.code()),
+                               "stdout": tail(&stdout), "stderr": tail(&stderr)}));
+                }
+            }
+        }
+        drop(c);
+        state.wake();
+    });
 }
 
 #[cfg(test)]

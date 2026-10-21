@@ -54,7 +54,8 @@ fn migrate(c: &Connection) {
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL, plan_content TEXT, confirmed_at INTEGER,
-            queue_priority INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
+            queue_priority INTEGER NOT NULL DEFAULT 0, hooks TEXT,
+            created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS engineerings (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '',
@@ -126,6 +127,7 @@ fn migrate(c: &Connection) {
     // M6 工程层：项目归属工程（旧数据为 NULL，后续由人迁移）
     add_column_if_missing(c, "projects", "engineering_id", "TEXT");
     add_column_if_missing(c, "projects", "queue_priority", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(c, "projects", "hooks", "TEXT");
     add_column_if_missing(c, "tasks", "queue_priority", "INTEGER NOT NULL DEFAULT 0");
     c.execute_batch("CREATE INDEX IF NOT EXISTS idx_projects_engineering ON projects(engineering_id);")
         .ok();
@@ -328,6 +330,7 @@ fn project_row(r: &Row) -> rusqlite::Result<Project> {
         agent_pool,
         repos,
         queue_priority: r.get("queue_priority").unwrap_or(0),
+        hooks: r.get::<_, Option<String>>("hooks").ok().flatten().and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.get("created_at")?,
     })
 }

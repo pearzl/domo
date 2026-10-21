@@ -39,7 +39,7 @@ import type {
 } from './types';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
-export type ViewId = 'engineering' | 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge' | 'usage';
+export type ViewId = 'engineering' | 'projects' | 'tasks' | 'org' | 'inbox' | 'audit' | 'knowledge' | 'usage' | 'settings';
 /** 任务视图呈现方式：看板 / DAG 图（提升到 store，切页再切回不丢失） */
 export type TasksViewMode = 'kanban' | 'dag';
 /** DAG 布局方向：tb=上下（里程碑横泳道）/ lr=左右（同上看板流向）——同样跨视图保持 */
@@ -110,7 +110,7 @@ export interface DomoStore {
   updateEngineering: (id: string, body: Partial<Omit<Engineering, 'id' | 'created_at'>>) => Promise<boolean>;
   updateProject: (
     id: string,
-    value: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; queue_priority?: number },
+    value: { name?: string; brief?: string; workspace?: Workspace | null; agent_pool?: string[] | null; queue_priority?: number; hooks?: { after_complete?: string } | null },
   ) => Promise<boolean>;
   projectAction: (id: string, action: 'confirm' | 'pause' | 'resume' | 'cancel', force?: boolean) => Promise<void>;
   /** M3 项目总结报告：拉取详情（未生成时返回 null） */

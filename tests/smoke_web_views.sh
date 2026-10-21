@@ -316,6 +316,17 @@ check("成本与用量：项目汇总包含 mock 调用", s == 200 and (usage.ge
 check("成本与用量：按 agent 汇总", s == 200 and len(usage.get("by_agent") or []) > 0, usage)
 check("成本与用量：按任务汇总", s == 200 and len(usage.get("by_task") or []) > 0, usage)
 
+# ---------------------------------------------------------------- backup/system
+s, b = post("/api/backups", {})
+check("备份：创建数据库备份", s == 200 and (b or {}).get("name"), b)
+bname = (b or {}).get("name", "")
+s, bl = get("/api/backups")
+check("备份：列表包含新备份", s == 200 and any(x.get("name") == bname for x in (bl.get("backups") or [])), bl)
+s, sysinfo = get("/api/system")
+check("系统信息：平台/数据目录", s == 200 and (sysinfo or {}).get("os") and (sysinfo or {}).get("data_dir"), sysinfo)
+s, dr = req("DELETE", f"/api/backups/{bname}")
+check("备份：删除", s == 200, (s, dr))
+
 # ---------------------------------------------------------------- SSE realtime
 print("[web-smoke] 9) SSE 实时推送（前端图/负载实时刷新的数据源）")
 frames = sse_frames()

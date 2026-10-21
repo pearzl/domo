@@ -157,6 +157,7 @@ export function ProjectsView() {
     name: string;
     brief: string;
     f: WsFields;
+    hook: string;
   } | null>(null);
 
   async function submitCreate() {
@@ -301,6 +302,7 @@ export function ProjectsView() {
                           project: p,
                           name: p.name,
                           brief: p.brief,
+                          hook: p.hooks?.after_complete ?? '',
                           f: {
                             kind: p.workspace?.kind ?? 'local',
                             path: p.workspace?.path ?? '',
@@ -501,6 +503,14 @@ export function ProjectsView() {
               f={editWs.f}
               set={patch => setEditWs(prev => (prev ? { ...prev, f: { ...prev.f, ...patch } } : prev))}
             />
+            <label>
+              完成后钩子（可选 · 项目完成时执行一次 shell 命令）
+              <input
+                value={editWs.hook}
+                onChange={e => setEditWs(prev => (prev ? { ...prev, hook: e.target.value } : prev))}
+                placeholder="例：npm test（在工程目录执行，60s 超时；失败进收件箱）"
+              />
+            </label>
           </div>
           <div className="row-end">
             <button className="btn" onClick={() => setEditWs(null)}>
@@ -518,6 +528,7 @@ export function ProjectsView() {
                     name: editWs.name.trim(),
                     brief: editWs.brief.trim(),
                     workspace: fieldsToWorkspace(editWs.f),
+                    hooks: editWs.hook.trim() ? { after_complete: editWs.hook.trim() } : null,
                   });
                   if (ok) setEditWs(null);
                 })();

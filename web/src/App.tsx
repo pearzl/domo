@@ -4,6 +4,7 @@ import { EngineeringView } from './views/Engineering';
 import { InboxView } from './views/Inbox';
 import { KnowledgeView } from './views/Knowledge';
 import { UsageView } from './views/Usage';
+import { SettingsView } from './views/Settings';
 import { OrgView } from './views/Org';
 import { ProjectsView } from './views/Projects';
 import { TaskFormModal as TasksFormModal, TasksView, type TaskFormState } from './views/Tasks';
@@ -19,6 +20,7 @@ const VIEW_TITLES: Record<ViewId, string> = {
   audit: '审计日志',
   knowledge: '项目知识库',
   usage: '成本与用量',
+  settings: '设置',
 };
 
 function Sidebar() {
@@ -36,6 +38,7 @@ function Sidebar() {
     { id: 'knowledge', label: '知识库' },
     { id: 'audit', label: '审计' },
     { id: 'usage', label: '成本与用量' },
+    { id: 'settings', label: '设置' },
   ];
   return (
     <aside className="sidebar">
@@ -272,6 +275,7 @@ function Shell() {
             {view === 'knowledge' && <KnowledgeView />}
             {view === 'audit' && <AuditView />}
             {view === 'usage' && <UsageView />}
+            {view === 'settings' && <SettingsView />}
           </ViewErrorBoundary>
         </div>
       </main>

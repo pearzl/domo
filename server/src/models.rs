@@ -60,6 +60,9 @@ pub struct Project {
     /// P1 队列人工调序：项目整体优先级（越大越先；默认 0）
     #[serde(default)]
     pub queue_priority: i64,
+    /// P2 项目级钩子：{"after_complete": "shell command"}
+    #[serde(default)]
+    pub hooks: Option<Value>,
     pub created_at: i64,
 }
 
