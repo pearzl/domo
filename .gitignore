@@ -22,3 +22,11 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# ---------- AI 辅助文档（仅本地） ----------
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.windsurfrules
+.github/copilot-instructions.md
