@@ -79,6 +79,7 @@ export interface DomoStore {
   /** M3 项目总结报告：按项目缓存（SSE report 事件实时刷新） */
   reports: Record<string, Report>;
 
+  selectedEngineeringId: string | null;
   selectedProjectId: string | null;
   selectedTaskId: string | null;
   taskDetail: TaskDetail | null;
@@ -93,6 +94,7 @@ export interface DomoStore {
   focusedInboxId: string | null;
   focusInbox: (itemId: string) => void;
 
+  selectEngineering: (id: string) => void;
   selectProject: (id: string) => void;
   openTask: (id: string) => void;
   closeTask: () => void;
@@ -194,8 +196,19 @@ export function DomoProvider({ children }: { children: ReactNode }) {
   const [logsByTask, setLogsByTask] = useState<Record<string, LogLine[]>>({});
   const [reports, setReports] = useState<Record<string, Report>>({});
 
+  const [selectedEngineeringId, setSelectedEngineeringId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
+  // 三层导航：选中项目时自动定位其工程；未选时默认第一个工程。
+  useEffect(() => {
+    if (selectedProjectId) {
+      const p = projects.find(x => x.id === selectedProjectId);
+      if (p?.engineering_id) setSelectedEngineeringId(p.engineering_id);
+    } else if (!selectedEngineeringId && engineerings.length > 0) {
+      setSelectedEngineeringId(engineerings[0].id);
+    }
+  }, [selectedProjectId, projects, engineerings, selectedEngineeringId]);
   const [taskDetail, setTaskDetail] = useState<TaskDetail | null>(null);
 
   const [tasksViewMode, setTasksViewMode] = useState<TasksViewMode>('dag');
@@ -343,6 +356,11 @@ export function DomoProvider({ children }: { children: ReactNode }) {
       }
     })();
   }, [loadProjectTasks]);
+
+  const selectEngineering = useCallback((id: string) => {
+    setSelectedEngineeringId(id);
+    setViewRaw('projects');
+  }, []);
 
   const selectProject = useCallback(
     (id: string) => {
@@ -720,6 +738,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     conn,
     view,
     setView,
+    selectedEngineeringId,
     error,
     setError,
     projects,
@@ -744,6 +763,7 @@ export function DomoProvider({ children }: { children: ReactNode }) {
     setTasksViewMode,
     focusedInboxId,
     focusInbox,
+    selectEngineering,
     selectProject,
     openTask,
     closeTask,

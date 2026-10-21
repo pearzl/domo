@@ -342,7 +342,9 @@ for p in js_paths:
     if st == 200:
         bundle += txt
 for marker, label in [("DAG 图", "任务视图 DAG 切换"), ("待确认 · 去收件箱", "总览 gate 跳转按钮"),
-                      ("占用", "负载占用比"), ("队列空", "队列长度"), ("角色分布", "角色分布")]:
+                      ("占用", "负载占用比"), ("队列空", "队列长度"), ("角色分布", "角色分布"),
+                      ("规划台", "规划台"), ("方案摘要", "方案摘要"), ("验收一屏", "验收一屏"),
+                      ("工程 / 项目", "三级导航")]:
     check(f"bundle 含「{label}」标记：{marker}", marker in bundle)
 
 failed = [n for n, ok in CHECKS if not ok]

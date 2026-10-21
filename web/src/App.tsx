@@ -19,7 +19,10 @@ const VIEW_TITLES: Record<ViewId, string> = {
 };
 
 function Sidebar() {
-  const { view, setView, inbox, selectedProjectId } = useDomo();
+  const {
+    view, setView, inbox, selectedProjectId,
+    engineerings, projects, selectedEngineeringId, selectEngineering, selectProject,
+  } = useDomo();
   const openCount = inbox.filter(i => i.status === 'open').length;
   const items: { id: ViewId; label: string; badge?: number; dot?: boolean }[] = [
     { id: 'engineering', label: '工程总览' },
@@ -51,6 +54,36 @@ function Sidebar() {
           </button>
         ))}
       </nav>
+      <div className="scope-nav">
+        <div className="scope-title">工程 / 项目</div>
+        {engineerings.length === 0 && <div className="muted scope-empty">还没有工程</div>}
+        {engineerings.map(e => {
+          const mine = projects.filter(p => p.engineering_id === e.id);
+          const open = selectedEngineeringId === e.id;
+          return (
+            <div key={e.id} className="scope-group">
+              <button
+                className={`scope-eng ${open ? 'active' : ''}`}
+                title={e.workspace_path ?? e.name}
+                onClick={() => selectEngineering(e.id)}
+              >
+                <span>{e.name}</span>
+                <span className="muted">{mine.length}</span>
+              </button>
+              {open && mine.map(p => (
+                <button
+                  key={p.id}
+                  className={`scope-project ${selectedProjectId === p.id ? 'active' : ''}`}
+                  onClick={() => selectProject(p.id)}
+                  title={p.brief}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
       <ConnStatus />
     </aside>
   );
@@ -102,8 +135,40 @@ class ViewErrorBoundary extends Component<{ children: ReactNode }, { err: Error 
   }
 }
 
+function Breadcrumbs() {
+  const {
+    engineerings, projects, taskDetail, selectedEngineeringId, selectedProjectId,
+    setView, selectEngineering, selectProject,
+  } = useDomo();
+  const eng = engineerings.find(e => e.id === selectedEngineeringId);
+  const proj = projects.find(p => p.id === selectedProjectId);
+  return (
+    <nav className="breadcrumbs" aria-label="层级导航">
+      <button className="crumb-link" onClick={() => setView('engineering')}>工程</button>
+      {eng && (
+        <>
+          <span className="crumb-sep">/</span>
+          <button className="crumb-link" onClick={() => selectEngineering(eng.id)}>{eng.name}</button>
+        </>
+      )}
+      {proj && (
+        <>
+          <span className="crumb-sep">/</span>
+          <button className="crumb-link" onClick={() => selectProject(proj.id)}>{proj.name}</button>
+        </>
+      )}
+      {proj && taskDetail && (
+        <>
+          <span className="crumb-sep">/</span>
+          <span className="crumb-current">{taskDetail.title}</span>
+        </>
+      )}
+    </nav>
+  );
+}
+
 function Shell() {
-  const { view, taskDetail } = useDomo();
+  const { view } = useDomo();
   const [taskForm, setTaskForm] = useState<TaskFormState | null>(null);
 
   return (
@@ -111,8 +176,8 @@ function Shell() {
       <Sidebar />
       <main className="main">
         <header className="topbar">
-          <h1>{VIEW_TITLES[view]}</h1>
-          {view === 'tasks' && taskDetail && <span className="muted crumb">/ 任务详情</span>}
+          <Breadcrumbs />
+          <span className="topbar-view">{VIEW_TITLES[view]}</span>
         </header>
         <div className="content">
           <ViewErrorBoundary>

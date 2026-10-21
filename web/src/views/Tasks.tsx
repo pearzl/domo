@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useDomo } from '../store';
 import type { Agent, ApplyResult, AuditEvent, InterveneResult, ReplanReportResult, Task, TaskDetail, TaskFormValue, TaskStatus } from '../types';
 import { Empty, Modal, Pager, StatusBadge, TASK_STATUS_LABEL, TaskLink, fmtTime, shortId, useElapsed } from '../ui';
@@ -48,11 +48,27 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
   const [briefDraft, setBriefDraft] = useState<string | null>(null);
   const [planPlanner, setPlanPlanner] = useState('');
   const [planFeedback, setPlanFeedback] = useState('');
+  // 规划台差异：规划前快照 → 规划落地后与当前方案对比（新增/移除）
+  const [planBase, setPlanBase] = useState<{ tasks: string[]; milestones: string[] } | null>(null);
+  const [planDiff, setPlanDiff] = useState<{ added: string[]; removed: string[]; msAdded: string[]; msRemoved: string[] } | null>(null);
 
   const planElapsed = useElapsed(planning?.startedAt);
   const tasks = selectedProjectId ? (tasksByProject[selectedProjectId] ?? []) : [];
   const milestones = selectedProjectId ? (milestonesByProject[selectedProjectId] ?? []) : [];
   const project = projects.find(p => p.id === selectedProjectId);
+
+  useEffect(() => {
+    if (!planBase || planning) return;
+    const nowTasks = tasks.map(t => t.title);
+    const nowMs = milestones.map(m => m.name);
+    setPlanDiff({
+      added: nowTasks.filter(t => !planBase.tasks.includes(t)),
+      removed: planBase.tasks.filter(t => !nowTasks.includes(t)),
+      msAdded: nowMs.filter(m => !planBase.milestones.includes(m)),
+      msRemoved: planBase.milestones.filter(m => !nowMs.includes(m)),
+    });
+    setPlanBase(null);
+  }, [planBase, planning, tasks, milestones]);
 
   if (!selectedProjectId || !project) {
     return (
@@ -122,89 +138,136 @@ export function TasksView({ onOpenForm }: { onOpenForm: (s: TaskFormState) => vo
         )}
       </div>
 
-      {/* 初始化规划台：目标文本框（与规划者/执行 agent 讨论用）+ agent 池 + 指定规划者/执行/验收 + 生成/确认规划 */}
+      {/* 规划台：左侧对话/意见，右侧方案摘要与差异（DESIGN §13.3） */}
       {project.status === 'initializing' && !project.plan?.confirmed_at && (
-        <section className="panel">
+        <section className="panel planning-panel">
           <h2 className="panel-title">规划台（初始化项目）</h2>
-          <div className="stack">
-            <label>
-              项目目标（必填 · 作为初始化提示词，规划者据此拆解任务；可随时修改后重新生成规划）
-              <textarea
-                rows={3}
-                value={briefDraft ?? project.brief ?? ''}
-                onChange={e => setBriefDraft(e.target.value)}
-                placeholder="交给团队的目标说明：做什么、做到什么程度、有什么约束……"
-              />
-            </label>
-            <PoolTable projectId={project.id} />
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <label className="muted">
-                规划者（生成规划的 LLM 实例；任务 agent 不在此绑定，执行时按池优先级动态选择）
-                <select value={planPlanner} onChange={e => setPlanPlanner(e.target.value)} className="select">
-                  <option value="">自动选择</option>
-                  {agents.filter(a => a.adapter === 'opencode' && a.roles.includes('planner')).map(a => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
-              </label>
-              <span className="muted" style={{ alignSelf: 'end' }}>
-                提示：可用右上角「🧭 人工介入」与规划者对话讨论任务拆解
-              </span>
+          <div className="planning-console">
+            <div className="planning-chat stack">
+              <div className="chat-bubble planner">
+                <strong>规划者</strong>
+                <p className="muted" style={{ margin: '4px 0 0' }}>
+                  告诉我产品目标与约束，我会拆成任务与里程碑。你可以随时提意见，我会重做整版方案（原子替换）。
+                </p>
+              </div>
+              <div className="chat-bubble human">
+                <strong>项目目标</strong>
+                <textarea
+                  rows={3}
+                  value={briefDraft ?? project.brief ?? ''}
+                  onChange={e => setBriefDraft(e.target.value)}
+                  placeholder="交给团队的目标说明：做什么、做到什么程度、有什么约束……"
+                />
+              </div>
+              <div className="chat-bubble human">
+                <strong>修改意见（可选）</strong>
+                <textarea
+                  rows={2}
+                  value={planFeedback}
+                  onChange={e => setPlanFeedback(e.target.value)}
+                  placeholder="例：把审计相关任务合并为一个；先做会话稳定性再做审计；阶段划分按交付批次重排……"
+                />
+              </div>
+              <details className="json">
+                <summary>团队池与规划者配置</summary>
+                <div className="stack" style={{ marginTop: 8 }}>
+                  <PoolTable projectId={project.id} />
+                  <label className="muted">
+                    规划者（生成规划的 LLM 实例；任务 agent 执行时按池优先级动态选择）
+                    <select value={planPlanner} onChange={e => setPlanPlanner(e.target.value)} className="select">
+                      <option value="">自动选择</option>
+                      {agents.filter(a => a.adapter === 'opencode' && a.roles.includes('planner')).map(a => (
+                        <option key={a.id} value={a.id}>{a.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </details>
+              <div className="row-end">
+                <button
+                  className="btn btn-primary"
+                  disabled={!!planning}
+                  title={tasks.length > 0
+                    ? '按意见（可留空）重新规划：规划成功后原子替换现有任务与里程碑；失败则原计划保留'
+                    : '由规划者拆解任务与里程碑'}
+                  onClick={() => {
+                    void (async () => {
+                      const brief = (briefDraft ?? project.brief ?? '').trim();
+                      if (!brief) return void setError('必须填写项目目标，规划者据此拆解任务。');
+                      if (brief !== (project.brief ?? '')) await updateProject(project.id, { brief });
+                      if (tasks.length > 0) {
+                        const okGo = window.confirm(
+                          `将重新规划并替换当前 ${tasks.length} 个任务与 ${milestones.length} 个里程碑。\n` +
+                          `规划失败时原计划会完整保留。继续？`
+                        );
+                        if (!okGo) return;
+                      }
+                      setPlanDiff(null);
+                      setPlanBase({ tasks: tasks.map(t => t.title), milestones: milestones.map(m => m.name) });
+                      const added = await planProject(project.id, {
+                        planner_agent_id: planPlanner || undefined,
+                        feedback: planFeedback.trim() || undefined,
+                      });
+                      if (added >= 0) {
+                        setBriefDraft(null);
+                        setPlanFeedback('');
+                      } else {
+                        setPlanBase(null);
+                      }
+                    })();
+                  }}
+                >
+                  {planning?.projectId === project.id
+                    ? `规划者生成中… ${planElapsed}s`
+                    : tasks.length > 0
+                      ? '✨ 重新规划（替换现有计划）'
+                      : '✨ 生成规划'}
+                </button>
+                <button
+                  className="btn btn-primary"
+                  disabled={tasks.length === 0 || !!planning}
+                  title={tasks.length === 0 ? '先生成或手动创建任务' : '确认任务拆分、里程碑与目标后，项目进入运行'}
+                  onClick={() => void projectAction(project.id, 'confirm')}
+                >
+                  ✓ 确认规划，开始执行 →
+                </button>
+              </div>
             </div>
-            <label>
-              对规划有异议？（可选）填写修改意见 → 规划者按意见重新规划全部任务与里程碑
-              <textarea
-                rows={2}
-                value={planFeedback}
-                onChange={e => setPlanFeedback(e.target.value)}
-                placeholder="例：把审计相关任务合并为一个；先做会话稳定性再做审计；阶段划分按交付批次重排……"
-              />
-            </label>
-            <div className="row-end">
-              <button
-                className="btn btn-primary"
-                disabled={!!planning}
-                title={tasks.length > 0
-                  ? '按意见（可留空）重新规划：规划成功后原子替换现有任务与里程碑；失败则原计划保留'
-                  : '由规划者拆解任务与里程碑'}
-                onClick={() => {
-                  void (async () => {
-                    const brief = (briefDraft ?? project.brief ?? '').trim();
-                    if (!brief) return void setError('必须填写项目目标，规划者据此拆解任务。');
-                    if (brief !== (project.brief ?? '')) await updateProject(project.id, { brief });
-                    if (tasks.length > 0) {
-                      const okGo = window.confirm(
-                        `将重新规划并替换当前 ${tasks.length} 个任务与 ${milestones.length} 个里程碑。\n` +
-                        `规划失败时原计划会完整保留。继续？`
-                      );
-                      if (!okGo) return;
-                    }
-                    const added = await planProject(project.id, {
-                      planner_agent_id: planPlanner || undefined,
-                      feedback: planFeedback.trim() || undefined,
-                    });
-                    if (added >= 0) {
-                      setBriefDraft(null);
-                      setPlanFeedback('');
-                    }
-                  })();
-                }}
-              >
-                {planning?.projectId === project.id
-                  ? `规划者生成中… ${planElapsed}s`
-                  : tasks.length > 0
-                    ? '✨ 重新规划（替换现有计划）'
-                    : '✨ 生成规划'}
-              </button>
-              <button
-                className="btn btn-primary"
-                disabled={tasks.length === 0 || !!planning}
-                title={tasks.length === 0 ? '先生成或手动创建任务' : '确认任务拆分、里程碑与目标后，项目进入运行'}
-                onClick={() => void projectAction(project.id, 'confirm')}
-              >
-                ✓ 确认规划，开始执行 →
-              </button>
-            </div>
+
+            <aside className="planning-summary stack">
+              <div className="summary-card">
+                <h4>方案摘要</h4>
+                <div className="summary-row"><span>目标</span><span>{project.brief || '（未填写）'}</span></div>
+                <div className="summary-row"><span>任务</span><span>{tasks.length}</span></div>
+                <div className="summary-row"><span>里程碑</span><span>{milestones.length}</span></div>
+                <div className="summary-row"><span>依赖边</span><span>{tasks.reduce((n, t) => n + (t.depends_on?.length ?? 0), 0)}</span></div>
+                {milestones.length > 0 && (
+                  <div className="summary-milestones">
+                    {milestones.map(m => (
+                      <div key={m.id} className="muted">
+                        · {m.name}（{tasks.filter(t => t.milestone_id === m.id).length} 任务）
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="summary-card">
+                <h4>差异</h4>
+                {!planDiff ? (
+                  <p className="muted" style={{ margin: 0 }}>生成或重新规划后，这里显示与上一版相比的新增/移除。</p>
+                ) : (
+                  <div className="stack" style={{ gap: 6 }}>
+                    {planDiff.added.length > 0 && <div className="diff-add">＋ 新增任务：{planDiff.added.join('、')}</div>}
+                    {planDiff.removed.length > 0 && <div className="diff-del">－ 移除任务：{planDiff.removed.join('、')}</div>}
+                    {planDiff.msAdded.length > 0 && <div className="diff-add">＋ 新增里程碑：{planDiff.msAdded.join('、')}</div>}
+                    {planDiff.msRemoved.length > 0 && <div className="diff-del">－ 移除里程碑：{planDiff.msRemoved.join('、')}</div>}
+                    {planDiff.added.length + planDiff.removed.length + planDiff.msAdded.length + planDiff.msRemoved.length === 0 && (
+                      <p className="muted" style={{ margin: 0 }}>与上一版一致。</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </aside>
           </div>
         </section>
       )}
@@ -420,6 +483,12 @@ function TaskCard({
   return (
     <button className={`task-card ${active ? 'active' : ''}`} onClick={onClick}>
       <div className="task-card-title">{task.title}</div>
+      {['plan_drafting', 'plan_review', 'executing'].includes(task.status) && (
+        <div className="task-running">
+          <span className="spinner" />
+          {task.status === 'executing' ? '执行中…' : task.status === 'plan_review' ? '计划审查中…' : '制定计划中…'}
+        </div>
+      )}
       <div className="task-card-meta">
         <span className="muted">依赖 {task.depends_on?.length ?? 0}</span>
         <span className="muted">
@@ -499,6 +568,15 @@ function TaskDetailDrawer({
   const latestGuidanceEv = [...(task.events ?? [])]
     .reverse()
     .find(e => e.type === 'task.guidance_added');
+  // 执行过程可见：用最近一次进入执行/计划阶段的 status_changed 事件计时
+  const runningSince = [...(task.events ?? [])]
+    .reverse()
+    .find(e => e.type === 'task.status_changed'
+      && ['plan_drafting', 'plan_review', 'executing'].includes(String((e.payload as { to?: string } | null)?.to ?? '')))?.ts;
+  const runningElapsed = useElapsed(runningSince);
+  const acceptanceChecks = task.acceptance_checks ?? [];
+  const acceptanceEvidence = task.acceptance_evidence ?? [];
+  const failedChecks = acceptanceChecks.filter((_, i) => acceptanceEvidence[i] && !acceptanceEvidence[i].passed).length;
 
   async function doReview(verdict: 'accept' | 'reject') {
     if (verdict === 'reject' && !comment.trim()) {
@@ -551,6 +629,11 @@ function TaskDetailDrawer({
             <div className="drawer-sub">
               <StatusBadge kind="task" value={task.status} />
               <span className="mono muted">#{shortId(task.id)}</span>
+              {runningSince && ['plan_drafting', 'plan_review', 'executing'].includes(task.status) && (
+                <span className="risk-line" style={{ margin: 0 }}>
+                  <span className="spinner" /> 已运行 {runningElapsed}s
+                </span>
+              )}
             </div>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="关闭">
@@ -584,6 +667,48 @@ function TaskDetailDrawer({
           <h4>描述</h4>
           <p className="pre-wrap">{task.description || '（无）'}</p>
         </section>
+
+        {task.status === 'awaiting_acceptance' && (
+          <section className="drawer-section highlight acceptance-screen">
+            <h4>验收一屏</h4>
+            <div className="acceptance-grid">
+              <span className="muted">任务目标</span>
+              <div>{task.description || '（未填写描述）'}</div>
+              <span className="muted">验收标准</span>
+              <div className="pre-wrap">{task.acceptance_criteria || '（未填写）'}</div>
+              <span className="muted">任务计划</span>
+              <div className="pre-wrap">{task.execution_plan ? task.execution_plan.slice(0, 500) : '（未产出）'}</div>
+              <span className="muted">机械检查</span>
+              <div>
+                {acceptanceChecks.length === 0
+                  ? '未配置机械检查'
+                  : `${acceptanceChecks.length} 项，通过 ${acceptanceChecks.length - failedChecks}，失败 ${failedChecks}`}
+                {failedChecks > 0 && <span className="diff-del"> · 存在失败项</span>}
+              </div>
+              <span className="muted">独立性与结论</span>
+              <div>
+                {task.executor_agent_id && task.executor_agent_id === task.acceptor_agent_id
+                  ? '执行与验收为同一实例，独立性有限；'
+                  : '执行与验收为不同实例；'}
+                结论只有通过 / 退回。
+              </div>
+            </div>
+            <textarea
+              rows={2}
+              value={comment}
+              onChange={e => setComment(e.target.value)}
+              placeholder="验收意见（退回时必填）"
+            />
+            <div className="btn-row">
+              <button className="btn btn-primary" disabled={busy} onClick={() => void doReview('accept')}>
+                验收通过
+              </button>
+              <button className="btn btn-danger-ghost" disabled={busy} onClick={() => void doReview('reject')}>
+                退回重做
+              </button>
+            </div>
+          </section>
+        )}
 
         <section className="drawer-section">
           <h4>验收标准</h4>
@@ -700,26 +825,6 @@ function TaskDetailDrawer({
             </ul>
           )}
         </section>
-
-        {task.status === 'awaiting_acceptance' && (
-          <section className="drawer-section highlight">
-            <h4>人工验收</h4>
-            <textarea
-              rows={2}
-              value={comment}
-              onChange={e => setComment(e.target.value)}
-              placeholder="验收意见（退回时必填）"
-            />
-            <div className="btn-row">
-              <button className="btn btn-primary" disabled={busy} onClick={() => void doReview('accept')}>
-                验收通过
-              </button>
-              <button className="btn btn-danger-ghost" disabled={busy} onClick={() => void doReview('reject')}>
-                退回重做
-              </button>
-            </div>
-          </section>
-        )}
 
         <section className="drawer-section">
           <h4>人工指导</h4>
