@@ -62,6 +62,7 @@ export const INBOX_TYPE_LABEL: Record<string, string> = {
   escalation: '执行升级',
   replan: '重规划',
   milestone_gate: '里程碑确认',
+  project_action_blocked: '项目操作受阻',
 };
 
 export const MILESTONE_STATUS_LABEL: Record<string, { label: string; tone: string }> = {
@@ -85,6 +86,7 @@ export const RESOLUTION_LABEL: Record<string, string> = {
   deny: '否决',
   applied: '窗口方案已应用',
   close: '已确认处理',
+  retry_pause: '重试强制暂停',
 };
 
 export function fmtTime(ts: number | undefined | null): string {

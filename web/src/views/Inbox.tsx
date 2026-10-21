@@ -7,6 +7,10 @@ import {
 } from '../ui';
 
 const TERMINAL_STATUS = ['done', 'cancelled'];
+type InboxAction = { id: string; label: string; needs_agent?: 'executor' | 'acceptor' };
+function actionsOf(item: InboxItem, fallback: InboxAction[] = []): InboxAction[] {
+  return item.actions && item.actions.length > 0 ? (item.actions as InboxAction[]) : fallback;
+}
 
 function resolutionLabel(resolution: InboxItem['resolution']): string {
   // 后端 resolution 是 JSON 对象 {resolution, note?, agent_id?}
@@ -151,7 +155,10 @@ function InboxRow({
   if (item.type === 'replan') {
     return <PlainReplanRow item={item} projectName={projectName} focused={focused} />;
   }
-  return <EscalationRow item={item} projectName={projectName} focused={focused} />;
+  if (item.type === 'escalation') {
+    return <EscalationRow item={item} projectName={projectName} focused={focused} />;
+  }
+  return <GenericActionRow item={item} projectName={projectName} focused={focused} />;
 }
 
 /** 普通重规划提示（无决策请求）：例如放弃任务后提示下游需要重规划。
@@ -175,12 +182,14 @@ function PlainReplanRow({
   const tasks = tasksByProject[item.project_id] ?? [];
   const titleOf = (id: string) => tasks.find(t => t.id === id)?.title ?? `#${shortId(id)}`;
 
+  const actions = actionsOf(item, [{ id: 'close', label: '确认处理' }]);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit() {
+    if (actions.length === 0) return;
     setBusy(true);
-    const ok = await resolveInboxItem(item.id, 'close', note.trim());
+    const ok = await resolveInboxItem(item.id, actions[0].id, note.trim());
     setBusy(false);
     if (ok) setNote('');
   }
@@ -214,8 +223,8 @@ function PlainReplanRow({
 
       <div className="resolve-row">
         <input value={note} onChange={e => setNote(e.target.value)} placeholder="处理备注（可选）" />
-        <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? '处理中…' : '确认处理'}
+        <button className="btn btn-primary" disabled={busy || actions.length === 0} onClick={() => void submit()}>
+          {busy ? '处理中…' : (actions[0]?.label ?? '确认处理')}
         </button>
       </div>
     </div>
@@ -241,11 +250,13 @@ function ReplanReportRow({
   const scope = typeof payload.scope === 'string' ? payload.scope : '';
   const changes = Array.isArray(payload.proposed_changes) ? payload.proposed_changes : [];
   const planning = typeof payload.planning === 'string' ? payload.planning : '';
-  const [resolution, setResolution] = useState<'approve' | 'deny'>('approve');
+  const actions = actionsOf(item, [{ id: 'approve', label: '批准' }, { id: 'deny', label: '否决' }]);
+  const [resolution, setResolution] = useState<string>(actions[0]?.id ?? 'approve');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit() {
+    if (actions.length === 0) return;
     setBusy(true);
     const ok = await resolveInboxItem(item.id, resolution, note.trim());
     setBusy(false);
@@ -283,11 +294,10 @@ function ReplanReportRow({
           </button>
         </div>
       )}
-      {(!planning || planning === 'rejected') && (
+      {actions.length > 0 && (
         <div className="resolve-row">
-          <select value={resolution} onChange={e => setResolution(e.target.value as 'approve' | 'deny')} className="select">
-            <option value="approve">{RESOLUTION_LABEL.approve}</option>
-            <option value="deny">{RESOLUTION_LABEL.deny}</option>
+          <select value={resolution} onChange={e => setResolution(e.target.value)} className="select">
+            {actions.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
           </select>
           <input value={note} onChange={e => setNote(e.target.value)} placeholder="裁决备注（可选）" />
           <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
@@ -317,11 +327,13 @@ function GateRow({
   const effect = typeof payload.effect === 'string' ? payload.effect : '';
   const detail = typeof payload.detail === 'string' ? payload.detail : '';
 
-  const [resolution, setResolution] = useState<'pass' | 'reject'>('pass');
+  const actions = actionsOf(item, [{ id: 'pass', label: '确认通过' }, { id: 'reject', label: '退回重规划' }]);
+  const [resolution, setResolution] = useState<string>(actions[0]?.id ?? 'pass');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit() {
+    if (actions.length === 0) return;
     setBusy(true);
     const ok = await resolveInboxItem(item.id, resolution, note.trim());
     setBusy(false);
@@ -359,9 +371,8 @@ function GateRow({
       </div>
 
       <div className="resolve-row">
-        <select value={resolution} onChange={e => setResolution(e.target.value as 'pass' | 'reject')} className="select">
-          <option value="pass">{RESOLUTION_LABEL.pass}</option>
-          <option value="reject">{RESOLUTION_LABEL.reject}</option>
+        <select value={resolution} onChange={e => setResolution(e.target.value)} className="select">
+          {actions.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
         </select>
         <input value={note} onChange={e => setNote(e.target.value)} placeholder="确认备注（可选）" />
         <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
@@ -742,23 +753,14 @@ function EscalationRow({
     ?? (reason === 'rejection_limit' ? 'acceptance.rejected'
       : reason === 'acceptance_failure_limit' ? 'acceptance.run_failed'
       : 'task.execution_failed');
+  const preferred = hintKey === 'acceptance.run_failed' ? 'reassign_acceptor' : 'resume';
+  // 动作完全由后端按待决类型下发。
+  const actions = actionsOf(item);
   const [resolution, setResolution] = useState<string>(
-    hintKey === 'acceptance.run_failed' ? 'reassign_acceptor' : 'resume'
+    actions.find(a => a.id === preferred)?.id ?? actions[0]?.id ?? ''
   );
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
-
-  // 动作由后端按待决类型下发；缺省时回退到旧动作集（兼容旧快照）
-  const actions: { id: string; label: string; needs_agent?: 'executor' | 'acceptor' }[] =
-    item.actions && item.actions.length > 0
-      ? item.actions
-      : [
-          { id: 'resume', label: '恢复重派' },
-          { id: 'reassign', label: '更换执行者', needs_agent: 'executor' },
-          { id: 'reassign_acceptor', label: '更换验收者', needs_agent: 'acceptor' },
-          { id: 'relax', label: '放宽标准' },
-          { id: 'abandon', label: '放弃任务' },
-        ];
   const wantRole = actions.find(a => a.id === resolution)?.needs_agent;
   const [agentId, setAgentId] = useState<string>('');
 
@@ -828,6 +830,69 @@ function EscalationRow({
           {busy ? '处理中…' : '处理'}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** 通用收件箱条目：动作完全由后端下发（如暂停受阻、未来新增类型）。 */
+function GenericActionRow({
+  item,
+  projectName,
+  focused,
+}: {
+  item: InboxItem;
+  projectName: string;
+  focused?: boolean;
+}) {
+  const { resolveInboxItem, selectProject, setView } = useDomo();
+  const payload = (item.payload ?? {}) as Record<string, unknown>;
+  const actions = actionsOf(item, [{ id: 'close', label: '确认处理' }]);
+  const detail = typeof payload.detail === 'string' ? payload.detail : '';
+  const [resolution, setResolution] = useState<string>(actions[0]?.id ?? 'close');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit() {
+    if (actions.length === 0) return;
+    setBusy(true);
+    setError('');
+    const ok = await resolveInboxItem(item.id, resolution, note.trim());
+    setBusy(false);
+    if (ok) setNote('');
+    else setError('处理失败：请查看服务端日志或稍后重试');
+  }
+
+  return (
+    <div id={`inbox-${item.id}`} className={`panel inbox-item${focused ? ' inbox-focus' : ''}`}>
+      <div className="inbox-head">
+        <Badge tone="amber">{INBOX_TYPE_LABEL[item.type] ?? item.type}</Badge>
+        <span>{projectName}</span>
+        <span className="muted">{fmtTime(item.created_at)}</span>
+        <span className="spacer" />
+        <Badge tone="amber">待处理</Badge>
+      </div>
+      <div className="stack" style={{ borderLeft: '3px solid var(--line, #ccc)', paddingLeft: 10 }}>
+        {detail && <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>💡 {detail}</p>}
+        <PayloadBlock payload={item.payload} />
+      </div>
+      <div className="row-end">
+        <button className="btn" onClick={() => { selectProject(item.project_id); setView('projects'); }}>
+          查看项目 →
+        </button>
+      </div>
+      {actions.length > 0 && (
+        <div className="resolve-row">
+          <select value={resolution} onChange={e => setResolution(e.target.value)} className="select">
+            {actions.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="处理备注（可选）" />
+          <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+            {busy ? '处理中…' : '处理'}
+          </button>
+        </div>
+      )}
+      {error && <div className="form-error">{error}</div>}
     </div>
   );
 }

@@ -1605,17 +1605,44 @@ async fn pause_project(
     Json(body): Json<Value>,
 ) -> Response {
     let force = body["force"].as_bool().unwrap_or(false);
-    let has_live = {
+    let (has_live, other_running) = {
         let c = st.db.lock().unwrap();
-        match db::get_project(&c, &id).map(|p| p.status) {
-            Some(s) if s == "running" || s == "pausing" => {}
-            Some(_) => return err(StatusCode::CONFLICT, "only running projects can be paused"),
-            None => return err(StatusCode::NOT_FOUND, "project not found"),
+        let Some(project) = db::get_project(&c, &id) else {
+            return err(StatusCode::NOT_FOUND, "project not found");
+        };
+        match project.status.as_str() {
+            "running" | "pausing" => {}
+            _ => return err(StatusCode::CONFLICT, "only running projects can be paused"),
         }
-        db::list_tasks(&c, &id)
+        let other = project
+            .engineering_id
+            .as_deref()
+            .map(|eid| db::list_projects_of(&c, eid).into_iter().any(|x| {
+                x.id != id && (x.status == "running" || x.status == "pausing")
+            }))
+            .unwrap_or(false);
+        let live = db::list_tasks(&c, &id)
             .iter()
-            .any(|t| st.has_live_handle(&t.id))
+            .any(|t| st.has_live_handle(&t.id));
+        (live, other)
     };
+    // 安全网：强制暂停会终止本项目在途会话；若同工程仍有运行中项目（legacy 数据），
+    // 不猜测影响范围，交人确认后重试。
+    if force && has_live && other_running {
+        let c = st.db.lock().unwrap();
+        let item = events::new_inbox_item(&st, &c, &id, "project_action_blocked",
+            json!({
+                "reason": "pause_affected_other_projects",
+                "project_id": id,
+                "detail": "强制暂停需要终止本项目在途会话，但同工程仍有运行中项目；请先确认影响范围后重试",
+            }));
+        let inbox_id = item.id;
+        drop(c);
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": "强制暂停受阻：同工程仍有运行中项目，已在收件箱登记，请确认后重试",
+            "inbox_id": inbox_id,
+        }))).into_response();
+    }
     if force && has_live {
         // 强制暂停：只终止**本项目**的在途会话并释放占用，立即进入已暂停。
         let tids: Vec<String> = {
@@ -2813,11 +2840,23 @@ fn inbox_actions(i: &crate::models::InboxItem) -> Vec<Value> {
                 json!({"id":"abandon","label":"放弃任务"}),
             ]
         }
+        "project_action_blocked" => vec![
+            json!({"id":"retry_pause","label":"重试强制暂停"}),
+            json!({"id":"close","label":"暂不处理"}),
+        ],
         "replan" => {
-            if i.payload.get("planning").and_then(|v| v.as_str()) == Some("pending") {
-                vec![]
+            let kind = i.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if kind == "milestone_window" {
+                vec![] // 窗口有自己的编辑/应用界面
+            } else if kind == "replan_report" {
+                let planning = i.payload.get("planning").and_then(|v| v.as_str()).unwrap_or("");
+                if planning == "pending" || planning == "applied" {
+                    vec![]
+                } else {
+                    vec![json!({"id":"approve","label":"批准"}), json!({"id":"deny","label":"否决"})]
+                }
             } else {
-                vec![json!({"id":"approve","label":"批准"}), json!({"id":"deny","label":"否决"})]
+                vec![json!({"id":"close","label":"确认处理"})]
             }
         }
         _ => vec![json!({"id":"close","label":"确认处理"})],
@@ -2900,6 +2939,55 @@ async fn resolve_inbox(State(st): State<Arc<App>>, Path(id): Path<String>, Json(
             }
         }
         drop(c);
+    } else if item.kind == "project_action_blocked" {
+        match resolution {
+            "retry_pause" => {
+                let Some(p) = db::get_project(&c, &project_id) else {
+                    drop(c);
+                    return err(StatusCode::NOT_FOUND, "project not found");
+                };
+                if p.status != "running" && p.status != "pausing" {
+                    drop(c);
+                    return err(StatusCode::CONFLICT, "project is not running");
+                }
+                if let Some(eid) = p.engineering_id.as_deref() {
+                    let busy = db::list_projects_of(&c, eid)
+                        .into_iter()
+                        .any(|x| x.id != project_id && (x.status == "running" || x.status == "pausing"));
+                    if busy {
+                        drop(c);
+                        return err(StatusCode::CONFLICT, "同工程仍有运行中项目；请先处理后再重试");
+                    }
+                }
+                let tids: Vec<String> = db::list_tasks(&c, &project_id).into_iter().map(|t| t.id).collect();
+                let aborted: Vec<String> = db::list_tasks(&c, &project_id)
+                    .into_iter().filter(|t| st.has_live_handle(&t.id)).map(|t| t.id).collect();
+                drop(c);
+                st.abort_project_handles(&tids);
+                let c = st.db.lock().unwrap();
+                events::push_event(&st, &c, &project_id, None, "project.pause_applied",
+                    json!({"mode": "force", "scope": "project", "aborted_attempts": aborted.len(),
+                           "task_ids": aborted, "source": "inbox_retry"}));
+                for tid in &tids {
+                    if let Some(t) = db::get_task(&c, tid) {
+                        for a in [t.executor_agent_id.clone(), t.acceptor_agent_id.clone()].into_iter().flatten() {
+                            db::occupancy_remove(&c, &a, &t.id);
+                            if let Some(ag) = db::get_agent(&c, &a) { events::send_agent(&st, &ag); }
+                        }
+                    }
+                }
+                let _ = c.execute("UPDATE projects SET status='paused' WHERE id=?1", rusqlite::params![project_id]);
+                if let Some(p) = db::get_project(&c, &project_id) { events::send_project(&st, &p); }
+                events::push_event(&st, &c, &project_id, None, "project.force_paused", json!({"source": "inbox"}));
+                payload_out["project_status"] = json!("paused");
+                drop(c);
+            }
+            "close" => drop(c),
+            other => {
+                if_error = Some(err(StatusCode::BAD_REQUEST, format!("unknown project action: {other}")));
+                drop(c);
+            }
+        }
     } else if item.kind == "replan"
         && (item.payload.get("kind").and_then(|v| v.as_str()) == Some("replan_report")
             || (item.payload.get("task_id").is_some()
@@ -3292,6 +3380,31 @@ mod tests {
 
         let not_array = "{\"tasks\":[{\"title\":\"A\",\"acceptance_checks\":\"nope\"}]}";
         assert!(parse_plan_json(not_array).is_err());
+    }
+
+    fn inbox_item(kind: &str, payload: Value) -> InboxItem {
+        InboxItem {
+            id: "inb_test".into(), project_id: "prj".into(), kind: kind.into(),
+            payload, status: "open".into(), resolution: None, created_at: 0,
+        }
+    }
+
+    #[test]
+    fn inbox_actions_are_backend_driven_per_type() {
+        let gate = inbox_actions(&inbox_item("milestone_gate", serde_json::json!({"milestone_id": "m1"})));
+        assert_eq!(gate.iter().map(|a| a["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["pass", "reject"]);
+
+        let report = inbox_actions(&inbox_item("replan", serde_json::json!({"kind": "replan_report"})));
+        assert_eq!(report.iter().map(|a| a["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["approve", "deny"]);
+
+        let pending = inbox_actions(&inbox_item("replan", serde_json::json!({"kind": "replan_report", "planning": "pending"})));
+        assert!(pending.is_empty());
+
+        let window = inbox_actions(&inbox_item("replan", serde_json::json!({"kind": "milestone_window", "milestone_id": "m1"})));
+        assert!(window.is_empty());
+
+        let blocked = inbox_actions(&inbox_item("project_action_blocked", serde_json::json!({"reason": "pause_affected_other_projects"})));
+        assert_eq!(blocked.iter().map(|a| a["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["retry_pause", "close"]);
     }
 
     #[test]
