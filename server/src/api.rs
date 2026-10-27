@@ -101,6 +101,9 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{id}/agents/{role}/{agent_id}",
             patch(update_project_agent),
         )
+        .route("/api/projects/{id}/goal/messages", post(post_goal_message))
+        .route("/api/projects/{id}/goal/confirm", post(confirm_goal))
+        .route("/api/projects/{id}/goal/policy", patch(update_goal_policy))
         .route("/api/projects/{id}/confirm", post(confirm_goal))
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
@@ -144,6 +147,7 @@ pub fn router(state: AppState) -> Router {
             get(task_arbitration).post(submit_arbitration),
         )
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/output", get(get_job_output))
         .route("/api/events", get(list_events))
         .route("/api/events/stream", get(stream_events))
         .route("/api/{*rest}", any(api_not_found))
@@ -652,6 +656,8 @@ async fn list_projects(
             task_completed: completed,
             replan_reason: row.replan_reason,
             replan_source: row.replan_source,
+            goal_confirm_mode: row.goal_confirm_mode,
+            completion_mode: row.completion_mode,
             created_at: row.created_at,
             updated_at: row.updated_at,
         });
@@ -664,12 +670,8 @@ async fn create_project(
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
     let name = request.name.trim();
-    let goal = request.goal.trim();
     if name.is_empty() {
         return Err(ApiError::bad("项目名称不能为空"));
-    }
-    if goal.is_empty() {
-        return Err(ApiError::bad("项目目标不能为空"));
     }
     let raw_repo = request.repo_path.trim();
     let repo_input = if let Some(rest) = raw_repo.strip_prefix("~/") {
@@ -708,17 +710,20 @@ async fn create_project(
     let timestamp = now();
     let result = sqlx::query(
         "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
-         stage, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         stage, status, blocked_reason, goal_confirm_mode, completion_mode, created_at, updated_at) \
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&project_id)
     .bind(name)
-    .bind(goal)
     .bind(repo.to_string_lossy().to_string())
     .bind(&base)
     .bind(&branch)
     .bind(workspace.to_string_lossy().to_string())
     .bind(STAGE_GOAL_CONFIRM)
     .bind(STATUS_BLOCKED)
+    .bind("等待输入项目目标")
+    .bind(GOAL_CONFIRM_MANUAL)
+    .bind(COMPLETION_TASKS)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -728,15 +733,6 @@ async fn create_project(
         let _ = tokio::fs::remove_dir_all(&workspace).await;
         return Err(error.into());
     }
-    sqlx::query(
-        "INSERT INTO messages (id, project_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
-    )
-    .bind(domain::new_id("msg"))
-    .bind(&project_id)
-    .bind(goal)
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
     crate::db::ensure_project_agents(&state.db, &project_id).await?;
     emit(
         &state.db,
@@ -744,7 +740,7 @@ async fn create_project(
         Some(&project_id),
         None,
         "project_created",
-        format!("项目创建，等待确认目标（base 分支 {base}）"),
+        format!("项目创建，等待输入目标（base 分支 {base}）"),
     )
     .await;
     state.notify_scheduler();
@@ -1093,16 +1089,19 @@ async fn create_task(
     // A project in the planning, summarizing, or completed stage moves back to
     // executing so the DAG schedules the added task. A report that would not
     // cover every task is dropped and written again after the new work finishes.
-    let reopened = !matches!(project.stage.as_str(), STAGE_GOAL_CONFIRM | STAGE_EXECUTING);
+    let reopened = project.completion_mode == COMPLETION_DIRECT
+        || !matches!(project.stage.as_str(), STAGE_GOAL_CONFIRM | STAGE_EXECUTING);
     let had_report = project.report.is_some();
     if reopened {
         sqlx::query(
             "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
              ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
-             report = NULL, report_feedback = NULL, updated_at = ? WHERE id = ?",
+             report = NULL, report_feedback = NULL, completion_mode = ?, updated_at = ? \
+             WHERE id = ?",
         )
         .bind(STAGE_EXECUTING)
         .bind(STATUS_RUNNING)
+        .bind(COMPLETION_TASKS)
         .bind(&timestamp)
         .bind(&id)
         .execute(&mut *tx)
@@ -1428,23 +1427,64 @@ async fn reorder_task_queue(
     load_detail(&state, &project_id).await.map(Json)
 }
 
-async fn confirm_goal(
+fn goal_confirm_mode(value: &str) -> Result<&'static str, ApiError> {
+    match value.trim() {
+        GOAL_CONFIRM_MANUAL => Ok(GOAL_CONFIRM_MANUAL),
+        GOAL_CONFIRM_AUTO => Ok(GOAL_CONFIRM_AUTO),
+        _ => Err(ApiError::bad("目标确认方式必须是 manual 或 auto")),
+    }
+}
+
+async fn running_project_job(
+    state: &AppState,
+    project_id: &str,
+    role: &str,
+) -> Result<bool, ApiError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND role = ? AND status = 'running'",
+    )
+    .bind(project_id)
+    .bind(role)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(count > 0)
+}
+
+async fn post_goal_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<ConfirmGoalRequest>,
+    Json(request): Json<GoalMessageRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err(ApiError::bad("目标内容不能为空"));
+    }
+    let mode = request
+        .goal_confirm_mode
+        .as_deref()
+        .map(goal_confirm_mode)
+        .transpose()?;
     let project = require_project(&state, &id).await?;
     if project.stage != STAGE_GOAL_CONFIRM {
-        return Err(ApiError::bad("当前阶段不允许确认目标"));
+        return Err(ApiError::bad("当前阶段不允许输入目标"));
     }
-    if let Some(message) = request
-        .message
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    ) {
+        return Err(ApiError::bad("项目已暂停，请先恢复"));
+    }
+    if running_project_job(&state, &id, JOB_ROLE_CONFIRM).await? {
+        return Err(ApiError::bad("规划者正在处理上一条消息"));
+    }
     {
+        let _guard = state.schedule_lock.lock().await;
         sqlx::query(
-            "INSERT INTO messages (id, project_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
+            "INSERT INTO messages (id, project_id, role, content, created_at) \
+             VALUES (?, ?, 'user', ?, ?)",
         )
         .bind(domain::new_id("msg"))
         .bind(&id)
@@ -1452,13 +1492,13 @@ async fn confirm_goal(
         .bind(now())
         .execute(&state.db)
         .await?;
-    }
-    {
-        let _guard = state.schedule_lock.lock().await;
         sqlx::query(
-            "UPDATE projects SET stage = ?, status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE projects SET goal = ?, goal_confirm_mode = COALESCE(?, goal_confirm_mode), \
+             goal_proposal = NULL, goal_confirmed_at = NULL, status = ?, blocked_reason = NULL, \
+             updated_at = ? WHERE id = ?",
         )
-        .bind(STAGE_PLANNING)
+        .bind(message)
+        .bind(mode)
         .bind(STATUS_RUNNING)
         .bind(now())
         .bind(&id)
@@ -1470,8 +1510,164 @@ async fn confirm_goal(
         &state.bus,
         Some(&id),
         None,
+        "goal_message",
+        "收到用户目标消息，规划者开始分析",
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &id).await.map(Json)
+}
+
+async fn update_goal_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<GoalPolicyRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let mode = goal_confirm_mode(&request.mode)?;
+    let project = require_project(&state, &id).await?;
+    if project.stage != STAGE_GOAL_CONFIRM {
+        return Err(ApiError::bad("只有目标确认阶段可以调整确认方式"));
+    }
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if running_project_job(&state, &id, JOB_ROLE_CONFIRM).await? {
+        return Err(ApiError::bad("规划者正在处理当前消息"));
+    }
+    {
+        let _guard = state.schedule_lock.lock().await;
+        sqlx::query("UPDATE projects SET goal_confirm_mode = ?, updated_at = ? WHERE id = ?")
+            .bind(mode)
+            .bind(now())
+            .bind(&id)
+            .execute(&state.db)
+            .await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        None,
+        "goal_policy_updated",
+        format!(
+            "目标确认方式已设为{}",
+            if mode == GOAL_CONFIRM_AUTO {
+                "自动确认"
+            } else {
+                "人工确认"
+            }
+        ),
+    )
+    .await;
+    load_detail(&state, &id).await.map(Json)
+}
+
+async fn confirm_goal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ConfirmGoalRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.stage != STAGE_GOAL_CONFIRM {
+        return Err(ApiError::bad("当前阶段不允许确认目标"));
+    }
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    ) {
+        return Err(ApiError::bad("项目已暂停，请先恢复"));
+    }
+    let proposal: GoalProposal = project
+        .goal_proposal
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .ok_or_else(|| ApiError::bad("规划者还没有给出可确认的目标"))?;
+    if !matches!(proposal.kind.as_str(), "ready" | "direct") {
+        return Err(ApiError::bad("当前目标提议不能确认"));
+    }
+    let goal = proposal
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(project.goal.trim())
+        .to_string();
+    if goal.is_empty() {
+        return Err(ApiError::bad("目标内容为空"));
+    }
+    let direct = proposal.kind == "direct";
+    if direct {
+        let active_tasks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
+             AND COALESCE(status, '') != ?",
+        )
+        .bind(&id)
+        .bind(TASK_STAGE_COMPLETED)
+        .bind(STATUS_CANCELED)
+        .fetch_one(&state.db)
+        .await?;
+        if active_tasks > 0 {
+            return Err(ApiError::bad(
+                "项目已有任务，不能直接完成；请继续规划或删除任务",
+            ));
+        }
+    }
+    if let Some(message) = request
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sqlx::query(
+            "INSERT INTO messages (id, project_id, role, content, created_at) \
+             VALUES (?, ?, 'user', ?, ?)",
+        )
+        .bind(domain::new_id("msg"))
+        .bind(&id)
+        .bind(message)
+        .bind(now())
+        .execute(&state.db)
+        .await?;
+    }
+    {
+        let _guard = state.schedule_lock.lock().await;
+        sqlx::query(
+            "UPDATE projects SET goal = ?, stage = ?, status = ?, completion_mode = ?, \
+             goal_confirmed_at = ?, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(&goal)
+        .bind(if direct {
+            STAGE_EXECUTING
+        } else {
+            STAGE_PLANNING
+        })
+        .bind(STATUS_RUNNING)
+        .bind(if direct {
+            COMPLETION_DIRECT
+        } else {
+            COMPLETION_TASKS
+        })
+        .bind(now())
+        .bind(now())
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        None,
         "goal_confirmed",
-        "目标已确认，开始规划",
+        if direct {
+            "目标已确认，开始直接完成"
+        } else {
+            "目标已确认，开始规划"
+        },
     )
     .await;
     state.notify_scheduler();
@@ -1588,7 +1784,14 @@ async fn resume_project(
     ) {
         return Err(ApiError::bad("项目当前没有暂停"));
     }
-    let waiting_human = project.stage == STAGE_GOAL_CONFIRM
+    let last_message_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM messages WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(&project.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let waiting_human = (project.stage == STAGE_GOAL_CONFIRM
+        && last_message_role.as_deref() != Some("user"))
         || (project.stage == STAGE_SUMMARIZING && project.report.is_some());
     {
         let _guard = state.schedule_lock.lock().await;
@@ -1728,19 +1931,37 @@ async fn submit_report(
                 }
                 require_opinion(&feedback)?;
                 let round = record_report_opinion(&state, &id, &feedback).await?;
-                sqlx::query(
-                    "UPDATE projects SET stage = ?, status = ?, report = NULL, \
-                     report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-                )
-                .bind(STAGE_SUMMARIZING)
-                .bind(STATUS_RUNNING)
-                .bind(&feedback)
-                .bind(now())
-                .bind(&id)
-                .execute(&state.db)
-                .await?;
-                event_kind = Some("report_rejected");
-                event_message = format!("项目报告被要求重写（第 {round} 条意见）：{feedback}");
+                if project.completion_mode == COMPLETION_DIRECT {
+                    sqlx::query(
+                        "UPDATE projects SET stage = ?, status = ?, report = NULL, \
+                         report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    )
+                    .bind(STAGE_EXECUTING)
+                    .bind(STATUS_RUNNING)
+                    .bind(&feedback)
+                    .bind(now())
+                    .bind(&id)
+                    .execute(&state.db)
+                    .await?;
+                    event_kind = Some("report_rejected");
+                    event_message = format!(
+                        "项目报告被要求重做（第 {round} 条意见），重新直接完成：{feedback}"
+                    );
+                } else {
+                    sqlx::query(
+                        "UPDATE projects SET stage = ?, status = ?, report = NULL, \
+                         report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    )
+                    .bind(STAGE_SUMMARIZING)
+                    .bind(STATUS_RUNNING)
+                    .bind(&feedback)
+                    .bind(now())
+                    .bind(&id)
+                    .execute(&state.db)
+                    .await?;
+                    event_kind = Some("report_rejected");
+                    event_message = format!("项目报告被要求重写（第 {round} 条意见）：{feedback}");
+                }
             }
             // 处置二：要求重新规划，项目回到规划阶段（复用重规划路径）。
             "replan" => {
@@ -1843,31 +2064,34 @@ async fn retry_project(
     {
         let _guard = state.schedule_lock.lock().await;
         match project.stage.as_str() {
-            STAGE_GOAL_CONFIRM | STAGE_PLANNING => {
-                sqlx::query(
-                    "UPDATE projects SET stage = ?, status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+            STAGE_GOAL_CONFIRM => {
+                let last_message_role: Option<String> = sqlx::query_scalar(
+                    "SELECT role FROM messages WHERE project_id = ? \
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
                 )
-                .bind(STAGE_PLANNING)
-                .bind(STATUS_RUNNING)
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await?;
+                let waiting_user = last_message_role.as_deref() != Some("user");
+                sqlx::query(
+                    "UPDATE projects SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(if waiting_user {
+                    STATUS_BLOCKED
+                } else {
+                    STATUS_RUNNING
+                })
+                .bind(if waiting_user {
+                    Some("等待用户答复或确认目标")
+                } else {
+                    None
+                })
                 .bind(now())
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
             }
-            STAGE_EXECUTING => {
-                sqlx::query(
-                    "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-                     last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
-                     waiting_reason = NULL, updated_at = ? \
-                     WHERE project_id = ? AND status = ?",
-                )
-                .bind(STATUS_QUEUED)
-                .bind(now())
-                .bind(&id)
-                .bind(STATUS_BLOCKED)
-                .execute(&state.db)
-                .await?;
-                clear_project_agent_backoff(&state, &id).await?;
+            STAGE_PLANNING => {
                 sqlx::query(
                     "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                 )
@@ -1876,6 +2100,40 @@ async fn retry_project(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
+            }
+            STAGE_EXECUTING => {
+                if project.completion_mode == COMPLETION_DIRECT {
+                    sqlx::query(
+                        "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    )
+                    .bind(STATUS_RUNNING)
+                    .bind(now())
+                    .bind(&id)
+                    .execute(&state.db)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
+                         last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
+                         waiting_reason = NULL, updated_at = ? \
+                         WHERE project_id = ? AND status = ?",
+                    )
+                    .bind(STATUS_QUEUED)
+                    .bind(now())
+                    .bind(&id)
+                    .bind(STATUS_BLOCKED)
+                    .execute(&state.db)
+                    .await?;
+                    clear_project_agent_backoff(&state, &id).await?;
+                    sqlx::query(
+                        "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    )
+                    .bind(STATUS_RUNNING)
+                    .bind(now())
+                    .bind(&id)
+                    .execute(&state.db)
+                    .await?;
+                }
             }
             STAGE_SUMMARIZING => {
                 if project.report.is_some() {
@@ -2715,6 +2973,10 @@ async fn get_job(
             .map(|agent| agent.name),
         None => None,
     };
+    let pid = match job.pid {
+        Some(pid) => Some(pid),
+        None => job_pid_file(&state, &job).await,
+    };
     Ok(Json(JobView {
         id: job.id,
         project_id: job.project_id,
@@ -2730,7 +2992,7 @@ async fn get_job(
         stderr: job.stderr,
         error: job.error,
         exit_code: job.exit_code,
-        pid: job.pid,
+        pid,
         failure_kind: job.failure_kind,
         input_tokens: job.input_tokens,
         output_tokens: job.output_tokens,
@@ -2742,6 +3004,64 @@ async fn get_job(
         started_at: job.started_at,
         finished_at: job.finished_at,
         created_at: job.created_at,
+    }))
+}
+
+async fn job_pid_file(state: &AppState, job: &JobRow) -> Option<i64> {
+    let project = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
+        .bind(&job.project_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()?;
+    let path = PathBuf::from(project.workspace)
+        .join("jobs")
+        .join(&job.id)
+        .join("pid");
+    let raw = tokio::fs::read_to_string(path).await.ok()?;
+    raw.trim().split(':').next()?.parse::<i64>().ok()
+}
+
+#[derive(Debug, serde::Serialize)]
+struct JobOutput {
+    stdout: String,
+    stderr: String,
+    pid: Option<i64>,
+    running: bool,
+}
+
+async fn get_job_output(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<JobOutput>, ApiError> {
+    let job = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("作业不存在"))?;
+    let project = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
+        .bind(&job.project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let dir = PathBuf::from(project.workspace).join("jobs").join(&job.id);
+    let stdout = match tokio::fs::read_to_string(dir.join("stdout.log")).await {
+        Ok(text) => text,
+        Err(_) => job.stdout.clone().unwrap_or_default(),
+    };
+    let stderr = match tokio::fs::read_to_string(dir.join("stderr.log")).await {
+        Ok(text) => text,
+        Err(_) => job.stderr.clone().unwrap_or_default(),
+    };
+    let pid = match job.pid {
+        Some(pid) => Some(pid),
+        None => job_pid_file(&state, &job).await,
+    };
+    Ok(Json(JobOutput {
+        stdout,
+        stderr,
+        pid,
+        running: job.status == JOB_STATUS_RUNNING,
     }))
 }
 
@@ -2850,12 +3170,13 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    let events = sqlx::query_as::<_, EventRow>(
-        "SELECT * FROM events WHERE project_id = ? ORDER BY id ASC LIMIT 500",
+    let mut events = sqlx::query_as::<_, EventRow>(
+        "SELECT * FROM events WHERE project_id = ? ORDER BY id DESC LIMIT 500",
     )
     .bind(id)
     .fetch_all(&state.db)
     .await?;
+    events.reverse();
     let agent_rows =
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
             .fetch_all(&state.db)
@@ -2906,6 +3227,10 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
             created_at: job.created_at,
         })
         .collect();
+    let goal_proposal = project
+        .goal_proposal
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<GoalProposal>(raw).ok());
     Ok(ProjectDetail {
         project,
         tasks: task_views(tasks),
@@ -2915,6 +3240,7 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
         agents,
         agent_pool,
         usage: project_usage,
+        goal_proposal,
     })
 }
 

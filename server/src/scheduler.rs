@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::agents::kill_job_dir;
 use crate::domain::{self, deps_complete, now, short_id};
-use crate::events::emit;
+use crate::events::{emit, emit_job};
 use crate::models::*;
 use crate::runner;
 use crate::state::AppState;
@@ -100,6 +100,19 @@ async fn recover(state: &AppState) -> Result<()> {
                     .await?;
                 }
             }
+        } else if job.role == JOB_ROLE_CONFIRM {
+            sqlx::query(
+                "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+                 THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? \
+                 WHERE id = ? AND stage = ?",
+            )
+            .bind(STAGE_GOAL_CONFIRM)
+            .bind(STATUS_RUNNING)
+            .bind(now())
+            .bind(&job.project_id)
+            .bind(STAGE_GOAL_CONFIRM)
+            .execute(&state.db)
+            .await?;
         } else if job.role == JOB_ROLE_GOAL {
             sqlx::query(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
@@ -111,6 +124,19 @@ async fn recover(state: &AppState) -> Result<()> {
             .bind(now())
             .bind(&job.project_id)
             .bind(STAGE_PLANNING)
+            .execute(&state.db)
+            .await?;
+        } else if job.role == JOB_ROLE_DIRECT {
+            sqlx::query(
+                "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+                 THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? \
+                 WHERE id = ? AND stage = ?",
+            )
+            .bind(STAGE_EXECUTING)
+            .bind(STATUS_RUNNING)
+            .bind(now())
+            .bind(&job.project_id)
+            .bind(STAGE_EXECUTING)
             .execute(&state.db)
             .await?;
         } else if job.role == JOB_ROLE_SUMMARY {
@@ -127,11 +153,12 @@ async fn recover(state: &AppState) -> Result<()> {
             .execute(&state.db)
             .await?;
         }
-        emit(
+        emit_job(
             &state.db,
             &state.bus,
             Some(&job.project_id),
             job.task_id.as_deref(),
+            Some(&job.id),
             "job_recovered",
             format!("作业 {} 因服务重启中断，将重新调度", short_id(&job.id)),
         )
@@ -289,6 +316,45 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
             continue;
         }
         match project.stage.as_str() {
+            STAGE_GOAL_CONFIRM => {
+                if has_project_job(&state.db, &project.id, JOB_ROLE_CONFIRM).await? {
+                    continue;
+                }
+                let last_role = latest_message_role(&state.db, &project.id).await?;
+                if last_role.as_deref() != Some("user") {
+                    sqlx::query(
+                        "UPDATE projects SET status = ?, blocked_reason = COALESCE(blocked_reason, ?), \
+                         updated_at = ? WHERE id = ? AND status = ?",
+                    )
+                    .bind(STATUS_BLOCKED)
+                    .bind(if last_role.is_some() {
+                        "等待用户答复或确认目标"
+                    } else {
+                        "等待用户输入项目目标"
+                    })
+                    .bind(now())
+                    .bind(&project.id)
+                    .bind(STATUS_RUNNING)
+                    .execute(&state.db)
+                    .await?;
+                    continue;
+                }
+                let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
+                let Some(agent) = choice.agent else {
+                    note_waiting(
+                        state,
+                        &project,
+                        choice.reason.as_deref().unwrap_or("等待可用的规划 Agent"),
+                    )
+                    .await?;
+                    continue;
+                };
+                if let Some(job_id) =
+                    spawn_project_job(state, &project, &agent, JOB_ROLE_CONFIRM).await?
+                {
+                    spawns.push(job_id);
+                }
+            }
             STAGE_PLANNING => {
                 if has_project_job(&state.db, &project.id, JOB_ROLE_GOAL).await? {
                     continue;
@@ -310,6 +376,30 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 }
             }
             STAGE_EXECUTING => {
+                if project.completion_mode == COMPLETION_DIRECT {
+                    if has_project_job(&state.db, &project.id, JOB_ROLE_DIRECT).await? {
+                        continue;
+                    }
+                    let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
+                    let Some(agent) = choice.agent else {
+                        note_waiting(
+                            state,
+                            &project,
+                            choice
+                                .reason
+                                .as_deref()
+                                .unwrap_or("等待可用的直接完成 Agent"),
+                        )
+                        .await?;
+                        continue;
+                    };
+                    if let Some(job_id) =
+                        spawn_project_job(state, &project, &agent, JOB_ROLE_DIRECT).await?
+                    {
+                        spawns.push(job_id);
+                    }
+                    continue;
+                }
                 let tasks = sqlx::query_as::<_, TaskRow>(
                     "SELECT * FROM tasks WHERE project_id = ? ORDER BY queue_order ASC, seq ASC",
                 )
@@ -904,11 +994,12 @@ async fn spawn_task_job(
     .execute(&state.db)
     .await?;
     clear_waiting(&state.db, &project.id).await?;
-    emit(
+    emit_job(
         &state.db,
         &state.bus,
         Some(&project.id),
         Some(&task.id),
+        Some(&job_id),
         "job_queued",
         format!(
             "{} 作业已派发给 {}（任务 {}）{}",
@@ -946,11 +1037,12 @@ async fn spawn_project_job(
     .execute(&state.db)
     .await?;
     clear_waiting(&state.db, &project.id).await?;
-    emit(
+    emit_job(
         &state.db,
         &state.bus,
         Some(&project.id),
         None,
+        Some(&job_id),
         "job_queued",
         format!("{} 作业已派发给 {}", role_label(role), agent.name),
     )
@@ -990,6 +1082,15 @@ async fn set_task_waiting(state: &AppState, task_id: &str, reason: &str) -> Resu
     .execute(&state.db)
     .await?;
     Ok(())
+}
+
+async fn latest_message_role(pool: &SqlitePool, project_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT role FROM messages WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 async fn has_project_job(pool: &SqlitePool, project_id: &str, role: &str) -> Result<bool> {
@@ -1059,7 +1160,9 @@ fn parse_list(raw: &str) -> Vec<String> {
 
 fn role_label(role: &str) -> &'static str {
     match role {
+        JOB_ROLE_CONFIRM => "目标确认",
         JOB_ROLE_GOAL => "规划",
+        JOB_ROLE_DIRECT => "直接完成",
         ROLE_PLANNER => "规划",
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",

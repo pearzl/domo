@@ -11,7 +11,7 @@ use tokio::fs;
 
 use crate::agents::{self, AgentSpec};
 use crate::domain::{self, now, parse_result, short_id, slug, FailureKind, ParsedResult};
-use crate::events::emit;
+use crate::events::{emit, emit_job};
 use crate::git;
 use crate::models::*;
 use crate::prompts::{
@@ -63,7 +63,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
 
     let workspace = PathBuf::from(&project.workspace);
     let cwd = match job.role.as_str() {
-        JOB_ROLE_GOAL | JOB_ROLE_SUMMARY => workspace.join("repo"),
+        JOB_ROLE_CONFIRM | JOB_ROLE_GOAL | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => {
+            workspace.join("repo")
+        }
         JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
         JOB_ROLE_VERIFIER => {
             prepare_verify_worktree(state, &project, task.as_ref(), &job.id).await?
@@ -71,6 +73,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         other => return Err(anyhow!("未知作业角色: {other}")),
     };
     ensure_worktree_root(&cwd).await?;
+    if job.role == JOB_ROLE_DIRECT {
+        let _guard = state.git_lock.lock().await;
+        git::reset_hard(&cwd).await?;
+    }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
     let prompt = prompts::render(&prompt_data);
@@ -96,11 +102,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         .bind(&job.id)
         .execute(&state.db)
         .await?;
-    emit(
+    emit_job(
         &state.db,
         &state.bus,
         Some(&project.id),
         job.task_id.as_deref(),
+        Some(&job.id),
         "job_started",
         format!("{} 作业开始（{}）", role_label(&job.role), agent.name),
     )
@@ -143,7 +150,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         let _guard = state.git_lock.lock().await;
         let _ = git::remove_worktree(&workspace.join("repo"), &cwd).await;
     }
-    if job.role == JOB_ROLE_GOAL || job.role == JOB_ROLE_SUMMARY {
+    if matches!(
+        job.role.as_str(),
+        JOB_ROLE_CONFIRM | JOB_ROLE_GOAL | JOB_ROLE_SUMMARY
+    ) {
         let _guard = state.git_lock.lock().await;
         let _ = git::reset_hard(&workspace.join("repo")).await;
     }
@@ -226,6 +236,49 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 error = Some(reason);
                 parsed = None;
             }
+        }
+    }
+
+    if job.role == JOB_ROLE_DIRECT && status == JOB_STATUS_SUCCEEDED {
+        if let Some(ParsedResult::DirectDone { summary, report }) = parsed.clone() {
+            let message = format!("domo(direct): {} ({})", project.name, short_id(&job.id));
+            let commit = {
+                let _guard = state.git_lock.lock().await;
+                git::commit_all(&cwd, &message).await
+            };
+            if let Err(commit_error) = commit {
+                let error_text = format!("提交直接完成结果失败: {commit_error:#}");
+                let transition = handle_direct_failure(state, &project, &error_text).await;
+                let finished = finish_job(
+                    state,
+                    &job,
+                    JOB_STATUS_FAILED,
+                    result_text,
+                    &run,
+                    Some(&error_text),
+                    None,
+                )
+                .await?;
+                if finished {
+                    transition?;
+                }
+                return Ok(());
+            }
+            let transition = handle_direct_success(state, &project, &summary, &report).await;
+            let finished = finish_job(
+                state,
+                &job,
+                JOB_STATUS_SUCCEEDED,
+                result_text,
+                &run,
+                None,
+                None,
+            )
+            .await?;
+            if finished {
+                transition?;
+            }
+            return Ok(());
         }
     }
 
@@ -353,6 +406,55 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let transition: Result<()> = match (job.role.as_str(), &parsed) {
+        (JOB_ROLE_CONFIRM, Some(ParsedResult::Questions { questions, summary })) => {
+            handle_goal_questions(state, &project, questions, summary).await
+        }
+        (
+            JOB_ROLE_CONFIRM,
+            Some(ParsedResult::GoalReady {
+                summary,
+                goal,
+                assumptions,
+                acceptance,
+                skip_confirmation,
+            }),
+        ) => {
+            handle_goal_ready(
+                state,
+                &project,
+                summary,
+                goal,
+                assumptions,
+                acceptance,
+                *skip_confirmation,
+            )
+            .await
+        }
+        (
+            JOB_ROLE_CONFIRM,
+            Some(ParsedResult::GoalDirect {
+                summary,
+                plan,
+                verification,
+                skip_confirmation,
+            }),
+        ) => {
+            handle_goal_direct(
+                state,
+                &project,
+                summary,
+                plan,
+                verification,
+                *skip_confirmation,
+            )
+            .await
+        }
+        (JOB_ROLE_CONFIRM, _) => {
+            handle_goal_failure(state, &project, error.as_deref().unwrap_or("目标确认失败")).await
+        }
+        (JOB_ROLE_DIRECT, _) => {
+            handle_direct_failure(state, &project, error.as_deref().unwrap_or("直接完成失败")).await
+        }
         (JOB_ROLE_GOAL, Some(ParsedResult::Questions { questions, summary })) => {
             handle_goal_questions(state, &project, questions, summary).await
         }
@@ -360,7 +462,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             handle_goal_plan(state, &project, summary, tasks).await
         }
         (JOB_ROLE_GOAL, _) => {
-            handle_goal_failure(state, &project, error.as_deref().unwrap_or("规划失败")).await
+            handle_plan_failure(state, &project, error.as_deref().unwrap_or("规划失败")).await
         }
         (JOB_ROLE_EXECUTOR, Some(ParsedResult::ExecutorDone { summary })) => {
             if let Some(task) = task.as_ref() {
@@ -474,11 +576,12 @@ async fn run_agent_job(
                     "Agent 作业卡死：连续 {idle_secs} 秒无 stdout/stderr 输出或进度\
                      （stdout {stdout_bytes} 字节，stderr {stderr_bytes} 字节），已终止进程"
                 );
-                emit(
+                emit_job(
                     &state.db,
                     &state.bus,
                     Some(&job.project_id),
                     job.task_id.as_deref(),
+                    Some(&job.id),
                     "job_stalled",
                     format!("{}作业无响应，已判定卡死：{reason}", role_label(&job.role)),
                 )
@@ -506,11 +609,12 @@ async fn run_agent_job(
             run.stderr.push_str(&reason);
         } else {
             // The process exited on its own before the kill took effect.
-            emit(
+            emit_job(
                 &state.db,
                 &state.bus,
                 Some(&job.project_id),
                 job.task_id.as_deref(),
+                Some(&job.id),
                 "job_stall_recovered",
                 format!(
                     "{}作业在卡死判定生效前已自行退出，按实际退出状态处理",
@@ -611,8 +715,11 @@ async fn build_prompt_data(
     .fetch_all(&state.db)
     .await?;
     let mut messages = messages;
-    if job.role == JOB_ROLE_GOAL {
-        // 规划作业的对话历史只保留目标确认内容；报告评议记录只属于总结作业。
+    if matches!(
+        job.role.as_str(),
+        JOB_ROLE_CONFIRM | JOB_ROLE_GOAL | JOB_ROLE_DIRECT
+    ) {
+        // 报告评议记录只属于总结作业和直接重做反馈。
         messages.retain(|message| message.role != REPORT_MESSAGE_ROLE);
     }
     let mut summary_tasks = Vec::new();
@@ -689,6 +796,7 @@ async fn build_prompt_data(
         report_feedback: project.report_feedback.clone(),
         replan_reason: project.replan_reason.clone(),
         replan_source: project.replan_source.clone(),
+        goal_confirm_mode: project.goal_confirm_mode.clone(),
     })
 }
 
@@ -721,6 +829,9 @@ fn build_context(
             "branch": project.branch,
             "replan_reason": project.replan_reason,
             "replan_source": project.replan_source,
+            "goal_confirm_mode": project.goal_confirm_mode,
+            "completion_mode": project.completion_mode,
+            "goal_confirmed_at": project.goal_confirmed_at,
         },
         "task": task.map(|task| json!({
             "id": task.id,
@@ -890,7 +1001,8 @@ async fn handle_goal_questions(
     insert_message(&state.db, &project.id, "planner", &content).await?;
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-         THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+         THEN status ELSE ? END, blocked_reason = NULL, goal_proposal = NULL, \
+         goal_confirmed_at = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_GOAL_CONFIRM)
     .bind(STATUS_BLOCKED)
@@ -976,10 +1088,13 @@ async fn handle_goal_plan(
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
+         completion_mode = ?, goal_confirmed_at = COALESCE(goal_confirmed_at, ?), \
          updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_EXECUTING)
     .bind(STATUS_RUNNING)
+    .bind(COMPLETION_TASKS)
+    .bind(&timestamp)
     .bind(&timestamp)
     .bind(&project.id)
     .execute(&mut *tx)
@@ -1002,7 +1117,295 @@ async fn handle_goal_plan(
     Ok(())
 }
 
+fn goal_proposal_content(
+    summary: &str,
+    goal: Option<&str>,
+    assumptions: &[String],
+    acceptance: &[String],
+    plan: &[String],
+    verification: &[String],
+) -> String {
+    let mut content = summary.trim().to_string();
+    if let Some(goal) = goal.map(str::trim).filter(|value| !value.is_empty()) {
+        content.push_str(&format!("\n\n目标：{goal}"));
+    }
+    let push_list = |content: &mut String, title: &str, items: &[String]| {
+        if items.is_empty() {
+            return;
+        }
+        content.push_str(&format!("\n\n{title}："));
+        for item in items {
+            content.push_str(&format!("\n- {item}"));
+        }
+    };
+    push_list(&mut content, "关键假设", assumptions);
+    push_list(&mut content, "验收口径", acceptance);
+    push_list(&mut content, "执行步骤", plan);
+    push_list(&mut content, "自检方式", verification);
+    content
+}
+
+async fn handle_goal_ready(
+    state: &AppState,
+    project: &ProjectRow,
+    summary: &str,
+    goal: &str,
+    assumptions: &[String],
+    acceptance: &[String],
+    skip_confirmation: bool,
+) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    let content = goal_proposal_content(summary, Some(goal), assumptions, acceptance, &[], &[]);
+    insert_message(&state.db, &project.id, "planner", &content).await?;
+    let proposal = GoalProposal {
+        kind: "ready".into(),
+        summary: summary.to_string(),
+        goal: Some(goal.to_string()),
+        assumptions: assumptions.to_vec(),
+        acceptance: acceptance.to_vec(),
+        plan: Vec::new(),
+        verification: Vec::new(),
+        skip_confirmation,
+    };
+    let proposal_json = serde_json::to_string(&proposal)?;
+    let auto = skip_confirmation && project.goal_confirm_mode == GOAL_CONFIRM_AUTO;
+    if auto {
+        sqlx::query(
+            "UPDATE projects SET goal = ?, goal_proposal = ?, goal_confirmed_at = ?, \
+             stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(goal)
+        .bind(&proposal_json)
+        .bind(now())
+        .bind(STAGE_PLANNING)
+        .bind(STATUS_RUNNING)
+        .bind(COMPLETION_TASKS)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "goal_auto_confirmed",
+            "目标已由自动确认通过，开始规划",
+        )
+        .await;
+    } else {
+        sqlx::query(
+            "UPDATE projects SET goal = ?, goal_proposal = ?, goal_confirmed_at = NULL, \
+             stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(goal)
+        .bind(&proposal_json)
+        .bind(STAGE_GOAL_CONFIRM)
+        .bind(STATUS_BLOCKED)
+        .bind(COMPLETION_TASKS)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "goal_ready",
+            "规划者已给出目标理解，等待人工确认",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn handle_goal_direct(
+    state: &AppState,
+    project: &ProjectRow,
+    summary: &str,
+    plan: &[String],
+    verification: &[String],
+    skip_confirmation: bool,
+) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    let content = goal_proposal_content(summary, None, &[], &[], plan, verification);
+    insert_message(&state.db, &project.id, "planner", &content).await?;
+    let proposal = GoalProposal {
+        kind: "direct".into(),
+        summary: summary.to_string(),
+        goal: None,
+        assumptions: Vec::new(),
+        acceptance: Vec::new(),
+        plan: plan.to_vec(),
+        verification: verification.to_vec(),
+        skip_confirmation,
+    };
+    let proposal_json = serde_json::to_string(&proposal)?;
+    let auto = skip_confirmation && project.goal_confirm_mode == GOAL_CONFIRM_AUTO;
+    if auto {
+        sqlx::query(
+            "UPDATE projects SET goal_proposal = ?, goal_confirmed_at = ?, stage = ?, \
+             status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&proposal_json)
+        .bind(now())
+        .bind(STAGE_EXECUTING)
+        .bind(STATUS_RUNNING)
+        .bind(COMPLETION_DIRECT)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "goal_auto_confirmed",
+            "目标已由自动确认通过，开始直接完成",
+        )
+        .await;
+    } else {
+        sqlx::query(
+            "UPDATE projects SET goal_proposal = ?, goal_confirmed_at = NULL, stage = ?, \
+             status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(&proposal_json)
+        .bind(STAGE_GOAL_CONFIRM)
+        .bind(STATUS_BLOCKED)
+        .bind(COMPLETION_TASKS)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "goal_direct",
+            "规划者建议直接完成，等待人工确认",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn handle_direct_success(
+    state: &AppState,
+    project: &ProjectRow,
+    summary: &str,
+    report: &str,
+) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    let timestamp = now();
+    sqlx::query(
+        "UPDATE projects SET report = ?, report_feedback = NULL, stage = ?, \
+         status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+         completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(report)
+    .bind(STAGE_SUMMARIZING)
+    .bind(STATUS_BLOCKED)
+    .bind(COMPLETION_DIRECT)
+    .bind(&timestamp)
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "direct_completed",
+        format!(
+            "直接完成作业已完成{}，等待人工验收报告",
+            if summary.trim().is_empty() {
+                String::new()
+            } else {
+                format!("：{summary}")
+            }
+        ),
+    )
+    .await;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "report_ready",
+        "项目报告已生成，等待人工验收",
+    )
+    .await;
+    Ok(())
+}
+
+async fn handle_direct_failure(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
+    {
+        let _guard = state.git_lock.lock().await;
+        let _ = git::reset_hard(&PathBuf::from(&project.workspace).join("repo")).await;
+    }
+    let _guard = state.schedule_lock.lock().await;
+    sqlx::query(
+        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, goal_proposal = NULL, \
+         goal_confirmed_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(STAGE_GOAL_CONFIRM)
+    .bind(STATUS_BLOCKED)
+    .bind(reason)
+    .bind(COMPLETION_TASKS)
+    .bind(now())
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "direct_failed",
+        format!("直接完成失败：{reason}"),
+    )
+    .await;
+    Ok(())
+}
+
 async fn handle_goal_failure(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    sqlx::query(
+        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, goal_proposal = NULL, \
+         goal_confirmed_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(STAGE_GOAL_CONFIRM)
+    .bind(STATUS_BLOCKED)
+    .bind(reason)
+    .bind(COMPLETION_TASKS)
+    .bind(now())
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "goal_failed",
+        format!("目标确认失败：{reason}"),
+    )
+    .await;
+    Ok(())
+}
+
+async fn handle_plan_failure(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
     if has_active_tasks(&state.db, &project.id).await? {
         return apply_stale_result(
@@ -1017,7 +1420,7 @@ async fn handle_goal_failure(state: &AppState, project: &ProjectRow, reason: &st
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
     )
-    .bind(STAGE_GOAL_CONFIRM)
+    .bind(STAGE_PLANNING)
     .bind(STATUS_BLOCKED)
     .bind(reason)
     .bind(now())
@@ -1734,11 +2137,12 @@ async fn finish_job(
         .bind(&job.project_id)
         .execute(&state.db)
         .await;
-    emit(
+    emit_job(
         &state.db,
         &state.bus,
         Some(&job.project_id),
         job.task_id.as_deref(),
+        Some(&job.id),
         "job_finished",
         format!(
             "{} 作业{}",
@@ -1807,17 +2211,22 @@ async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -> Result<()
                     _ => {}
                 }
             }
-        } else if job.role == JOB_ROLE_GOAL {
+        } else if job.role == JOB_ROLE_CONFIRM {
             handle_goal_failure(state, &project, reason).await?;
+        } else if job.role == JOB_ROLE_GOAL {
+            handle_plan_failure(state, &project, reason).await?;
+        } else if job.role == JOB_ROLE_DIRECT {
+            handle_direct_failure(state, &project, reason).await?;
         } else if job.role == JOB_ROLE_SUMMARY {
             handle_summary_failure(state, &project, reason).await?;
         }
     }
-    emit(
+    emit_job(
         &state.db,
         &state.bus,
         Some(&job.project_id),
         job.task_id.as_deref(),
+        Some(&job.id),
         "job_failed",
         format!("作业基础设施失败：{reason}"),
     )
@@ -2116,7 +2525,9 @@ fn parsed_error(parsed: &ParsedResult) -> Option<String> {
 
 fn role_label(role: &str) -> &'static str {
     match role {
+        JOB_ROLE_CONFIRM => "目标确认",
         JOB_ROLE_GOAL => "规划",
+        JOB_ROLE_DIRECT => "直接完成",
         JOB_ROLE_EXECUTOR => "执行",
         JOB_ROLE_VERIFIER => "验收",
         JOB_ROLE_SUMMARY => "总结",

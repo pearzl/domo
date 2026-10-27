@@ -7,7 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::{
-    parse_string_list, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, ROLE_EXECUTOR, ROLE_VERIFIER,
+    parse_string_list, JOB_ROLE_CONFIRM, JOB_ROLE_DIRECT, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY,
+    ROLE_EXECUTOR, ROLE_VERIFIER,
 };
 
 pub fn now() -> String {
@@ -75,9 +76,26 @@ pub enum ParsedResult {
         questions: Vec<String>,
         summary: String,
     },
+    GoalReady {
+        summary: String,
+        goal: String,
+        assumptions: Vec<String>,
+        acceptance: Vec<String>,
+        skip_confirmation: bool,
+    },
+    GoalDirect {
+        summary: String,
+        plan: Vec<String>,
+        verification: Vec<String>,
+        skip_confirmation: bool,
+    },
     Plan {
         summary: String,
         tasks: Vec<NormalizedTask>,
+    },
+    DirectDone {
+        summary: String,
+        report: String,
     },
     ExecutorDone {
         summary: String,
@@ -130,12 +148,68 @@ pub fn extract_json(raw: &str) -> Option<Value> {
 pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
     let value = extract_json(raw).ok_or_else(|| "结果不是合法 JSON".to_string())?;
     match role {
+        JOB_ROLE_CONFIRM => parse_confirm_result(&value),
         JOB_ROLE_GOAL => parse_planner_result(&value),
+        JOB_ROLE_DIRECT => parse_direct_result(&value),
         ROLE_EXECUTOR => parse_executor_result(&value),
         ROLE_VERIFIER => parse_verifier_result(&value),
         JOB_ROLE_SUMMARY => parse_report_result(&value),
         other => Err(format!("未知作业角色: {other}")),
     }
+}
+
+fn parse_confirm_result(value: &Value) -> Result<ParsedResult, String> {
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let summary = string_field(value, "summary").unwrap_or_default();
+    let questions = string_array(value.get("questions"));
+    if kind == "questions" || (!questions.is_empty() && kind.is_empty()) {
+        if questions.is_empty() {
+            return Err("目标确认结果缺少 questions 数组".to_string());
+        }
+        return Ok(ParsedResult::Questions { questions, summary });
+    }
+    let skip_confirmation = value
+        .get("skip_confirmation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if kind == "ready" {
+        let goal = string_field(value, "goal")
+            .or_else(|| string_field(value, "summary"))
+            .ok_or_else(|| "目标确认结果缺少 goal".to_string())?;
+        return Ok(ParsedResult::GoalReady {
+            summary,
+            goal,
+            assumptions: string_array(value.get("assumptions")),
+            acceptance: string_array(value.get("acceptance")),
+            skip_confirmation,
+        });
+    }
+    if kind == "direct" {
+        return Ok(ParsedResult::GoalDirect {
+            summary,
+            plan: string_array(value.get("plan")),
+            verification: string_array(value.get("verification")),
+            skip_confirmation,
+        });
+    }
+    Err(format!("未知目标确认结果类型: {kind}"))
+}
+
+fn parse_direct_result(value: &Value) -> Result<ParsedResult, String> {
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !matches!(kind, "direct_done" | "report" | "done") {
+        return Err(format!("直接完成结果类型不合法: {kind}"));
+    }
+    let report =
+        string_field(value, "report").ok_or_else(|| "直接完成结果缺少 report".to_string())?;
+    let summary = string_field(value, "summary").unwrap_or_else(|| "直接完成".into());
+    Ok(ParsedResult::DirectDone { summary, report })
 }
 
 fn parse_planner_result(value: &Value) -> Result<ParsedResult, String> {
@@ -779,6 +853,47 @@ mod tests {
             ParsedResult::Questions { questions, .. } => assert_eq!(questions, vec!["what?"]),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_goal_ready_and_direct() {
+        let ready = r#"{"kind":"ready","summary":"s","goal":"g","assumptions":["a"],"acceptance":["b"],"skip_confirmation":true}"#;
+        match parse_result(JOB_ROLE_CONFIRM, ready).unwrap() {
+            ParsedResult::GoalReady {
+                goal,
+                skip_confirmation,
+                ..
+            } => {
+                assert_eq!(goal, "g");
+                assert!(skip_confirmation);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let direct = r#"{"kind":"direct","summary":"s","plan":["p"],"verification":["v"],"skip_confirmation":false}"#;
+        match parse_result(JOB_ROLE_CONFIRM, direct).unwrap() {
+            ParsedResult::GoalDirect {
+                plan, verification, ..
+            } => {
+                assert_eq!(plan, vec!["p"]);
+                assert_eq!(verification, vec!["v"]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_direct_completion_report() {
+        let raw = r#"{"kind":"direct_done","summary":"s","report":"report body"}"#;
+        match parse_result(JOB_ROLE_DIRECT, raw).unwrap() {
+            ParsedResult::DirectDone { report, .. } => assert_eq!(report, "report body"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_plan_as_goal_confirmation() {
+        let raw = r#"{"kind":"plan","tasks":[]}"#;
+        assert!(parse_result(JOB_ROLE_CONFIRM, raw).is_err());
     }
 
     #[test]

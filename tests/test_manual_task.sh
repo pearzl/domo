@@ -77,7 +77,61 @@ base = f"http://127.0.0.1:{sys.argv[1]}"
 repo = sys.argv[2]
 
 
+_pending_goals = {}
+
+
 def call(method, path, data=None):
+    if method == "POST" and path == "/api/projects" and isinstance(data, dict) and "goal" in data:
+        goal = data.get("goal")
+        payload = {key: value for key, value in data.items() if key != "goal"}
+        result = _call_raw("POST", path, payload)
+        project_id = result["project"]["id"]
+        _pending_goals[project_id] = goal
+        return result
+    if (
+        method == "POST"
+        and path.startswith("/api/projects/")
+        and path.endswith("/confirm")
+        and not path.endswith("/goal/confirm")
+    ):
+        project_id = path.split("/")[-2]
+        detail = _call_raw("GET", f"/api/projects/{project_id}")
+        if not detail["messages"] and project_id in _pending_goals:
+            _call_raw(
+                "POST",
+                f"/api/projects/{project_id}/goal/messages",
+                {
+                    "message": _pending_goals.pop(project_id),
+                    "goal_confirm_mode": "auto",
+                },
+            )
+        message = (data or {}).get("message")
+        if message:
+            _call_raw(
+                "POST",
+                f"/api/projects/{project_id}/goal/messages",
+                {"message": message, "goal_confirm_mode": "auto"},
+            )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            detail = _call_raw("GET", f"/api/projects/{project_id}")
+            if detail["project"]["stage"] != "goal_confirm":
+                return detail
+            if detail.get("goal_proposal") and not detail["jobs"]:
+                return _call_raw(
+                    "POST",
+                    f"/api/projects/{project_id}/goal/confirm",
+                    {"message": None},
+                )
+            last = detail["messages"][-1] if detail["messages"] else None
+            if last and last["role"] == "planner" and not detail.get("goal_proposal"):
+                return detail
+            time.sleep(0.1)
+        return _call_raw("GET", f"/api/projects/{project_id}")
+    return _call_raw(method, path, data)
+
+
+def _call_raw(method, path, data=None):
     code, body = call_raw(method, path, data)
     if code >= 400:
         raise RuntimeError(f"{method} {path} -> {code}: {body}")
@@ -236,32 +290,28 @@ assert detail["project"]["report"] is None, detail["project"]
 assert detail["project"]["status"] == "running", detail["project"]
 call("POST", f"/api/projects/{project_id}/archive", {})
 
-# ---- 项目 B：规划中添加任务 -> 直接进入执行并完成 ------------------------------------------
+# ---- 项目 B：目标确认阶段添加任务，确认后与规划任务一起执行 --------------------------------
 planning = call(
     "POST",
     "/api/projects",
     {
-        "name": "Manual-Planning",
-        "goal": "生成一个 mock 文件",
+        "name": "Manual-Before-Planning",
         "repo_path": repo,
         "base_branch": "main",
     },
 )["project"]
 planning_id = planning["id"]
-
-# 项目池中的规划 Agent 停用后，项目停在规划阶段等待
-call(
-    "PATCH",
-    f"/api/projects/{planning_id}/agents/planner/{mock['id']}",
-    {"enabled": False},
+_call_raw(
+    "POST",
+    f"/api/projects/{planning_id}/goal/messages",
+    {"message": "生成一个 mock 文件", "goal_confirm_mode": "manual"},
 )
-call("POST", f"/api/projects/{planning_id}/confirm", {})
 wait_for(
     planning_id,
-    lambda d: d["project"]["stage"] == "planning"
-    and d["project"]["status"] == "running"
-    and d["project"]["blocked_reason"],
-    "规划阶段等待",
+    lambda d: d.get("goal_proposal")
+    and d["project"]["stage"] == "goal_confirm"
+    and d["project"]["status"] == "blocked",
+    "目标确认提议",
     30,
 )
 
@@ -269,25 +319,17 @@ created = add_task(planning_id, "M1")
 assert created["stage"] == "pending"
 assert created["status"] == "queued"
 
-detail = call("GET", f"/api/projects/{planning_id}")
-assert detail["project"]["stage"] == "executing", detail["project"]
-assert detail["project"]["status"] == "running", detail["project"]
-
-call(
-    "PATCH",
-    f"/api/projects/{planning_id}/agents/planner/{mock['id']}",
-    {"enabled": True},
-)
+_call_raw("POST", f"/api/projects/{planning_id}/goal/confirm", {})
 detail = wait_for(
     planning_id,
     lambda d: d["project"]["stage"] == "summarizing"
     and d["project"]["report"]
     and all(task["stage"] == "completed" for task in d["tasks"]),
-    "规划中添加的任务完成",
+    "目标确认前添加的任务完成",
 )
-assert [task["key"] for task in detail["tasks"]] == ["M1"]
+assert "M1" in {task["key"] for task in detail["tasks"]}, detail["tasks"]
 kinds = [event["kind"] for event in detail["events"]]
-assert "task_created" in kinds and "project_reopened" in kinds, kinds
+assert "task_created" in kinds, kinds
 call("POST", f"/api/projects/{planning_id}/archive", {})
 
 print("冒烟测试通过")

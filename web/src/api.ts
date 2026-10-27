@@ -97,11 +97,35 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+  postGoalMessage: (
+    id: string,
+    message: string,
+    goalConfirmMode?: "manual" | "auto",
+  ) =>
+    request<ProjectDetail>(`/api/projects/${id}/goal/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        message,
+        goal_confirm_mode: goalConfirmMode ?? null,
+      }),
+    }),
   confirmGoal: (id: string, message?: string) =>
-    request<ProjectDetail>(`/api/projects/${id}/confirm`, {
+    request<ProjectDetail>(`/api/projects/${id}/goal/confirm`, {
       method: "POST",
       body: JSON.stringify({ message: message || null }),
     }),
+  updateGoalPolicy: (id: string, mode: "manual" | "auto") =>
+    request<ProjectDetail>(`/api/projects/${id}/goal/policy`, {
+      method: "PATCH",
+      body: JSON.stringify({ mode }),
+    }),
+  getJobOutput: (id: string) =>
+    request<{
+      stdout: string;
+      stderr: string;
+      pid: number | null;
+      running: boolean;
+    }>(`/api/jobs/${id}/output`),
   pauseProject: (id: string, force = false) =>
     request<{ ok: boolean; forced: boolean }>(`/api/projects/${id}/pause`, {
       method: "POST",

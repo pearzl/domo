@@ -59,10 +59,18 @@ pub const FAILURE_TRANSIENT: &str = "transient";
 pub const FAILURE_PERMANENT: &str = "permanent";
 pub const FAILURE_TASK: &str = "task";
 
+pub const JOB_ROLE_CONFIRM: &str = "confirm";
 pub const JOB_ROLE_GOAL: &str = "goal";
+pub const JOB_ROLE_DIRECT: &str = "direct";
 pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
 pub const JOB_ROLE_VERIFIER: &str = ROLE_VERIFIER;
 pub const JOB_ROLE_SUMMARY: &str = "summary";
+
+pub const GOAL_CONFIRM_MANUAL: &str = "manual";
+pub const GOAL_CONFIRM_AUTO: &str = "auto";
+
+pub const COMPLETION_TASKS: &str = "tasks";
+pub const COMPLETION_DIRECT: &str = "direct";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct AgentRow {
@@ -217,6 +225,24 @@ pub fn default_team_row_to_pool(row: DefaultTeamRow) -> ProjectAgentRow {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalProposal {
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub assumptions: Vec<String>,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub plan: Vec<String>,
+    #[serde(default)]
+    pub verification: Vec<String>,
+    #[serde(default)]
+    pub skip_confirmation: bool,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct ProjectRow {
     pub id: String,
@@ -234,6 +260,11 @@ pub struct ProjectRow {
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
     pub replan_requested_at: Option<String>,
+    pub goal_confirm_mode: String,
+    #[serde(skip_serializing)]
+    pub goal_proposal: Option<String>,
+    pub goal_confirmed_at: Option<String>,
+    pub completion_mode: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -315,6 +346,7 @@ pub struct EventRow {
     pub id: i64,
     pub project_id: Option<String>,
     pub task_id: Option<String>,
+    pub job_id: Option<String>,
     pub kind: String,
     pub message: String,
     pub created_at: String,
@@ -335,6 +367,8 @@ pub struct ProjectSummary {
     pub task_completed: i64,
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
+    pub goal_confirm_mode: String,
+    pub completion_mode: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -477,17 +511,28 @@ pub struct ProjectDetail {
     pub agents: Vec<AgentView>,
     pub agent_pool: ProjectAgentPool,
     pub usage: ProjectUsage,
+    pub goal_proposal: Option<GoalProposal>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateProjectRequest {
     pub name: String,
-    pub goal: String,
     pub repo_path: String,
     pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GoalMessageRequest {
+    pub message: String,
+    pub goal_confirm_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GoalPolicyRequest {
+    pub mode: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct ConfirmGoalRequest {
     pub message: Option<String>,
 }

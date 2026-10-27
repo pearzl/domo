@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS projects (
     replan_reason TEXT,
     replan_source TEXT,
     replan_requested_at TEXT,
+    goal_confirm_mode TEXT NOT NULL DEFAULT 'manual',
+    goal_proposal TEXT,
+    goal_confirmed_at TEXT,
+    completion_mode TEXT NOT NULL DEFAULT 'tasks',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -161,6 +165,7 @@ CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT,
     task_id TEXT,
+    job_id TEXT,
     kind TEXT NOT NULL,
     message TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -192,6 +197,23 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
     ensure_column(pool, "projects", "replan_source", "TEXT").await?;
     ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "goal_confirm_mode",
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )
+    .await?;
+    ensure_column(pool, "projects", "goal_proposal", "TEXT").await?;
+    ensure_column(pool, "projects", "goal_confirmed_at", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "completion_mode",
+        "TEXT NOT NULL DEFAULT 'tasks'",
+    )
+    .await?;
+    ensure_column(pool, "events", "job_id", "TEXT").await?;
     ensure_column(pool, "tasks", "guidance", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column(pool, "tasks", "parent_id", "TEXT").await?;
     ensure_column(pool, "tasks", "milestone", "INTEGER NOT NULL DEFAULT 0").await?;

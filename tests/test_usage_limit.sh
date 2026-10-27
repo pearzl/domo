@@ -103,7 +103,61 @@ EXPECTED_COST = 0.25
 EXPECTED_DURATION = 1234
 
 
+_pending_goals = {}
+
+
 def call(method, path, data=None):
+    if method == "POST" and path == "/api/projects" and isinstance(data, dict) and "goal" in data:
+        goal = data.get("goal")
+        payload = {key: value for key, value in data.items() if key != "goal"}
+        result = _call_raw("POST", path, payload)
+        project_id = result["project"]["id"]
+        _pending_goals[project_id] = goal
+        return result
+    if (
+        method == "POST"
+        and path.startswith("/api/projects/")
+        and path.endswith("/confirm")
+        and not path.endswith("/goal/confirm")
+    ):
+        project_id = path.split("/")[-2]
+        detail = _call_raw("GET", f"/api/projects/{project_id}")
+        if not detail["messages"] and project_id in _pending_goals:
+            _call_raw(
+                "POST",
+                f"/api/projects/{project_id}/goal/messages",
+                {
+                    "message": _pending_goals.pop(project_id),
+                    "goal_confirm_mode": "auto",
+                },
+            )
+        message = (data or {}).get("message")
+        if message:
+            _call_raw(
+                "POST",
+                f"/api/projects/{project_id}/goal/messages",
+                {"message": message, "goal_confirm_mode": "auto"},
+            )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            detail = _call_raw("GET", f"/api/projects/{project_id}")
+            if detail["project"]["stage"] != "goal_confirm":
+                return detail
+            if detail.get("goal_proposal") and not detail["jobs"]:
+                return _call_raw(
+                    "POST",
+                    f"/api/projects/{project_id}/goal/confirm",
+                    {"message": None},
+                )
+            last = detail["messages"][-1] if detail["messages"] else None
+            if last and last["role"] == "planner" and not detail.get("goal_proposal"):
+                return detail
+            time.sleep(0.1)
+        return _call_raw("GET", f"/api/projects/{project_id}")
+    return _call_raw(method, path, data)
+
+
+def _call_raw(method, path, data=None):
     body = json.dumps(data).encode() if data is not None else None
     request = urllib.request.Request(
         base + path,

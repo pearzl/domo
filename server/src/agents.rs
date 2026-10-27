@@ -12,8 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::models::{
-    AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL,
-    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, GOAL_CONFIRM_AUTO, JOB_ROLE_CONFIRM,
+    JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
 
 const OUTPUT_CAP: usize = 2 * 1024 * 1024;
@@ -143,7 +143,9 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
 
     let context = read_context(&spec.job_dir)?;
     let result = match spec.role.as_str() {
+        JOB_ROLE_CONFIRM => mock_confirm(&context),
         JOB_ROLE_GOAL => mock_plan(&context),
+        JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
         JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
         JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
         JOB_ROLE_SUMMARY => mock_summary(&context),
@@ -152,8 +154,10 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
     let result = attach_mock_usage(result, &context);
     let path = spec.job_dir.join("result.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&result)?).await?;
+    let stdout = format!("mock job {} finished\n", spec.job_id);
+    let _ = tokio::fs::write(spec.job_dir.join("stdout.log"), &stdout).await;
     Ok(AgentRun {
-        stdout: format!("mock job {} finished\n", spec.job_id),
+        stdout,
         stderr: String::new(),
         exit_code: Some(0),
         timed_out: false,
@@ -219,6 +223,72 @@ fn mock_env_f64(key: &str, fallback: f64) -> f64 {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(fallback)
+}
+
+fn mock_confirm(context: &serde_json::Value) -> serde_json::Value {
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let mode = context
+        .get("project")
+        .and_then(|value| value.get("goal_confirm_mode"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("manual");
+    let has_planner_message = context
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|messages| {
+            messages
+                .iter()
+                .any(|message| message.get("role").and_then(|v| v.as_str()) == Some("planner"))
+        })
+        .unwrap_or(false);
+    if goal.contains("[ask]") && !has_planner_message {
+        return serde_json::json!({
+            "kind": "questions",
+            "summary": "需要确认目标",
+            "questions": ["希望优先实现哪个使用场景？"]
+        });
+    }
+    let skip = goal.contains("[skipforce]") || mode == GOAL_CONFIRM_AUTO;
+    if goal.contains("[direct]") {
+        return serde_json::json!({
+            "kind": "direct",
+            "summary": "这个目标足够简单，可以直接完成",
+            "plan": ["创建目标文件", "检查文件内容"],
+            "verification": ["读取文件确认内容"],
+            "skip_confirmation": skip
+        });
+    }
+    serde_json::json!({
+        "kind": "ready",
+        "summary": "已理解目标",
+        "goal": goal,
+        "assumptions": ["使用 mock Agent"],
+        "acceptance": ["产物符合目标描述"],
+        "skip_confirmation": skip
+    })
+}
+
+fn mock_direct(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let dir = cwd.join("domo_mock");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("direct.txt"), "mock direct completion\n")?;
+    Ok(serde_json::json!({
+        "kind": "direct_done",
+        "summary": "已直接完成目标",
+        "report": format!(
+            "# Mock 直接完成报告\n\n目标：{}\n\n已完成 `domo_mock/direct.txt` 并通过自检。",
+            goal
+        )
+    }))
 }
 
 fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
@@ -831,8 +901,17 @@ async fn run_process(
     }
     let stdout = child.stdout.take().expect("stdout pipe");
     let stderr = child.stderr.take().expect("stderr pipe");
-    let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true));
-    let stderr_task = tokio::spawn(read_capped(stderr, spec.progress.clone(), false));
+    let stdout_log = spec.job_dir.join("stdout.log");
+    let stderr_log = spec.job_dir.join("stderr.log");
+    let _ = tokio::fs::write(&stdout_log, b"").await;
+    let _ = tokio::fs::write(&stderr_log, b"").await;
+    let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true, stdout_log));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr,
+        spec.progress.clone(),
+        false,
+        stderr_log,
+    ));
 
     let mut timed_out = false;
     let status = match tokio::time::timeout(timeout, child.wait()).await {
@@ -861,9 +940,17 @@ async fn read_capped<R: AsyncRead + Unpin>(
     mut reader: R,
     progress: JobProgress,
     stdout: bool,
+    log_path: PathBuf,
 ) -> String {
     let mut output = Vec::new();
+    let mut written = 0usize;
     let mut buffer = [0u8; 8192];
+    let mut log = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .await
+        .ok();
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => break,
@@ -871,6 +958,13 @@ async fn read_capped<R: AsyncRead + Unpin>(
                 if output.len() < OUTPUT_CAP {
                     let take = n.min(OUTPUT_CAP - output.len());
                     output.extend_from_slice(&buffer[..take]);
+                }
+                if let Some(log) = &mut log {
+                    if written < OUTPUT_CAP {
+                        let take = n.min(OUTPUT_CAP - written);
+                        let _ = log.write_all(&buffer[..take]).await;
+                        written += take;
+                    }
                 }
                 if stdout {
                     progress.record_stdout(n);

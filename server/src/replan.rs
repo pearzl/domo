@@ -106,10 +106,12 @@ pub async fn request(
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
-         replan_reason = ?, replan_source = ?, replan_requested_at = ?, updated_at = ? WHERE id = ?",
+         completion_mode = ?, replan_reason = ?, replan_source = ?, replan_requested_at = ?, \
+         updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_PLANNING)
     .bind(STATUS_RUNNING)
+    .bind(COMPLETION_TASKS)
     .bind(reason)
     .bind(source)
     .bind(&timestamp)

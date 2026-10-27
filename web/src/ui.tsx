@@ -25,7 +25,9 @@ export const TASK_STAGE_LABELS: Record<string, string> = {
 };
 
 export const ROLE_LABELS: Record<string, string> = {
+  confirm: "目标确认",
   goal: "规划",
+  direct: "直接完成",
   planner: "规划",
   executor: "执行",
   verifier: "验收",

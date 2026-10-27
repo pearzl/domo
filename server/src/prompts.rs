@@ -2,8 +2,8 @@
 //! write JSON there; stdout is captured for audit but is not the protocol channel.
 
 use crate::models::{
-    MessageRow, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
-    REPORT_MESSAGE_ROLE,
+    MessageRow, JOB_ROLE_CONFIRM, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL,
+    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -64,11 +64,14 @@ pub struct PromptData {
     pub report_feedback: Option<String>,
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
+    pub goal_confirm_mode: String,
 }
 
 pub fn render(data: &PromptData) -> String {
     match data.role.as_str() {
+        JOB_ROLE_CONFIRM => confirm_prompt(data),
         JOB_ROLE_GOAL => goal_prompt(data),
+        JOB_ROLE_DIRECT => direct_prompt(data),
         JOB_ROLE_EXECUTOR => executor_prompt(data),
         JOB_ROLE_VERIFIER => verifier_prompt(data),
         JOB_ROLE_SUMMARY => summary_prompt(data),
@@ -110,7 +113,7 @@ fn result_rules(data: &PromptData, schema: &str) -> String {
     )
 }
 
-fn goal_prompt(data: &PromptData) -> String {
+fn conversation_history(data: &PromptData) -> String {
     let mut history = String::new();
     for message in &data.messages {
         history.push_str(&format!(
@@ -126,11 +129,45 @@ fn goal_prompt(data: &PromptData) -> String {
     if history.is_empty() {
         history.push_str("\n（暂无对话）\n");
     }
+    history
+}
+
+fn confirm_prompt(data: &PromptData) -> String {
+    let auto = data.goal_confirm_mode == crate::models::GOAL_CONFIRM_AUTO;
+    format!(
+        "{}你当前扮演**规划者**，正在与用户确认项目目标。此阶段只讨论目标，不生成任务计划，不修改代码。\n\
+         判断目标是否足够明确：只有确实缺少会影响实现的关键信息时才提问；目标足够清晰时，给出对目标的理解、关键假设和验收口径。\n\
+         如果目标简单到不需要拆分任务，可以提出直接完成，说明执行步骤和自检方式。\n\
+         \n## 人工确认设置\n{}\n\
+         \n## 目标确认对话\n{}\n\
+         \n## 输出 schema\n\
+         如果需要澄清，输出：\n\
+         {{\"kind\":\"questions\",\"summary\":\"为什么需要澄清\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
+         如果目标明确但需要任务规划，输出：\n\
+         {{\"kind\":\"ready\",\"summary\":\"对目标的理解\",\"goal\":\"确认后的目标\",\"assumptions\":[\"关键假设\"],\"acceptance\":[\"验收口径\"],\"skip_confirmation\":false}}\n\
+         如果目标足够简单、可以直接完成，输出：\n\
+         {{\"kind\":\"direct\",\"summary\":\"为什么可以直接完成\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方式\"],\"skip_confirmation\":false}}\n\
+         {}",
+        common_header(data),
+        if auto {
+            "当前为自动确认模式：目标足够明确时可以把 skip_confirmation 设为 true，DOMO 会直接进入规划或直接完成；仍有歧义时必须提问或等待用户确认。"
+        } else {
+            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认后继续。"
+        },
+        conversation_history(data),
+        result_rules(
+            data,
+            "{\"kind\":\"questions\",\"questions\":[...]}、{\"kind\":\"ready\",\"goal\":\"...\",...} 或 {\"kind\":\"direct\",\"plan\":[...],\"verification\":[...],...}"
+        )
+    )
+}
+
+fn goal_prompt(data: &PromptData) -> String {
     let replan = replan_section(data);
     format!(
-        "{}你当前扮演**规划者**。先判断项目目标是否足够明确：只有确实缺少会影响实现的关键信息时才提问；\
-         如果目标已经足够清晰，直接给出任务规划。不要为了提问而提问。\n\
-         \n## 目标确认对话\n{}\n\
+        "{}你当前扮演**规划者**。目标已经确认，现在只负责任务规划：把目标拆成可独立执行、独立验收的最小任务。\n\
+         不要再向用户确认目标；如果确实发现目标无法规划，可以返回 questions 让项目回到目标确认阶段。\n\
+         \n## 已确认目标与对话\n{}\n\
          {}\
          \n## 规划约束\n\
          - 任务必须是可以独立执行、独立验收的最小单元；\n\
@@ -142,18 +179,49 @@ fn goal_prompt(data: &PromptData) -> String {
          - 不要修改任何代码或文件，当前工作区只用于阅读；\n\
          - 需要阅读仓库时，优先看 README.md、docs/DEV.md 和相关源码。\n\
          \n## 输出 schema\n\
-         如果需要澄清，输出：\n\
-         {{\"kind\":\"questions\",\"summary\":\"为什么需要澄清\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
-         如果可以直接规划，输出：\n\
+         如果需要退回目标确认，输出：\n\
+         {{\"kind\":\"questions\",\"summary\":\"为什么需要重新确认\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
+         正常规划输出：\n\
          {{\"kind\":\"plan\",\"summary\":\"规划说明\",\"tasks\":[{{\"key\":\"T1\",\"title\":\"短标题\",\"description\":\"详细目标和边界\",\"acceptance\":[\"可执行的验收标准\"],\"deps\":[]}},{{\"key\":\"T2\",\"title\":\"...\",\"description\":\"...\",\"acceptance\":[\"...\"],\"deps\":[\"T1\"]}}]}}\n\
          key 使用 T1、T2 这类短标识；deps 引用其他任务的 key。\n\
          {}",
         common_header(data),
-        history,
+        conversation_history(data),
         replan,
         result_rules(
             data,
             "{\"kind\":\"plan\",\"summary\":\"...\",\"tasks\":[...]} 或 {\"kind\":\"questions\",\"questions\":[...]}"
+        )
+    )
+}
+
+fn direct_prompt(data: &PromptData) -> String {
+    let feedback = data
+        .report_feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n## 上一轮报告意见（本次必须处理）\n{value}\n"))
+        .unwrap_or_default();
+    format!(
+        "{}你当前扮演**规划者**，并已被授权直接完成目标。此模式不拆分任务，由你一次性完成实现、自检和总结。\n\
+         \n## 执行要求\n\
+         - 直接在当前工作区修改文件、创建产物并运行必要的测试或检查；\n\
+         - 不要执行 git commit、git merge、git push，DOMO 会在作业成功后提交变更；\n\
+         - 不要修改工作区以外的文件；\n\
+         - 完成后必须把结果 JSON 写入结果文件；\n\
+         - 报告必须包含：变更内容、自检命令与结果、未覆盖的风险。\n\
+         {}\
+         \n## 目标确认对话\n{}\n\
+         \n## 输出 schema\n\
+         {{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告，包含变更、自检结果和风险\"}}\n\
+         {}",
+        common_header(data),
+        feedback,
+        conversation_history(data),
+        result_rules(
+            data,
+            "{\"kind\":\"direct_done\",\"summary\":\"...\",\"report\":\"Markdown 报告\"}"
         )
     )
 }

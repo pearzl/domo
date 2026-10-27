@@ -106,7 +106,7 @@ export function ProjectPage({
     );
   }
 
-  const { project, tasks, jobs, messages, events, agents } = detail;
+  const { project, tasks, jobs, messages, events, agents, goal_proposal } = detail;
   const activeTasks = tasks.filter((task) => task.status !== "canceled");
   const completed = activeTasks.filter((task) => task.stage === "completed").length;
   const archived = project.status === "archived";
@@ -126,6 +126,18 @@ export function ProjectPage({
   const agentName = (agentId: string | null) =>
     agentId ? agents.find((agent) => agent.id === agentId)?.name ?? agentId : "—";
   const projectJobs = jobs.filter((job) => !job.task_id);
+  const confirmJob = jobs.find(
+    (job) => job.role === "confirm" && job.status === "running",
+  );
+  const directJob = jobs.find(
+    (job) => job.role === "direct" && job.status === "running",
+  );
+  const directMode = project.completion_mode === "direct";
+  const lastGoalMessage = goalMessages[goalMessages.length - 1];
+  const waitingGoal =
+    project.stage === "goal_confirm" &&
+    !confirmJob &&
+    lastGoalMessage?.role === "planner";
   const canReorder = (task: Task) =>
     !archived &&
     task.stage === "pending" &&
@@ -215,7 +227,8 @@ export function ProjectPage({
             {!archived &&
             project.status === "blocked" &&
             project.stage !== "completed" &&
-            !waitingReport ? (
+            !waitingReport &&
+            !waitingGoal ? (
               <button
                 className="secondary"
                 disabled={busy}
@@ -370,7 +383,27 @@ export function ProjectPage({
       {project.stage === "goal_confirm" ? (
         <section className="panel">
           <h2>目标确认</h2>
-          <p className="subtitle">规划者会先判断目标是否清晰；不确定时可以在这里补充信息再确认。</p>
+          <p className="subtitle">
+            规划者会分析目标、提出问题并给出自己的理解。你可以多轮补充，确认后再开始规划。
+          </p>
+          <label className="goal-policy">
+            <input
+              type="checkbox"
+              checked={project.goal_confirm_mode === "auto"}
+              disabled={busy || archived || paused || !!confirmJob}
+              onChange={(event) =>
+                run(() =>
+                  api.updateGoalPolicy(
+                    project.id,
+                    event.target.checked ? "auto" : "manual",
+                  ),
+                )
+              }
+            />
+            <span>
+              自动确认：目标足够清晰时允许 AI 跳过人工确认，直接开始规划或直接完成
+            </span>
+          </label>
           <div className="messages">
             {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
@@ -378,27 +411,114 @@ export function ProjectPage({
                 <div className="pre-wrap">{item.content}</div>
               </div>
             ))}
+            {goalMessages.length === 0 ? (
+              <div className="muted">还没有输入项目目标。</div>
+            ) : null}
           </div>
-          <div className="confirm-row">
-            <textarea
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              rows={3}
-              placeholder="补充说明（可选）。如果规划者已经提问，请在这里回答。"
-            />
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() =>
-                run(async () => {
-                  await api.confirmGoal(project.id, message);
-                  setMessage("");
-                })
-              }
-            >
-              {goalMessages.length > 1 ? "发送并继续" : "确认目标并规划"}
-            </button>
-          </div>
+          {confirmJob ? (
+            <div className="goal-running">
+              <Badge tone="info">规划者正在分析</Badge>
+              <span className="muted">
+                {confirmJob.agent_name ?? "规划 Agent"} ·{" "}
+                {formatTime(confirmJob.started_at)}
+              </span>
+            </div>
+          ) : null}
+          {goal_proposal ? (
+            <div className="goal-proposal">
+              <div className="goal-proposal-head">
+                <Badge tone={goal_proposal.kind === "direct" ? "warn" : "success"}>
+                  {goal_proposal.kind === "direct" ? "建议直接完成" : "目标已明确"}
+                </Badge>
+                <span>{goal_proposal.summary}</span>
+              </div>
+              {goal_proposal.goal ? (
+                <div className="pre-wrap">
+                  <strong>确认后的目标：</strong>
+                  {goal_proposal.goal}
+                </div>
+              ) : null}
+              {goal_proposal.plan.length ? (
+                <div>
+                  <strong>执行步骤</strong>
+                  <ul>
+                    {goal_proposal.plan.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {goal_proposal.verification.length ? (
+                <div>
+                  <strong>自检方式</strong>
+                  <ul>
+                    {goal_proposal.verification.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {!confirmJob ? (
+            <div className="confirm-row">
+              <textarea
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                disabled={busy || paused || archived}
+                rows={3}
+                placeholder={
+                  goalMessages.length === 0
+                    ? "描述项目目标、边界和验收预期。"
+                    : "补充信息或回答规划者的问题。"
+                }
+              />
+              <div className="button-row">
+                <button
+                  className="secondary"
+                  disabled={busy || paused || archived || !message.trim()}
+                  onClick={() =>
+                    run(async () => {
+                      await api.postGoalMessage(
+                        project.id,
+                        message,
+                        project.goal_confirm_mode,
+                      );
+                      setMessage("");
+                    })
+                  }
+                >
+                  {goalMessages.length === 0 ? "开始讨论" : "发送"}
+                </button>
+                {goal_proposal ? (
+                  <button
+                    className="primary"
+                    disabled={
+                      busy ||
+                      paused ||
+                      archived ||
+                      (goal_proposal.kind === "direct" && activeTasks.length > 0)
+                    }
+                    title={
+                      goal_proposal.kind === "direct" && activeTasks.length > 0
+                        ? "项目已有任务，不能直接完成"
+                        : undefined
+                    }
+                    onClick={() =>
+                      run(async () => {
+                        await api.confirmGoal(project.id, message || undefined);
+                        setMessage("");
+                      })
+                    }
+                  >
+                    {goal_proposal.kind === "direct"
+                      ? "确认并直接完成"
+                      : "确认目标，开始规划"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : goalMessages.length > 1 ? (
         <details className="panel">
@@ -416,8 +536,8 @@ export function ProjectPage({
 
       <section className="panel">
         <div className="panel-head">
-          <h2>任务</h2>
-          {!archived ? (
+          <h2>{directMode ? "直接完成" : "任务"}</h2>
+          {!archived && !directMode && goal_proposal?.kind !== "direct" ? (
             <button
               className="secondary"
               disabled={busy}
@@ -427,7 +547,29 @@ export function ProjectPage({
             </button>
           ) : null}
         </div>
-        {addTaskOpen && !archived ? (
+        {directMode ? (
+          <div className="direct-mode">
+            <p className="subtitle">
+              本项目采用直接完成模式，不拆分任务。规划者会一次性完成实现、自检和总结，报告仍需人工验收。
+            </p>
+            {directJob ? (
+              <div className="goal-running">
+                <Badge tone="info">直接完成中</Badge>
+                <span className="muted">
+                  {directJob.agent_name ?? "规划 Agent"} ·{" "}
+                  {formatTime(directJob.started_at)}
+                </span>
+              </div>
+            ) : project.stage === "executing" ? (
+              <div className="muted">等待直接完成作业派发。</div>
+            ) : (
+              <div className="muted">
+                直接完成已结束，请查看下方项目报告。
+              </div>
+            )}
+          </div>
+        ) : null}
+        {addTaskOpen && !archived && !directMode && goal_proposal?.kind !== "direct" ? (
           <form className="form add-task-form" onSubmit={handleAddTask}>
             <div className="form-grid">
               <label>
@@ -522,7 +664,7 @@ export function ProjectPage({
             </div>
           </form>
         ) : null}
-        {tasks.length === 0 ? (
+        {directMode ? null : tasks.length === 0 ? (
           <Empty title="还没有任务" hint="确认目标后，规划者会输出带依赖关系的任务列表。" />
         ) : (
           <div className="task-list">
@@ -608,7 +750,7 @@ export function ProjectPage({
             })}
           </div>
         )}
-        {tasks.length > 0 ? (
+        {!directMode && tasks.length > 0 ? (
           <div className="legend muted">
             阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。
           </div>
@@ -617,7 +759,7 @@ export function ProjectPage({
 
       {projectJobs.length > 0 ? (
         <section className="panel">
-          <h2>规划与总结作业</h2>
+          <h2>目标确认 / 规划 / 总结作业</h2>
           <div className="jobs">
             {projectJobs.map((job) => (
               <JobDetailView key={job.id} job={job} />
@@ -688,9 +830,13 @@ export function ProjectPage({
                       setFeedback("");
                     })
                   }
-                  title="记录意见并要求规划者重新撰写报告"
+                  title={
+                    project.completion_mode === "direct"
+                      ? "记录意见并重新执行直接完成"
+                      : "记录意见并要求规划者重新撰写报告"
+                  }
                 >
-                  重新撰写
+                  {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
                 </button>
                 <button
                   className="secondary"
@@ -705,18 +851,26 @@ export function ProjectPage({
                 >
                   要求重新规划
                 </button>
-                <button
-                  className="secondary"
-                  disabled={busy || archived}
-                  onClick={() => setAddTaskOpen(true)}
-                  title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
-                >
-                  增加新任务
-                </button>
+                {project.completion_mode !== "direct" ? (
+                  <button
+                    className="secondary"
+                    disabled={busy || archived}
+                    onClick={() => setAddTaskOpen(true)}
+                    title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
+                  >
+                    增加新任务
+                  </button>
+                ) : null}
               </div>
-              <p className="muted">
-                “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
-              </p>
+              {project.completion_mode !== "direct" ? (
+                <p className="muted">
+                  “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
+                </p>
+              ) : (
+                <p className="muted">
+                  直接完成模式下，“重做并重新总结”会重新执行并生成新报告。
+                </p>
+              )}
             </div>
           ) : null}
         </section>

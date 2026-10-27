@@ -140,6 +140,8 @@ export interface ProjectSummary {
   task_completed: number;
   replan_reason: string | null;
   replan_source: string | null;
+  goal_confirm_mode: "manual" | "auto";
+  completion_mode: "tasks" | "direct";
   created_at: string;
   updated_at: string;
 }
@@ -160,6 +162,9 @@ export interface Project {
   replan_reason: string | null;
   replan_source: string | null;
   replan_requested_at: string | null;
+  goal_confirm_mode: "manual" | "auto";
+  goal_confirmed_at: string | null;
+  completion_mode: "tasks" | "direct";
   created_at: string;
   updated_at: string;
 }
@@ -242,9 +247,21 @@ export interface AuditEvent {
   id: number;
   project_id: string | null;
   task_id: string | null;
+  job_id: string | null;
   kind: string;
   message: string;
   created_at: string;
+}
+
+export interface GoalProposal {
+  kind: "ready" | "direct";
+  summary: string;
+  goal: string | null;
+  assumptions: string[];
+  acceptance: string[];
+  plan: string[];
+  verification: string[];
+  skip_confirmation: boolean;
 }
 
 export interface ProjectDetail {
@@ -256,6 +273,7 @@ export interface ProjectDetail {
   agents: Agent[];
   agent_pool: ProjectAgentPool;
   usage: ProjectUsage;
+  goal_proposal: GoalProposal | null;
 }
 
 export interface ArbitrationAgent {
@@ -313,7 +331,6 @@ export interface ArbitrationContext {
 
 export interface CreateProjectInput {
   name: string;
-  goal: string;
   repo_path: string;
   base_branch?: string;
 }

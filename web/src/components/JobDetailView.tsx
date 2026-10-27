@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
@@ -17,11 +17,17 @@ import {
 
 export function JobDetailView({ job }: { job: JobSummary }) {
   const [detail, setDetail] = useState<JobDetail | null>(null);
+  const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [live, setLive] = useState<{
+    stdout: string;
+    stderr: string;
+    pid: number | null;
+    running: boolean;
+  } | null>(null);
 
-  async function handleToggle(event: SyntheticEvent<HTMLDetailsElement>) {
-    if (!event.currentTarget.open || detail || loading) return;
+  async function loadDetail() {
     setLoading(true);
     setError("");
     try {
@@ -33,9 +39,37 @@ export function JobDetailView({ job }: { job: JobSummary }) {
     }
   }
 
+  async function loadOutput() {
+    try {
+      setLive(await api.getJobOutput(job.id));
+    } catch {
+      // The job may have just been removed or the output file may not exist yet.
+    }
+  }
+
+  function handleToggle(event: SyntheticEvent<HTMLDetailsElement>) {
+    const next = event.currentTarget.open;
+    setOpen(next);
+    if (next && !detail && !loading) {
+      void loadDetail();
+    }
+    if (next) void loadOutput();
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    void loadOutput();
+    if (job.status !== "running") return;
+    const timer = window.setInterval(() => void loadOutput(), 1500);
+    return () => window.clearInterval(timer);
+  }, [open, job.id, job.status]);
+
   const duration = job.duration_ms
     ? formatMillis(job.duration_ms)
     : formatDuration(job.started_at, job.finished_at);
+  const stdout = live?.stdout || detail?.stdout || "";
+  const stderr = live?.stderr || detail?.stderr || "";
+  const pid = live?.pid ?? detail?.pid ?? null;
 
   return (
     <details className="job" onToggle={handleToggle}>
@@ -70,6 +104,7 @@ export function JobDetailView({ job }: { job: JobSummary }) {
         <div className="job-meta">
           创建 {formatTime(job.created_at)} · 开始 {formatTime(job.started_at)} · 结束{" "}
           {formatTime(job.finished_at)}
+          {pid ? ` · PID ${pid}` : ""}
         </div>
         <div className="job-meta">
           用量：
@@ -83,14 +118,16 @@ export function JobDetailView({ job }: { job: JobSummary }) {
         {job.error ? <div className="error-box pre-wrap">{job.error}</div> : null}
         {loading ? <div className="muted">加载作业详情…</div> : null}
         {error ? <div className="error-box">{error}</div> : null}
-        {detail ? (
-          <>
-            <JobBlock title="结果" value={detail.result} />
-            <JobBlock title="提示词" value={detail.prompt} />
-            <JobBlock title="标准输出" value={detail.stdout} />
-            <JobBlock title="标准错误" value={detail.stderr} />
-          </>
-        ) : null}
+        {detail ? <JobBlock title="结果" value={detail.result} /> : null}
+        <JobBlock
+          title={live?.running ? "运行输出（实时）" : "标准输出"}
+          value={stdout}
+        />
+        <JobBlock
+          title={live?.running ? "运行错误（实时）" : "标准错误"}
+          value={stderr}
+        />
+        {detail ? <JobBlock title="提示词" value={detail.prompt} /> : null}
       </div>
     </details>
   );

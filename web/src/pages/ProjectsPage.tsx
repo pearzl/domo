@@ -17,7 +17,6 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [error, setError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
-  const [goal, setGoal] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
   const [creating, setCreating] = useState(false);
@@ -46,12 +45,10 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
     try {
       const detail = await api.createProject({
         name: name.trim(),
-        goal: goal.trim(),
         repo_path: repoPath.trim(),
         base_branch: baseBranch.trim() || undefined,
       });
       setName("");
-      setGoal("");
       setRepoPath("");
       setBaseBranch("");
       setShowForm(false);
@@ -107,16 +104,6 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
               />
             </label>
           </div>
-          <label>
-            <span>项目目标</span>
-            <textarea
-              value={goal}
-              onChange={(event) => setGoal(event.target.value)}
-              rows={4}
-              placeholder="描述要达成的目标、边界和验收预期。规划者会先判断是否需要澄清。"
-              required
-            />
-          </label>
           <div className="form-actions">
             <button className="primary" type="submit" disabled={creating}>
               {creating ? "创建中…" : "创建项目"}
@@ -128,7 +115,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       {loading ? (
         <div className="muted">加载中…</div>
       ) : projects.length === 0 ? (
-        <Empty title="还没有项目" hint="新建项目后，先与规划者确认目标，再开始自动执行。" />
+        <Empty title="还没有项目" hint="新建项目并进入项目后，输入目标与规划者确认。" />
       ) : (
         <div className="project-list">
           {projects.map((project) => (
@@ -148,7 +135,9 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
                   <StageBadge stage={project.stage} />
                   <StatusBadge status={project.status} />
                 </div>
-                <p className="goal-line">{project.goal}</p>
+                <p className="goal-line">
+                  {project.goal || "尚未输入项目目标"}
+                </p>
                 {project.blocked_reason ? (
                   <p className="blocked-line">阻塞：{project.blocked_reason}</p>
                 ) : null}
