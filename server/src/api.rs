@@ -23,6 +23,7 @@ use crate::models::*;
 use crate::replan;
 use crate::state::AppState;
 use crate::usage;
+use crate::version;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -150,7 +151,11 @@ async fn api_not_found() -> (StatusCode, Json<ErrorBody>) {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({"ok": true}))
+    Json(json!({
+        "ok": true,
+        "version": version::VERSION,
+        "git_hash": version::git_hash(),
+    }))
 }
 
 async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentView>>, ApiError> {

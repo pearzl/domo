@@ -4,6 +4,7 @@ import type {
   ArbitrationContext,
   AuditEvent,
   CreateProjectInput,
+  Health,
   JobDetail,
   ProjectAgentPool,
   ProjectDetail,
@@ -36,6 +37,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  health: () => request<Health>("/api/health"),
   listProjects: () => request<ProjectSummary[]>("/api/projects"),
   createProject: (input: CreateProjectInput) =>
     request<ProjectDetail>("/api/projects", {
@@ -210,9 +212,14 @@ export const api = {
   },
 };
 
-export function subscribeEvents(onEvent: () => void): () => void {
+export function subscribeEvents(
+  onEvent: () => void,
+  onStatus?: (connected: boolean) => void,
+): () => void {
   if (typeof EventSource === "undefined") return () => undefined;
   const source = new EventSource("/api/events/stream");
+  source.onopen = () => onStatus?.(true);
+  source.onerror = () => onStatus?.(false);
   source.onmessage = () => onEvent();
   return () => source.close();
 }

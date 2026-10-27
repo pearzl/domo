@@ -3,6 +3,12 @@ export type Role = "planner" | "executor" | "verifier";
 export type UsageMetric = "tokens" | "input_tokens" | "output_tokens" | "cost";
 export type UsageWindowKind = "day" | "month";
 
+export interface Health {
+  ok: boolean;
+  version: string;
+  git_hash: string;
+}
+
 export interface AvailabilitySlot {
   /** 1 = Monday, 7 = Sunday. */
   weekday: number;

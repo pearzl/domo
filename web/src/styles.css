@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+  --sidebar-width: 216px;
   --bg: #f4f6f8;
   --panel: #ffffff;
   --text: #1c2430;
@@ -109,17 +110,88 @@ pre {
   min-height: 100vh;
 }
 
-.topbar {
-  position: sticky;
+.content {
+  margin-left: var(--sidebar-width);
+  min-height: 100vh;
+  min-width: 0;
+}
+
+.sidebar {
+  position: fixed;
   top: 0;
+  bottom: 0;
+  left: 0;
   z-index: 20;
+  width: var(--sidebar-width);
   display: flex;
-  align-items: center;
-  gap: 28px;
-  padding: 12px 28px;
-  background: rgba(255, 255, 255, 0.85);
+  flex-direction: column;
+  padding: 18px 14px 16px;
+  background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.sidebar-nav {
+  flex-direction: column;
+  margin-top: 22px;
+}
+
+.sidebar-nav .nav-link {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-meta-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.sidebar-meta-row .mono {
+  font-size: 0.76rem;
+  color: var(--text);
+}
+
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.connection-online {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.connection-offline {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.6);
 }
 
 .brand {
@@ -1155,13 +1227,17 @@ summary {
 }
 
 @media (max-width: 840px) {
+  :root {
+    --sidebar-width: 176px;
+  }
+
   .page {
     width: calc(100% - 28px);
     padding-top: 18px;
   }
 
-  .topbar {
-    padding: 10px 14px;
+  .sidebar {
+    padding: 14px 10px;
   }
 
   .project-card {

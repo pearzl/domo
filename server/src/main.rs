@@ -12,6 +12,7 @@ mod runner;
 mod scheduler;
 mod state;
 mod usage;
+mod version;
 
 use std::time::Duration;
 

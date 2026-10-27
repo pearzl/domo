@@ -256,6 +256,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 
 REST 路由（`api.rs`）按资源分组：
 
+- `GET /api/health`：健康检查，返回 `ok`、`version`（Cargo 包版本）与 `git_hash`（构建期注入的提交短哈希；非 Git 环境为 `unknown`）
 - `GET/POST /api/agents`、`PATCH/DELETE /api/agents/{id}`、`POST /api/agents/{id}/usage/reset`
 - `GET /api/usage`：用量报告，支持按 project / agent / role 聚合与时间过滤
 - `GET/POST /api/projects`、`GET /api/projects/{id}`（详情 + 任务视图 + 作业流水 + 项目用量）
