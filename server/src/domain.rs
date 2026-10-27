@@ -67,6 +67,8 @@ pub struct NormalizedTask {
     pub deps: Vec<String>,
 }
 
+pub const MAX_DERIVED_TASKS: usize = 8;
+
 #[derive(Debug, Clone)]
 pub enum ParsedResult {
     Questions {
@@ -82,6 +84,13 @@ pub enum ParsedResult {
     },
     ExecutorFailed {
         reason: String,
+    },
+    ExecutorReplan {
+        reason: String,
+    },
+    ExecutorDerive {
+        summary: String,
+        tasks: Vec<NormalizedTask>,
     },
     Verdict {
         pass: bool,
@@ -155,19 +164,52 @@ fn parse_planner_result(value: &Value) -> Result<ParsedResult, String> {
 }
 
 fn parse_executor_result(value: &Value) -> Result<ParsedResult, String> {
-    let failed = value
-        .get("failed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-        || value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .map(|v| v == "failed" || v == "blocked")
-            .unwrap_or(false);
+    let kind = value.get("kind").and_then(|v| v.as_str());
     let reason = string_field(value, "reason")
         .or_else(|| string_field(value, "summary"))
         .or_else(|| string_field(value, "error"))
         .unwrap_or_default();
+    if kind == Some("replan") {
+        return Ok(ParsedResult::ExecutorReplan {
+            reason: if reason.is_empty() {
+                "执行者请求重新规划".into()
+            } else {
+                reason
+            },
+        });
+    }
+    if kind == Some("derive") {
+        let tasks_value = value
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "派生结果缺少 tasks 数组".to_string())?;
+        let mut raw_tasks = Vec::new();
+        for item in tasks_value {
+            raw_tasks.push(PlanTask {
+                key: string_field(item, "key").unwrap_or_default(),
+                title: string_field(item, "title").unwrap_or_default(),
+                description: string_field(item, "description").unwrap_or_default(),
+                acceptance: string_array(item.get("acceptance")),
+                deps: string_array(item.get("deps").or_else(|| item.get("depends_on"))),
+            });
+        }
+        let tasks = validate_derive(raw_tasks)?;
+        return Ok(ParsedResult::ExecutorDerive {
+            summary: if reason.is_empty() {
+                "执行者请求派生子任务".into()
+            } else {
+                reason
+            },
+            tasks,
+        });
+    }
+    let failed = value
+        .get("failed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || kind
+            .map(|v| v == "failed" || v == "blocked")
+            .unwrap_or(false);
     if failed {
         return Ok(ParsedResult::ExecutorFailed {
             reason: if reason.is_empty() {
@@ -312,6 +354,98 @@ pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, St
     Ok(tasks)
 }
 
+pub fn validate_derive(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, String> {
+    if raw_tasks.is_empty() {
+        return Err("派生请求至少需要 1 个子任务".into());
+    }
+    if raw_tasks.len() > MAX_DERIVED_TASKS {
+        return Err(format!("单次派生最多支持 {MAX_DERIVED_TASKS} 个子任务"));
+    }
+    let mut tasks = Vec::new();
+    let mut used_keys = HashSet::new();
+    for raw in raw_tasks {
+        let key = raw.key.trim().to_string();
+        if key.is_empty() {
+            return Err("派生任务缺少 key".into());
+        }
+        if key.len() > 32 {
+            return Err(format!("派生任务 key 过长: {key}"));
+        }
+        if !used_keys.insert(key.clone()) {
+            return Err(format!("派生任务 key 重复: {key}"));
+        }
+        let title = raw.title.trim().to_string();
+        if title.is_empty() {
+            return Err(format!("派生任务 {key} 缺少标题"));
+        }
+        let description = raw.description.trim().to_string();
+        if description.is_empty() {
+            return Err(format!("派生任务 {key} 缺少描述"));
+        }
+        let acceptance: Vec<String> = raw
+            .acceptance
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        if acceptance.is_empty() {
+            return Err(format!("派生任务 {key} 缺少验收标准"));
+        }
+        let deps: Vec<String> = raw
+            .deps
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        if !deps.is_empty() {
+            return Err(format!("派生任务 {key} 的 deps 必须为空"));
+        }
+        tasks.push(NormalizedTask {
+            key,
+            title,
+            description,
+            acceptance,
+            deps,
+        });
+    }
+    Ok(tasks)
+}
+
+pub fn validate_derive_scope(
+    parent_is_derived: bool,
+    active_keys: &HashSet<String>,
+    tasks: &[NormalizedTask],
+) -> Result<(), String> {
+    if parent_is_derived {
+        return Err("派生任务不能再次派生".into());
+    }
+    if tasks.is_empty() {
+        return Err("派生请求至少需要 1 个子任务".into());
+    }
+    if tasks.len() > MAX_DERIVED_TASKS {
+        return Err(format!("单次派生最多支持 {MAX_DERIVED_TASKS} 个子任务"));
+    }
+    let mut seen = HashSet::new();
+    for task in tasks {
+        if !task.deps.is_empty() {
+            return Err(format!("派生任务 {} 的 deps 必须为空", task.key));
+        }
+        if task.description.trim().is_empty() {
+            return Err(format!("派生任务 {} 缺少描述", task.key));
+        }
+        if task.acceptance.is_empty() {
+            return Err(format!("派生任务 {} 缺少验收标准", task.key));
+        }
+        if active_keys.contains(&task.key) {
+            return Err(format!("派生任务 key 已存在: {}", task.key));
+        }
+        if !seen.insert(task.key.clone()) {
+            return Err(format!("派生任务 key 重复: {}", task.key));
+        }
+    }
+    Ok(())
+}
+
 fn detect_cycle(tasks: &[NormalizedTask]) -> Result<(), String> {
     let map: HashMap<&str, &NormalizedTask> =
         tasks.iter().map(|task| (task.key.as_str(), task)).collect();
@@ -346,6 +480,178 @@ fn detect_cycle(tasks: &[NormalizedTask]) -> Result<(), String> {
 
 pub fn deps_complete(deps: &[String], completed: &HashSet<String>) -> bool {
     deps.iter().all(|dep| completed.contains(dep))
+}
+
+/// Failure categories drive agent selection: rate limits and exhausted
+/// transient retries cool an agent down, permanent errors move to the next
+/// agent immediately, and task-level failures use the task retry budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    RateLimit,
+    Transient,
+    Permanent,
+    Task,
+}
+
+impl FailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureKind::RateLimit => crate::models::FAILURE_RATE_LIMIT,
+            FailureKind::Transient => crate::models::FAILURE_TRANSIENT,
+            FailureKind::Permanent => crate::models::FAILURE_PERMANENT,
+            FailureKind::Task => crate::models::FAILURE_TASK,
+        }
+    }
+
+    pub fn is_agent_failure(self) -> bool {
+        !matches!(self, FailureKind::Task)
+    }
+}
+
+pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
+    let lowered = reason.to_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "429",
+            "rate limit",
+            "ratelimit",
+            "too many requests",
+            "quota",
+            "限流",
+            "请求过多",
+        ],
+    ) {
+        return FailureKind::RateLimit;
+    }
+    if contains_any(
+        &lowered,
+        &[
+            "永久错误",
+            "permanent",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "invalid_request",
+            "401",
+            "403",
+            "配置无效",
+            "不可恢复",
+        ],
+    ) {
+        return FailureKind::Permanent;
+    }
+    if process_failure
+        || contains_any(
+            &lowered,
+            &[
+                "timeout",
+                "timed out",
+                "超时",
+                "temporar",
+                "unavailable",
+                "overloaded",
+                "connection",
+                "network",
+                "502",
+                "503",
+                "504",
+                "broken pipe",
+                "provider",
+            ],
+        )
+    {
+        return FailureKind::Transient;
+    }
+    FailureKind::Task
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+/// Rate limits may carry their own retry window. The default is 30 minutes.
+pub fn rate_limit_cooldown(reason: &str) -> chrono::Duration {
+    let default_secs = std::env::var("DOMO_RATE_LIMIT_COOLDOWN_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30 * 60);
+    let secs = parse_retry_after(reason).unwrap_or(default_secs);
+    chrono::Duration::seconds(secs.clamp(1, 24 * 60 * 60))
+}
+
+pub fn transient_retry_limit() -> i64 {
+    std::env::var("DOMO_TRANSIENT_RETRY_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3)
+}
+
+fn parse_retry_after(reason: &str) -> Option<i64> {
+    let lowered = reason.to_lowercase();
+    for marker in [
+        "retry after",
+        "retry_after",
+        "retry-after",
+        "reset after",
+        "reset_after",
+        "reset-after",
+    ] {
+        if let Some(position) = lowered.find(marker) {
+            if let Some(secs) = parse_amount(&lowered[position + marker.len()..]) {
+                return Some(secs);
+            }
+        }
+    }
+    for marker in ["分钟后", "分钟", "minute", "min ", "hour", "小时"] {
+        if let Some(position) = lowered.find(marker) {
+            let start = lowered[..position]
+                .rfind(|ch: char| !ch.is_ascii_digit())
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            if let Ok(value) = lowered[start..position].trim().parse::<i64>() {
+                let multiplier = if marker.contains("小时") || marker.contains("hour") {
+                    3600
+                } else {
+                    60
+                };
+                return Some(value * multiplier);
+            }
+        }
+    }
+    None
+}
+
+fn parse_amount(text: &str) -> Option<i64> {
+    let mut chars = text.chars().skip_while(|ch| {
+        ch.is_whitespace() || *ch == '=' || *ch == ':' || *ch == '：' || *ch == '后'
+    });
+    let mut digits = String::new();
+    for ch in chars.by_ref() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            break;
+        }
+    }
+    let value = digits.parse::<i64>().ok()?;
+    let unit: String = chars
+        .by_ref()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(|ch| {
+            ch.is_ascii_alphabetic() || *ch == '小' || *ch == '时' || *ch == '分' || *ch == '钟'
+        })
+        .collect();
+    let unit = unit.to_lowercase();
+    if unit.starts_with('h') || unit.contains('时') {
+        Some(value * 3600)
+    } else if unit.starts_with('m') || unit.contains("分") {
+        Some(value * 60)
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +725,115 @@ mod tests {
     }
 
     #[test]
+    fn parses_executor_replan_request() {
+        let raw = r#"{"kind":"replan","reason":"原计划与仓库现状冲突"}"#;
+        match parse_result(ROLE_EXECUTOR, raw).unwrap() {
+            ParsedResult::ExecutorReplan { reason } => {
+                assert_eq!(reason, "原计划与仓库现状冲突")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    fn derive_task(key: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            key: key.into(),
+            title: format!("派生 {key}"),
+            description: "完成派生子任务".into(),
+            acceptance: vec!["产物存在".into()],
+            deps: deps.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    fn normalized(key: &str, deps: &[&str]) -> NormalizedTask {
+        NormalizedTask {
+            key: key.into(),
+            title: format!("派生 {key}"),
+            description: "完成派生子任务".into(),
+            acceptance: vec!["产物存在".into()],
+            deps: deps.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn parses_executor_derive_request() {
+        let raw = r#"{"kind":"derive","summary":"拆分","tasks":[
+            {"key":"T1.1","title":"a","description":"b","acceptance":["c"],"deps":[]},
+            {"key":"T1.2","title":"d","description":"e","acceptance":["f"],"deps":[]}
+        ]}"#;
+        match parse_result(ROLE_EXECUTOR, raw).unwrap() {
+            ParsedResult::ExecutorDerive { summary, tasks } => {
+                assert_eq!(summary, "拆分");
+                assert_eq!(tasks.len(), 2);
+                assert!(tasks.iter().all(|task| task.deps.is_empty()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_derive_with_dependencies() {
+        let raw = r#"{"kind":"derive","summary":"拆分","tasks":[
+            {"key":"T1.1","title":"a","description":"b","acceptance":["c"],"deps":["T1"]}
+        ]}"#;
+        assert!(parse_result(ROLE_EXECUTOR, raw).is_err());
+    }
+
+    #[test]
+    fn rejects_derive_over_limit() {
+        let tasks: Vec<PlanTask> = (1..=MAX_DERIVED_TASKS + 1)
+            .map(|index| derive_task(&format!("T1.{index}"), &[]))
+            .collect();
+        assert!(validate_derive(tasks).is_err());
+    }
+
+    #[test]
+    fn rejects_derive_duplicate_keys() {
+        let tasks = vec![derive_task("T1.1", &[]), derive_task("T1.1", &[])];
+        assert!(validate_derive(tasks).is_err());
+    }
+
+    #[test]
+    fn rejects_derive_missing_fields() {
+        let mut missing_description = derive_task("T1.1", &[]);
+        missing_description.description.clear();
+        assert!(validate_derive(vec![missing_description]).is_err());
+
+        let mut missing_acceptance = derive_task("T1.2", &[]);
+        missing_acceptance.acceptance.clear();
+        assert!(validate_derive(vec![missing_acceptance]).is_err());
+
+        let mut missing_key = derive_task("", &[]);
+        missing_key.key.clear();
+        assert!(validate_derive(vec![missing_key]).is_err());
+    }
+
+    #[test]
+    fn rejects_derive_from_derived_task() {
+        let active: HashSet<String> = HashSet::new();
+        let error = validate_derive_scope(true, &active, &[normalized("T1.1", &[])]);
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn rejects_derive_key_collision_with_active_task() {
+        let active: HashSet<String> = ["T2".to_string()].into_iter().collect();
+        let error = validate_derive_scope(false, &active, &[normalized("T2", &[])]);
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn accepts_parallel_sibling_derivation() {
+        let active: HashSet<String> = ["T1".to_string()].into_iter().collect();
+        let result = validate_derive_scope(
+            false,
+            &active,
+            &[normalized("T1.1", &[]), normalized("T1.2", &[])],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn deps_complete_checks_all() {
         let completed: HashSet<String> = ["A".to_string()].into_iter().collect();
         assert!(deps_complete(&["A".into()], &completed));
@@ -429,5 +844,42 @@ mod tests {
     fn slug_is_stable() {
         assert_eq!(slug("Hello World!"), "hello-world");
         assert_eq!(slug("***"), "task");
+    }
+
+    #[test]
+    fn classifies_rate_limit_transient_and_permanent() {
+        assert_eq!(
+            classify_failure("HTTP 429 too many requests", false),
+            FailureKind::RateLimit
+        );
+        assert_eq!(
+            classify_failure("provider temporarily unavailable", false),
+            FailureKind::Transient
+        );
+        assert_eq!(
+            classify_failure("Agent 作业超时", true),
+            FailureKind::Transient
+        );
+        assert_eq!(
+            classify_failure("永久错误：Agent 配置无效", false),
+            FailureKind::Permanent
+        );
+        assert_eq!(
+            classify_failure("mock 首次执行失败", false),
+            FailureKind::Task
+        );
+    }
+
+    #[test]
+    fn parses_rate_limit_cooldown_from_message() {
+        assert_eq!(
+            rate_limit_cooldown("HTTP 429; retry after 900 seconds").num_seconds(),
+            900
+        );
+        assert_eq!(
+            rate_limit_cooldown("429 retry_after=120").num_seconds(),
+            120
+        );
+        assert!(rate_limit_cooldown("429 rate limit").num_seconds() >= 60);
     }
 }

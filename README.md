@@ -38,9 +38,13 @@ cd server && cargo run --release
 | 文档 | 内容 |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 产品设计：主要功能介绍，设计思路说明 |
-| [docs/TECH.md](docs/TECH.md) | 技术架构与实现方式：边界、核心模块设计、运行时状态 |
 | [docs/DEV.md](docs/DEV.md) | 开发模式和约定：目录、文档职责、测试与变更要求 |
 | [docs/notes/](docs/notes/) | 所有其他值得保存的内容：决策依据和过程、未决讨论与思考 |
+
+## 技术栈
+
+- 后端：Rust (Axum + Tokio + rusqlite/SQLite)
+- 前端：React + Vite + TypeScript
 
 ## 许可证
 

@@ -39,6 +39,13 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
   canceled: "已取消",
 };
 
+export const FAILURE_KIND_LABELS: Record<string, string> = {
+  rate_limit: "限流",
+  transient: "供应商波动",
+  permanent: "永久错误",
+  task: "任务失败",
+};
+
 export function formatTime(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -52,6 +59,26 @@ export function formatDuration(start?: string | null, end?: string | null): stri
   const to = end ? new Date(end).getTime() : Date.now();
   if (Number.isNaN(from) || Number.isNaN(to) || to < from) return "—";
   const seconds = Math.round((to - from) / 1000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 时 ${minutes % 60} 分`;
+}
+
+export function formatTokens(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "未知";
+  return new Intl.NumberFormat("zh-CN").format(Math.round(value));
+}
+
+export function formatCost(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "未知";
+  if (!value) return "0";
+  return value < 1 ? value.toFixed(4) : value.toFixed(2);
+}
+
+export function formatMillis(value: number | null | undefined): string {
+  if (value === null || value === undefined || value <= 0) return "—";
+  const seconds = Math.round(value / 1000);
   if (seconds < 60) return `${seconds} 秒`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
@@ -117,6 +144,7 @@ export function StatusBadge({ status }: { status?: string | null }) {
 }
 
 export function TaskStateBadge({ stage, status }: { stage: string; status?: string | null }) {
+  if (status === "canceled") return <Badge tone="muted">已取消</Badge>;
   if (status === "blocked") return <Badge tone="danger">阻塞</Badge>;
   if (status === "running") return <Badge tone="info">运行中</Badge>;
   if (stage === "completed") return <Badge tone="success">完成</Badge>;

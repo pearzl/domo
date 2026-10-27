@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::usage::{AvailabilityConfig, ProjectUsage, UsageLimitConfig, UsageWindow};
+
 pub const ROLE_PLANNER: &str = "planner";
 pub const ROLE_EXECUTOR: &str = "executor";
 pub const ROLE_VERIFIER: &str = "verifier";
@@ -23,6 +25,16 @@ pub const STATUS_QUEUED: &str = "queued";
 pub const STATUS_PAUSING: &str = "pausing";
 pub const STATUS_PAUSED: &str = "paused";
 pub const STATUS_ARCHIVED: &str = "archived";
+pub const STATUS_CANCELED: &str = "canceled";
+
+pub const REPLAN_SOURCE_HUMAN: &str = "human";
+pub const REPLAN_SOURCE_EXECUTOR: &str = "executor";
+
+pub const HUMAN_GATE_MILESTONE: &str = "milestone";
+
+pub const ARBITRATION_RETRY: &str = "retry";
+pub const ARBITRATION_SWITCH_AGENT: &str = "switch_agent";
+pub const ARBITRATION_GUIDE: &str = "guide";
 
 pub const TASK_STAGE_PENDING: &str = "pending";
 pub const TASK_STAGE_EXECUTING: &str = "executing";
@@ -33,6 +45,11 @@ pub const JOB_STATUS_RUNNING: &str = "running";
 pub const JOB_STATUS_SUCCEEDED: &str = "succeeded";
 pub const JOB_STATUS_FAILED: &str = "failed";
 pub const JOB_STATUS_CANCELED: &str = "canceled";
+
+pub const FAILURE_RATE_LIMIT: &str = "rate_limit";
+pub const FAILURE_TRANSIENT: &str = "transient";
+pub const FAILURE_PERMANENT: &str = "permanent";
+pub const FAILURE_TASK: &str = "task";
 
 pub const JOB_ROLE_GOAL: &str = "goal";
 pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
@@ -53,6 +70,11 @@ pub struct AgentRow {
     pub model_args_json: Option<String>,
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
+    pub failure_kind: Option<String>,
+    pub transient_failures: i64,
+    pub availability_json: Option<String>,
+    pub usage_limit_json: Option<String>,
+    pub usage_reset_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -71,6 +93,11 @@ pub struct AgentView {
     pub model_args: Vec<String>,
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
+    pub failure_kind: Option<String>,
+    pub transient_failures: i64,
+    pub availability: Option<AvailabilityConfig>,
+    pub usage_limit: Option<UsageLimitConfig>,
+    pub usage_window: Option<UsageWindow>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -98,10 +125,62 @@ impl AgentView {
                 .unwrap_or_default(),
             cooldown_until: row.cooldown_until,
             last_error: row.last_error,
+            failure_kind: row.failure_kind,
+            transient_failures: row.transient_failures,
+            availability: crate::usage::parse_availability(row.availability_json.as_deref()),
+            usage_limit: crate::usage::parse_usage_limit(row.usage_limit_json.as_deref()),
+            usage_window: None,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
     }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct ProjectAgentRow {
+    pub project_id: String,
+    pub role: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub priority: i64,
+    pub enabled: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectAgentEntry {
+    pub agent_id: String,
+    pub name: String,
+    pub kind: String,
+    pub model: String,
+    pub priority: i64,
+    pub enabled: bool,
+    pub agent_enabled: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+    pub max_concurrency: i64,
+    pub cooldown_until: Option<String>,
+    pub last_error: Option<String>,
+    pub failure_kind: Option<String>,
+    pub transient_failures: i64,
+    pub availability: Option<AvailabilityConfig>,
+    pub availability_reason: Option<String>,
+    pub usage_limit: Option<UsageLimitConfig>,
+    pub usage_window: Option<UsageWindow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectRolePool {
+    pub role: String,
+    pub entries: Vec<ProjectAgentEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectAgentPool {
+    pub project_id: String,
+    pub roles: Vec<ProjectRolePool>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -118,6 +197,9 @@ pub struct ProjectRow {
     pub blocked_reason: Option<String>,
     pub report: Option<String>,
     pub report_feedback: Option<String>,
+    pub replan_reason: Option<String>,
+    pub replan_source: Option<String>,
+    pub replan_requested_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -127,11 +209,19 @@ pub struct TaskRow {
     pub id: String,
     pub project_id: String,
     pub seq: i64,
+    pub queue_order: i64,
     pub key: String,
     pub title: String,
     pub description: String,
     pub acceptance: String,
     pub deps: String,
+    pub parent_id: Option<String>,
+    pub milestone: i64,
+    pub human_gate: Option<String>,
+    pub forced_agent_id: Option<String>,
+    pub forced_agent_role: Option<String>,
+    pub executor_agent_id: Option<String>,
+    pub verifier_agent_id: Option<String>,
     pub stage: String,
     pub status: Option<String>,
     pub agent_id: Option<String>,
@@ -141,8 +231,11 @@ pub struct TaskRow {
     pub attempts: i64,
     pub rejections: i64,
     pub last_error: Option<String>,
+    pub last_failure_kind: Option<String>,
+    pub waiting_reason: Option<String>,
     pub result_summary: Option<String>,
     pub verifier_issues: String,
+    pub guidance: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -163,6 +256,12 @@ pub struct JobRow {
     pub error: Option<String>,
     pub exit_code: Option<i64>,
     pub pid: Option<i64>,
+    pub failure_kind: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub usage_known: i64,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
@@ -200,6 +299,8 @@ pub struct ProjectSummary {
     pub blocked_reason: Option<String>,
     pub task_total: i64,
     pub task_completed: i64,
+    pub replan_reason: Option<String>,
+    pub replan_source: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -209,11 +310,20 @@ pub struct TaskView {
     pub id: String,
     pub project_id: String,
     pub seq: i64,
+    pub queue_order: i64,
+    pub queue_position: Option<i64>,
     pub key: String,
     pub title: String,
     pub description: String,
     pub acceptance: Vec<String>,
     pub deps: Vec<String>,
+    pub parent_id: Option<String>,
+    pub milestone: bool,
+    pub human_gate: Option<String>,
+    pub forced_agent_id: Option<String>,
+    pub forced_agent_role: Option<String>,
+    pub executor_agent_id: Option<String>,
+    pub verifier_agent_id: Option<String>,
     pub stage: String,
     pub status: Option<String>,
     pub agent_id: Option<String>,
@@ -223,8 +333,11 @@ pub struct TaskView {
     pub attempts: i64,
     pub rejections: i64,
     pub last_error: Option<String>,
+    pub last_failure_kind: Option<String>,
+    pub waiting_reason: Option<String>,
     pub result_summary: Option<String>,
     pub verifier_issues: Vec<String>,
+    pub guidance: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -235,11 +348,20 @@ impl TaskView {
             id: row.id,
             project_id: row.project_id,
             seq: row.seq,
+            queue_order: row.queue_order,
+            queue_position: None,
             key: row.key,
             title: row.title,
             description: row.description,
             acceptance: parse_string_list(&row.acceptance),
             deps: parse_string_list(&row.deps),
+            parent_id: row.parent_id,
+            milestone: row.milestone != 0,
+            human_gate: row.human_gate,
+            forced_agent_id: row.forced_agent_id,
+            forced_agent_role: row.forced_agent_role,
+            executor_agent_id: row.executor_agent_id,
+            verifier_agent_id: row.verifier_agent_id,
             stage: row.stage,
             status: row.status,
             agent_id: row.agent_id,
@@ -249,8 +371,11 @@ impl TaskView {
             attempts: row.attempts,
             rejections: row.rejections,
             last_error: row.last_error,
+            last_failure_kind: row.last_failure_kind,
+            waiting_reason: row.waiting_reason,
             result_summary: row.result_summary,
             verifier_issues: parse_string_list(&row.verifier_issues),
+            guidance: row.guidance,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -269,6 +394,12 @@ pub struct JobSummary {
     pub attempt: i64,
     pub error: Option<String>,
     pub exit_code: Option<i64>,
+    pub failure_kind: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub usage_known: bool,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
@@ -291,6 +422,12 @@ pub struct JobView {
     pub error: Option<String>,
     pub exit_code: Option<i64>,
     pub pid: Option<i64>,
+    pub failure_kind: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub usage_known: bool,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
@@ -304,6 +441,8 @@ pub struct ProjectDetail {
     pub messages: Vec<MessageRow>,
     pub events: Vec<EventRow>,
     pub agents: Vec<AgentView>,
+    pub agent_pool: ProjectAgentPool,
+    pub usage: ProjectUsage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +456,46 @@ pub struct CreateProjectRequest {
 #[derive(Debug, Deserialize)]
 pub struct ConfirmGoalRequest {
     pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskGuidanceRequest {
+    #[serde(alias = "message", alias = "content", alias = "text")]
+    pub guidance: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplanRequest {
+    #[serde(alias = "message", alias = "content", alias = "text")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MilestoneRequest {
+    #[serde(alias = "enabled", alias = "value")]
+    pub milestone: Option<bool>,
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MilestoneAcceptRequest {
+    #[serde(alias = "feedback", alias = "comment", alias = "message")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MilestoneRejectRequest {
+    #[serde(alias = "feedback", alias = "comment", alias = "message")]
+    pub reason: String,
+    pub guidance: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArbitrationRequest {
+    pub action: String,
+    pub agent_id: Option<String>,
+    #[serde(alias = "message", alias = "content", alias = "text")]
+    pub guidance: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +515,8 @@ pub struct CreateAgentRequest {
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
     pub model_args: Option<Vec<String>>,
+    pub availability: Option<AvailabilityConfig>,
+    pub usage_limit: Option<UsageLimitConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,6 +530,104 @@ pub struct UpdateAgentRequest {
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
     pub model_args: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
+    pub availability: Option<Option<AvailabilityConfig>>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
+    pub usage_limit: Option<Option<UsageLimitConfig>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectAgentUpdateRequest {
+    pub enabled: Option<bool>,
+    pub direction: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectPauseRequest {
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl ProjectPauseRequest {
+    pub fn forced(&self) -> bool {
+        self.force
+            || matches!(
+                self.mode.as_deref().map(str::trim),
+                Some("force") | Some("forced") | Some("强制")
+            )
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TaskPauseRequest {
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl TaskPauseRequest {
+    pub fn forced(&self) -> bool {
+        self.force
+            || matches!(
+                self.mode.as_deref().map(str::trim),
+                Some("force") | Some("forced") | Some("强制")
+            )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskQueueRequest {
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddProjectAgentRequest {
+    pub role: String,
+    pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskAgentsRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_agent")]
+    pub executor_agent_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_agent")]
+    pub verifier_agent_id: Option<Option<String>>,
+}
+
+/// Missing fields leave the current override unchanged; explicit null or an
+/// empty string clears it.
+pub fn deserialize_optional_agent<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(Some(value.and_then(|text| {
+        let text = text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    })))
+}
+
+/// Distinguishes a missing configuration field from an explicit null so a PATCH
+/// can either preserve or clear the persisted configuration.
+pub fn deserialize_optional_json<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<T>::deserialize(deserializer)?;
+    Ok(Some(value))
 }
 
 #[derive(Debug, Serialize)]

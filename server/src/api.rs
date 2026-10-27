@@ -16,11 +16,13 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::agents::kill_job_dir;
-use crate::domain::{self, now, short_id};
+use crate::domain::{self, deps_complete, now, short_id};
 use crate::events::emit;
 use crate::git;
 use crate::models::*;
+use crate::replan;
 use crate::state::AppState;
+use crate::usage;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -78,15 +80,59 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}", patch(update_agent).delete(delete_agent))
+        .route("/api/agents/{id}/usage/reset", post(reset_agent_usage))
+        .route("/api/usage", get(usage_report))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project))
+        .route(
+            "/api/projects/{id}/agents",
+            get(get_project_agents).post(add_project_agent),
+        )
+        .route(
+            "/api/projects/{id}/agents/{role}/{agent_id}",
+            patch(update_project_agent),
+        )
         .route("/api/projects/{id}/confirm", post(confirm_goal))
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
         .route("/api/projects/{id}/archive", post(archive_project))
         .route("/api/projects/{id}/retry", post(retry_project))
+        .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/report", post(submit_report))
         .route("/api/projects/{id}/tasks/{task_id}/retry", post(retry_task))
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/guidance",
+            post(save_task_guidance),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/agents",
+            patch(set_task_agents),
+        )
+        .route("/api/projects/{id}/tasks/{task_id}/pause", post(pause_task))
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/resume",
+            post(resume_task),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/queue",
+            patch(reorder_task_queue).post(reorder_task_queue),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/milestone",
+            post(set_task_milestone),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/milestone/accept",
+            post(accept_milestone),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/milestone/reject",
+            post(reject_milestone),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/arbitration",
+            get(task_arbitration).post(submit_arbitration),
+        )
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/events", get(list_events))
         .route("/api/events/stream", get(stream_events))
@@ -112,7 +158,25 @@ async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentView
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC, created_at ASC")
             .fetch_all(&state.db)
             .await?;
-    Ok(Json(rows.into_iter().map(AgentView::from_row).collect()))
+    let mut views = Vec::new();
+    for row in rows {
+        views.push(agent_view(&state, row).await?);
+    }
+    Ok(Json(views))
+}
+
+async fn agent_view(state: &AppState, row: AgentRow) -> Result<AgentView, ApiError> {
+    let usage_window = usage::agent_usage(
+        &state.db,
+        &row.id,
+        row.usage_limit_json.as_deref(),
+        row.usage_reset_at.as_deref(),
+        chrono::Utc::now(),
+    )
+    .await?;
+    let mut view = AgentView::from_row(row);
+    view.usage_window = usage_window;
+    Ok(view)
 }
 
 async fn create_agent(
@@ -135,12 +199,26 @@ async fn create_agent(
     if kind == AGENT_CLI && command.is_empty() {
         return Err(ApiError::bad("CLI Agent 必须配置命令模板"));
     }
+    let availability = match request.availability {
+        Some(config) => {
+            usage::validate_availability(&config).map_err(ApiError::bad)?;
+            Some(serde_json::to_string(&config).map_err(|error| ApiError::internal(error.into()))?)
+        }
+        None => None,
+    };
+    let usage_limit = match request.usage_limit {
+        Some(config) => {
+            usage::validate_usage_limit(&config).map_err(ApiError::bad)?;
+            Some(serde_json::to_string(&config).map_err(|error| ApiError::internal(error.into()))?)
+        }
+        None => None,
+    };
     let id = domain::new_id("agt");
     let timestamp = now();
     sqlx::query(
         "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
-         command_json, model_args_json, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         command_json, model_args_json, availability_json, usage_limit_json, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
@@ -159,6 +237,8 @@ async fn create_agent(
         serde_json::to_string(&request.model_args.unwrap_or_default())
             .unwrap_or_else(|_| "[]".into()),
     )
+    .bind(availability)
+    .bind(usage_limit)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
@@ -166,7 +246,7 @@ async fn create_agent(
     let row = crate::db::load_agent(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;
-    Ok(Json(AgentView::from_row(row)))
+    Ok(Json(agent_view(&state, row).await?))
 }
 
 async fn update_agent(
@@ -220,9 +300,26 @@ async fn update_agent(
         .enabled
         .map(|value| if value { 1 } else { 0 })
         .unwrap_or(existing.enabled);
+    let availability_json = match request.availability {
+        None => existing.availability_json.clone(),
+        Some(None) => None,
+        Some(Some(config)) => {
+            usage::validate_availability(&config).map_err(ApiError::bad)?;
+            Some(serde_json::to_string(&config).map_err(|error| ApiError::internal(error.into()))?)
+        }
+    };
+    let usage_limit_json = match request.usage_limit {
+        None => existing.usage_limit_json.clone(),
+        Some(None) => None,
+        Some(Some(config)) => {
+            usage::validate_usage_limit(&config).map_err(ApiError::bad)?;
+            Some(serde_json::to_string(&config).map_err(|error| ApiError::internal(error.into()))?)
+        }
+    };
     sqlx::query(
         "UPDATE agents SET name = ?, kind = ?, model = ?, roles = ?, priority = ?, \
          max_concurrency = ?, enabled = ?, command_json = ?, model_args_json = ?, \
+         availability_json = ?, usage_limit_json = ?, \
          cooldown_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(&name)
@@ -234,14 +331,46 @@ async fn update_agent(
     .bind(enabled)
     .bind(&command)
     .bind(&model_args)
+    .bind(&availability_json)
+    .bind(&usage_limit_json)
     .bind(now())
     .bind(&id)
     .execute(&state.db)
     .await?;
+    state.notify_scheduler();
     let row = crate::db::load_agent(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;
-    Ok(Json(AgentView::from_row(row)))
+    Ok(Json(agent_view(&state, row).await?))
+}
+
+async fn reset_agent_usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AgentView>, ApiError> {
+    let Some(row) = crate::db::load_agent(&state.db, &id).await? else {
+        return Err(ApiError::not_found("Agent 不存在"));
+    };
+    sqlx::query("UPDATE agents SET usage_reset_at = ?, updated_at = ? WHERE id = ?")
+        .bind(now())
+        .bind(now())
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        None,
+        None,
+        "agent_usage_reset",
+        format!("Agent {} 的用量窗口已重置", row.name),
+    )
+    .await;
+    state.notify_scheduler();
+    let row = crate::db::load_agent(&state.db, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;
+    Ok(Json(agent_view(&state, row).await?))
 }
 
 async fn delete_agent(
@@ -265,10 +394,13 @@ async fn list_projects(
     .await?;
     let mut projects = Vec::new();
     for row in rows {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE project_id = ?")
-            .bind(&row.id)
-            .fetch_one(&state.db)
-            .await?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ?",
+        )
+        .bind(&row.id)
+        .bind(STATUS_CANCELED)
+        .fetch_one(&state.db)
+        .await?;
         let completed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage = 'completed'",
         )
@@ -287,6 +419,8 @@ async fn list_projects(
             blocked_reason: row.blocked_reason,
             task_total: total,
             task_completed: completed,
+            replan_reason: row.replan_reason,
+            replan_source: row.replan_source,
             created_at: row.created_at,
             updated_at: row.updated_at,
         });
@@ -372,6 +506,7 @@ async fn create_project(
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
+    crate::db::ensure_project_agents(&state.db, &project_id).await?;
     emit(
         &state.db,
         &state.bus,
@@ -390,6 +525,532 @@ async fn get_project(
     Path(id): Path<String>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
     load_detail(&state, &id).await.map(Json)
+}
+
+async fn get_project_agents(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    require_project(&state, &id).await?;
+    let pool = crate::db::load_project_agent_pool(&state.db, &id).await?;
+    Ok(Json(pool))
+}
+
+async fn add_project_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<AddProjectAgentRequest>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    let role = validate_role(request.role.trim())?;
+    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
+        return Err(ApiError::not_found("Agent 不存在"));
+    };
+    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
+        return Err(ApiError::bad(format!(
+            "Agent {} 不能承担{}角色",
+            agent.name,
+            role_label(&role)
+        )));
+    }
+    crate::db::ensure_project_agents(&state.db, &id).await?;
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&id)
+    .bind(&role)
+    .bind(&agent.id)
+    .fetch_one(&state.db)
+    .await?;
+    if exists > 0 {
+        return Err(ApiError::bad("Agent 已在项目池中"));
+    }
+    let priority: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(priority), -1) + 1 FROM project_agents WHERE project_id = ? AND role = ?",
+    )
+    .bind(&id)
+    .bind(&role)
+    .fetch_one(&state.db)
+    .await?;
+    let timestamp = now();
+    sqlx::query(
+        "INSERT INTO project_agents \
+         (project_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&role)
+    .bind(&agent.id)
+    .bind(&agent.name)
+    .bind(priority)
+    .bind(agent.enabled)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        None,
+        "project_agents_updated",
+        format!(
+            "项目 Agent 池加入{} Agent {}",
+            role_label(&role),
+            agent.name
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let pool = crate::db::load_project_agent_pool(&state.db, &id).await?;
+    Ok(Json(pool))
+}
+
+async fn update_project_agent(
+    State(state): State<AppState>,
+    Path((project_id, role, agent_id)): Path<(String, String, String)>,
+    Json(request): Json<ProjectAgentUpdateRequest>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    let role = validate_role(role.trim())?;
+    crate::db::ensure_project_agents(&state.db, &project_id).await?;
+    let current = sqlx::query_as::<_, ProjectAgentRow>(
+        "SELECT * FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&project_id)
+    .bind(&role)
+    .bind(&agent_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("项目 Agent 池中没有该 Agent"))?;
+    if let Some(direction) = request.direction.as_deref().map(str::trim) {
+        if !matches!(direction, "up" | "down") {
+            return Err(ApiError::bad("direction 必须是 up 或 down"));
+        }
+        let target = if direction == "up" {
+            sqlx::query_as::<_, ProjectAgentRow>(
+                "SELECT * FROM project_agents WHERE project_id = ? AND role = ? \
+                 AND priority < ? ORDER BY priority DESC LIMIT 1",
+            )
+            .bind(&project_id)
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        } else {
+            sqlx::query_as::<_, ProjectAgentRow>(
+                "SELECT * FROM project_agents WHERE project_id = ? AND role = ? \
+                 AND priority > ? ORDER BY priority ASC LIMIT 1",
+            )
+            .bind(&project_id)
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        };
+        if let Some(target) = target {
+            let timestamp = now();
+            let mut tx = state.db.begin().await?;
+            sqlx::query(
+                "UPDATE project_agents SET priority = ?, updated_at = ? \
+                 WHERE project_id = ? AND role = ? AND agent_id = ?",
+            )
+            .bind(target.priority)
+            .bind(&timestamp)
+            .bind(&project_id)
+            .bind(&role)
+            .bind(&current.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE project_agents SET priority = ?, updated_at = ? \
+                 WHERE project_id = ? AND role = ? AND agent_id = ?",
+            )
+            .bind(current.priority)
+            .bind(&timestamp)
+            .bind(&project_id)
+            .bind(&role)
+            .bind(&target.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+    }
+    if let Some(enabled) = request.enabled {
+        sqlx::query(
+            "UPDATE project_agents SET enabled = ?, updated_at = ? \
+             WHERE project_id = ? AND role = ? AND agent_id = ?",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(now())
+        .bind(&project_id)
+        .bind(&role)
+        .bind(&current.agent_id)
+        .execute(&state.db)
+        .await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        None,
+        "project_agents_updated",
+        format!(
+            "项目 Agent 池更新{}角色配置（{}）",
+            role_label(&role),
+            current.agent_id
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let pool = crate::db::load_project_agent_pool(&state.db, &project_id).await?;
+    Ok(Json(pool))
+}
+
+async fn set_task_agents(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<TaskAgentsRequest>,
+) -> Result<Json<TaskView>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    let mut executor = task.executor_agent_id.clone();
+    let mut verifier = task.verifier_agent_id.clone();
+    if let Some(value) = &request.executor_agent_id {
+        executor = resolve_task_agent(&state, value, ROLE_EXECUTOR).await?;
+    }
+    if let Some(value) = &request.verifier_agent_id {
+        verifier = resolve_task_agent(&state, value, ROLE_VERIFIER).await?;
+    }
+    sqlx::query(
+        "UPDATE tasks SET executor_agent_id = ?, verifier_agent_id = ?, updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(&executor)
+    .bind(&verifier)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_agents_updated",
+        format!(
+            "任务 {} 的 Agent 覆盖已更新（执行：{}，验收：{}）",
+            task.key,
+            executor.as_deref().unwrap_or("跟随项目池"),
+            verifier.as_deref().unwrap_or("跟随项目池")
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let row = load_project_task(&state, &project_id, &task.id).await?;
+    Ok(Json(TaskView::from_row(row)))
+}
+
+async fn resolve_task_agent(
+    state: &AppState,
+    agent_id: &Option<String>,
+    role: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(None);
+    };
+    let Some(agent) = crate::db::load_agent(&state.db, agent_id).await? else {
+        return Err(ApiError::not_found(format!("Agent {agent_id} 不存在")));
+    };
+    if !parse_list(&agent.roles).iter().any(|item| item == role) {
+        return Err(ApiError::bad(format!(
+            "Agent {} 不能承担{}角色",
+            agent.name,
+            role_label(role)
+        )));
+    }
+    Ok(Some(agent.id))
+}
+
+async fn pause_task(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    body: Option<Json<TaskPauseRequest>>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let request = body.map(|Json(value)| value).unwrap_or_default();
+    let force = request.forced();
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    let workspace = PathBuf::from(&project.workspace);
+    {
+        let _guard = state.schedule_lock.lock().await;
+        let task = load_project_task(&state, &project_id, &task_id).await?;
+        if task.stage == TASK_STAGE_COMPLETED {
+            return Err(ApiError::bad("任务已完成"));
+        }
+        if task.status.as_deref() == Some(STATUS_CANCELED) {
+            return Err(ApiError::bad("任务已取消"));
+        }
+        if force {
+            let running = sqlx::query_as::<_, JobRow>(
+                "SELECT * FROM jobs WHERE task_id = ? AND status = 'running'",
+            )
+            .bind(&task.id)
+            .fetch_all(&state.db)
+            .await?;
+            for job in &running {
+                crate::agents::kill_job_dir(&workspace.join("jobs").join(&job.id));
+                let finished_at = now();
+                let duration_ms = job
+                    .started_at
+                    .as_deref()
+                    .and_then(|started| usage::elapsed_ms(Some(started), &finished_at));
+                sqlx::query(
+                    "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \
+                     finished_at = ? WHERE id = ? AND status = 'running'",
+                )
+                .bind(JOB_STATUS_CANCELED)
+                .bind("任务被强制暂停，作业已终止")
+                .bind(duration_ms)
+                .bind(&finished_at)
+                .bind(&job.id)
+                .execute(&state.db)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE tasks SET status = ?, agent_id = NULL, waiting_reason = NULL, updated_at = ? \
+                 WHERE id = ? AND stage != ?",
+            )
+            .bind(STATUS_PAUSED)
+            .bind(now())
+            .bind(&task.id)
+            .bind(TASK_STAGE_COMPLETED)
+            .execute(&state.db)
+            .await?;
+        } else {
+            let running: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM jobs WHERE task_id = ? AND status = 'running'",
+            )
+            .bind(&task.id)
+            .fetch_one(&state.db)
+            .await?;
+            let status = if running > 0 {
+                STATUS_PAUSING
+            } else {
+                STATUS_PAUSED
+            };
+            sqlx::query(
+                "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
+                 WHERE id = ? AND stage != ?",
+            )
+            .bind(status)
+            .bind(now())
+            .bind(&task.id)
+            .bind(TASK_STAGE_COMPLETED)
+            .execute(&state.db)
+            .await?;
+        }
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        if force {
+            "task_paused_forced"
+        } else {
+            "task_pausing"
+        },
+        if force {
+            format!("任务 {} 已强制暂停，在途作业已终止", task.key)
+        } else {
+            format!("任务 {} 暂停请求已提交", task.key)
+        },
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
+}
+
+async fn resume_task(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    {
+        let _guard = state.schedule_lock.lock().await;
+        let task = load_project_task(&state, &project_id, &task_id).await?;
+        if !matches!(
+            task.status.as_deref(),
+            Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+        ) {
+            return Err(ApiError::bad("任务当前没有暂停"));
+        }
+        sqlx::query(
+            "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
+             WHERE id = ? AND status IN (?, ?)",
+        )
+        .bind(STATUS_QUEUED)
+        .bind(now())
+        .bind(&task.id)
+        .bind(STATUS_PAUSING)
+        .bind(STATUS_PAUSED)
+        .execute(&state.db)
+        .await?;
+        if !matches!(
+            project.status.as_deref(),
+            Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+        ) {
+            let human_gate: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND id != ? AND stage != ? \
+                 AND status = ? AND human_gate IS NOT NULL",
+            )
+            .bind(&project_id)
+            .bind(&task.id)
+            .bind(TASK_STAGE_COMPLETED)
+            .bind(STATUS_BLOCKED)
+            .fetch_one(&state.db)
+            .await?;
+            if human_gate == 0 {
+                sqlx::query(
+                    "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? \
+                     WHERE id = ? AND status = ?",
+                )
+                .bind(STATUS_RUNNING)
+                .bind(now())
+                .bind(&project_id)
+                .bind(STATUS_BLOCKED)
+                .execute(&state.db)
+                .await?;
+            }
+        }
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_resumed",
+        format!("任务 {} 已恢复，回到原阶段重新排队", task.key),
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
+}
+
+async fn reorder_task_queue(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<TaskQueueRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let direction = request.direction.as_deref().unwrap_or("").trim();
+    if request.position.is_none() && !matches!(direction, "up" | "down") {
+        return Err(ApiError::bad("direction 必须是 up 或 down"));
+    }
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    let _guard = state.schedule_lock.lock().await;
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    if task.stage != TASK_STAGE_PENDING
+        || task.attempts > 0
+        || task.rejections > 0
+        || task.status.as_deref() == Some(STATUS_CANCELED)
+    {
+        return Err(ApiError::bad("只有尚未开始的任务可以调整排队顺序"));
+    }
+    let mut tx = state.db.begin().await?;
+    let mut queue = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks WHERE project_id = ? AND stage = ? AND attempts = 0 \
+         AND rejections = 0 AND COALESCE(status, '') != ? ORDER BY queue_order ASC, seq ASC",
+    )
+    .bind(&project_id)
+    .bind(TASK_STAGE_PENDING)
+    .bind(STATUS_CANCELED)
+    .fetch_all(&mut *tx)
+    .await?;
+    let Some(index) = queue.iter().position(|row| row.id == task.id) else {
+        return Err(ApiError::bad("任务当前不在可调整的队列中"));
+    };
+    let target = if let Some(position) = request.position {
+        let target = (position.max(1) as usize - 1).min(queue.len() - 1);
+        if target == index {
+            return Err(ApiError::bad("任务排队位置没有变化"));
+        }
+        let row = queue.remove(index);
+        queue.insert(target, row);
+        target
+    } else {
+        let target = match direction {
+            "up" if index > 0 => index - 1,
+            "down" if index + 1 < queue.len() => index + 1,
+            _ => return Err(ApiError::bad("任务已经在队列边界")),
+        };
+        queue.swap(index, target);
+        target
+    };
+    let timestamp = now();
+    for (position, row) in queue.iter().enumerate() {
+        sqlx::query(
+            "UPDATE tasks SET queue_order = ?, updated_at = ? \
+             WHERE id = ? AND stage = ? AND attempts = 0 AND COALESCE(status, '') != ?",
+        )
+        .bind((position + 1) as i64)
+        .bind(&timestamp)
+        .bind(&row.id)
+        .bind(TASK_STAGE_PENDING)
+        .bind(STATUS_CANCELED)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_queue_reordered",
+        format!(
+            "任务 {} 排队顺序已调整到第 {} 位{}",
+            task.key,
+            target + 1,
+            match direction {
+                "up" => "（向上）",
+                "down" => "（向下）",
+                _ => "",
+            }
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
 }
 
 async fn confirm_goal(
@@ -445,7 +1106,10 @@ async fn confirm_goal(
 async fn pause_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    body: Option<Json<ProjectPauseRequest>>,
 ) -> Result<Json<Value>, ApiError> {
+    let request = body.map(|Json(value)| value).unwrap_or_default();
+    let force = request.forced();
     let project = require_project(&state, &id).await?;
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档"));
@@ -453,26 +1117,86 @@ async fn pause_project(
     if project.stage == STAGE_COMPLETED {
         return Err(ApiError::bad("项目已完成"));
     }
+    let workspace = PathBuf::from(&project.workspace);
     {
         let _guard = state.schedule_lock.lock().await;
-        sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(STATUS_PAUSING)
+        if force {
+            let running = sqlx::query_as::<_, JobRow>(
+                "SELECT * FROM jobs WHERE project_id = ? AND status = 'running'",
+            )
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await?;
+            for job in &running {
+                crate::agents::kill_job_dir(&workspace.join("jobs").join(&job.id));
+                let finished_at = now();
+                let duration_ms = job
+                    .started_at
+                    .as_deref()
+                    .and_then(|started| usage::elapsed_ms(Some(started), &finished_at));
+                sqlx::query(
+                    "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \
+                     finished_at = ? WHERE id = ? AND status = 'running'",
+                )
+                .bind(JOB_STATUS_CANCELED)
+                .bind("项目被强制暂停，作业已终止")
+                .bind(duration_ms)
+                .bind(&finished_at)
+                .bind(&job.id)
+                .execute(&state.db)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE tasks SET status = ?, agent_id = NULL, waiting_reason = NULL, updated_at = ? \
+                 WHERE project_id = ? AND stage != ? AND status != ?",
+            )
+            .bind(STATUS_PAUSED)
+            .bind(now())
+            .bind(&id)
+            .bind(TASK_STAGE_COMPLETED)
+            .bind(STATUS_CANCELED)
+            .execute(&state.db)
+            .await?;
+            sqlx::query(
+                "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(STATUS_PAUSED)
             .bind(now())
             .bind(&id)
             .execute(&state.db)
             .await?;
+        } else {
+            sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
+                .bind(STATUS_PAUSING)
+                .bind(now())
+                .bind(&id)
+                .execute(&state.db)
+                .await?;
+        }
     }
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&id),
-        None,
-        "project_pausing",
-        "项目暂停请求已提交，等待在途作业结束",
-    )
-    .await;
+    if force {
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&id),
+            None,
+            "project_paused_forced",
+            "项目已强制暂停，所有在途作业已终止",
+        )
+        .await;
+    } else {
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&id),
+            None,
+            "project_pausing",
+            "项目暂停请求已提交，等待在途作业结束",
+        )
+        .await;
+    }
     state.notify_scheduler();
-    Ok(Json(json!({"ok": true})))
+    Ok(Json(json!({"ok": true, "forced": force})))
 }
 
 async fn resume_project(
@@ -494,26 +1218,31 @@ async fn resume_project(
     {
         let _guard = state.schedule_lock.lock().await;
         sqlx::query(
-            "UPDATE tasks SET status = ?, updated_at = ? \
-             WHERE project_id = ? AND stage != ? AND status = ?",
+            "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
+             WHERE project_id = ? AND stage != ? AND status IN (?, ?)",
         )
         .bind(STATUS_QUEUED)
         .bind(now())
         .bind(&id)
         .bind(TASK_STAGE_COMPLETED)
         .bind(STATUS_PAUSED)
+        .bind(STATUS_PAUSING)
         .execute(&state.db)
         .await?;
-        sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(if waiting_human {
-                STATUS_BLOCKED
-            } else {
-                STATUS_RUNNING
-            })
-            .bind(now())
-            .bind(&id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(
+            "UPDATE projects SET status = ?, blocked_reason = CASE WHEN ? THEN blocked_reason \
+             ELSE NULL END, updated_at = ? WHERE id = ?",
+        )
+        .bind(if waiting_human {
+            STATUS_BLOCKED
+        } else {
+            STATUS_RUNNING
+        })
+        .bind(waiting_human)
+        .bind(now())
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
     }
     emit(
         &state.db,
@@ -658,7 +1387,8 @@ async fn retry_project(
             STAGE_EXECUTING => {
                 sqlx::query(
                     "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-                     last_agent_id = NULL, last_error = NULL, updated_at = ? \
+                     last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
+                     waiting_reason = NULL, updated_at = ? \
                      WHERE project_id = ? AND status = ?",
                 )
                 .bind(STATUS_QUEUED)
@@ -667,6 +1397,7 @@ async fn retry_project(
                 .bind(STATUS_BLOCKED)
                 .execute(&state.db)
                 .await?;
+                clear_project_agent_backoff(&state, &id).await?;
                 sqlx::query(
                     "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                 )
@@ -705,6 +1436,643 @@ async fn retry_project(
     load_detail(&state, &id).await.map(Json)
 }
 
+async fn replan_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ReplanRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    if !matches!(project.stage.as_str(), STAGE_EXECUTING | STAGE_SUMMARIZING) {
+        return Err(ApiError::bad("只有执行或总结阶段可以重新规划"));
+    }
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad("重新规划必须填写原因"))?;
+    let outcome = replan::request(&state, &id, reason, REPLAN_SOURCE_HUMAN).await?;
+    let Some(summary) = outcome else {
+        return Err(ApiError::bad("项目状态已变化，未执行重新规划"));
+    };
+    tracing::info!(
+        project_id = %id,
+        canceled_tasks = summary.canceled_tasks,
+        retained_tasks = summary.retained_tasks,
+        canceled_jobs = summary.canceled_jobs,
+        "项目已重新规划"
+    );
+    state.notify_scheduler();
+    load_detail(&state, &id).await.map(Json)
+}
+
+async fn save_task_guidance(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<TaskGuidanceRequest>,
+) -> Result<Json<TaskView>, ApiError> {
+    let guidance = request
+        .guidance
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad("人工指导不能为空"))?
+        .to_string();
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    let Some(task) =
+        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+            .bind(&task_id)
+            .bind(&project_id)
+            .fetch_optional(&state.db)
+            .await?
+    else {
+        return Err(ApiError::not_found("任务不存在"));
+    };
+    if task.stage == TASK_STAGE_COMPLETED {
+        return Err(ApiError::bad("任务已完成，不能再添加指导"));
+    }
+    if task.status.as_deref() == Some(STATUS_CANCELED) {
+        return Err(ApiError::bad("任务已取消，不能再添加指导"));
+    }
+    let timestamp = now();
+    sqlx::query("UPDATE tasks SET guidance = ?, updated_at = ? WHERE id = ?")
+        .bind(&guidance)
+        .bind(&timestamp)
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "guidance",
+        format!("任务 {} 收到人工指导：{guidance}", task.key),
+    )
+    .await;
+    let row = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+        .bind(&task.id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(TaskView::from_row(row)))
+}
+
+async fn set_task_milestone(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<MilestoneRequest>,
+) -> Result<Json<TaskView>, ApiError> {
+    let milestone = match (request.milestone, request.action.as_deref()) {
+        (Some(value), _) => value,
+        (None, Some("set" | "enable")) => true,
+        (None, Some("clear" | "cancel" | "disable")) => false,
+        _ => return Err(ApiError::bad("必须指定 milestone 布尔值或 set/clear 动作")),
+    };
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    if task.stage == TASK_STAGE_COMPLETED {
+        return Err(ApiError::bad("任务已完成，不能修改里程碑标记"));
+    }
+    if task.status.as_deref() == Some(STATUS_CANCELED) {
+        return Err(ApiError::bad("任务已取消，不能修改里程碑标记"));
+    }
+    if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
+        return Err(ApiError::bad("任务正在等待人工验收，不能修改里程碑标记"));
+    }
+    sqlx::query("UPDATE tasks SET milestone = ?, updated_at = ? WHERE id = ?")
+        .bind(if milestone { 1 } else { 0 })
+        .bind(now())
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        if milestone {
+            "milestone_set"
+        } else {
+            "milestone_cleared"
+        },
+        if milestone {
+            format!("任务 {} 已标记为里程碑，验收通过后需要人工确认", task.key)
+        } else {
+            format!("任务 {} 已取消里程碑标记", task.key)
+        },
+    )
+    .await;
+    let row = load_project_task(&state, &project_id, &task.id).await?;
+    Ok(Json(TaskView::from_row(row)))
+}
+
+async fn accept_milestone(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<MilestoneAcceptRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let note = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let (project, task) = {
+        let _guard = state.schedule_lock.lock().await;
+        let project = require_project(&state, &project_id).await?;
+        if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+            return Err(ApiError::bad("项目已归档"));
+        }
+        if project.stage == STAGE_COMPLETED {
+            return Err(ApiError::bad("项目已完成"));
+        }
+        let task = load_project_task(&state, &project_id, &task_id).await?;
+        if task.status.as_deref() != Some(STATUS_BLOCKED)
+            || task.human_gate.as_deref() != Some(HUMAN_GATE_MILESTONE)
+        {
+            return Err(ApiError::bad("任务不在等待人工验收状态"));
+        }
+        sqlx::query(
+            "UPDATE tasks SET human_gate = 'milestone_accepting', updated_at = ? WHERE id = ?",
+        )
+        .bind(now())
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
+        (project, task)
+    };
+
+    let Some(branch) = task.branch.clone() else {
+        restore_milestone_gate(&state, &task.id, "任务缺少执行分支，无法完成人工验收").await?;
+        return Err(ApiError::bad("任务缺少执行分支，无法完成人工验收"));
+    };
+    let workspace = PathBuf::from(&project.workspace);
+    let message = format!("domo(task-{}): {}", task.key, task.title);
+    let merge = {
+        let _guard = state.git_lock.lock().await;
+        git::squash_merge(&workspace.join("repo"), &branch, &message).await
+    };
+    if let Err(error) = merge {
+        let reason = format!("人工验收通过但合并失败：{error:#}");
+        restore_milestone_gate(&state, &task.id, &reason).await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project_id),
+            Some(&task.id),
+            "milestone_merge_conflict",
+            format!("任务 {} 人工验收合并失败：{reason}", task.key),
+        )
+        .await;
+        return Err(ApiError::internal(error));
+    }
+
+    {
+        let _guard = state.schedule_lock.lock().await;
+        let fresh_project = require_project(&state, &project_id).await?;
+        sqlx::query(
+            "UPDATE tasks SET stage = ?, status = NULL, human_gate = NULL, last_error = NULL, \
+             forced_agent_id = NULL, forced_agent_role = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(TASK_STAGE_COMPLETED)
+        .bind(now())
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
+        sqlx::query(
+            "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, blocked_reason = CASE WHEN status IN ('pausing', 'paused') \
+             THEN ? ELSE NULL END, updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_RUNNING)
+        .bind("人工验收已通过，等待项目恢复后继续")
+        .bind(now())
+        .bind(&project_id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project_id),
+            Some(&task.id),
+            "milestone_accepted",
+            format!(
+                "任务 {} 人工验收通过{}，已合并到项目交付分支",
+                task.key,
+                if note.is_empty() {
+                    String::new()
+                } else {
+                    format!("：{note}")
+                }
+            ),
+        )
+        .await;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project_id),
+            Some(&task.id),
+            "task_completed",
+            format!("任务 {} 人工验收通过并合并到项目分支", task.key),
+        )
+        .await;
+        if fresh_project.status.as_deref() == Some(STATUS_ARCHIVED) {
+            tracing::warn!(project_id = %project_id, "项目在人工验收合并期间被归档");
+        }
+    }
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
+}
+
+async fn restore_milestone_gate(
+    state: &AppState,
+    task_id: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    sqlx::query(
+        "UPDATE tasks SET human_gate = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(HUMAN_GATE_MILESTONE)
+    .bind(STATUS_BLOCKED)
+    .bind(reason)
+    .bind(now())
+    .bind(task_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+async fn reject_milestone(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<MilestoneRejectRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::bad("拒绝人工验收时必须填写理由"));
+    }
+    let guidance = request
+        .guidance
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    if task.status.as_deref() != Some(STATUS_BLOCKED)
+        || task.human_gate.as_deref() != Some(HUMAN_GATE_MILESTONE)
+    {
+        return Err(ApiError::bad("任务不在等待人工验收状态"));
+    }
+    let issues = append_issue(&task.verifier_issues, reason);
+    let guidance = guidance.unwrap_or_else(|| task.guidance.clone());
+    sqlx::query(
+        "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, agent_id = NULL, \
+         last_error = NULL, verifier_issues = ?, guidance = ?, forced_agent_id = NULL, \
+         forced_agent_role = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(TASK_STAGE_EXECUTING)
+    .bind(STATUS_QUEUED)
+    .bind(&issues)
+    .bind(&guidance)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    let paused = matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    );
+    sqlx::query(
+        "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(STATUS_RUNNING)
+    .bind(paused)
+    .bind("人工验收已拒绝，等待项目恢复后重新执行")
+    .bind(now())
+    .bind(&project_id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "milestone_rejected",
+        format!("任务 {} 人工验收被拒绝，退回执行：{reason}", task.key),
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
+}
+
+async fn task_arbitration(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    let role = arbitration_role(&task);
+    let agents = role_agents(&state, role).await?;
+    let jobs =
+        sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE task_id = ? ORDER BY created_at ASC")
+            .bind(&task.id)
+            .fetch_all(&state.db)
+            .await?;
+    let agent_names: HashMap<String, String> = agents
+        .iter()
+        .map(|agent| (agent.id.clone(), agent.name.clone()))
+        .collect();
+    Ok(Json(json!({
+        "project": {
+            "id": project.id,
+            "name": project.name,
+            "stage": project.stage,
+            "status": project.status,
+            "blocked_reason": project.blocked_reason,
+        },
+        "task": {
+            "id": task.id,
+            "key": task.key,
+            "title": task.title,
+            "stage": task.stage,
+            "status": task.status,
+            "last_error": task.last_error,
+            "last_failure_kind": task.last_failure_kind,
+            "waiting_reason": task.waiting_reason,
+            "attempts": task.attempts,
+            "rejections": task.rejections,
+            "milestone": task.milestone != 0,
+            "human_gate": task.human_gate,
+            "forced_agent_id": task.forced_agent_id,
+            "forced_agent_role": task.forced_agent_role,
+        },
+        "role": role,
+        "agents": agents.iter().map(|agent| json!({
+            "id": agent.id,
+            "name": agent.name,
+            "kind": agent.kind,
+            "priority": agent.priority,
+            "enabled": agent.enabled != 0,
+            "cooldown_until": agent.cooldown_until,
+            "last_error": agent.last_error,
+            "failure_kind": agent.failure_kind,
+            "transient_failures": agent.transient_failures,
+        })).collect::<Vec<_>>(),
+        "jobs": jobs.iter().map(|job| json!({
+            "id": job.id,
+            "role": job.role,
+            "agent_id": job.agent_id,
+            "agent_name": job.agent_id.as_ref().and_then(|id| agent_names.get(id).cloned()),
+            "status": job.status,
+            "attempt": job.attempt,
+            "error": job.error,
+            "exit_code": job.exit_code,
+            "failure_kind": job.failure_kind,
+            "input_tokens": job.input_tokens,
+            "output_tokens": job.output_tokens,
+            "cost": job.cost,
+            "duration_ms": job.duration_ms,
+            "usage_known": job.usage_known != 0,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "created_at": job.created_at,
+        })).collect::<Vec<_>>(),
+        "actions": [ARBITRATION_RETRY, ARBITRATION_SWITCH_AGENT, ARBITRATION_GUIDE],
+    })))
+}
+
+async fn submit_arbitration(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<ArbitrationRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let action = request.action.trim().to_string();
+    if !matches!(
+        action.as_str(),
+        ARBITRATION_RETRY | ARBITRATION_SWITCH_AGENT | ARBITRATION_GUIDE
+    ) {
+        return Err(ApiError::bad("action 必须是 retry、switch_agent 或 guide"));
+    }
+    let guidance = request
+        .guidance
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if action == ARBITRATION_GUIDE && guidance.is_none() {
+        return Err(ApiError::bad("指导内容不能为空"));
+    }
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    if task.stage == TASK_STAGE_COMPLETED {
+        return Err(ApiError::bad("任务已完成"));
+    }
+    if task.status.as_deref() != Some(STATUS_BLOCKED) {
+        return Err(ApiError::bad("只有阻塞中的任务可以裁决"));
+    }
+    if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
+        return Err(ApiError::bad("任务正在等待人工验收，请使用人工验收操作"));
+    }
+    let role = arbitration_role(&task);
+    let mut forced_agent_id: Option<String> = None;
+    let mut forced_agent_role: Option<String> = None;
+    let mut event_kind = "arbitration_retry";
+    let mut event_message = format!("人工裁决：重试任务 {}", task.key);
+    match action.as_str() {
+        ARBITRATION_SWITCH_AGENT => {
+            let agent_id = request
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::bad("更换 Agent 时必须指定 agent_id"))?;
+            let Some(agent) = crate::db::load_agent(&state.db, agent_id).await? else {
+                return Err(ApiError::not_found("Agent 不存在"));
+            };
+            if !parse_list(&agent.roles).iter().any(|item| item == role) {
+                return Err(ApiError::bad(format!(
+                    "Agent {} 不能承担{}角色",
+                    agent.name,
+                    role_label(role)
+                )));
+            }
+            forced_agent_id = Some(agent.id.clone());
+            forced_agent_role = Some(role.to_string());
+            event_kind = "arbitration_switch_agent";
+            event_message = format!(
+                "人工裁决：任务 {} 下一次{}作业强制使用 {}",
+                task.key,
+                role_label(role),
+                agent.name
+            );
+        }
+        ARBITRATION_GUIDE => {
+            let text = guidance.clone().unwrap_or_default();
+            event_kind = "arbitration_guide";
+            event_message = format!("人工裁决：任务 {} 收到指导并重新排队：{text}", task.key);
+        }
+        _ => {}
+    }
+    let reset_counts = matches!(action.as_str(), ARBITRATION_RETRY | ARBITRATION_GUIDE);
+    let next_guidance = guidance.unwrap_or_else(|| task.guidance.clone());
+    let paused = matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    );
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE tasks SET status = ?, attempts = ?, rejections = ?, agent_id = NULL, \
+         last_agent_id = CASE WHEN ? THEN NULL ELSE last_agent_id END, last_error = NULL, \
+         last_failure_kind = NULL, waiting_reason = NULL, human_gate = NULL, guidance = ?, \
+         forced_agent_id = ?, forced_agent_role = ?, \
+         updated_at = ? WHERE id = ? AND status = ?",
+    )
+    .bind(STATUS_QUEUED)
+    .bind(if reset_counts { 0 } else { task.attempts })
+    .bind(if reset_counts { 0 } else { task.rejections })
+    .bind(reset_counts)
+    .bind(&next_guidance)
+    .bind(&forced_agent_id)
+    .bind(&forced_agent_role)
+    .bind(now())
+    .bind(&task.id)
+    .bind(STATUS_BLOCKED)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(STATUS_RUNNING)
+    .bind(paused)
+    .bind("人工裁决已记录，等待项目恢复后生效")
+    .bind(now())
+    .bind(&project_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    clear_project_agent_backoff(&state, &project_id).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        event_kind,
+        event_message,
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project_id).await.map(Json)
+}
+
+/// Human retry overrides automatic backoff for every agent in the project pool.
+async fn clear_project_agent_backoff(state: &AppState, project_id: &str) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
+         updated_at = ? WHERE id IN (SELECT agent_id FROM project_agents WHERE project_id = ?)",
+    )
+    .bind(now())
+    .bind(project_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+async fn load_project_task(
+    state: &AppState,
+    project_id: &str,
+    task_id: &str,
+) -> Result<TaskRow, ApiError> {
+    sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+        .bind(task_id)
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("任务不存在"))
+}
+
+async fn role_agents(state: &AppState, role: &str) -> Result<Vec<AgentRow>, ApiError> {
+    let rows =
+        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC, created_at ASC")
+            .fetch_all(&state.db)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|agent| parse_list(&agent.roles).iter().any(|item| item == role))
+        .collect())
+}
+
+fn arbitration_role(task: &TaskRow) -> &'static str {
+    if task.stage == TASK_STAGE_VERIFYING {
+        ROLE_VERIFIER
+    } else {
+        ROLE_EXECUTOR
+    }
+}
+
+fn role_label(role: &str) -> &'static str {
+    match role {
+        ROLE_EXECUTOR => "执行",
+        ROLE_VERIFIER => "验收",
+        ROLE_PLANNER => "规划",
+        _ => "未知",
+    }
+}
+
+fn parse_list(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn append_issue(existing: &str, issue: &str) -> String {
+    let mut issues: Vec<String> = parse_list(existing);
+    if !issues.iter().any(|item| item == issue) {
+        issues.push(issue.to_string());
+    }
+    while issues.len() > 20 {
+        issues.remove(0);
+    }
+    serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into())
+}
+
 async fn retry_task(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
@@ -735,13 +2103,15 @@ async fn retry_task(
         let _guard = state.schedule_lock.lock().await;
         sqlx::query(
             "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-             last_agent_id = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
+             last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
+             waiting_reason = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(STATUS_QUEUED)
         .bind(now())
         .bind(&task.id)
         .execute(&state.db)
         .await?;
+        clear_project_agent_backoff(&state, &project_id).await?;
         sqlx::query(
             "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
         )
@@ -795,10 +2165,64 @@ async fn get_job(
         error: job.error,
         exit_code: job.exit_code,
         pid: job.pid,
+        failure_kind: job.failure_kind,
+        input_tokens: job.input_tokens,
+        output_tokens: job.output_tokens,
+        cost: job.cost,
+        duration_ms: job
+            .duration_ms
+            .or_else(|| job_duration(&job.started_at, &job.finished_at)),
+        usage_known: job.usage_known != 0,
         started_at: job.started_at,
         finished_at: job.finished_at,
         created_at: job.created_at,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageQuery {
+    project_id: Option<String>,
+    agent_id: Option<String>,
+    role: Option<String>,
+    #[serde(alias = "start")]
+    from: Option<String>,
+    #[serde(alias = "end")]
+    to: Option<String>,
+    group_by: Option<String>,
+}
+
+async fn usage_report(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<usage::UsageReport>, ApiError> {
+    let group_by = usage::UsageGroupBy::parse(query.group_by.as_deref()).map_err(ApiError::bad)?;
+    let from = parse_usage_time(query.from.as_deref())?;
+    let to = parse_usage_time(query.to.as_deref())?;
+    let filter = usage::UsageFilter {
+        project_id: query.project_id.clone(),
+        agent_id: query.agent_id.clone(),
+        role: query.role.clone(),
+        from,
+        to,
+    };
+    let rows = usage::load_jobs(&state.db, query.project_id.as_deref()).await?;
+    let agent_rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+        .fetch_all(&state.db)
+        .await?;
+    let names: HashMap<String, String> = agent_rows
+        .into_iter()
+        .map(|agent| (agent.id, agent.name))
+        .collect();
+    Ok(Json(usage::summarize(&rows, &filter, group_by, &names)))
+}
+
+fn parse_usage_time(raw: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|value| Some(value.with_timezone(&chrono::Utc)))
+        .map_err(|_| ApiError::bad(format!("时间格式必须为 RFC3339: {raw}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -848,11 +2272,12 @@ async fn stream_events(
 
 async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiError> {
     let project = require_project(state, id).await?;
-    let tasks =
-        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE project_id = ? ORDER BY seq ASC")
-            .bind(id)
-            .fetch_all(&state.db)
-            .await?;
+    let tasks = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks WHERE project_id = ? ORDER BY queue_order ASC, seq ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
     let messages = sqlx::query_as::<_, MessageRow>(
         "SELECT * FROM messages WHERE project_id = ? ORDER BY created_at ASC",
     )
@@ -868,11 +2293,17 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
     let agent_rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC")
         .fetch_all(&state.db)
         .await?;
-    let agents: Vec<AgentView> = agent_rows.into_iter().map(AgentView::from_row).collect();
+    let mut agents: Vec<AgentView> = Vec::new();
+    for row in agent_rows {
+        agents.push(agent_view(state, row).await?);
+    }
+    let agent_pool = crate::db::load_project_agent_pool(&state.db, id).await?;
     let agent_names: HashMap<String, String> = agents
         .iter()
         .map(|agent| (agent.id.clone(), agent.name.clone()))
         .collect();
+    let usage_rows = usage::load_jobs(&state.db, Some(id)).await?;
+    let project_usage = usage::project_usage(&usage_rows, id, &agent_names);
     let job_rows = sqlx::query_as::<_, JobRow>(
         "SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at ASC",
     )
@@ -895,6 +2326,14 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
             attempt: job.attempt,
             error: job.error,
             exit_code: job.exit_code,
+            failure_kind: job.failure_kind,
+            input_tokens: job.input_tokens,
+            output_tokens: job.output_tokens,
+            cost: job.cost,
+            duration_ms: job
+                .duration_ms
+                .or_else(|| job_duration(&job.started_at, &job.finished_at)),
+            usage_known: job.usage_known != 0,
             started_at: job.started_at,
             finished_at: job.finished_at,
             created_at: job.created_at,
@@ -902,12 +2341,91 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
         .collect();
     Ok(ProjectDetail {
         project,
-        tasks: tasks.into_iter().map(TaskView::from_row).collect(),
+        tasks: task_views(tasks),
         jobs,
         messages,
         events,
         agents,
+        agent_pool,
+        usage: project_usage,
     })
+}
+
+fn job_duration(started_at: &Option<String>, finished_at: &Option<String>) -> Option<i64> {
+    usage::elapsed_ms(started_at.as_deref(), finished_at.as_deref()?)
+}
+
+/// Queue positions rank ready, queued tasks by the stable queue order. Paused
+/// and not-yet-ready tasks are excluded from the dispatch ordering.
+fn task_views(rows: Vec<TaskRow>) -> Vec<TaskView> {
+    let completed: HashSet<String> = rows
+        .iter()
+        .filter(|task| task.stage == TASK_STAGE_COMPLETED)
+        .map(|task| task.key.clone())
+        .collect();
+    let mut ready: Vec<&TaskRow> = rows
+        .iter()
+        .filter(|task| {
+            task.status.as_deref() == Some(STATUS_QUEUED)
+                && task.stage != TASK_STAGE_COMPLETED
+                && (task.stage != TASK_STAGE_PENDING
+                    || deps_complete(&parse_list(&task.deps), &completed))
+        })
+        .collect();
+    ready.sort_by_key(|task| (task.queue_order, task.seq));
+    let positions: HashMap<String, i64> = ready
+        .iter()
+        .enumerate()
+        .map(|(index, task)| (task.id.clone(), (index + 1) as i64))
+        .collect();
+    rows.into_iter()
+        .map(|row| {
+            let position = positions.get(&row.id).copied();
+            let mut view = TaskView::from_row(row);
+            view.queue_position = position;
+            view.waiting_reason = task_waiting_reason(&view, &completed);
+            view
+        })
+        .collect()
+}
+
+fn task_waiting_reason(task: &TaskView, completed: &HashSet<String>) -> Option<String> {
+    match task.status.as_deref() {
+        Some(STATUS_CANCELED) => return Some("任务已取消".into()),
+        Some(STATUS_PAUSED) => return Some("任务已暂停".into()),
+        Some(STATUS_PAUSING) => return Some("暂停中，等待在途作业结束".into()),
+        Some(STATUS_BLOCKED) => {
+            return Some(
+                if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
+                    "等待人工验收".into()
+                } else {
+                    "等待人工裁决".into()
+                },
+            )
+        }
+        _ => {}
+    }
+    if task.stage == TASK_STAGE_COMPLETED {
+        return None;
+    }
+    if task.stage == TASK_STAGE_PENDING {
+        let missing: Vec<String> = task
+            .deps
+            .iter()
+            .filter(|dep| !completed.contains(*dep))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Some(format!("等待前置任务：{}", missing.join("、")));
+        }
+    }
+    if task.queue_position.is_some() {
+        return task
+            .waiting_reason
+            .clone()
+            .or_else(|| Some("等待派发".into()));
+    }
+    task.waiting_reason.clone()
 }
 
 async fn require_project(state: &AppState, id: &str) -> Result<ProjectRow, ApiError> {
@@ -922,6 +2440,13 @@ fn validate_kind(kind: &str) -> Result<String, ApiError> {
     match kind {
         AGENT_MOCK | AGENT_OPENCODE | AGENT_CLI => Ok(kind.to_string()),
         _ => Err(ApiError::bad("Agent 类型必须是 mock、opencode 或 cli")),
+    }
+}
+
+fn validate_role(role: &str) -> Result<String, ApiError> {
+    match role {
+        ROLE_PLANNER | ROLE_EXECUTOR | ROLE_VERIFIER => Ok(role.to_string()),
+        _ => Err(ApiError::bad(format!("未知角色: {role}"))),
     }
 }
 

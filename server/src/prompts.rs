@@ -18,12 +18,22 @@ pub struct TaskInfo {
     pub title: String,
     pub description: String,
     pub acceptance: Vec<String>,
+    pub guidance: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SummaryTaskInfo {
     pub key: String,
     pub title: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DerivedTaskInfo {
+    pub key: String,
+    pub title: String,
+    pub stage: String,
+    pub status: Option<String>,
     pub summary: String,
 }
 
@@ -38,14 +48,20 @@ pub struct PromptData {
     pub project_branch: String,
     pub task: Option<TaskInfo>,
     pub dependencies: Vec<DependencyInfo>,
+    pub derived_from: Option<DependencyInfo>,
+    pub derived_tasks: Vec<DerivedTaskInfo>,
     pub messages: Vec<MessageRow>,
     pub verifier_issues: Vec<String>,
     pub summary_tasks: Vec<SummaryTaskInfo>,
+    pub completed_tasks: Vec<SummaryTaskInfo>,
+    pub canceled_tasks: Vec<SummaryTaskInfo>,
     pub diff_stat: String,
     pub job_dir: String,
     pub result_path: String,
     pub attempt: i64,
     pub report_feedback: Option<String>,
+    pub replan_reason: Option<String>,
+    pub replan_source: Option<String>,
 }
 
 pub fn render(data: &PromptData) -> String {
@@ -105,10 +121,12 @@ fn goal_prompt(data: &PromptData) -> String {
     if history.is_empty() {
         history.push_str("\n（暂无对话）\n");
     }
+    let replan = replan_section(data);
     format!(
         "{}你当前扮演**规划者**。先判断项目目标是否足够明确：只有确实缺少会影响实现的关键信息时才提问；\
          如果目标已经足够清晰，直接给出任务规划。不要为了提问而提问。\n\
          \n## 目标确认对话\n{}\n\
+         {}\
          \n## 规划约束\n\
          - 任务必须是可以独立执行、独立验收的最小单元；\n\
          - 任务之间用 deps 表示前置依赖，必须是无环 DAG；\n\
@@ -127,10 +145,78 @@ fn goal_prompt(data: &PromptData) -> String {
          {}",
         common_header(data),
         history,
+        replan,
         result_rules(
             data,
             "{\"kind\":\"plan\",\"summary\":\"...\",\"tasks\":[...]} 或 {\"kind\":\"questions\",\"questions\":[...]}"
         )
+    )
+}
+
+fn replan_section(data: &PromptData) -> String {
+    let Some(reason) = data
+        .replan_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return String::new();
+    };
+    let source = match data.replan_source.as_deref() {
+        Some("executor") => "执行者",
+        Some("human") => "人工",
+        _ => "未知",
+    };
+    let completed = if data.completed_tasks.is_empty() {
+        "（没有已完成任务）".to_string()
+    } else {
+        data.completed_tasks
+            .iter()
+            .map(|task| {
+                format!(
+                    "- {} {}：{}",
+                    task.key,
+                    task.title,
+                    if task.summary.is_empty() {
+                        "已完成"
+                    } else {
+                        &task.summary
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let canceled = if data.canceled_tasks.is_empty() {
+        "（没有被取消的任务）".to_string()
+    } else {
+        data.canceled_tasks
+            .iter()
+            .map(|task| {
+                format!(
+                    "- {} {}：{}",
+                    task.key,
+                    task.title,
+                    if task.summary.is_empty() {
+                        "已取消"
+                    } else {
+                        &task.summary
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "\n## 重规划上下文\n\
+         重规划原因（来源：{source}）：\n{reason}\n\
+         \n已完成任务（保留在交付分支中，不要重新规划、不要重复实现）：\n{completed}\n\
+         \n已取消任务（已退出活动 DAG，不要把它们作为前置依赖）：\n{canceled}\n\
+         \n## 重规划约束\n\
+         - 新计划只包含仍需完成的工作，不要重复已完成任务；\n\
+         - deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n\
+         - 可以复用已取消任务的 key；\n\
+         - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正。\n"
     )
 }
 
@@ -175,33 +261,108 @@ fn executor_prompt(data: &PromptData) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let guidance = if task.guidance.trim().is_empty() {
+        "（暂无人工指导）".to_string()
+    } else {
+        task.guidance.trim().to_string()
+    };
+    let derivation = match &data.derived_from {
+        Some(parent) => format!(
+            "\n## 派生任务约束\n\
+             本任务是从父任务 {} {} 派生的子任务。完成工作后跳过验收阶段，由 DOMO 直接提交并合入父任务分支。\n\
+             禁止再次派生新的子任务；如果任务仍然过于复杂，请在结果中说明失败原因或请求重新规划。\n",
+            parent.key, parent.title
+        ),
+        None => String::new(),
+    };
+    let derived_children = if data.derived_tasks.is_empty() {
+        String::new()
+    } else {
+        let items = data
+            .derived_tasks
+            .iter()
+            .map(|child| {
+                let state = child.state_label();
+                format!(
+                    "- {} {}（{}）：{}",
+                    child.key,
+                    child.title,
+                    state,
+                    if child.summary.is_empty() {
+                        "尚无结果"
+                    } else {
+                        &child.summary
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n## 派生子任务\n{items}\n")
+    };
+    let derive_rule = if data.derived_from.is_some() {
+        "禁止派生子任务；派生任务只能完成自身工作或请求重新规划。"
+    } else {
+        "如果任务仍然过于复杂，可以派生子任务：单次 1 到 8 个、deps 必须为空、key 在项目活动任务中唯一，且每个子任务必须写清描述和验收标准。"
+    };
+    let schema = if data.derived_from.is_some() {
+        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
+         {\"kind\":\"failed\",\"reason\":\"失败原因\"} 或 \
+         {\"kind\":\"replan\",\"reason\":\"需要重新规划的原因\"}"
+    } else {
+        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
+         {\"kind\":\"failed\",\"reason\":\"失败原因\"}、\
+         {\"kind\":\"replan\",\"reason\":\"需要重新规划的原因\"} 或 \
+         {\"kind\":\"derive\",\"summary\":\"为什么需要派生\",\"tasks\":[{\"key\":\"T1.1\",\"title\":\"短标题\",\"description\":\"详细目标和边界\",\"acceptance\":[\"可核查的验收标准\"],\"deps\":[]}]}"
+    };
     format!(
         "{}你当前扮演**执行者**，只负责下面这个任务。第 {} 次执行。\n\
+         {}\
          \n## 任务\n{} - {}\n\n{}\n\
+         \n## 人工指导（必须遵守）\n{}\n\
          \n## 验收标准\n{}\n\
          \n## 前置任务结果\n{}\n\
          \n## 上一轮验收意见（必须逐条处理）\n{}\n\
+         {}\
          \n## 执行要求\n\
          - 在当前工作目录内完成实现，不要修改工作目录以外的文件；\n\
          - 可以阅读仓库中的文档和源码，遵循项目现有结构、命名和风格；\n\
          - 必须实际运行与改动相关的构建或测试，并在结果里说明运行了什么；\n\
          - 不要执行 git commit、git checkout、git reset、git merge、git rebase 等改变历史或分支的命令；DOMO 会负责提交和合并；\n\
          - 如果无法完成，写清失败原因，不要伪造成功；\n\
+         - 如果原计划存在事实错误，导致当前任务无法按描述完成，输出 replan 请求并说明原因；\n\
+         - {}；\n\
          - 结果文件路径固定，不要写到其他位置。\n\
          {}",
         common_header(data),
         data.attempt + 1,
+        derivation,
         task.key,
         task.title,
         task.description,
+        guidance,
         acceptance,
         deps,
         issues,
-        result_rules(
-            data,
-            "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"} 或 {\"kind\":\"failed\",\"reason\":\"失败原因\"}"
-        )
+        derived_children,
+        derive_rule,
+        result_rules(data, schema)
     )
+}
+
+impl DerivedTaskInfo {
+    fn state_label(&self) -> &str {
+        if self.stage == crate::models::TASK_STAGE_COMPLETED {
+            "已完成"
+        } else if self.status.as_deref() == Some(crate::models::STATUS_BLOCKED) {
+            "已阻塞"
+        } else if self.status.as_deref() == Some(crate::models::STATUS_CANCELED) {
+            "已取消"
+        } else if self.stage == crate::models::TASK_STAGE_EXECUTING {
+            "执行中"
+        } else {
+            "待执行"
+        }
+    }
 }
 
 fn verifier_prompt(data: &PromptData) -> String {

@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { Agent, AgentInput, AgentKind, Role } from "../types";
+import type {
+  Agent,
+  AgentAvailability,
+  AgentInput,
+  AgentKind,
+  AgentUsageLimit,
+  Role,
+  UsageMetric,
+  UsageWindowKind,
+} from "../types";
 import { api, errorMessage } from "../api";
-import { Badge, ErrorBox, formatTime } from "../ui";
+import { Badge, ErrorBox, FAILURE_KIND_LABELS, formatTime } from "../ui";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
 const ROLE_TEXT: Record<Role, string> = {
@@ -10,6 +19,23 @@ const ROLE_TEXT: Record<Role, string> = {
   executor: "执行者",
   verifier: "验收者",
 };
+const DAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const METRIC_LABELS: Record<UsageMetric, string> = {
+  tokens: "token（输入+输出）",
+  input_tokens: "输入 token",
+  output_tokens: "输出 token",
+  cost: "费用",
+};
+const WINDOW_LABELS: Record<UsageWindowKind, string> = {
+  day: "每日",
+  month: "每月",
+};
+
+interface SlotState {
+  enabled: boolean;
+  start: string;
+  end: string;
+}
 
 interface FormState {
   name: string;
@@ -21,19 +47,41 @@ interface FormState {
   enabled: boolean;
   command: string;
   modelArgs: string;
+  availabilityEnabled: boolean;
+  slots: SlotState[];
+  usageLimitEnabled: boolean;
+  usageMetric: UsageMetric;
+  usageWindow: UsageWindowKind;
+  usageLimit: string;
 }
 
-const emptyForm: FormState = {
-  name: "",
-  kind: "opencode",
-  model: "",
-  roles: [...ALL_ROLES],
-  priority: "0",
-  maxConcurrency: "2",
-  enabled: true,
-  command: "",
-  modelArgs: "",
-};
+function emptySlots(): SlotState[] {
+  return DAY_LABELS.map((_, index) => ({
+    enabled: false,
+    start: index < 5 ? "09:00" : "10:00",
+    end: index < 5 ? "18:00" : "16:00",
+  }));
+}
+
+function emptyForm(): FormState {
+  return {
+    name: "",
+    kind: "opencode",
+    model: "",
+    roles: [...ALL_ROLES],
+    priority: "0",
+    maxConcurrency: "2",
+    enabled: true,
+    command: "",
+    modelArgs: "",
+    availabilityEnabled: false,
+    slots: emptySlots(),
+    usageLimitEnabled: false,
+    usageMetric: "tokens",
+    usageWindow: "day",
+    usageLimit: "100000",
+  };
+}
 
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -42,6 +90,7 @@ export function AgentsPage() {
   const [editing, setEditing] = useState<Agent | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState("");
 
   async function refresh() {
     try {
@@ -58,12 +107,22 @@ export function AgentsPage() {
 
   function startCreate() {
     setEditing(null);
-    setForm(emptyForm);
+    setForm(emptyForm());
     setShowForm(true);
   }
 
   function startEdit(agent: Agent) {
     setEditing(agent);
+    const slots = emptySlots();
+    agent.availability?.slots.forEach((slot) => {
+      if (slot.weekday >= 1 && slot.weekday <= 7) {
+        slots[slot.weekday - 1] = {
+          enabled: true,
+          start: slot.start,
+          end: slot.end,
+        };
+      }
+    });
     setForm({
       name: agent.name,
       kind: agent.kind,
@@ -74,6 +133,12 @@ export function AgentsPage() {
       enabled: agent.enabled,
       command: agent.command.length ? JSON.stringify(agent.command) : "",
       modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
+      availabilityEnabled: Boolean(agent.availability?.enabled),
+      slots,
+      usageLimitEnabled: Boolean(agent.usage_limit?.enabled),
+      usageMetric: agent.usage_limit?.metric ?? "tokens",
+      usageWindow: agent.usage_limit?.window ?? "day",
+      usageLimit: agent.usage_limit ? String(agent.usage_limit.limit) : "100000",
     });
     setShowForm(true);
   }
@@ -83,6 +148,8 @@ export function AgentsPage() {
     setSaving(true);
     setError("");
     try {
+      const availability = buildAvailability(form);
+      const usageLimit = buildUsageLimit(form);
       const input: AgentInput = {
         name: form.name.trim(),
         kind: form.kind,
@@ -93,6 +160,8 @@ export function AgentsPage() {
         enabled: form.enabled,
         command: parseJsonArray(form.command),
         model_args: parseJsonArray(form.modelArgs),
+        availability,
+        usage_limit: usageLimit,
       };
       if (editing) {
         await api.updateAgent(editing.id, input);
@@ -117,12 +186,34 @@ export function AgentsPage() {
     }
   }
 
+  async function resetUsage(agent: Agent) {
+    setBusyId(agent.id);
+    setError("");
+    try {
+      await api.resetAgentUsage(agent.id);
+      await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
   function toggleRole(role: Role) {
     setForm((current) => ({
       ...current,
       roles: current.roles.includes(role)
         ? current.roles.filter((item) => item !== role)
         : [...current.roles, role],
+    }));
+  }
+
+  function updateSlot(index: number, patch: Partial<SlotState>) {
+    setForm((current) => ({
+      ...current,
+      slots: current.slots.map((slot, position) =>
+        position === index ? { ...slot, ...patch } : slot,
+      ),
     }));
   }
 
@@ -133,6 +224,7 @@ export function AgentsPage() {
           <h1>Agent 团队</h1>
           <p className="subtitle">
             同一 Agent 可以扮演多个角色。按优先级从小到大选择，数字越小越优先。
+            可用时段按本地时区生效，用量限额达到后自动跳过，新窗口开始后自动恢复。
           </p>
         </div>
         <button className="primary" onClick={startCreate}>
@@ -219,6 +311,126 @@ export function AgentsPage() {
             </div>
           </div>
 
+          <div className="field">
+            <span className="field-label">可用时段（本地时区）</span>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.availabilityEnabled}
+                onChange={(event) =>
+                  setForm({ ...form, availabilityEnabled: event.target.checked })
+                }
+              />
+              <span>按每周时段限制派发</span>
+            </label>
+            {form.availabilityEnabled ? (
+              <div className="schedule-grid">
+                {DAY_LABELS.map((day, index) => {
+                  const slot = form.slots[index];
+                  return (
+                    <div className="schedule-row" key={day}>
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={slot.enabled}
+                          onChange={(event) =>
+                            updateSlot(index, { enabled: event.target.checked })
+                          }
+                        />
+                        <span>{day}</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={slot.start}
+                        disabled={!slot.enabled}
+                        onChange={(event) =>
+                          updateSlot(index, { start: event.target.value })
+                        }
+                      />
+                      <span className="muted">至</span>
+                      <input
+                        type="time"
+                        value={slot.end}
+                        disabled={!slot.enabled}
+                        onChange={(event) =>
+                          updateSlot(index, { end: event.target.value })
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <small className="muted">未配置时段时全天可用。</small>
+            )}
+          </div>
+
+          <div className="field">
+            <span className="field-label">用量限额</span>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.usageLimitEnabled}
+                onChange={(event) =>
+                  setForm({ ...form, usageLimitEnabled: event.target.checked })
+                }
+              />
+              <span>达到限额后自动暂停派发</span>
+            </label>
+            {form.usageLimitEnabled ? (
+              <div className="form-grid usage-form-grid">
+                <label>
+                  <span>计量维度</span>
+                  <select
+                    value={form.usageMetric}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        usageMetric: event.target.value as UsageMetric,
+                      })
+                    }
+                  >
+                    <option value="tokens">token（输入+输出）</option>
+                    <option value="input_tokens">输入 token</option>
+                    <option value="output_tokens">输出 token</option>
+                    <option value="cost">费用</option>
+                  </select>
+                </label>
+                <label>
+                  <span>统计窗口</span>
+                  <select
+                    value={form.usageWindow}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        usageWindow: event.target.value as UsageWindowKind,
+                      })
+                    }
+                  >
+                    <option value="day">每日</option>
+                    <option value="month">每月</option>
+                  </select>
+                </label>
+                <label>
+                  <span>限额</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={form.usageLimit}
+                    onChange={(event) =>
+                      setForm({ ...form, usageLimit: event.target.value })
+                    }
+                  />
+                </label>
+              </div>
+            ) : (
+              <small className="muted">
+                未记录用量的作业不会扣减限额。
+              </small>
+            )}
+          </div>
+
           {form.kind === "cli" ? (
             <div className="form-grid">
               <label>
@@ -270,6 +482,9 @@ export function AgentsPage() {
                   </Badge>
                   <Badge tone="muted">优先级 {agent.priority}</Badge>
                   <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
+                  {agent.usage_window?.exceeded ? (
+                    <Badge tone="danger">用量限额已触发</Badge>
+                  ) : null}
                 </div>
               </div>
               <div className="button-row">
@@ -308,8 +523,45 @@ export function AgentsPage() {
                 <span>{formatTime(agent.updated_at)}</span>
               </div>
             </div>
+            {agent.availability?.enabled ? (
+              <div className="usage-line">
+                <span className="meta-label">可用时段</span>
+                <span>{scheduleSummary(agent.availability)}</span>
+              </div>
+            ) : null}
+            {agent.usage_limit?.enabled && agent.usage_window ? (
+              <div className={agent.usage_window.exceeded ? "warn-banner" : "usage-line"}>
+                <span>
+                  {WINDOW_LABELS[agent.usage_window.window]} ·
+                  {METRIC_LABELS[agent.usage_window.metric]} 用量{" "}
+                  <strong>{formatAmount(agent.usage_window.used)}</strong> /{" "}
+                  {formatAmount(agent.usage_window.limit)}
+                  {agent.usage_window.exceeded
+                    ? ` · 已跳过，${formatTime(agent.usage_window.window_end)} 后自动恢复`
+                    : ""}
+                </span>
+                <button
+                  className="ghost"
+                  disabled={busyId === agent.id}
+                  onClick={() => void resetUsage(agent)}
+                >
+                  重置窗口用量
+                </button>
+              </div>
+            ) : null}
+            {agent.failure_kind ? (
+              <div className="warn-banner">
+                最近失败分类：
+                {FAILURE_KIND_LABELS[agent.failure_kind] ?? agent.failure_kind}
+                {agent.transient_failures
+                  ? ` · 供应商波动 ${agent.transient_failures} 次`
+                  : ""}
+              </div>
+            ) : null}
             {agent.cooldown_until ? (
-              <div className="warn-banner">限流冷却至 {formatTime(agent.cooldown_until)}</div>
+              <div className="warn-banner">
+                冷却至 {formatTime(agent.cooldown_until)}
+              </div>
             ) : null}
             {agent.last_error ? (
               <div className="error-box pre-wrap">{agent.last_error}</div>
@@ -319,6 +571,48 @@ export function AgentsPage() {
       </div>
     </div>
   );
+}
+
+function buildAvailability(form: FormState): AgentAvailability | null {
+  if (!form.availabilityEnabled) return null;
+  const slots = form.slots.flatMap((slot, index) =>
+    slot.enabled
+      ? [{ weekday: index + 1, start: slot.start, end: slot.end }]
+      : [],
+  );
+  if (slots.length === 0) {
+    throw new Error("启用可用时段时至少选择一天");
+  }
+  return { enabled: true, slots };
+}
+
+function buildUsageLimit(form: FormState): AgentUsageLimit | null {
+  if (!form.usageLimitEnabled) return null;
+  const limit = Number(form.usageLimit);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error("启用用量限额时限额必须大于 0");
+  }
+  return {
+    enabled: true,
+    metric: form.usageMetric,
+    window: form.usageWindow,
+    limit,
+  };
+}
+
+function scheduleSummary(availability: AgentAvailability): string {
+  if (availability.slots.length === 0) return "未设置任何时段（始终不可用）";
+  return availability.slots
+    .map(
+      (slot) =>
+        `${DAY_LABELS[slot.weekday - 1] ?? `周${slot.weekday}`} ${slot.start}-${slot.end}`,
+    )
+    .join("、");
+}
+
+function formatAmount(value: number): string {
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function parseJsonArray(raw: string): string[] {

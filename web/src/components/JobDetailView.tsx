@@ -2,7 +2,18 @@ import { useState } from "react";
 import type { SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
-import { Badge, JOB_STATUS_LABELS, ROLE_LABELS, formatDuration, formatTime, toneForStatus } from "../ui";
+import {
+  Badge,
+  FAILURE_KIND_LABELS,
+  JOB_STATUS_LABELS,
+  ROLE_LABELS,
+  formatCost,
+  formatDuration,
+  formatMillis,
+  formatTime,
+  formatTokens,
+  toneForStatus,
+} from "../ui";
 
 export function JobDetailView({ job }: { job: JobSummary }) {
   const [detail, setDetail] = useState<JobDetail | null>(null);
@@ -22,6 +33,10 @@ export function JobDetailView({ job }: { job: JobSummary }) {
     }
   }
 
+  const duration = job.duration_ms
+    ? formatMillis(job.duration_ms)
+    : formatDuration(job.started_at, job.finished_at);
+
   return (
     <details className="job" onToggle={handleToggle}>
       <summary className="job-summary">
@@ -31,9 +46,22 @@ export function JobDetailView({ job }: { job: JobSummary }) {
         </Badge>
         <span className="muted">{job.agent_name ?? "无 Agent"}</span>
         <span className="muted">第 {job.attempt} 次</span>
-        <span className="muted job-duration">
-          {formatDuration(job.started_at, job.finished_at)}
-        </span>
+        <span className="muted job-duration">{duration}</span>
+        {job.usage_known ? (
+          <span className="muted">
+            {formatTokens(job.input_tokens)} in · {formatTokens(job.output_tokens)} out ·{" "}
+            {formatCost(job.cost)}
+          </span>
+        ) : (
+          <Badge tone="warn" title="Agent 未在结果中提供 token 或费用">
+            用量未知
+          </Badge>
+        )}
+        {job.failure_kind ? (
+          <Badge tone="danger">
+            {FAILURE_KIND_LABELS[job.failure_kind] ?? job.failure_kind}
+          </Badge>
+        ) : null}
         {job.exit_code !== null ? (
           <span className="muted">exit {job.exit_code}</span>
         ) : null}
@@ -42,6 +70,15 @@ export function JobDetailView({ job }: { job: JobSummary }) {
         <div className="job-meta">
           创建 {formatTime(job.created_at)} · 开始 {formatTime(job.started_at)} · 结束{" "}
           {formatTime(job.finished_at)}
+        </div>
+        <div className="job-meta">
+          用量：
+          {job.usage_known
+            ? `输入 ${formatTokens(job.input_tokens)} · 输出 ${formatTokens(
+                job.output_tokens,
+              )} · 费用 ${formatCost(job.cost)}`
+            : "未知（Agent 未提供 token 或费用）"}
+          {" · "}时长 {formatMillis(job.duration_ms)}
         </div>
         {job.error ? <div className="error-box pre-wrap">{job.error}</div> : null}
         {loading ? <div className="muted">加载作业详情…</div> : null}

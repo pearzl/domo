@@ -668,6 +668,7 @@ small {
   background: white;
   text-align: left;
   color: var(--text);
+  cursor: pointer;
 }
 
 .task-row:last-child {
@@ -680,6 +681,13 @@ small {
 
 .task-row.selected {
   background: var(--accent-soft);
+}
+
+.task-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
 }
 
 .task-key {
@@ -705,9 +713,101 @@ small {
   white-space: nowrap;
 }
 
+.queue-controls {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.queue-controls button {
+  padding: 0 5px;
+  line-height: 1.4;
+}
+
+.task-control-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
 .legend {
   margin-top: 10px;
   font-size: 0.8rem;
+}
+
+.agent-pool-role {
+  margin-top: 16px;
+}
+
+.agent-pool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-pool-row {
+  display: grid;
+  grid-template-columns: 32px minmax(160px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fcfdff;
+}
+
+.agent-pool-row.unavailable {
+  background: #fff7f7;
+  border-color: #f1c9c9;
+}
+
+.agent-pool-rank {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.agent-pool-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-pool-name .mono {
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-pool-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.agent-pool-actions button {
+  min-width: 0;
+  padding: 4px 8px;
+}
+
+.agent-pool-reason {
+  grid-column: 2 / -1;
+  font-size: 0.78rem;
+}
+
+.task-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.task-agent-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .jobs {
@@ -849,6 +949,50 @@ small {
   margin-bottom: 4px;
 }
 
+.guidance-actions {
+  margin-top: 8px;
+  align-items: center;
+}
+
+.milestone-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.arbitration-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.arbitration-panel textarea {
+  width: 100%;
+}
+
+.arbitration-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.arbitration-switch select {
+  flex: 1 1 220px;
+}
+
+.arbitration-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
 .kv {
   display: grid;
   grid-template-columns: 90px 1fr;
@@ -859,6 +1003,35 @@ small {
 
 .kv > span:first-child {
   color: var(--muted);
+}
+
+.derive-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.derive-child {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fcfdff;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.derive-child-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.derive-child-title {
+  font-weight: 600;
+  flex: 1;
 }
 
 .agent-grid {
@@ -904,6 +1077,81 @@ small {
 
 summary {
   cursor: pointer;
+}
+
+.schedule-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.schedule-row input[type="time"] {
+  width: 120px;
+}
+
+.usage-form-grid {
+  margin-top: 8px;
+}
+
+.usage-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+  color: var(--muted);
+  background: #f7f9fc;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.usage-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.usage-cards > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fcfdff;
+}
+
+.usage-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 18px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.usage-table th,
+.usage-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.usage-table th {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 @media (max-width: 840px) {

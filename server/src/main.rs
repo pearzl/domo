@@ -7,9 +7,11 @@ mod events;
 mod git;
 mod models;
 mod prompts;
+mod replan;
 mod runner;
 mod scheduler;
 mod state;
+mod usage;
 
 use std::time::Duration;
 

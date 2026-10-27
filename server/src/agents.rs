@@ -1,6 +1,7 @@
 //! Agent adapters. A job is one process (or one in-process mock) that changes the
 //! workspace and writes a result JSON file.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -65,6 +66,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         JOB_ROLE_SUMMARY => mock_summary(),
         other => return Err(anyhow!("mock 不支持角色 {other}")),
     };
+    let result = attach_mock_usage(result, &context);
     let path = spec.job_dir.join("result.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&result)?).await?;
     Ok(AgentRun {
@@ -79,6 +81,60 @@ fn read_context(job_dir: &Path) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(job_dir.join("context.json"))
         .with_context(|| format!("读取 {} 失败", job_dir.display()))?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+/// Mock usage is opt-in so existing mock flows keep results without a usage
+/// object. A goal containing `[nousage]` exercises the unknown path.
+fn attach_mock_usage(
+    mut result: serde_json::Value,
+    context: &serde_json::Value,
+) -> serde_json::Value {
+    let enabled = std::env::var("DOMO_MOCK_USAGE")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return result;
+    }
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if goal.contains("[nousage]") {
+        return result;
+    }
+    let input = mock_env_i64("DOMO_MOCK_INPUT_TOKENS", 1200);
+    let output = mock_env_i64("DOMO_MOCK_OUTPUT_TOKENS", 800);
+    let cost = mock_env_f64("DOMO_MOCK_COST", 0.0125);
+    let mut usage = serde_json::json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "cost": cost,
+    });
+    if let Ok(raw) = std::env::var("DOMO_MOCK_USAGE_DURATION_MS") {
+        if let Ok(value) = raw.parse::<i64>() {
+            usage["duration_ms"] = serde_json::json!(value);
+        }
+    }
+    if let Some(object) = result.as_object_mut() {
+        object.insert("usage".into(), usage);
+    }
+    result
+}
+
+fn mock_env_i64(key: &str, fallback: i64) -> i64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(fallback)
+}
+
+fn mock_env_f64(key: &str, fallback: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(fallback)
 }
 
 fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
@@ -103,6 +159,59 @@ fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
             "questions": ["希望优先实现哪个使用场景？"]
         });
     }
+    if let Some(reason) = context
+        .get("project")
+        .and_then(|value| value.get("replan_reason"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return mock_replan_plan(context, reason);
+    }
+    if goal.contains("[single]") {
+        return serde_json::json!({
+            "kind": "plan",
+            "summary": "mock 规划：单个任务",
+            "tasks": [
+                {
+                    "key": "T1",
+                    "title": "单任务",
+                    "description": "在 domo_mock/T1.txt 写入单任务的内容。",
+                    "acceptance": ["domo_mock/T1.txt 存在且包含 T1"],
+                    "deps": []
+                }
+            ]
+        });
+    }
+    if goal.contains("[parallel]") {
+        return serde_json::json!({
+            "kind": "plan",
+            "summary": "mock 规划：三个可并行的实现任务",
+            "tasks": [
+                {
+                    "key": "T1",
+                    "title": "并行任务一",
+                    "description": "在 domo_mock/T1.txt 写入并行任务一的内容。",
+                    "acceptance": ["domo_mock/T1.txt 存在且包含 T1"],
+                    "deps": []
+                },
+                {
+                    "key": "T2",
+                    "title": "并行任务二",
+                    "description": "在 domo_mock/T2.txt 写入并行任务二的内容。",
+                    "acceptance": ["domo_mock/T2.txt 存在且包含 T2"],
+                    "deps": []
+                },
+                {
+                    "key": "T3",
+                    "title": "并行任务三",
+                    "description": "在 domo_mock/T3.txt 写入并行任务三的内容。",
+                    "acceptance": ["domo_mock/T3.txt 存在且包含 T3"],
+                    "deps": []
+                }
+            ]
+        });
+    }
     serde_json::json!({
         "kind": "plan",
         "summary": "mock 规划：两个有依赖的实现任务",
@@ -123,6 +232,152 @@ fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
             }
         ]
     })
+}
+
+fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Value {
+    let completed: HashSet<String> = context
+        .get("completed_tasks")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("key").and_then(|value| value.as_str()))
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let canceled: Vec<String> = context
+        .get("canceled_tasks")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("key").and_then(|value| value.as_str()))
+                .filter(|key| !completed.contains(*key))
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let first_key = canceled
+        .first()
+        .cloned()
+        .unwrap_or_else(|| next_mock_key(&completed, &HashSet::new()));
+    let mut taken = completed.clone();
+    taken.insert(first_key.clone());
+    let second_key = next_mock_key(&taken, &HashSet::new());
+    serde_json::json!({
+        "kind": "plan",
+        "summary": format!("mock 重规划：{reason}"),
+        "tasks": [
+            {
+                "key": first_key,
+                "title": "重规划后的剩余工作",
+                "description": format!("在 domo_mock/{first_key}.txt 写入重规划后的内容。"),
+                "acceptance": [format!("domo_mock/{first_key}.txt 存在")],
+                "deps": []
+            },
+            {
+                "key": second_key,
+                "title": "重规划后的后继工作",
+                "description": format!("确认 domo_mock/{first_key}.txt 存在，然后写入 domo_mock/{second_key}.txt。"),
+                "acceptance": [format!("domo_mock/{first_key}.txt 与 domo_mock/{second_key}.txt 均存在")],
+                "deps": [first_key]
+            }
+        ]
+    })
+}
+
+fn next_mock_key(taken: &HashSet<String>, extra: &HashSet<String>) -> String {
+    let mut index = 1;
+    loop {
+        let key = format!("T{index}");
+        if !taken.contains(&key) && !extra.contains(&key) {
+            return key;
+        }
+        index += 1;
+    }
+}
+
+fn mock_switch_matches(context: &serde_json::Value, switch_env: &str, key: &str) -> bool {
+    let enabled = std::env::var(switch_env)
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    let base = switch_env.strip_suffix("_ONCE").unwrap_or(switch_env);
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let matches_goal = std::env::var(format!("{base}_GOAL"))
+        .ok()
+        .map(|marker| goal.contains(&marker))
+        .unwrap_or(true);
+    let matches_key = std::env::var(format!("{base}_KEY"))
+        .ok()
+        .map(|marker| marker == key)
+        .unwrap_or(true);
+    let agent_name = context
+        .get("agent")
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let matches_agent = std::env::var(format!("{base}_AGENT"))
+        .ok()
+        .map(|marker| marker == agent_name)
+        .unwrap_or(true);
+    matches_goal && matches_key && matches_agent
+}
+
+fn mock_flag_matches(context: &serde_json::Value, flag_env: &str, key: &str) -> bool {
+    let enabled = std::env::var(flag_env)
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let matches_goal = std::env::var(format!("{flag_env}_GOAL"))
+        .ok()
+        .map(|marker| goal.contains(&marker))
+        .unwrap_or(true);
+    let matches_key = std::env::var(format!("{flag_env}_KEY"))
+        .ok()
+        .map(|marker| marker == key)
+        .unwrap_or(true);
+    let agent_name = context
+        .get("agent")
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let matches_agent = std::env::var(format!("{flag_env}_AGENT"))
+        .ok()
+        .map(|marker| marker == agent_name)
+        .unwrap_or(true);
+    matches_goal && matches_key && matches_agent
+}
+
+fn take_once_marker(context: &serde_json::Value, cwd: &Path, name: &str) -> Result<bool> {
+    let job_dir = context
+        .get("job_dir")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let marker = job_dir
+        .parent()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|| job_dir.join(name));
+    if marker.exists() {
+        return Ok(false);
+    }
+    std::fs::write(&marker, b"1")?;
+    Ok(true)
 }
 
 fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
@@ -148,6 +403,111 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
                 "reason": "mock 首次执行失败"
             }));
         }
+    }
+    if mock_switch_matches(context, "DOMO_MOCK_FAIL_ALWAYS", key) {
+        return Ok(serde_json::json!({
+            "kind": "failed",
+            "reason": "mock 执行者持续失败"
+        }));
+    }
+    if mock_flag_matches(context, "DOMO_MOCK_RATE_LIMIT", key) {
+        let secs = std::env::var("DOMO_MOCK_RATE_LIMIT_RETRY")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(900);
+        return Ok(serde_json::json!({
+            "kind": "failed",
+            "reason": format!("HTTP 429 too many requests; retry after {secs} seconds")
+        }));
+    }
+    if mock_flag_matches(context, "DOMO_MOCK_TRANSIENT", key) {
+        return Ok(serde_json::json!({
+            "kind": "failed",
+            "reason": "provider temporarily unavailable (503)"
+        }));
+    }
+    if mock_flag_matches(context, "DOMO_MOCK_PERMANENT", key) {
+        return Ok(serde_json::json!({
+            "kind": "failed",
+            "reason": "永久错误：Agent 配置无效"
+        }));
+    }
+    let replan_once = std::env::var("DOMO_MOCK_REPLAN_ONCE")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if replan_once {
+        let goal = context
+            .get("project")
+            .and_then(|value| value.get("goal"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let matches_goal = std::env::var("DOMO_MOCK_REPLAN_GOAL")
+            .ok()
+            .map(|marker| goal.contains(&marker))
+            .unwrap_or(true);
+        let matches_key = std::env::var("DOMO_MOCK_REPLAN_KEY")
+            .ok()
+            .map(|marker| marker == key)
+            .unwrap_or(true);
+        if matches_goal && matches_key {
+            let job_dir = context
+                .get("job_dir")
+                .and_then(|value| value.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cwd.to_path_buf());
+            let marker = job_dir
+                .parent()
+                .map(|parent| parent.join(".mock-replan-once"))
+                .unwrap_or_else(|| job_dir.join(".mock-replan-once"));
+            if !marker.exists() {
+                std::fs::write(&marker, b"1")?;
+                return Ok(serde_json::json!({
+                    "kind": "replan",
+                    "reason": "mock 执行者发现原计划与仓库现状冲突，请求重新规划"
+                }));
+            }
+        }
+    }
+    if mock_switch_matches(context, "DOMO_MOCK_DERIVE_ONCE", key)
+        && take_once_marker(context, cwd, ".mock-derive-once")?
+    {
+        return Ok(serde_json::json!({
+            "kind": "derive",
+            "summary": "mock 执行者把当前任务拆成两个可并行子任务",
+            "tasks": [
+                {
+                    "key": "T1.1",
+                    "title": "并行子任务一",
+                    "description": "在 domo_mock/T1.1.txt 写入派生任务一的内容。",
+                    "acceptance": ["domo_mock/T1.1.txt 存在且包含 T1.1"],
+                    "deps": []
+                },
+                {
+                    "key": "T1.2",
+                    "title": "并行子任务二",
+                    "description": "在 domo_mock/T1.2.txt 写入派生任务二的内容。",
+                    "acceptance": ["domo_mock/T1.2.txt 存在且包含 T1.2"],
+                    "deps": []
+                }
+            ]
+        }));
+    }
+    if mock_switch_matches(context, "DOMO_MOCK_INVALID_DERIVE_ONCE", key)
+        && take_once_marker(context, cwd, ".mock-invalid-derive-once")?
+    {
+        return Ok(serde_json::json!({
+            "kind": "derive",
+            "summary": "mock 非法派生请求",
+            "tasks": [
+                {
+                    "key": "T1.9",
+                    "title": "非法子任务",
+                    "description": "派生任务不允许带依赖。",
+                    "acceptance": ["非法请求应被拒绝"],
+                    "deps": ["T1"]
+                }
+            ]
+        }));
     }
     let deps: Vec<String> = task
         .get("deps")
