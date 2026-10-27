@@ -1208,8 +1208,13 @@ summary {
   gap: 18px;
 }
 
+.usage-table-wrap {
+  overflow-x: auto;
+}
+
 .usage-table {
   width: 100%;
+  min-width: 680px;
   border-collapse: collapse;
   font-size: 0.82rem;
 }
@@ -1224,6 +1229,28 @@ summary {
 .usage-table th {
   color: var(--muted);
   font-weight: 600;
+}
+
+.usage-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.usage-group-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.usage-filter-actions {
+  margin-top: 12px;
+  align-items: center;
+}
+
+.usage-filter-warning {
+  margin-top: 10px;
 }
 
 @media (max-width: 840px) {

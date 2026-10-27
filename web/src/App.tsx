@@ -4,6 +4,7 @@ import type { Health } from "./types";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { AgentsPage } from "./pages/AgentsPage";
+import { UsagePage } from "./pages/UsagePage";
 
 const HEALTH_POLL_MS = 5000;
 
@@ -56,6 +57,7 @@ export default function App() {
 
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   const isAgents = path === "/agents";
+  const isUsage = path === "/usage";
   const online = healthOnline || eventsOnline;
 
   return (
@@ -78,6 +80,12 @@ export default function App() {
             onClick={() => navigate("/agents")}
           >
             Agent 团队
+          </button>
+          <button
+            className={isUsage ? "nav-link active" : "nav-link"}
+            onClick={() => navigate("/usage")}
+          >
+            用量
           </button>
         </nav>
 
@@ -109,6 +117,8 @@ export default function App() {
           />
         ) : isAgents ? (
           <AgentsPage />
+        ) : isUsage ? (
+          <UsagePage />
         ) : (
           <ProjectsPage onOpen={(id) => navigate(`/projects/${id}`)} />
         )}
