@@ -3,6 +3,7 @@
 
 use crate::models::{
     MessageRow, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -435,12 +436,30 @@ fn summary_prompt(data: &PromptData) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let feedback = data
-        .report_feedback
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("\n## 用户对上一版报告的意见\n{}\n", value))
-        .unwrap_or_default();
+    let reviews: Vec<&MessageRow> = data
+        .messages
+        .iter()
+        .filter(|message| message.role == REPORT_MESSAGE_ROLE)
+        .collect();
+    let feedback = if reviews.is_empty() {
+        // 兼容只保存了最新一条意见的历史项目。
+        data.report_feedback
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("\n## 用户对上一版报告的意见\n{value}\n"))
+            .unwrap_or_default()
+    } else {
+        let items = reviews
+            .iter()
+            .enumerate()
+            .map(|(index, message)| format!("{}. {}", index + 1, message.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n## 人工对报告的评议记录（共 {} 条，必须逐条回应）\n{items}\n",
+            reviews.len()
+        )
+    };
     format!(
         "{}你当前扮演**规划者**，负责撰写项目总结报告。所有任务已经完成并合并到项目交付分支。\n\
          \n## 任务结果\n{}\n\

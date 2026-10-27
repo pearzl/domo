@@ -4,6 +4,8 @@ import type {
   ArbitrationContext,
   AuditEvent,
   CreateProjectInput,
+  CreateTaskInput,
+  DefaultTeamPool,
   Health,
   JobDetail,
   ProjectAgentPool,
@@ -45,8 +47,32 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
+  createTask: (projectId: string, input: CreateTaskInput) =>
+    request<Task>(`/api/projects/${projectId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   getProjectAgents: (id: string) =>
     request<ProjectAgentPool>(`/api/projects/${id}/agents`),
+  getDefaultTeam: () => request<DefaultTeamPool>("/api/team/default"),
+  addDefaultTeamAgent: (role: Role, agentId: string) =>
+    request<DefaultTeamPool>("/api/team/default", {
+      method: "POST",
+      body: JSON.stringify({ role, agent_id: agentId }),
+    }),
+  updateDefaultTeamAgent: (
+    role: Role,
+    agentId: string,
+    input: { enabled?: boolean; direction?: "up" | "down" },
+  ) =>
+    request<DefaultTeamPool>(`/api/team/default/${role}/${agentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteDefaultTeamAgent: (role: Role, agentId: string) =>
+    request<DefaultTeamPool>(`/api/team/default/${role}/${agentId}`, {
+      method: "DELETE",
+    }),
   addProjectAgent: (id: string, role: Role, agentId: string) =>
     request<ProjectAgentPool>(`/api/projects/${id}/agents`, {
       method: "POST",
@@ -140,12 +166,13 @@ export const api = {
     taskId: string,
     reason: string,
     guidance?: string,
+    action: "retry" | "replan" = "retry",
   ) =>
     request<ProjectDetail>(
       `/api/projects/${projectId}/tasks/${taskId}/milestone/reject`,
       {
         method: "POST",
-        body: JSON.stringify({ reason, guidance: guidance || null }),
+        body: JSON.stringify({ reason, guidance: guidance || null, action }),
       },
     ),
   getTaskArbitration: (projectId: string, taskId: string) =>
@@ -169,8 +196,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
-  submitReport: (id: string, action: "accept" | "reject", feedback?: string) =>
-    request<{ ok: boolean }>(`/api/projects/${id}/report`, {
+  submitReport: (
+    id: string,
+    action: "accept" | "reject" | "replan" | "comment",
+    feedback?: string,
+  ) =>
+    request<{ ok: boolean; action: string }>(`/api/projects/${id}/report`, {
       method: "POST",
       body: JSON.stringify({ action, feedback: feedback || null }),
     }),

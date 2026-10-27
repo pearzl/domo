@@ -116,10 +116,12 @@ mock = call(
         "name": "Smoke Mock",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 2,
     },
 )
+# 新建项目的项目池继承默认团队，把测试 Agent 加入默认团队供继承。
+for role in mock["roles"]:
+    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 project = call(
     "POST",

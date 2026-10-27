@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
   ProjectAgentPool,
@@ -9,6 +10,7 @@ import type {
   UsageGroup,
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
+import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { JobDetailView } from "../components/JobDetailView";
 import {
   Badge,
@@ -43,6 +45,13 @@ export function ProjectPage({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [replanOpen, setReplanOpen] = useState(false);
   const [replanReason, setReplanReason] = useState("");
+  const [addTaskOpen, setAddTaskOpen] = useState(false);
+  const [taskKey, setTaskKey] = useState("");
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskDescription, setTaskDescription] = useState("");
+  const [taskAcceptance, setTaskAcceptance] = useState("");
+  const [taskDeps, setTaskDeps] = useState<string[]>([]);
+  const [taskMilestone, setTaskMilestone] = useState(false);
 
   async function refresh(silent = false) {
     try {
@@ -103,6 +112,8 @@ export function ProjectPage({
   const archived = project.status === "archived";
   const paused = project.status === "paused" || project.status === "pausing";
   const waitingReport = project.stage === "summarizing" && project.report;
+  const goalMessages = messages.filter((item) => item.role !== "review");
+  const reviewMessages = messages.filter((item) => item.role === "review");
   const canReplan =
     !archived &&
     project.stage !== "completed" &&
@@ -121,6 +132,30 @@ export function ProjectPage({
     task.attempts === 0 &&
     task.rejections === 0 &&
     task.status !== "canceled";
+
+  async function handleAddTask(event: FormEvent) {
+    event.preventDefault();
+    await run(async () => {
+      await api.createTask(project.id, {
+        key: taskKey.trim(),
+        title: taskTitle.trim(),
+        description: taskDescription.trim(),
+        acceptance: taskAcceptance
+          .split("\n")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        deps: taskDeps,
+        milestone: taskMilestone,
+      });
+      setTaskKey("");
+      setTaskTitle("");
+      setTaskDescription("");
+      setTaskAcceptance("");
+      setTaskDeps([]);
+      setTaskMilestone(false);
+      setAddTaskOpen(false);
+    });
+  }
 
   return (
     <div className="page">
@@ -249,10 +284,17 @@ export function ProjectPage({
       </header>
 
       <AgentPoolPanel
-        pool={detail.agent_pool}
-        projectId={project.id}
-        onRefresh={() => refresh()}
+        title="项目 Agent 池"
+        subtitle="每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
+        roles={detail.agent_pool.roles}
         disabled={archived}
+        onMove={(role, agentId, direction) =>
+          api.updateProjectAgent(project.id, role, agentId, { direction })
+        }
+        onToggle={(role, agentId, enabled) =>
+          api.updateProjectAgent(project.id, role, agentId, { enabled })
+        }
+        onRefresh={() => refresh()}
       />
 
       <UsagePanel usage={detail.usage} agents={agents} />
@@ -330,7 +372,7 @@ export function ProjectPage({
           <h2>目标确认</h2>
           <p className="subtitle">规划者会先判断目标是否清晰；不确定时可以在这里补充信息再确认。</p>
           <div className="messages">
-            {messages.map((item) => (
+            {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
                 <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
                 <div className="pre-wrap">{item.content}</div>
@@ -354,15 +396,15 @@ export function ProjectPage({
                 })
               }
             >
-              {messages.length > 1 ? "发送并继续" : "确认目标并规划"}
+              {goalMessages.length > 1 ? "发送并继续" : "确认目标并规划"}
             </button>
           </div>
         </section>
-      ) : messages.length > 1 ? (
+      ) : goalMessages.length > 1 ? (
         <details className="panel">
           <summary>目标确认记录</summary>
           <div className="messages compact">
-            {messages.map((item) => (
+            {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
                 <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
                 <div className="pre-wrap">{item.content}</div>
@@ -373,7 +415,113 @@ export function ProjectPage({
       ) : null}
 
       <section className="panel">
-        <h2>任务</h2>
+        <div className="panel-head">
+          <h2>任务</h2>
+          {!archived ? (
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={() => setAddTaskOpen((value) => !value)}
+            >
+              {addTaskOpen ? "取消添加" : "添加任务"}
+            </button>
+          ) : null}
+        </div>
+        {addTaskOpen && !archived ? (
+          <form className="form add-task-form" onSubmit={handleAddTask}>
+            <div className="form-grid">
+              <label>
+                <span>任务 key</span>
+                <input
+                  value={taskKey}
+                  onChange={(event) => setTaskKey(event.target.value)}
+                  placeholder="例如：T3"
+                  required
+                />
+              </label>
+              <label>
+                <span>标题</span>
+                <input
+                  value={taskTitle}
+                  onChange={(event) => setTaskTitle(event.target.value)}
+                  placeholder="一句话说明这个任务做什么"
+                  required
+                />
+              </label>
+            </div>
+            <label>
+              <span>描述</span>
+              <textarea
+                value={taskDescription}
+                onChange={(event) => setTaskDescription(event.target.value)}
+                rows={3}
+                placeholder="任务目标、边界和实现要点。"
+                required
+              />
+            </label>
+            <label>
+              <span>验收标准（每行一条，留空使用默认标准）</span>
+              <textarea
+                value={taskAcceptance}
+                onChange={(event) => setTaskAcceptance(event.target.value)}
+                rows={3}
+                placeholder={"例如：\ndomo_mock/T3.txt 存在且包含 T3"}
+              />
+            </label>
+            <div className="field">
+              <span className="field-label">前置任务（依赖）</span>
+              {activeTasks.length === 0 ? (
+                <span className="muted">项目还没有可依赖的任务。</span>
+              ) : (
+                <div className="checkbox-row">
+                  {activeTasks.map((task) => (
+                    <label className="checkbox-label" key={task.id}>
+                      <input
+                        type="checkbox"
+                        checked={taskDeps.includes(task.key)}
+                        onChange={(event) => {
+                          setTaskDeps((current) =>
+                            event.target.checked
+                              ? [...current, task.key]
+                              : current.filter((dep) => dep !== task.key),
+                          );
+                        }}
+                      />
+                      <span>
+                        {task.key} {task.title}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={taskMilestone}
+                onChange={(event) => setTaskMilestone(event.target.checked)}
+              />
+              <span>标记为里程碑（验收通过后需人工确认）</span>
+            </label>
+            <div className="form-actions">
+              <button
+                className="primary"
+                type="submit"
+                disabled={
+                  busy ||
+                  !taskKey.trim() ||
+                  !taskTitle.trim() ||
+                  !taskDescription.trim()
+                }
+              >
+                {busy ? "提交中…" : "添加任务"}
+              </button>
+              <span className="muted">
+                项目在总结或完成阶段时会回到执行阶段，原报告作废待重写。
+              </span>
+            </div>
+          </form>
+        ) : null}
         {tasks.length === 0 ? (
           <Empty title="还没有任务" hint="确认目标后，规划者会输出带依赖关系的任务列表。" />
         ) : (
@@ -478,51 +626,99 @@ export function ProjectPage({
         </section>
       ) : null}
 
-      {project.report ? (
+      {project.stage === "summarizing" || project.report ? (
         <section className="panel">
-          <h2>项目报告</h2>
-          {project.report_feedback ? (
-            <div className="muted">上一轮意见：{project.report_feedback}</div>
+          <h2>项目报告{reviewMessages.length > 0 ? `（${reviewMessages.length} 条评议）` : ""}</h2>
+          {reviewMessages.length > 0 ? (
+            <details className="report-review-log" open={!!project.report}>
+              <summary>评议记录（{reviewMessages.length}）</summary>
+              <div className="messages compact">
+                {reviewMessages.map((item) => (
+                  <div key={item.id} className="message message-user">
+                    <div className="message-role">你的意见</div>
+                    <div className="pre-wrap">{item.content}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
           ) : null}
-          <pre className="report">{project.report}</pre>
+          {project.report ? (
+            <pre className="report">{project.report}</pre>
+          ) : project.stage === "summarizing" ? (
+            project.blocked_reason ? (
+              <p className="muted">报告生成失败，可点击上方“重试项目”。</p>
+            ) : (
+              <p className="muted">规划者正在依据评议意见重写报告…</p>
+            )
+          ) : null}
           {project.stage === "summarizing" ? (
             <div className="report-actions">
               <textarea
                 value={feedback}
                 onChange={(event) => setFeedback(event.target.value)}
                 rows={3}
-                placeholder="拒绝时填写原因（通过可留空）"
+                placeholder="对报告的意见（提交意见可供多轮讨论；要求重写或重新规划时必须填写）。"
               />
               <div className="button-row">
                 <button
                   className="primary"
-                  disabled={busy}
+                  disabled={busy || !project.report}
                   onClick={() => run(() => api.submitReport(project.id, "accept"))}
                 >
                   通过并完成
                 </button>
                 <button
                   className="secondary"
-                  disabled={busy}
+                  disabled={busy || !feedback.trim()}
+                  onClick={() =>
+                    run(async () => {
+                      await api.submitReport(project.id, "comment", feedback);
+                      setFeedback("");
+                    })
+                  }
+                >
+                  提交意见
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || !project.report || !feedback.trim()}
                   onClick={() =>
                     run(async () => {
                       await api.submitReport(project.id, "reject", feedback);
                       setFeedback("");
                     })
                   }
+                  title="记录意见并要求规划者重新撰写报告"
                 >
-                  拒绝并重写
+                  重新撰写
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || !project.report || !feedback.trim()}
+                  onClick={() =>
+                    run(async () => {
+                      await api.submitReport(project.id, "replan", feedback);
+                      setFeedback("");
+                    })
+                  }
+                  title="记录意见并要求重新规划，项目回到规划阶段"
+                >
+                  要求重新规划
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || archived}
+                  onClick={() => setAddTaskOpen(true)}
+                  title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
+                >
+                  增加新任务
                 </button>
               </div>
+              <p className="muted">
+                “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
+              </p>
             </div>
           ) : null}
-        </section>
-      ) : null}
-
-      {project.stage === "summarizing" && !project.report && project.blocked_reason ? (
-        <section className="panel">
-          <h2>项目报告</h2>
-          <p className="muted">报告生成失败，可点击上方“重试项目”。</p>
         </section>
       ) : null}
 
@@ -674,166 +870,6 @@ function UsageTable({
         </table>
       )}
     </div>
-  );
-}
-
-function AgentPoolPanel({
-  pool,
-  projectId,
-  onRefresh,
-  disabled,
-}: {
-  pool: ProjectAgentPool;
-  projectId: string;
-  onRefresh: () => Promise<void>;
-  disabled: boolean;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  async function act(action: () => Promise<unknown>) {
-    setBusy(true);
-    setError("");
-    try {
-      await action();
-      await onRefresh();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <details className="panel agent-pool">
-      <summary>项目 Agent 池</summary>
-      <p className="subtitle">
-        每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。项目池在创建时继承全局
-        Agent 配置，之后独立维护。
-      </p>
-      {pool.roles.map((group) => (
-        <div className="agent-pool-role" key={group.role}>
-          <h3>{ROLE_LABELS[group.role] ?? group.role}</h3>
-          {group.entries.length === 0 ? (
-            <div className="muted">这个角色还没有 Agent。</div>
-          ) : (
-            <div className="agent-pool-list">
-              {group.entries.map((entry, index) => (
-                <div
-                  className={`agent-pool-row${entry.available ? "" : " unavailable"}`}
-                  key={entry.agent_id}
-                >
-                  <span className="agent-pool-rank">{index + 1}</span>
-                  <span className="agent-pool-name">
-                    <span>{entry.name}</span>
-                    <span className="muted mono">
-                      {entry.kind === "missing" ? entry.agent_id : entry.kind}
-                      {entry.model ? ` · ${entry.model}` : ""}
-                    </span>
-                  </span>
-                  <span className="badge-row">
-                    {!entry.available ? (
-                      <Badge tone="danger" title={entry.unavailable_reason ?? ""}>
-                        不可用
-                      </Badge>
-                    ) : null}
-                    {entry.available && !entry.enabled ? (
-                      <Badge tone="warn">已停用</Badge>
-                    ) : null}
-                    {entry.available && entry.enabled ? (
-                      <Badge tone="success">已启用</Badge>
-                    ) : null}
-                    {entry.cooldown_until &&
-                    new Date(entry.cooldown_until).getTime() > Date.now() ? (
-                      <Badge
-                        tone="warn"
-                        title={`冷却至 ${formatTime(entry.cooldown_until)}`}
-                      >
-                        冷却中 · {formatTime(entry.cooldown_until)}
-                      </Badge>
-                    ) : null}
-                    {entry.failure_kind ? (
-                      <Badge tone="danger">
-                        {FAILURE_KIND_LABELS[entry.failure_kind] ?? entry.failure_kind}
-                        {entry.transient_failures
-                          ? ` · 波动 ${entry.transient_failures} 次`
-                          : ""}
-                      </Badge>
-                    ) : null}
-                    {entry.availability_reason ? (
-                      <Badge tone="warn" title={entry.availability_reason}>
-                        不在可用时段
-                      </Badge>
-                    ) : null}
-                    {entry.usage_window?.exceeded ? (
-                      <Badge
-                        tone="danger"
-                        title={`已用 ${formatUsageAmount(entry.usage_window.used)} / 限额 ${formatUsageAmount(entry.usage_window.limit)}`}
-                      >
-                        用量限额已触发
-                      </Badge>
-                    ) : null}
-                  </span>
-                  <span className="agent-pool-actions">
-                    <button
-                      className="ghost"
-                      disabled={disabled || busy || index === 0}
-                      title="上移"
-                      onClick={() =>
-                        void act(() =>
-                          api.updateProjectAgent(projectId, group.role, entry.agent_id, {
-                            direction: "up",
-                          }),
-                        )
-                      }
-                    >
-                      ↑
-                    </button>
-                    <button
-                      className="ghost"
-                      disabled={disabled || busy || index === group.entries.length - 1}
-                      title="下移"
-                      onClick={() =>
-                        void act(() =>
-                          api.updateProjectAgent(projectId, group.role, entry.agent_id, {
-                            direction: "down",
-                          }),
-                        )
-                      }
-                    >
-                      ↓
-                    </button>
-                    <button
-                      className={entry.enabled ? "secondary" : "ghost"}
-                      disabled={disabled || busy || !entry.available}
-                      onClick={() =>
-                        void act(() =>
-                          api.updateProjectAgent(projectId, group.role, entry.agent_id, {
-                            enabled: !entry.enabled,
-                          }),
-                        )
-                      }
-                    >
-                      {entry.enabled ? "停用" : "启用"}
-                    </button>
-                  </span>
-                  {entry.unavailable_reason ? (
-                    <span className="agent-pool-reason muted">
-                      {entry.unavailable_reason}
-                    </span>
-                  ) : entry.last_error ? (
-                    <span className="agent-pool-reason muted" title={entry.last_error}>
-                      {entry.last_error}
-                    </span>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
-      {error ? <ErrorBox message={error} /> : null}
-    </details>
   );
 }
 
@@ -1333,8 +1369,8 @@ function HumanAcceptancePanel({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function submit(action: "accept" | "reject") {
-    if (action === "reject" && !reason.trim()) {
+  async function submit(action: "accept" | "retry" | "replan") {
+    if (action !== "accept" && !reason.trim()) {
       setError("拒绝时必须填写理由。");
       return;
     }
@@ -1344,7 +1380,7 @@ function HumanAcceptancePanel({
       if (action === "accept") {
         await api.acceptMilestone(projectId, task.id, reason);
       } else {
-        await api.rejectMilestone(projectId, task.id, reason, guidance);
+        await api.rejectMilestone(projectId, task.id, reason, guidance, action);
       }
       setReason("");
       setGuidance("");
@@ -1375,7 +1411,7 @@ function HumanAcceptancePanel({
         onChange={(event) => setGuidance(event.target.value)}
         rows={3}
         disabled={disabled || busy}
-        placeholder="拒绝时可选：给执行者的补充指导。"
+        placeholder="拒绝时可选：给执行者或规划者的补充指导。"
       />
       <div className="button-row">
         <button
@@ -1388,11 +1424,21 @@ function HumanAcceptancePanel({
         <button
           className="secondary"
           disabled={disabled || busy}
-          onClick={() => void submit("reject")}
+          onClick={() => void submit("retry")}
         >
           拒绝并退回执行
         </button>
+        <button
+          className="secondary"
+          disabled={disabled || busy}
+          onClick={() => void submit("replan")}
+        >
+          拒绝并要求重新规划
+        </button>
       </div>
+      <small>
+        退回执行会把验收意见和指导交给执行者；要求重新规划会作废未完成任务，并把意见交给规划者。
+      </small>
       {error ? <div className="error-box">{error}</div> : null}
     </section>
   );

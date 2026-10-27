@@ -478,6 +478,75 @@ fn detect_cycle(tasks: &[NormalizedTask]) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates one human-added task against the project's active tasks. The
+/// returned task keeps the project DAG acyclic and falls back to the plan
+/// defaults for missing acceptance criteria.
+pub fn validate_manual_task(
+    active: &[NormalizedTask],
+    key: &str,
+    title: &str,
+    description: &str,
+    acceptance: Vec<String>,
+    deps: Vec<String>,
+) -> Result<NormalizedTask, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("任务 key 不能为空".into());
+    }
+    if key.len() > 32 {
+        return Err(format!("任务 key 过长: {key}"));
+    }
+    if active.iter().any(|task| task.key == key) {
+        return Err(format!("任务 key 已存在: {key}"));
+    }
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err(format!("任务 {key} 缺少标题"));
+    }
+    let description = description.trim().to_string();
+    if description.is_empty() {
+        return Err(format!("任务 {key} 缺少描述"));
+    }
+    let mut acceptance: Vec<String> = acceptance
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if acceptance.is_empty() {
+        acceptance.push("实现任务描述中的要求，并通过项目已有测试".into());
+    }
+    let deps: Vec<String> = deps
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    let keys: HashSet<String> = active.iter().map(|task| task.key.clone()).collect();
+    for dep in &deps {
+        if dep == key {
+            return Err(format!("任务 {key} 不能依赖自身"));
+        }
+        if !keys.contains(dep) {
+            return Err(format!("任务 {key} 依赖了不存在的任务 {dep}"));
+        }
+    }
+    let mut tasks = active.to_vec();
+    tasks.push(NormalizedTask {
+        key: key.to_string(),
+        title: title.clone(),
+        description: description.clone(),
+        acceptance: acceptance.clone(),
+        deps: deps.clone(),
+    });
+    detect_cycle(&tasks)?;
+    Ok(NormalizedTask {
+        key: key.to_string(),
+        title,
+        description,
+        acceptance,
+        deps,
+    })
+}
+
 pub fn deps_complete(deps: &[String], completed: &HashSet<String>) -> bool {
     deps.iter().all(|dep| completed.contains(dep))
 }
@@ -841,6 +910,67 @@ mod tests {
     }
 
     #[test]
+    fn manual_task_accepts_valid_task() {
+        let active = vec![normalized("T1", &[]), normalized("T2", &["T1"])];
+        let task = validate_manual_task(
+            &active,
+            "T3",
+            "补充任务",
+            "完成补充工作",
+            vec![" 产物存在 ".into()],
+            vec![" T2 ".into(), "".into()],
+        )
+        .unwrap();
+        assert_eq!(task.key, "T3");
+        assert_eq!(task.deps, vec!["T2".to_string()]);
+        assert_eq!(task.acceptance, vec!["产物存在".to_string()]);
+    }
+
+    #[test]
+    fn manual_task_fills_default_acceptance() {
+        let task = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), Vec::new()).unwrap();
+        assert!(!task.acceptance.is_empty());
+    }
+
+    #[test]
+    fn manual_task_rejects_cycle() {
+        let active = vec![normalized("B", &["A"])];
+        let error =
+            validate_manual_task(&active, "A", "标题", "描述", Vec::new(), vec!["B".into()])
+                .unwrap_err();
+        assert!(error.contains("环"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn manual_task_rejects_duplicate_key() {
+        let active = vec![normalized("T1", &[])];
+        let error = validate_manual_task(&active, "T1", "标题", "描述", Vec::new(), Vec::new())
+            .unwrap_err();
+        assert!(error.contains("已存在"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn manual_task_rejects_missing_dependency() {
+        let error = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), vec!["T9".into()])
+            .unwrap_err();
+        assert!(error.contains("不存在"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn manual_task_rejects_self_dependency() {
+        let error = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), vec!["T1".into()])
+            .unwrap_err();
+        assert!(error.contains("自身"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn manual_task_rejects_missing_fields() {
+        assert!(validate_manual_task(&[], "", "标题", "描述", Vec::new(), Vec::new()).is_err());
+        assert!(validate_manual_task(&[], "T1", " ", "描述", Vec::new(), Vec::new()).is_err());
+        assert!(validate_manual_task(&[], "T1", "标题", " ", Vec::new(), Vec::new()).is_err());
+    }
+
+    #[test]
     fn slug_is_stable() {
         assert_eq!(slug("Hello World!"), "hello-world");
         assert_eq!(slug("***"), "task");
@@ -858,6 +988,10 @@ mod tests {
         );
         assert_eq!(
             classify_failure("Agent 作业超时", true),
+            FailureKind::Transient
+        );
+        assert_eq!(
+            classify_failure("Agent 作业卡死：连续 60 秒无输出或进度", true),
             FailureKind::Transient
         );
         assert_eq!(

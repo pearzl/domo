@@ -11,6 +11,8 @@
 #      作业开始后强制设置失效，后续调度恢复项目池优先级；
 #   7. 重复人工裁决不会重复派发作业；
 #   8. 暂停中的项目只记录裁决不派发作业，恢复后生效；归档项目拒绝裁决。
+#   9. 里程碑人工拒绝可选择重新规划：项目回到规划阶段并生成规划者作业，
+#      指导意见进入规划 prompt，审计事件记录人工裁决，旧任务被取消。
 #
 # 使用内置 mock Agent，不访问外网；临时数据全部放在 ${TMPDIR:-/tmp}。
 # 退出码 0 表示全部通过。
@@ -158,6 +160,10 @@ def task_by_key(detail, key):
     return next(task for task in detail["tasks"] if task["key"] == key)
 
 
+def goal_jobs(detail):
+    return [job for job in detail["jobs"] if job["role"] == "goal"]
+
+
 def branch_has(path):
     completed = subprocess.run(
         ["git", "-C", repo, "cat-file", "-e", path],
@@ -184,7 +190,6 @@ default_agent = call(
         "name": "Switch Default",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 2,
     },
 )
@@ -195,11 +200,14 @@ forced_agent = call(
         "name": "Switch Forced",
         "kind": "mock",
         "roles": ["executor"],
-        "priority": 1,
         "max_concurrency": 1,
         "enabled": False,
     },
 )
+# 新建项目的项目池继承默认团队，把测试 Agent 按原优先级顺序加入默认团队。
+for role in ("planner", "executor", "verifier"):
+    call("POST", "/api/team/default", {"role": role, "agent_id": default_agent["id"]})
+call("POST", "/api/team/default", {"role": "executor", "agent_id": forced_agent["id"]})
 
 # 1. 里程碑任务：验收通过后阻塞等待人工验收，产物不进入交付分支。
 milestone_id = new_project("Milestone", "里程碑任务需要人工验收")
@@ -314,6 +322,73 @@ assert all(task["stage"] == "completed" for task in detail["tasks"]), detail["ta
 assert branch_has(f"{branch}:domo_mock/T2.txt"), "后续任务应正常完成并合并"
 call("POST", f"/api/projects/{milestone_id}/report", {"action": "accept"})
 assert call("GET", f"/api/projects/{milestone_id}")["project"]["stage"] == "completed"
+
+# 2. 里程碑人工拒绝可要求重新规划：项目回到规划阶段，意见交给规划者。
+replan_id = new_project("MilestoneReplan", "里程碑人工拒绝后要求重新规划")
+detail = wait_for(
+    replan_id,
+    lambda item: item["project"]["stage"] == "executing" and len(item["tasks"]) == 2,
+    "重规划场景规划完成",
+)
+replan_t1 = task_by_key(detail, "T1")
+replan_branch = detail["project"]["branch"]
+marked = call(
+    "POST",
+    f"/api/projects/{replan_id}/tasks/{replan_t1['id']}/milestone",
+    {"milestone": True},
+)
+assert marked["milestone"] is True, marked
+detail = wait_for(
+    replan_id,
+    lambda item: task_by_key(item, "T1")["status"] == "blocked"
+    and task_by_key(item, "T1")["human_gate"] == "milestone",
+    "重规划场景等待人工验收",
+)
+goal_jobs_before = len(goal_jobs(detail))
+replan_reason = "人工验收意见：原计划遗漏里程碑要求的交付物"
+replan_guidance = "DOMO-REPLAN-GUIDANCE：重新拆分 T1，补齐交付物后再推进 T2"
+rejected = call(
+    "POST",
+    f"/api/projects/{replan_id}/tasks/{replan_t1['id']}/milestone/reject",
+    {"reason": replan_reason, "guidance": replan_guidance, "action": "replan"},
+)
+project = rejected["project"]
+assert project["replan_source"] == "human", project
+assert replan_reason in (project["replan_reason"] or ""), project
+assert replan_guidance in (project["replan_reason"] or ""), project
+replan_t1 = task_by_key(rejected, "T1")
+assert replan_t1["status"] == "canceled", replan_t1
+assert replan_t1["human_gate"] is None, replan_t1
+assert not branch_has(f"{replan_branch}:domo_mock/T1.txt"), "重新规划不应合并未完成任务"
+assert any(
+    event["kind"] == "replan_requested" and replan_guidance in event["message"]
+    for event in rejected["events"]
+), rejected["events"]
+assert any(
+    event["kind"] == "milestone_rejected"
+    and "要求重新规划" in event["message"]
+    and replan_reason in event["message"]
+    for event in rejected["events"]
+), rejected["events"]
+
+detail = wait_for(
+    replan_id,
+    lambda item: len(goal_jobs(item)) > goal_jobs_before,
+    "重新规划后生成规划者作业",
+)
+replan_goal_job = goal_jobs(detail)[-1]
+prompt = wait_job_prompt(replan_goal_job["id"])["prompt"]
+assert replan_reason in prompt, prompt
+assert replan_guidance in prompt, prompt
+assert "人工" in prompt, prompt
+
+detail = wait_for(
+    replan_id,
+    lambda item: item["project"]["stage"] == "executing"
+    and len([task for task in item["tasks"] if task["status"] != "canceled"]) == 2,
+    "重新规划生成新任务",
+)
+assert all(task["key"] in ("T1", "T2") for task in detail["tasks"]), detail["tasks"]
 
 # 4. switch_agent：默认 Agent 连续失败阻塞，人工指定停用的另一 Agent 执行。
 switch_id = new_project("Switch", "[switch] 默认执行 Agent 持续失败后人工更换 Agent")

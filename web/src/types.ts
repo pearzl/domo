@@ -80,7 +80,6 @@ export interface Agent {
   kind: AgentKind;
   model: string;
   roles: Role[];
-  priority: number;
   max_concurrency: number;
   enabled: boolean;
   command: string[];
@@ -263,7 +262,6 @@ export interface ArbitrationAgent {
   id: string;
   name: string;
   kind: string;
-  priority: number;
   enabled: boolean;
   cooldown_until: string | null;
   last_error: string | null;
@@ -320,12 +318,20 @@ export interface CreateProjectInput {
   base_branch?: string;
 }
 
+export interface CreateTaskInput {
+  key: string;
+  title: string;
+  description: string;
+  acceptance?: string[];
+  deps?: string[];
+  milestone?: boolean;
+}
+
 export interface AgentInput {
   name: string;
   kind: AgentKind;
   model?: string;
   roles?: Role[];
-  priority?: number;
   max_concurrency?: number;
   enabled?: boolean;
   command?: string[];
@@ -333,3 +339,7 @@ export interface AgentInput {
   availability?: AgentAvailability | null;
   usage_limit?: AgentUsageLimit | null;
 }
+
+/// 默认团队是系统级 Agent 模板，新建项目的项目 Agent 池按它快照初始化；
+/// 视图复用项目池形态（project_id 固定为 "default"）。
+export type DefaultTeamPool = ProjectAgentPool;

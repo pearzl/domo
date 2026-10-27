@@ -259,6 +259,21 @@ pre {
   margin-bottom: 4px;
 }
 
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.add-task-form {
+  padding: 16px;
+  margin: 14px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
 .subtitle {
   color: var(--muted);
   margin-top: 6px;
@@ -863,6 +878,17 @@ small {
 .agent-pool-actions button {
   min-width: 0;
   padding: 4px 8px;
+}
+
+.agent-pool-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.agent-pool-add select {
+  max-width: 320px;
 }
 
 .agent-pool-reason {

@@ -13,6 +13,9 @@ pub struct Config {
     pub bind: String,
     pub port: u16,
     pub job_timeout: Duration,
+    /// A running job with no output growth for this long is considered stalled.
+    /// Zero disables stall detection.
+    pub stall_timeout: Duration,
 }
 
 impl Config {
@@ -31,6 +34,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(30 * 60));
+        let stall_timeout = env::var("DOMO_STALL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(10 * 60));
         let web_dist = env::var("DOMO_WEB_DIST")
             .map(PathBuf::from)
             .unwrap_or_else(|_| discover_web_dist());
@@ -43,6 +51,7 @@ impl Config {
             bind,
             port,
             job_timeout,
+            stall_timeout,
         })
     }
 

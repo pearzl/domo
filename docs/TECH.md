@@ -32,7 +32,7 @@ DOMO 被实现为一个本地 Web 应用。能快速提供简单易用的图形�
 
 | 模块 | 职责 |
 |---|---|
-| `config.rs` | 启动时一次性解析环境变量（数据/工作区/日志根目录、端口、作业超时等），不支持运行时修改 |
+| `config.rs` | 启动时一次性解析环境变量（数据/工作区/日志根目录、端口、作业超时与卡死阈值等），不支持运行时修改 |
 | `db.rs` | SQLite 连接（WAL、busy_timeout 10s、连接池 5）、内嵌建表语句、列级迁移、默认 Agent 种子 |
 | `models.rs` | 全部常量（阶段/状态/角色/失败类型/Agent 类型）与行类型 |
 | `domain.rs` | ID 生成、DAG 校验、Agent 结果协议解析（`parse_result`）、失败分类（`classify_failure`）、冷却时长解析 |
@@ -98,6 +98,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 | `agents` | Agent 全局配置 | `kind`（mock/opencode/cli）、`roles`、`model`、`max_concurrency`、`cooldown_until`、`transient_failures`、`failure_kind`、`availability_json`（时段）、`usage_limit_json`（限额） |
 | `projects` | 项目 | `goal`、`repo_path`、`base_branch`、`branch`（交付分支）、`workspace`、`stage`、`status`、`blocked_reason`、`report`/`report_feedback`、`replan_reason`/`replan_source`/`replan_requested_at` |
 | `project_agents` | 项目角色池（`(project_id, role, agent_id)`） | `priority`（越小越优先）、`enabled` |
+| `default_team` | 默认团队：系统级 Agent 模板（`(role, agent_id)`） | `priority`（越小越优先）、`enabled`；空库种子 Agent 初始化，存量库按旧有全局顺序快照；新建项目的项目池按它继承 |
 | `tasks` | 任务 | `key`（项目内唯一，排 `canceled` 外）、`deps`、`parent_id`（派生）、`milestone`、`human_gate`、`forced_agent_*`（人工裁决指定）、`stage`/`status`、`worktree`/`branch`、`attempts`/`rejections`、`verifier_issues`、`guidance`、`result_summary`、`waiting_reason` |
 | `jobs` | 作业调用记录 | `role`、`agent_id`、`attempt`、`prompt`、`result`、`stdout`/`stderr`、`exit_code`、`failure_kind`、用量四元组（`input_tokens`/`output_tokens`/`cost`/`usage_known`）、`started_at`/`finished_at` |
 | `messages` | 项目级对话（用户↔规划者） | `role`、`content`，参与目标确认阶段的上下文 |
@@ -165,7 +166,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
    - `verifier` → 准备验收 worktree（detached，基于任务分支）。
 3. 渲染提示词，写 `prompt.md` 与 `context.json`，prompt 全文落库到 `jobs.prompt`。
 4. 执行前再次检查项目/任务暂停与归档意图，暂停态下作业标记取消且不启动进程。
-5. 以 `timeout` 包裹 Agent 调用；超时则按 pid 文件杀掉整个进程组，并按"进程失败"处理。
+5. 作业受两道看门狗约束：整体超时 `DOMO_JOB_TIMEOUT_SECS`（默认 30 分钟）与卡死阈值 `DOMO_STALL_SECS`（默认 10 分钟，0 关闭）。卡死判定基于每个作业独立的输出进度（stdout/stderr 每次读到数据即刷新），超过阈值无任何输出增长即判定卡死。任一触发都按 pid 文件杀掉该作业的进程组，记录 `job_stalled`（仅卡死）事件并按"进程失败"处理；其他作业的进程组与槽位不受影响。
 6. Agent 进程结束后：
    - verifier 的验收 worktree 立即删除（一次性工作区，防止泄漏）；
    - `goal` / `summary` 作业结束后对 `repo/` 执行 `git reset --hard`，保证规划者在项目分支上不留工作区残留；
@@ -173,7 +174,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 
 ### 6.2 结果判定
 
-进程退出码为 0 且未超时 → 读取 `result.json` 并按角色解析（`parse_result`）。解析失败、协议不合法、Agent 未写结果文件，均计为作业失败。失败原因经 `classify_failure` 分类（见第 7 节）。
+进程退出码为 0 且未超时、未卡死 → 读取 `result.json` 并按角色解析（`parse_result`）。解析失败、协议不合法、Agent 未写结果文件，均计为作业失败。失败原因经 `classify_failure` 分类（见第 7 节）；超时与卡死都按进程失败计入 `transient`。
 
 `finish_job` 以 `WHERE id = ? AND status = 'running'` 条件更新作业记录，保证重复执行/并发收割不产生双写；作业成功时顺带清除对应 Agent 的错误计数与冷却。状态转移在 `finish_job` 成功后才应用，二者都持有 `schedule_lock`。
 
@@ -200,7 +201,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 | 类型 | 对 Agent 的影响 | 对任务的影响 |
 |---|---|---|
 | `rate_limit`（限流） | 按 `Retry-After` 解析（支持秒/分钟/小时，上限 24h，默认 30 分钟）设置冷却并立即换下一优先级 Agent | 不消耗任务重试预算 |
-| `transient`（供应商波动/超时/网络） | 连续失败计数，达到上限（默认 3 次，`DOMO_TRANSIENT_RETRY_LIMIT`）后冷却 30 分钟并换 Agent | 不消耗任务重试预算 |
+| `transient`（供应商波动/超时/卡死/网络） | 连续失败计数，达到上限（默认 3 次，`DOMO_TRANSIENT_RETRY_LIMIT`）后冷却 30 分钟并换 Agent | 不消耗任务重试预算 |
 | `permanent`（配置错误、鉴权失败） | 立即换下一优先级 Agent | 若换遍角色池仍无可用 Agent，任务 `blocked` |
 | `task`（作业本身失败） | Agent 不受影响 | attempts +1；连续 3 次后任务 `blocked`，等待人工裁决 |
 
@@ -257,12 +258,13 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 REST 路由（`api.rs`）按资源分组：
 
 - `GET /api/health`：健康检查，返回 `ok`、`version`（Cargo 包版本）与 `git_hash`（构建期注入的提交短哈希；非 Git 环境为 `unknown`）
-- `GET/POST /api/agents`、`PATCH/DELETE /api/agents/{id}`、`POST /api/agents/{id}/usage/reset`
+- `GET/POST /api/agents`、`PATCH/DELETE /api/agents/{id}`、`POST /api/agents/{id}/usage/reset`；优先级只在角色池/默认团队中配置，全局 Agent 创建与更新不接收优先级
+- `GET/POST /api/team/default`、`PATCH/DELETE /api/team/default/{role}/{agent_id}`：默认团队模板的加入、上下移（相邻交换、编号连续）、启停与移除
 - `GET /api/usage`：用量报告，支持按 project / agent / role 聚合与时间过滤
 - `GET/POST /api/projects`、`GET /api/projects/{id}`（详情 + 任务视图 + 作业流水 + 项目用量）
 - 项目手术：`confirm`（确认目标/答复问题）、`pause`、`resume`、`retry`、`replan`、`archive`、`report`（提交报告评议结果）
-- 项目角色池：`GET/POST /api/projects/{id}/agents`、`PATCH .../agents/{role}/{agent_id}`
-- 任务手术：`retry`、`guidance`（写入指导，下发次作业生效）、`agents`（任务级 agent 覆盖）、`pause`/`resume`、`queue`（排队顺序）、`milestone`（标记/接受/拒绝里程碑）、`arbitration`（人工裁决查询与提交）
+- 项目角色池：`GET/POST /api/projects/{id}/agents`、`PATCH .../agents/{role}/{agent_id}`；项目池在创建时按默认团队快照继承（角色、顺序、启停）
+- 任务手术：`retry`、`guidance`（写入指导，下发次作业生效）、`agents`（任务级 agent 覆盖）、`pause`/`resume`、`queue`（排队顺序）、`milestone`（标记/接受/拒绝里程碑；拒绝可选退回执行或要求重新规划）、`arbitration`（人工裁决查询与提交）
 - 审计：`GET /api/events`（回溯）、`GET /api/events/stream`（SSE 实时推送）、`GET /api/jobs/{id}`（单作业详情含 stdin/stdout/result 存储）
 
 SSE 端点订阅 `EventBus`（tokio broadcast，容量 512），事件先落库再广播，浏览器刷新后可从事件表补齐历史。

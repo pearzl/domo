@@ -211,7 +211,6 @@ base_agent = call(
         "name": "Base Mock",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 100,
         "max_concurrency": 1,
     },
 )
@@ -222,7 +221,6 @@ rate_limited = call(
         "name": "Rate Limited",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 10,
         "max_concurrency": 1,
     },
 )
@@ -233,7 +231,6 @@ rate_backup = call(
         "name": "Rate Backup",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 11,
         "max_concurrency": 1,
     },
 )
@@ -244,7 +241,6 @@ transient_agent = call(
         "name": "Transient Agent",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 20,
         "max_concurrency": 1,
     },
 )
@@ -255,7 +251,6 @@ transient_backup = call(
         "name": "Transient Backup",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 21,
         "max_concurrency": 1,
     },
 )
@@ -266,7 +261,6 @@ permanent_agent = call(
         "name": "Permanent Agent",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 30,
         "max_concurrency": 1,
     },
 )
@@ -277,7 +271,6 @@ permanent_backup = call(
         "name": "Permanent Backup",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 31,
         "max_concurrency": 1,
     },
 )
@@ -288,11 +281,45 @@ cli_executor = call(
         "name": "Sleep CLI",
         "kind": "cli",
         "roles": ["executor"],
-        "priority": 0,
         "max_concurrency": 1,
         "command": ["bash", "-c", "sleep 30"],
     },
 )
+
+# 新建项目的项目池继承默认团队；按角色把测试 Agent 按原优先级顺序加入默认团队。
+team_order = {
+    "planner": [
+        rate_limited,
+        rate_backup,
+        transient_agent,
+        transient_backup,
+        permanent_agent,
+        permanent_backup,
+        base_agent,
+    ],
+    "executor": [
+        cli_executor,
+        rate_limited,
+        rate_backup,
+        transient_agent,
+        transient_backup,
+        permanent_agent,
+        permanent_backup,
+        base_agent,
+    ],
+    "verifier": [
+        rate_limited,
+        rate_backup,
+        transient_agent,
+        transient_backup,
+        permanent_agent,
+        permanent_backup,
+        base_agent,
+    ],
+}
+for role, agents in team_order.items():
+    for agent in agents:
+        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 
 # 1. 排队位置、调序与暂停排队任务。
 queue_id = create_project("Queue", "[parallel] 队列调序与暂停排队任务")
@@ -649,10 +676,15 @@ exhausted_agent_global = call(
         "name": "Rate Limited",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 1,
     },
 )
+for role in ("planner", "executor", "verifier"):
+    call(
+        "POST",
+        "/api/team/default",
+        {"role": role, "agent_id": exhausted_agent_global["id"]},
+    )
 exhausted_id = create_project("Exhausted", "[ratelimit] 池耗尽进入人工裁决")
 pool = call("GET", f"/api/projects/{exhausted_id}/agents")
 for group in pool["roles"]:

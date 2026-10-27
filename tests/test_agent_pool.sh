@@ -2,7 +2,7 @@
 # DOMO 项目级 Agent 池与任务级 Agent 选择测试。
 #
 # 覆盖范围：
-#   1. 项目创建时从全局 Agent 配置快照初始化，并包含禁用条目；
+#   1. 项目创建时从默认团队快照初始化，并包含禁用条目；
 #   2. 规划、执行、验收分别按角色从项目池中启用且优先级最高的 Agent 选人；
 #   3. 调整项目池顺序后，新作业按新顺序选人；
 #   4. 禁用项目池中最高优先级的 Agent 后自动回退到下一优先级；
@@ -194,7 +194,6 @@ high = call(
         "name": "Pool High",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 2,
     },
 )
@@ -205,10 +204,13 @@ low = call(
         "name": "Pool Low",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 1,
         "max_concurrency": 2,
     },
 )
+# 新建项目的项目池继承默认团队，把测试 Agent 按原优先级顺序加入默认团队。
+for role in ("planner", "executor", "verifier"):
+    for agent in (high, low):
+        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 
 # 1. 默认顺序：三个角色都使用各自角色下优先级最高的 Agent。
 basic_id = create_project("PoolBasic", "项目池按角色选择最高优先级 Agent")
@@ -251,7 +253,7 @@ planner_after = next(
 assert planner_after == planner_before, "调整执行角色不应改变规划角色顺序"
 
 # 全局配置在项目创建后变化，不应影响已经快照的项目池。
-call("PATCH", f"/api/agents/{high['id']}", {"enabled": False, "priority": 9})
+call("PATCH", f"/api/agents/{high['id']}", {"enabled": False})
 decoupled = pool_role(reordered_id, "planner")["entries"]
 assert next(entry for entry in decoupled if entry["agent_id"] == high["id"])[
     "enabled"
@@ -267,7 +269,7 @@ assert role_jobs(reordered, "goal")[0]["agent_id"] == high["id"], reordered["job
 assert all(
     job["agent_id"] == high["id"] for job in role_jobs(reordered, "verifier")
 ), reordered["jobs"]
-call("PATCH", f"/api/agents/{high['id']}", {"enabled": True, "priority": 0})
+call("PATCH", f"/api/agents/{high['id']}", {"enabled": True})
 
 # 3. 禁用最高优先级 Agent 后自动回退到下一优先级。
 fallback_id = create_project("PoolFallback", "禁用最高优先级后自动回退")
@@ -379,7 +381,6 @@ doomed_a = call(
         "name": "Doomed A",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 1,
     },
 )
@@ -390,10 +391,12 @@ doomed_b = call(
         "name": "Doomed B",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 1,
         "max_concurrency": 1,
     },
 )
+for role in ("planner", "executor", "verifier"):
+    for agent in (doomed_a, doomed_b):
+        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 missing_id = create_project("PoolMissing", "全局 Agent 删除后应明确阻塞")
 missing_pool = pool_role(missing_id, "planner")["entries"]
 assert any(

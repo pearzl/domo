@@ -86,11 +86,14 @@ def call(method, path, data=None):
 
 for agent in call("GET", "/api/agents"):
     call("PATCH", f"/api/agents/{agent['id']}", {"enabled": False})
-call("POST", "/api/agents", {
+mock = call("POST", "/api/agents", {
     "name": "Recovery Mock", "kind": "mock",
     "roles": ["planner", "executor", "verifier"],
-    "priority": 0, "max_concurrency": 2,
+    "max_concurrency": 2,
 })
+# 新建项目的项目池继承默认团队，把测试 Agent 加入默认团队供继承。
+for role in ("planner", "executor", "verifier"):
+    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 project = call("POST", "/api/projects", {
     "name": "Recovery", "goal": "验证服务重启恢复",
     "repo_path": repo, "base_branch": "main",

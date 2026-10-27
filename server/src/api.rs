@@ -82,6 +82,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}", patch(update_agent).delete(delete_agent))
         .route("/api/agents/{id}/usage/reset", post(reset_agent_usage))
+        .route(
+            "/api/team/default",
+            get(get_default_team).post(add_default_team_agent),
+        )
+        .route(
+            "/api/team/default/{role}/{agent_id}",
+            patch(update_default_team_agent).delete(delete_default_team_agent),
+        )
         .route("/api/usage", get(usage_report))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project))
@@ -100,6 +108,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/retry", post(retry_project))
         .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/report", post(submit_report))
+        .route("/api/projects/{id}/tasks", post(create_task))
         .route("/api/projects/{id}/tasks/{task_id}/retry", post(retry_task))
         .route(
             "/api/projects/{id}/tasks/{task_id}/guidance",
@@ -160,7 +169,7 @@ async fn health() -> Json<Value> {
 
 async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentView>>, ApiError> {
     let rows =
-        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC, created_at ASC")
+        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
             .fetch_all(&state.db)
             .await?;
     let mut views = Vec::new();
@@ -223,14 +232,13 @@ async fn create_agent(
     sqlx::query(
         "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
          command_json, model_args_json, availability_json, usage_limit_json, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
     .bind(&kind)
     .bind(request.model.unwrap_or_default().trim())
     .bind(serde_json::to_string(&roles).unwrap_or_else(|_| "[]".into()))
-    .bind(request.priority.unwrap_or(0))
     .bind(request.max_concurrency.unwrap_or(1).max(1))
     .bind(if request.enabled.unwrap_or(true) {
         1
@@ -296,7 +304,6 @@ async fn update_agent(
                 .unwrap_or_else(|| "[]".into())
         });
     let model = request.model.unwrap_or(existing.model.clone());
-    let priority = request.priority.unwrap_or(existing.priority);
     let max_concurrency = request
         .max_concurrency
         .unwrap_or(existing.max_concurrency)
@@ -322,7 +329,7 @@ async fn update_agent(
         }
     };
     sqlx::query(
-        "UPDATE agents SET name = ?, kind = ?, model = ?, roles = ?, priority = ?, \
+        "UPDATE agents SET name = ?, kind = ?, model = ?, roles = ?, \
          max_concurrency = ?, enabled = ?, command_json = ?, model_args_json = ?, \
          availability_json = ?, usage_limit_json = ?, \
          cooldown_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
@@ -331,7 +338,6 @@ async fn update_agent(
     .bind(&kind)
     .bind(model.trim())
     .bind(&roles)
-    .bind(priority)
     .bind(max_concurrency)
     .bind(enabled)
     .bind(&command)
@@ -347,6 +353,214 @@ async fn update_agent(
         .await?
         .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;
     Ok(Json(agent_view(&state, row).await?))
+}
+
+async fn get_default_team(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
+}
+
+async fn add_default_team_agent(
+    State(state): State<AppState>,
+    Json(request): Json<AddProjectAgentRequest>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let role = validate_role(request.role.trim())?;
+    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
+        return Err(ApiError::not_found("Agent 不存在"));
+    };
+    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
+        return Err(ApiError::bad(format!(
+            "Agent {} 不能承担{}角色",
+            agent.name,
+            role_label(&role)
+        )));
+    }
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM default_team WHERE role = ? AND agent_id = ?")
+            .bind(&role)
+            .bind(&agent.id)
+            .fetch_one(&state.db)
+            .await?;
+    if exists > 0 {
+        return Err(ApiError::bad("Agent 已在默认团队中"));
+    }
+    let priority: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(priority), -1) + 1 FROM default_team WHERE role = ?",
+    )
+    .bind(&role)
+    .fetch_one(&state.db)
+    .await?;
+    let timestamp = now();
+    sqlx::query(
+        "INSERT INTO default_team \
+         (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&role)
+    .bind(&agent.id)
+    .bind(&agent.name)
+    .bind(priority)
+    .bind(agent.enabled)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        None,
+        None,
+        "default_team_updated",
+        format!("默认团队加入{} Agent {}", role_label(&role), agent.name),
+    )
+    .await;
+    state.notify_scheduler();
+    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
+}
+
+async fn update_default_team_agent(
+    State(state): State<AppState>,
+    Path((role, agent_id)): Path<(String, String)>,
+    Json(request): Json<ProjectAgentUpdateRequest>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let role = validate_role(role.trim())?;
+    let current = sqlx::query_as::<_, DefaultTeamRow>(
+        "SELECT * FROM default_team WHERE role = ? AND agent_id = ?",
+    )
+    .bind(&role)
+    .bind(&agent_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("默认团队中没有该 Agent"))?;
+    if let Some(direction) = request.direction.as_deref().map(str::trim) {
+        if !matches!(direction, "up" | "down") {
+            return Err(ApiError::bad("direction 必须是 up 或 down"));
+        }
+        let target = if direction == "up" {
+            sqlx::query_as::<_, DefaultTeamRow>(
+                "SELECT * FROM default_team WHERE role = ? \
+                 AND priority < ? ORDER BY priority DESC LIMIT 1",
+            )
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        } else {
+            sqlx::query_as::<_, DefaultTeamRow>(
+                "SELECT * FROM default_team WHERE role = ? \
+                 AND priority > ? ORDER BY priority ASC LIMIT 1",
+            )
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        };
+        if let Some(target) = target {
+            let timestamp = now();
+            let mut tx = state.db.begin().await?;
+            sqlx::query(
+                "UPDATE default_team SET priority = ?, updated_at = ? \
+                 WHERE role = ? AND agent_id = ?",
+            )
+            .bind(target.priority)
+            .bind(&timestamp)
+            .bind(&role)
+            .bind(&current.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE default_team SET priority = ?, updated_at = ? \
+                 WHERE role = ? AND agent_id = ?",
+            )
+            .bind(current.priority)
+            .bind(&timestamp)
+            .bind(&role)
+            .bind(&target.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+    }
+    if let Some(enabled) = request.enabled {
+        sqlx::query(
+            "UPDATE default_team SET enabled = ?, updated_at = ? \
+             WHERE role = ? AND agent_id = ?",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(now())
+        .bind(&role)
+        .bind(&current.agent_id)
+        .execute(&state.db)
+        .await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        None,
+        None,
+        "default_team_updated",
+        format!(
+            "默认团队更新{}角色配置（{}）",
+            role_label(&role),
+            current.agent_id
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
+}
+
+async fn delete_default_team_agent(
+    State(state): State<AppState>,
+    Path((role, agent_id)): Path<(String, String)>,
+) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let role = validate_role(role.trim())?;
+    let result = sqlx::query("DELETE FROM default_team WHERE role = ? AND agent_id = ?")
+        .bind(&role)
+        .bind(&agent_id)
+        .execute(&state.db)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("默认团队中没有该 Agent"));
+    }
+    renumber_default_team_role(&state, &role).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        None,
+        None,
+        "default_team_updated",
+        format!("默认团队移除{} Agent {}", role_label(&role), agent_id),
+    )
+    .await;
+    state.notify_scheduler();
+    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
+}
+
+/// 移除条目后把该角色的优先级重排为 0..n-1，保持编号连续。
+async fn renumber_default_team_role(state: &AppState, role: &str) -> Result<(), ApiError> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_id FROM default_team WHERE role = ? ORDER BY priority ASC, agent_id ASC",
+    )
+    .bind(role)
+    .fetch_all(&state.db)
+    .await?;
+    let timestamp = now();
+    let mut tx = state.db.begin().await?;
+    for (priority, (agent_id,)) in members.iter().enumerate() {
+        sqlx::query(
+            "UPDATE default_team SET priority = ?, updated_at = ? WHERE role = ? AND agent_id = ?",
+        )
+        .bind(priority as i64)
+        .bind(&timestamp)
+        .bind(role)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn reset_agent_usage(
@@ -382,10 +596,22 @@ async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let affected_roles: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT role FROM default_team WHERE agent_id = ?")
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await?;
     sqlx::query("DELETE FROM agents WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
         .await?;
+    sqlx::query("DELETE FROM default_team WHERE agent_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    for role in affected_roles {
+        renumber_default_team_role(&state, &role).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -785,6 +1011,150 @@ async fn resolve_task_agent(
         )));
     }
     Ok(Some(agent.id))
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<CreateTaskRequest>,
+) -> Result<Json<TaskView>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档，不能再添加任务"));
+    }
+    if !matches!(
+        project.stage.as_str(),
+        STAGE_GOAL_CONFIRM | STAGE_PLANNING | STAGE_EXECUTING | STAGE_SUMMARIZING | STAGE_COMPLETED
+    ) {
+        return Err(ApiError::bad("当前阶段不允许添加任务"));
+    }
+    let rows = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ? ORDER BY seq ASC",
+    )
+    .bind(&id)
+    .bind(STATUS_CANCELED)
+    .fetch_all(&state.db)
+    .await?;
+    let active: Vec<domain::NormalizedTask> = rows
+        .iter()
+        .map(|row| domain::NormalizedTask {
+            key: row.key.clone(),
+            title: row.title.clone(),
+            description: row.description.clone(),
+            acceptance: parse_list(&row.acceptance),
+            deps: parse_list(&row.deps),
+        })
+        .collect();
+    let task = domain::validate_manual_task(
+        &active,
+        &request.key,
+        &request.title,
+        &request.description,
+        request.acceptance,
+        request.deps,
+    )
+    .map_err(ApiError::bad)?;
+    let mut tx = state.db.begin().await?;
+    let max_seq: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM tasks WHERE project_id = ?")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let max_queue: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(queue_order), 0) FROM tasks WHERE project_id = ?")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let task_id = domain::new_id("tsk");
+    let timestamp = now();
+    sqlx::query(
+        "INSERT INTO tasks (id, project_id, seq, queue_order, key, title, description, \
+         acceptance, deps, milestone, stage, status, attempts, rejections, verifier_issues, \
+         created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '[]', ?, ?)",
+    )
+    .bind(&task_id)
+    .bind(&id)
+    .bind(max_seq + 1)
+    .bind(max_queue + 1)
+    .bind(&task.key)
+    .bind(&task.title)
+    .bind(&task.description)
+    .bind(string_list_json(&task.acceptance))
+    .bind(string_list_json(&task.deps))
+    .bind(if request.milestone { 1 } else { 0 })
+    .bind(TASK_STAGE_PENDING)
+    .bind(STATUS_QUEUED)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .execute(&mut *tx)
+    .await?;
+    // A project in the planning, summarizing, or completed stage moves back to
+    // executing so the DAG schedules the added task. A report that would not
+    // cover every task is dropped and written again after the new work finishes.
+    let reopened = !matches!(project.stage.as_str(), STAGE_GOAL_CONFIRM | STAGE_EXECUTING);
+    let had_report = project.report.is_some();
+    if reopened {
+        sqlx::query(
+            "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
+             ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
+             report = NULL, report_feedback = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(STAGE_EXECUTING)
+        .bind(STATUS_RUNNING)
+        .bind(&timestamp)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        Some(&task_id),
+        "task_created",
+        format!(
+            "人工添加任务 {}：{}（依赖 {}）",
+            task.key,
+            task.title,
+            if task.deps.is_empty() {
+                "无".to_string()
+            } else {
+                task.deps.join("、")
+            }
+        ),
+    )
+    .await;
+    if reopened {
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&id),
+            None,
+            "project_reopened",
+            if had_report {
+                format!(
+                    "人工添加任务 {}，项目回到执行阶段，原报告作废待重写",
+                    task.key
+                )
+            } else {
+                format!(
+                    "人工添加任务 {}，项目从{}进入执行阶段",
+                    task.key,
+                    stage_label(&project.stage)
+                )
+            },
+        )
+        .await;
+    }
+    state.notify_scheduler();
+    let row = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(TaskView::from_row(row)))
 }
 
 async fn pause_task(
@@ -1305,14 +1675,41 @@ async fn submit_report(
     Json(request): Json<ReportRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let project = require_project(&state, &id).await?;
-    if project.stage != STAGE_SUMMARIZING || project.report.is_none() {
-        return Err(ApiError::bad("当前没有等待验收的项目报告"));
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
     }
+    let feedback = request
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let event_kind: Option<&'static str>;
     let event_message: String;
+    let mut replan_reason: Option<String> = None;
     {
         let _guard = state.schedule_lock.lock().await;
         match request.action.as_str() {
+            // 多轮评议：先记录意见，由规划者在下一轮重写时参考。
+            "comment" => {
+                if project.stage != STAGE_SUMMARIZING {
+                    return Err(ApiError::bad("项目不在总结阶段，无法对报告发表意见"));
+                }
+                require_opinion(&feedback)?;
+                record_report_opinion(&state, &id, &feedback).await?;
+                event_kind = None;
+                event_message = String::new();
+            }
             "accept" => {
+                if project.stage != STAGE_SUMMARIZING || project.report.is_none() {
+                    return Err(ApiError::bad("当前没有等待验收的项目报告"));
+                }
+                if !feedback.is_empty() {
+                    let round = record_report_opinion(&state, &id, &feedback).await?;
+                    event_message = format!("项目报告已通过（附第 {round} 条意见），项目完成");
+                } else {
+                    event_message = "项目报告已通过，项目完成".into();
+                }
                 sqlx::query(
                     "UPDATE projects SET stage = ?, status = NULL, blocked_reason = NULL, \
                      report_feedback = NULL, updated_at = ? WHERE id = ?",
@@ -1322,18 +1719,15 @@ async fn submit_report(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
-                event_message = "项目报告已通过，项目完成".into();
+                event_kind = Some("project_completed");
             }
+            // 处置一：要求重新撰写（可多轮重复，意见持久化 + 触发重写作业）。
             "reject" => {
-                let feedback = request
-                    .feedback
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .to_string();
-                if feedback.is_empty() {
-                    return Err(ApiError::bad("拒绝报告时必须填写意见"));
+                if project.stage != STAGE_SUMMARIZING || project.report.is_none() {
+                    return Err(ApiError::bad("当前没有等待验收的项目报告"));
                 }
+                require_opinion(&feedback)?;
+                let round = record_report_opinion(&state, &id, &feedback).await?;
                 sqlx::query(
                     "UPDATE projects SET stage = ?, status = ?, report = NULL, \
                      report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
@@ -1345,26 +1739,97 @@ async fn submit_report(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
-                event_message = format!("项目报告被拒绝，将重新撰写：{feedback}");
+                event_kind = Some("report_rejected");
+                event_message = format!("项目报告被要求重写（第 {round} 条意见）：{feedback}");
             }
-            _ => return Err(ApiError::bad("action 必须是 accept 或 reject")),
+            // 处置二：要求重新规划，项目回到规划阶段（复用重规划路径）。
+            "replan" => {
+                if project.stage != STAGE_SUMMARIZING || project.report.is_none() {
+                    return Err(ApiError::bad("当前没有等待验收的项目报告"));
+                }
+                require_opinion(&feedback)?;
+                let round = record_report_opinion(&state, &id, &feedback).await?;
+                event_kind = None;
+                event_message = format!(
+                    "项目报告被要求重新规划（第 {round} 条意见），项目回到规划阶段：{feedback}"
+                );
+                replan_reason = Some(feedback.clone());
+            }
+            _ => {
+                return Err(ApiError::bad(
+                    "action 必须是 accept、reject、replan 或 comment",
+                ))
+            }
         }
     }
+    // replan::request 自己加调度锁并发出 replan_requested / plan_superseded 事件，
+    // 因此放在锁外调用。
+    if let Some(reason) = replan_reason {
+        replan::request(&state, &id, &reason, REPLAN_SOURCE_HUMAN).await?;
+        state.notify_scheduler();
+        return Ok(Json(json!({"ok": true, "action": "replan"})));
+    }
+    if let Some(event_kind) = event_kind {
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&id),
+            None,
+            event_kind,
+            event_message,
+        )
+        .await;
+    }
+    state.notify_scheduler();
+    Ok(Json(json!({"ok": true, "action": request.action})))
+}
+
+/// 意见不能为空：评议记录必须可回溯，空意见不会产生任何处置。
+fn require_opinion(feedback: &str) -> Result<(), ApiError> {
+    if feedback.trim().is_empty() {
+        return Err(ApiError::bad("必须填写意见"));
+    }
+    Ok(())
+}
+
+/// 把一条人工意见写入 messages（角色 review），并返回它在评议记录中的序号。
+async fn record_report_opinion(
+    state: &AppState,
+    project_id: &str,
+    feedback: &str,
+) -> Result<i64, ApiError> {
+    let existing: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE project_id = ? AND role = ?")
+            .bind(project_id)
+            .bind(REPORT_MESSAGE_ROLE)
+            .fetch_one(&state.db)
+            .await?;
+    crate::runner::insert_message(&state.db, project_id, REPORT_MESSAGE_ROLE, feedback)
+        .await
+        .map_err(ApiError::internal)?;
     emit(
         &state.db,
         &state.bus,
-        Some(&id),
+        Some(project_id),
         None,
-        if request.action == "accept" {
-            "project_completed"
-        } else {
-            "report_rejected"
-        },
-        event_message,
+        "report_opinion",
+        format!(
+            "人工提交报告意见（第 {} 条）：{}",
+            existing + 1,
+            preview_opinion(feedback)
+        ),
     )
     .await;
-    state.notify_scheduler();
-    Ok(Json(json!({"ok": true})))
+    Ok(existing + 1)
+}
+
+fn preview_opinion(feedback: &str) -> String {
+    let first = feedback.lines().next().unwrap_or(feedback);
+    let mut text: String = first.chars().take(80).collect();
+    if first.chars().count() > 80 {
+        text.push('…');
+    }
+    text
 }
 
 async fn retry_project(
@@ -1730,7 +2195,7 @@ async fn reject_milestone(
     Path((project_id, task_id)): Path<(String, String)>,
     Json(request): Json<MilestoneRejectRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
-    let reason = request.reason.trim();
+    let reason = request.reason.trim().to_string();
     if reason.is_empty() {
         return Err(ApiError::bad("拒绝人工验收时必须填写理由"));
     }
@@ -1740,6 +2205,7 @@ async fn reject_milestone(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let disposition = milestone_reject_disposition(request.action.as_deref())?;
     let _guard = state.schedule_lock.lock().await;
     let project = require_project(&state, &project_id).await?;
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
@@ -1754,7 +2220,17 @@ async fn reject_milestone(
     {
         return Err(ApiError::bad("任务不在等待人工验收状态"));
     }
-    let issues = append_issue(&task.verifier_issues, reason);
+    if disposition == MILESTONE_DISPOSITION_REPLAN {
+        sqlx::query("UPDATE tasks SET human_gate = ?, updated_at = ? WHERE id = ?")
+            .bind(HUMAN_GATE_MILESTONE_REPLANNING)
+            .bind(now())
+            .bind(&task.id)
+            .execute(&state.db)
+            .await?;
+        drop(_guard);
+        return replan_rejected_milestone(&state, project, task, &reason, guidance).await;
+    }
+    let issues = append_issue(&task.verifier_issues, &reason);
     let guidance = guidance.unwrap_or_else(|| task.guidance.clone());
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, agent_id = NULL, \
@@ -1796,6 +2272,81 @@ async fn reject_milestone(
     .await;
     state.notify_scheduler();
     load_detail(&state, &project_id).await.map(Json)
+}
+
+fn milestone_reject_disposition(action: Option<&str>) -> Result<&'static str, ApiError> {
+    let Some(action) = action.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(MILESTONE_DISPOSITION_RETRY);
+    };
+    match action.to_ascii_lowercase().as_str() {
+        "retry" | "rework" | "reject" | "execute" | "execution" | "requeue" => {
+            Ok(MILESTONE_DISPOSITION_RETRY)
+        }
+        "replan" | "replanning" | "replan_project" | "plan" => Ok(MILESTONE_DISPOSITION_REPLAN),
+        _ => Err(ApiError::bad(
+            "不支持的里程碑拒绝处置，请选择 retry 或 replan",
+        )),
+    }
+}
+
+async fn replan_rejected_milestone(
+    state: &AppState,
+    project: ProjectRow,
+    task: TaskRow,
+    reason: &str,
+    guidance: Option<String>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let mut replan_reason = format!("人工里程碑验收拒绝（任务 {}）：{reason}", task.key);
+    if let Some(guidance) = guidance.as_deref() {
+        replan_reason.push_str(&format!("；指导意见：{guidance}"));
+    }
+    let outcome = replan::request(state, &project.id, &replan_reason, REPLAN_SOURCE_HUMAN).await;
+    let summary = match outcome {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            restore_milestone_gate(state, &task.id, "项目状态已变化，未执行重新规划").await?;
+            return Err(ApiError::bad("项目状态已变化，未执行重新规划"));
+        }
+        Err(error) => {
+            let message = format!("重新规划失败：{error:#}");
+            restore_milestone_gate(state, &task.id, &message).await?;
+            return Err(ApiError::internal(error));
+        }
+    };
+    sqlx::query(
+        "UPDATE tasks SET human_gate = NULL, updated_at = ? WHERE id = ? AND human_gate = ?",
+    )
+    .bind(now())
+    .bind(&task.id)
+    .bind(HUMAN_GATE_MILESTONE_REPLANNING)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        "milestone_rejected",
+        format!(
+            "任务 {} 人工验收被拒绝，要求重新规划：{reason}{}",
+            task.key,
+            guidance
+                .as_deref()
+                .map(|value| format!("；指导意见：{value}"))
+                .unwrap_or_default()
+        ),
+    )
+    .await;
+    tracing::info!(
+        project_id = %project.id,
+        task_key = %task.key,
+        canceled_tasks = summary.canceled_tasks,
+        retained_tasks = summary.retained_tasks,
+        canceled_jobs = summary.canceled_jobs,
+        "里程碑人工验收要求重新规划"
+    );
+    state.notify_scheduler();
+    load_detail(state, &project.id).await.map(Json)
 }
 
 async fn task_arbitration(
@@ -1847,7 +2398,6 @@ async fn task_arbitration(
             "id": agent.id,
             "name": agent.name,
             "kind": agent.kind,
-            "priority": agent.priority,
             "enabled": agent.enabled != 0,
             "cooldown_until": agent.cooldown_until,
             "last_error": agent.last_error,
@@ -2037,7 +2587,7 @@ async fn load_project_task(
 
 async fn role_agents(state: &AppState, role: &str) -> Result<Vec<AgentRow>, ApiError> {
     let rows =
-        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC, created_at ASC")
+        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
             .fetch_all(&state.db)
             .await?;
     Ok(rows
@@ -2059,6 +2609,17 @@ fn role_label(role: &str) -> &'static str {
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",
         ROLE_PLANNER => "规划",
+        _ => "未知",
+    }
+}
+
+fn stage_label(stage: &str) -> &'static str {
+    match stage {
+        STAGE_GOAL_CONFIRM => "目标确认",
+        STAGE_PLANNING => "规划",
+        STAGE_EXECUTING => "执行",
+        STAGE_SUMMARIZING => "总结",
+        STAGE_COMPLETED => "完成",
         _ => "未知",
     }
 }
@@ -2295,9 +2856,10 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    let agent_rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY priority ASC")
-        .fetch_all(&state.db)
-        .await?;
+    let agent_rows =
+        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
+            .fetch_all(&state.db)
+            .await?;
     let mut agents: Vec<AgentView> = Vec::new();
     for row in agent_rows {
         agents.push(agent_view(state, row).await?);

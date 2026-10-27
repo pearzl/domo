@@ -8,8 +8,9 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::models::{
-    parse_string_list, string_list_json, AgentRow, ProjectAgentEntry, ProjectAgentPool,
-    ProjectAgentRow, ProjectRolePool, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
+    default_team_row_to_pool, parse_string_list, string_list_json, AgentRow, DefaultTeamRow,
+    ProjectAgentEntry, ProjectAgentPool, ProjectAgentRow, ProjectRolePool, AGENT_OPENCODE,
+    ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
 };
 
 const SCHEMA: &str = r#"
@@ -68,6 +69,17 @@ CREATE TABLE IF NOT EXISTS project_agents (
 );
 CREATE INDEX IF NOT EXISTS idx_project_agents_role
     ON project_agents(project_id, role, priority);
+
+CREATE TABLE IF NOT EXISTS default_team (
+    role TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (role, agent_id)
+);
 
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -172,7 +184,7 @@ pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
         .await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
     migrate(&pool).await?;
-    seed_default_agent(&pool).await?;
+    seed_defaults(&pool).await?;
     Ok(pool)
 }
 
@@ -336,35 +348,107 @@ async fn ensure_column(
     Ok(())
 }
 
-async fn seed_default_agent(pool: &SqlitePool) -> anyhow::Result<()> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
+async fn seed_defaults(pool: &SqlitePool) -> anyhow::Result<()> {
+    let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
+        .fetch_one(pool)
+        .await?;
+    let mut fresh_agent_id: Option<String> = None;
+    if agent_count == 0 {
+        let now = crate::domain::now();
+        let id = format!("agt_{}", Uuid::new_v4().simple());
+        let roles = string_list_json(&[
+            ROLE_PLANNER.to_string(),
+            ROLE_EXECUTOR.to_string(),
+            ROLE_VERIFIER.to_string(),
+        ]);
+        let model = std::env::var("DOMO_DEFAULT_MODEL").unwrap_or_default();
+        sqlx::query(
+            "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
+             command_json, model_args_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, 0, 2, 1, NULL, NULL, ?, ?)",
+        )
+        .bind(&id)
+        .bind("OpenCode 默认团队")
+        .bind(AGENT_OPENCODE)
+        .bind(&model)
+        .bind(&roles)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+        fresh_agent_id = Some(id);
+    }
+    seed_default_team(pool, fresh_agent_id).await
+}
+
+/// 默认团队为空时初始化：空库沿用 OpenCode 默认团队 Agent；存量库把全局
+/// Agent 配置按既有优先级顺序快照进来，保持继承顺序不变。
+async fn seed_default_team(
+    pool: &SqlitePool,
+    fresh_agent_id: Option<String>,
+) -> anyhow::Result<()> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM default_team")
         .fetch_one(pool)
         .await?;
     if count > 0 {
         return Ok(());
     }
-    let now = crate::domain::now();
-    let id = format!("agt_{}", Uuid::new_v4().simple());
-    let roles = string_list_json(&[
-        ROLE_PLANNER.to_string(),
-        ROLE_EXECUTOR.to_string(),
-        ROLE_VERIFIER.to_string(),
-    ]);
-    let model = std::env::var("DOMO_DEFAULT_MODEL").unwrap_or_default();
-    sqlx::query(
-        "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
-         command_json, model_args_json, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, 0, 2, 1, NULL, NULL, ?, ?)",
+    let timestamp = crate::domain::now();
+    if let Some(agent_id) = fresh_agent_id {
+        let mut tx = pool.begin().await?;
+        for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
+            sqlx::query(
+                "INSERT OR IGNORE INTO default_team \
+                 (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+                 VALUES (?, ?, ?, 0, 1, ?, ?)",
+            )
+            .bind(role)
+            .bind(&agent_id)
+            .bind("OpenCode 默认团队")
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        return Ok(());
+    }
+    let agents = sqlx::query_as::<_, AgentRow>(
+        "SELECT * FROM agents ORDER BY priority ASC, created_at ASC, id ASC",
     )
-    .bind(&id)
-    .bind("OpenCode 默认团队")
-    .bind(AGENT_OPENCODE)
-    .bind(&model)
-    .bind(&roles)
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
+    if agents.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
+        let mut priority = 0;
+        for agent in &agents {
+            if !parse_string_list(&agent.roles)
+                .iter()
+                .any(|item| item == role)
+            {
+                continue;
+            }
+            sqlx::query(
+                "INSERT OR IGNORE INTO default_team \
+                 (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(role)
+            .bind(&agent.id)
+            .bind(&agent.name)
+            .bind(priority)
+            .bind(agent.enabled)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .execute(&mut *tx)
+            .await?;
+            priority += 1;
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -377,9 +461,10 @@ pub async fn load_agent(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Ag
     )
 }
 
-/// A project inherits a snapshot of the global agent configuration when it is
+/// A project inherits a snapshot of the default team configuration when it is
 /// first touched. Priorities are normalized per role so project changes only
-/// reorder the project's own pool.
+/// reorder the project's own pool. Entries whose global agent has been deleted
+/// are skipped, and a disabled global agent starts disabled in the pool.
 pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_agents WHERE project_id = ?")
         .bind(project_id)
@@ -388,11 +473,10 @@ pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyho
     if count > 0 {
         return Ok(());
     }
-    let agents = sqlx::query_as::<_, AgentRow>(
-        "SELECT * FROM agents ORDER BY priority ASC, created_at ASC, id ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = default_team_pool_rows(pool).await?;
+    let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+        .fetch_all(pool)
+        .await?;
     let timestamp = crate::domain::now();
     let mut tx = pool.begin().await?;
     let recheck: i64 =
@@ -406,13 +490,10 @@ pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyho
     }
     for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
         let mut priority = 0;
-        for agent in &agents {
-            if !parse_string_list(&agent.roles)
-                .iter()
-                .any(|item| item == role)
-            {
+        for row in rows.iter().filter(|row| row.role == role) {
+            let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
                 continue;
-            }
+            };
             sqlx::query(
                 "INSERT OR IGNORE INTO project_agents \
                  (project_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
@@ -423,7 +504,7 @@ pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyho
             .bind(&agent.id)
             .bind(&agent.name)
             .bind(priority)
-            .bind(agent.enabled)
+            .bind(i64::from(row.enabled != 0 && agent.enabled != 0))
             .bind(&timestamp)
             .bind(&timestamp)
             .execute(&mut *tx)
@@ -446,6 +527,64 @@ pub async fn load_project_agent_pool(
     .bind(project_id)
     .fetch_all(pool)
     .await?;
+    Ok(ProjectAgentPool {
+        project_id: project_id.to_string(),
+        roles: build_role_pools(pool, &rows).await?,
+    })
+}
+
+/// 默认团队视图：返回 ProjectAgentPool 形态（project_id 固定为 "default"），
+/// 条目带全局 Agent 的可用性与启停信息，供前端面板直接复用。
+pub async fn load_default_team_pool(pool: &SqlitePool) -> anyhow::Result<ProjectAgentPool> {
+    let rows = default_team_pool_rows(pool).await?;
+    Ok(ProjectAgentPool {
+        project_id: "default".to_string(),
+        roles: build_role_pools(pool, &rows).await?,
+    })
+}
+
+/// 默认团队按角色展开为项目池形态的行，角色顺序固定，条目按 priority 与
+/// agent_id 排序保证稳定。
+/// 默认团队按角色展开为项目池形态的行，角色顺序固定，条目按 priority 与
+/// agent_id 排序保证稳定。启停与全局 Agent 状态合并，和继承语义保持一致。
+async fn default_team_pool_rows(pool: &SqlitePool) -> anyhow::Result<Vec<ProjectAgentRow>> {
+    let members = sqlx::query_as::<_, DefaultTeamRow>("SELECT * FROM default_team")
+        .fetch_all(pool)
+        .await?;
+    let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+        .fetch_all(pool)
+        .await?;
+    let mut rows = Vec::new();
+    for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
+        let mut for_role: Vec<&DefaultTeamRow> = members
+            .iter()
+            .filter(|member| member.role == role)
+            .collect();
+        for_role.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        for member in for_role {
+            let global_enabled = agents
+                .iter()
+                .find(|agent| agent.id == member.agent_id)
+                .map(|agent| agent.enabled != 0)
+                .unwrap_or(true);
+            let mut row = default_team_row_to_pool(member.clone());
+            row.role = role.to_string();
+            row.enabled = i64::from(member.enabled != 0 && global_enabled);
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// 把池行与全局 Agent 合并成带可用性信息的角色分组视图。
+async fn build_role_pools(
+    pool: &SqlitePool,
+    rows: &[ProjectAgentRow],
+) -> anyhow::Result<Vec<ProjectRolePool>> {
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(pool)
         .await?;
@@ -517,8 +656,5 @@ pub async fn load_project_agent_pool(
             entries,
         });
     }
-    Ok(ProjectAgentPool {
-        project_id: project_id.to_string(),
-        roles,
-    })
+    Ok(roles)
 }

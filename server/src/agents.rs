@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -17,12 +18,93 @@ use crate::models::{
 
 const OUTPUT_CAP: usize = 2 * 1024 * 1024;
 
+/// Liveness signal for one job. Reader tasks update it whenever the agent
+/// writes to stdout/stderr; the runner compares it against the stall threshold.
+#[derive(Debug, Clone)]
+pub struct JobProgress {
+    inner: std::sync::Arc<JobProgressInner>,
+}
+
+#[derive(Debug)]
+struct JobProgressInner {
+    started: std::time::Instant,
+    last_activity_ms: AtomicU64,
+    stdout_bytes: AtomicU64,
+    stderr_bytes: AtomicU64,
+}
+
+impl JobProgress {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(JobProgressInner {
+                started: std::time::Instant::now(),
+                last_activity_ms: AtomicU64::new(0),
+                stdout_bytes: AtomicU64::new(0),
+                stderr_bytes: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.inner.started.elapsed().as_millis() as u64
+    }
+
+    pub fn touch(&self) {
+        self.inner
+            .last_activity_ms
+            .store(self.elapsed_ms(), Ordering::Relaxed);
+    }
+
+    pub fn idle_for(&self) -> Duration {
+        Duration::from_millis(
+            self.elapsed_ms()
+                .saturating_sub(self.inner.last_activity_ms.load(Ordering::Relaxed)),
+        )
+    }
+
+    pub fn record_stdout(&self, bytes: usize) {
+        self.inner
+            .stdout_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub fn record_stderr(&self, bytes: usize) {
+        self.inner
+            .stderr_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub fn output_bytes(&self) -> (u64, u64) {
+        (
+            self.inner.stdout_bytes.load(Ordering::Relaxed),
+            self.inner.stderr_bytes.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl Default for JobProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRun {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i64>,
     pub timed_out: bool,
+    pub stalled: bool,
+}
+
+impl AgentRun {
+    /// True when the process did not finish on its own terms, regardless of
+    /// whether the watchdog or the OS ended it.
+    pub fn process_failure(&self) -> bool {
+        self.timed_out || self.stalled || self.exit_code != Some(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +114,7 @@ pub struct AgentSpec {
     pub cwd: PathBuf,
     pub job_dir: PathBuf,
     pub prompt: String,
+    pub progress: JobProgress,
 }
 
 pub async fn execute(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
@@ -63,7 +146,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         JOB_ROLE_GOAL => mock_plan(&context),
         JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
         JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
-        JOB_ROLE_SUMMARY => mock_summary(),
+        JOB_ROLE_SUMMARY => mock_summary(&context),
         other => return Err(anyhow!("mock 不支持角色 {other}")),
     };
     let result = attach_mock_usage(result, &context);
@@ -74,6 +157,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         stderr: String::new(),
         exit_code: Some(0),
         timed_out: false,
+        stalled: false,
     })
 }
 
@@ -589,11 +673,43 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
     }
 }
 
-fn mock_summary() -> serde_json::Value {
-    serde_json::json!({
-        "kind": "report",
-        "report": "# Mock 项目报告\n\n所有 mock 任务已完成并通过验收，产物位于 `domo_mock/`。\n"
-    })
+fn mock_summary(context: &serde_json::Value) -> serde_json::Value {
+    let opinions: Vec<String> = context
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| {
+                    message.get("role").and_then(|value| value.as_str())
+                        == Some(crate::models::REPORT_MESSAGE_ROLE)
+                })
+                .filter_map(|message| {
+                    message
+                        .get("content")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let revision = if opinions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## 依据人工意见修订\n{}\n\n",
+            opinions
+                .iter()
+                .enumerate()
+                .map(|(index, item)| format!("- 已回应第 {} 条意见：{item}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let report = format!(
+        "# Mock 项目报告\n\n所有 mock 任务已完成并通过验收，产物位于 `domo_mock/`。\n\n{revision}"
+    );
+    serde_json::json!({ "kind": "report", "report": report })
 }
 
 async fn run_opencode(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
@@ -712,8 +828,8 @@ async fn run_process(
     }
     let stdout = child.stdout.take().expect("stdout pipe");
     let stderr = child.stderr.take().expect("stderr pipe");
-    let stdout_task = tokio::spawn(read_capped(stdout));
-    let stderr_task = tokio::spawn(read_capped(stderr));
+    let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true));
+    let stderr_task = tokio::spawn(read_capped(stderr, spec.progress.clone(), false));
 
     let mut timed_out = false;
     let status = match tokio::time::timeout(timeout, child.wait()).await {
@@ -734,10 +850,15 @@ async fn run_process(
         stderr,
         exit_code: status.code().map(|code| code as i64),
         timed_out,
+        stalled: false,
     })
 }
 
-async fn read_capped<R: AsyncRead + Unpin>(mut reader: R) -> String {
+async fn read_capped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    progress: JobProgress,
+    stdout: bool,
+) -> String {
     let mut output = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
@@ -747,6 +868,11 @@ async fn read_capped<R: AsyncRead + Unpin>(mut reader: R) -> String {
                 if output.len() < OUTPUT_CAP {
                     let take = n.min(OUTPUT_CAP - output.len());
                     output.extend_from_slice(&buffer[..take]);
+                }
+                if stdout {
+                    progress.record_stdout(n);
+                } else {
+                    progress.record_stderr(n);
                 }
             }
             Err(_) => break,
@@ -794,4 +920,49 @@ fn process_start_time(pid: u32) -> Option<String> {
     let rest = stat.rsplit_once(") ").map(|(_, rest)| rest)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     fields.get(19).map(|value| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_starts_idle_at_zero_and_grows() {
+        let progress = JobProgress::new();
+        assert!(progress.idle_for() < Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(progress.idle_for() >= Duration::from_millis(30));
+        progress.touch();
+        assert!(progress.idle_for() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn output_updates_idle_window_and_byte_counters() {
+        let progress = JobProgress::new();
+        std::thread::sleep(Duration::from_millis(40));
+        progress.record_stdout(7);
+        progress.record_stderr(3);
+        assert_eq!(progress.output_bytes(), (7, 3));
+        assert!(progress.idle_for() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn interrupted_runs_are_process_failures() {
+        let run = AgentRun {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            timed_out: false,
+            stalled: true,
+        };
+        assert!(run.process_failure());
+        let clean = AgentRun {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            timed_out: false,
+            stalled: false,
+        };
+        assert!(!clean.process_failure());
+    }
 }

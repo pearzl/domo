@@ -125,30 +125,16 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
     }
 
+    let progress = agents::JobProgress::new();
     let spec = AgentSpec {
         job_id: job.id.clone(),
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
         prompt: prompt.clone(),
+        progress: progress.clone(),
     };
-    let run = match tokio::time::timeout(
-        state.cfg.job_timeout,
-        agents::execute(&agent, &spec, state.cfg.job_timeout),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            agents::kill_job_dir(&job_dir);
-            agents::AgentRun {
-                stdout: String::new(),
-                stderr: "作业超时，进程已终止".into(),
-                exit_code: None,
-                timed_out: true,
-            }
-        }
-    };
+    let run = run_agent_job(state, &job, &job_dir, &agent, &spec, &progress).await?;
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
     if job.role == JOB_ROLE_VERIFIER {
@@ -182,10 +168,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
     }
 
-    let process_ok = run.exit_code == Some(0) && !run.timed_out;
+    let process_ok = run.exit_code == Some(0) && !run.timed_out && !run.stalled;
     let (mut status, result_text, mut error) = if !process_ok {
         let reason = if run.timed_out {
             "Agent 作业超时".to_string()
+        } else if run.stalled {
+            format!(
+                "Agent 作业卡死：连续 {} 秒无输出或进度，已终止进程",
+                state.cfg.stall_timeout.as_secs()
+            )
         } else {
             let detail = format!("{}\n{}", run.stderr, run.stdout);
             format!(
@@ -387,7 +378,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                         _ => None,
                     })
                     .unwrap_or("执行失败");
-                let process_failure = run.exit_code != Some(0) || run.timed_out;
+                let process_failure = run.process_failure();
                 handle_executor_failure(state, &project, task, reason, &agent, process_failure)
                     .await
             } else {
@@ -411,7 +402,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         (JOB_ROLE_VERIFIER, _) => {
             if let Some(task) = task.as_ref() {
                 let reason = error.as_deref().unwrap_or("验收作业失败");
-                let process_failure = run.exit_code != Some(0) || run.timed_out;
+                let process_failure = run.process_failure();
                 handle_verifier_failure(state, &project, task, reason, &agent, process_failure)
                     .await
             } else {
@@ -440,6 +431,110 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         transition?;
     }
     Ok(())
+}
+
+/// Runs one agent process under two watchdogs. The job deadline bounds the whole
+/// run; the stall watchdog ends a run whose stdout/stderr stopped growing for
+/// `stall_timeout`. Both kill only the recorded process group, leaving other
+/// jobs of the same agent untouched, and let the normal failure path apply.
+async fn run_agent_job(
+    state: &AppState,
+    job: &JobRow,
+    job_dir: &Path,
+    agent: &AgentRow,
+    spec: &AgentSpec,
+    progress: &agents::JobProgress,
+) -> Result<agents::AgentRun> {
+    let execution = agents::execute(agent, spec, state.cfg.job_timeout);
+    tokio::pin!(execution);
+    let deadline = tokio::time::sleep(state.cfg.job_timeout);
+    tokio::pin!(deadline);
+    let stall_watch = wait_for_stall(progress, state.cfg.stall_timeout);
+    tokio::pin!(stall_watch);
+
+    let mut stalled: Option<String> = None;
+    let mut timed_out = false;
+    let mut run: agents::AgentRun;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => {
+                run = result?;
+                break;
+            }
+            _ = &mut deadline, if !timed_out => {
+                timed_out = true;
+                agents::kill_job_dir(job_dir);
+            }
+            _ = &mut stall_watch, if stalled.is_none() && !timed_out => {
+                let (stdout_bytes, stderr_bytes) = progress.output_bytes();
+                let idle_secs = progress.idle_for().as_secs();
+                let reason = format!(
+                    "Agent 作业卡死：连续 {idle_secs} 秒无 stdout/stderr 输出或进度\
+                     （stdout {stdout_bytes} 字节，stderr {stderr_bytes} 字节），已终止进程"
+                );
+                emit(
+                    &state.db,
+                    &state.bus,
+                    Some(&job.project_id),
+                    job.task_id.as_deref(),
+                    "job_stalled",
+                    format!("{}作业无响应，已判定卡死：{reason}", role_label(&job.role)),
+                )
+                .await;
+                stalled = Some(reason);
+                agents::kill_job_dir(job_dir);
+            }
+        }
+    }
+
+    if timed_out {
+        run.timed_out = true;
+        run.stdout.clear();
+        run.stderr = format!(
+            "作业超时（{} 秒），进程已终止",
+            state.cfg.job_timeout.as_secs()
+        );
+    }
+    if let Some(reason) = stalled {
+        if run.exit_code.is_none() {
+            run.stalled = true;
+            if !run.stderr.is_empty() {
+                run.stderr.push('\n');
+            }
+            run.stderr.push_str(&reason);
+        } else {
+            // The process exited on its own before the kill took effect.
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&job.project_id),
+                job.task_id.as_deref(),
+                "job_stall_recovered",
+                format!(
+                    "{}作业在卡死判定生效前已自行退出，按实际退出状态处理",
+                    role_label(&job.role)
+                ),
+            )
+            .await;
+        }
+    }
+    Ok(run)
+}
+
+/// Resolves once no output has been observed for `threshold`. A zero threshold
+/// disables stall detection by never resolving.
+async fn wait_for_stall(progress: &agents::JobProgress, threshold: std::time::Duration) {
+    if threshold.is_zero() {
+        std::future::pending::<()>().await;
+    }
+    loop {
+        let idle = progress.idle_for();
+        if idle >= threshold {
+            return;
+        }
+        tokio::time::sleep(threshold - idle).await;
+    }
 }
 
 async fn build_prompt_data(
@@ -513,6 +608,11 @@ async fn build_prompt_data(
     .bind(&project.id)
     .fetch_all(&state.db)
     .await?;
+    let mut messages = messages;
+    if job.role == JOB_ROLE_GOAL {
+        // 规划作业的对话历史只保留目标确认内容；报告评议记录只属于总结作业。
+        messages.retain(|message| message.role != REPORT_MESSAGE_ROLE);
+    }
     let mut summary_tasks = Vec::new();
     let mut completed_tasks = Vec::new();
     let mut canceled_tasks = Vec::new();
@@ -743,6 +843,15 @@ async fn handle_goal_questions(
     summary: &str,
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    if has_active_tasks(&state.db, &project.id).await? {
+        return apply_stale_result(
+            state,
+            project,
+            "plan_ignored",
+            "项目已有活动任务，忽略规划者提问，回到执行阶段".into(),
+        )
+        .await;
+    }
     let content = if summary.trim().is_empty() {
         questions
             .iter()
@@ -802,15 +911,13 @@ async fn handle_goal_plan(
     .await?;
     if existing > 0 {
         tx.rollback().await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
+        apply_stale_result(
+            state,
+            project,
             "plan_ignored",
-            "项目已有活动任务，忽略重复规划结果",
+            "项目已有活动任务，忽略规划结果，回到执行阶段".into(),
         )
-        .await;
+        .await?;
         return Ok(());
     }
     let max_seq: i64 =
@@ -879,6 +986,15 @@ async fn handle_goal_plan(
 
 async fn handle_goal_failure(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    if has_active_tasks(&state.db, &project.id).await? {
+        return apply_stale_result(
+            state,
+            project,
+            "plan_failed",
+            format!("规划失败：{reason}（项目已有活动任务，保持在执行阶段）"),
+        )
+        .await;
+    }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
@@ -1453,6 +1569,15 @@ async fn handle_verifier_failure(
 
 async fn handle_report(state: &AppState, project: &ProjectRow, report: &str) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    if has_active_tasks(&state.db, &project.id).await? {
+        return apply_stale_result(
+            state,
+            project,
+            "report_superseded",
+            "项目已有未完成任务，报告作废，回到执行阶段".into(),
+        )
+        .await;
+    }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, report = ?, report_feedback = NULL, blocked_reason = NULL, \
@@ -1483,6 +1608,15 @@ async fn handle_summary_failure(
     reason: &str,
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    if has_active_tasks(&state.db, &project.id).await? {
+        return apply_stale_result(
+            state,
+            project,
+            "summary_failed",
+            format!("总结失败：{reason}（项目已有未完成任务，回到执行阶段）"),
+        )
+        .await;
+    }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
@@ -1516,7 +1650,7 @@ async fn finish_job(
     _parsed: Option<ParsedResult>,
 ) -> Result<bool> {
     let failure_kind = if status == JOB_STATUS_FAILED {
-        error.map(|reason| domain::classify_failure(reason, run.timed_out).as_str())
+        error.map(|reason| domain::classify_failure(reason, run.process_failure()).as_str())
     } else {
         None
     };
@@ -1869,7 +2003,53 @@ fn failure_kind_label(kind: FailureKind) -> &'static str {
     }
 }
 
-async fn insert_message(
+async fn has_active_tasks(pool: &SqlitePool, project_id: &str) -> Result<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
+         AND COALESCE(status, '') != ?",
+    )
+    .bind(project_id)
+    .bind(TASK_STAGE_COMPLETED)
+    .bind(STATUS_CANCELED)
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
+/// A planning or summary result is stale when the project already carries
+/// active tasks, for example after tasks were added by hand while the job was
+/// in flight. The project returns to the executing stage and the stale result
+/// only remains in the audit log.
+async fn apply_stale_result(
+    state: &AppState,
+    project: &ProjectRow,
+    kind: &str,
+    message: String,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
+         ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
+         report = NULL, report_feedback = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(STAGE_EXECUTING)
+    .bind(STATUS_RUNNING)
+    .bind(now())
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        kind,
+        message,
+    )
+    .await;
+    Ok(())
+}
+
+pub(crate) async fn insert_message(
     pool: &SqlitePool,
     project_id: &str,
     role: &str,

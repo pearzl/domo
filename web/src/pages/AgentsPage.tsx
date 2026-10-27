@@ -6,11 +6,13 @@ import type {
   AgentInput,
   AgentKind,
   AgentUsageLimit,
+  DefaultTeamPool,
   Role,
   UsageMetric,
   UsageWindowKind,
 } from "../types";
 import { api, errorMessage } from "../api";
+import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { Badge, ErrorBox, FAILURE_KIND_LABELS, formatTime } from "../ui";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
@@ -42,7 +44,6 @@ interface FormState {
   kind: AgentKind;
   model: string;
   roles: Role[];
-  priority: string;
   maxConcurrency: string;
   enabled: boolean;
   command: string;
@@ -69,7 +70,6 @@ function emptyForm(): FormState {
     kind: "opencode",
     model: "",
     roles: [...ALL_ROLES],
-    priority: "0",
     maxConcurrency: "2",
     enabled: true,
     command: "",
@@ -85,6 +85,7 @@ function emptyForm(): FormState {
 
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [team, setTeam] = useState<DefaultTeamPool | null>(null);
   const [error, setError] = useState("");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editing, setEditing] = useState<Agent | null>(null);
@@ -94,7 +95,12 @@ export function AgentsPage() {
 
   async function refresh() {
     try {
-      setAgents(await api.listAgents());
+      const [agentList, defaultTeam] = await Promise.all([
+        api.listAgents(),
+        api.getDefaultTeam(),
+      ]);
+      setAgents(agentList);
+      setTeam(defaultTeam);
       setError("");
     } catch (err) {
       setError(errorMessage(err));
@@ -128,7 +134,6 @@ export function AgentsPage() {
       kind: agent.kind,
       model: agent.model,
       roles: agent.roles,
-      priority: String(agent.priority),
       maxConcurrency: String(agent.max_concurrency),
       enabled: agent.enabled,
       command: agent.command.length ? JSON.stringify(agent.command) : "",
@@ -155,7 +160,6 @@ export function AgentsPage() {
         kind: form.kind,
         model: form.model.trim(),
         roles: form.roles,
-        priority: Number(form.priority) || 0,
         max_concurrency: Number(form.maxConcurrency) || 1,
         enabled: form.enabled,
         command: parseJsonArray(form.command),
@@ -223,7 +227,7 @@ export function AgentsPage() {
         <div>
           <h1>Agent 团队</h1>
           <p className="subtitle">
-            同一 Agent 可以扮演多个角色。按优先级从小到大选择，数字越小越优先。
+            同一 Agent 可以扮演多个角色。默认团队决定新项目的初始 Agent 池；
             可用时段按本地时区生效，用量限额达到后自动跳过，新窗口开始后自动恢复。
           </p>
         </div>
@@ -233,6 +237,26 @@ export function AgentsPage() {
       </header>
 
       {error ? <ErrorBox message={error} /> : null}
+
+      {team ? (
+        <AgentPoolPanel
+          title="默认团队"
+          subtitle="系统级团队模板：每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
+          roles={team.roles}
+          onMove={(role, agentId, direction) =>
+            api.updateDefaultTeamAgent(role, agentId, { direction })
+          }
+          onToggle={(role, agentId, enabled) =>
+            api.updateDefaultTeamAgent(role, agentId, { enabled })
+          }
+          onRemove={(role, agentId) => api.deleteDefaultTeamAgent(role, agentId)}
+          onAdd={(role, agentId) => api.addDefaultTeamAgent(role, agentId)}
+          onRefresh={() => refresh()}
+          addCandidates={(role) =>
+            agents.filter((agent) => agent.roles.includes(role))
+          }
+        />
+      ) : null}
 
       {showForm ? (
         <form className="panel form" onSubmit={handleSubmit}>
@@ -264,14 +288,6 @@ export function AgentsPage() {
                 value={form.model}
                 onChange={(event) => setForm({ ...form, model: event.target.value })}
                 placeholder="例如 opencode-go/deepseek-v4-pro"
-              />
-            </label>
-            <label>
-              <span>优先级</span>
-              <input
-                type="number"
-                value={form.priority}
-                onChange={(event) => setForm({ ...form, priority: event.target.value })}
               />
             </label>
             <label>
@@ -480,7 +496,6 @@ export function AgentsPage() {
                   <Badge tone={agent.enabled ? "success" : "muted"}>
                     {agent.enabled ? "已启用" : "已禁用"}
                   </Badge>
-                  <Badge tone="muted">优先级 {agent.priority}</Badge>
                   <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
                   {agent.usage_window?.exceeded ? (
                     <Badge tone="danger">用量限额已触发</Badge>

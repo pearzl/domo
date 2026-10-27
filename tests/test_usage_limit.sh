@@ -188,7 +188,6 @@ high = call(
         "name": "Usage High",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 2,
     },
 )
@@ -199,10 +198,13 @@ low = call(
         "name": "Usage Low",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 1,
         "max_concurrency": 2,
     },
 )
+# 新建项目的项目池继承默认团队，把测试 Agent 按原优先级顺序加入默认团队。
+for role in ("planner", "executor", "verifier"):
+    for agent in (high, low):
+        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 
 # 限额配置同时让 Agent 暴露当前窗口用量。
 high_limit = {"enabled": True, "metric": "tokens", "window": "day", "limit": 1000000}
@@ -397,7 +399,6 @@ slot_agent = call(
         "name": "Slot Agent",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
-        "priority": 0,
         "max_concurrency": 2,
         "availability": {
             "enabled": True,
@@ -405,6 +406,8 @@ slot_agent = call(
         },
     },
 )
+for role in ("planner", "executor", "verifier"):
+    call("POST", "/api/team/default", {"role": role, "agent_id": slot_agent["id"]})
 
 p5 = create_project("UsageSchedule", "[single] 可用时段保护")
 call("POST", f"/api/projects/{p5}/confirm", {})

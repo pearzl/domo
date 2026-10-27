@@ -30,7 +30,15 @@ pub const STATUS_CANCELED: &str = "canceled";
 pub const REPLAN_SOURCE_HUMAN: &str = "human";
 pub const REPLAN_SOURCE_EXECUTOR: &str = "executor";
 
+/// 项目报告评议中，人工提交的意见以该角色持久化到 messages，
+/// 供多轮重写时进入总结作业的提示词，并作为回溯审计记录。
+pub const REPORT_MESSAGE_ROLE: &str = "review";
+
 pub const HUMAN_GATE_MILESTONE: &str = "milestone";
+pub const HUMAN_GATE_MILESTONE_REPLANNING: &str = "milestone_replanning";
+
+pub const MILESTONE_DISPOSITION_RETRY: &str = "retry";
+pub const MILESTONE_DISPOSITION_REPLAN: &str = "replan";
 
 pub const ARBITRATION_RETRY: &str = "retry";
 pub const ARBITRATION_SWITCH_AGENT: &str = "switch_agent";
@@ -63,7 +71,8 @@ pub struct AgentRow {
     pub kind: String,
     pub model: String,
     pub roles: String,
-    pub priority: i64,
+    #[allow(dead_code)]
+    priority: i64,
     pub max_concurrency: i64,
     pub enabled: i64,
     pub command_json: Option<String>,
@@ -86,7 +95,6 @@ pub struct AgentView {
     pub kind: String,
     pub model: String,
     pub roles: Vec<String>,
-    pub priority: i64,
     pub max_concurrency: i64,
     pub enabled: bool,
     pub command: Vec<String>,
@@ -110,7 +118,6 @@ impl AgentView {
             kind: row.kind,
             model: row.model,
             roles: parse_string_list(&row.roles),
-            priority: row.priority,
             max_concurrency: row.max_concurrency.max(1),
             enabled: row.enabled != 0,
             command: row
@@ -181,6 +188,33 @@ pub struct ProjectRolePool {
 pub struct ProjectAgentPool {
     pub project_id: String,
     pub roles: Vec<ProjectRolePool>,
+}
+
+/// 默认团队是系统级模板：新建项目的项目 Agent 池按它快照初始化。
+/// 视图复用 ProjectAgentPool 的形态（project_id 固定为 "default"）。
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct DefaultTeamRow {
+    pub role: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub priority: i64,
+    pub enabled: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn default_team_row_to_pool(row: DefaultTeamRow) -> ProjectAgentRow {
+    ProjectAgentRow {
+        project_id: "default".to_string(),
+        role: row.role,
+        agent_id: row.agent_id,
+        agent_name: row.agent_name,
+        priority: row.priority,
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -459,6 +493,19 @@ pub struct ConfirmGoalRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub deps: Vec<String>,
+    #[serde(default)]
+    pub milestone: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TaskGuidanceRequest {
     #[serde(alias = "message", alias = "content", alias = "text")]
     pub guidance: Option<String>,
@@ -488,6 +535,13 @@ pub struct MilestoneRejectRequest {
     #[serde(alias = "feedback", alias = "comment", alias = "message")]
     pub reason: String,
     pub guidance: Option<String>,
+    #[serde(
+        alias = "option",
+        alias = "disposition",
+        alias = "decision",
+        alias = "mode"
+    )]
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -501,6 +555,7 @@ pub struct ArbitrationRequest {
 #[derive(Debug, Deserialize)]
 pub struct ReportRequest {
     pub action: String,
+    #[serde(alias = "message", alias = "comment", alias = "text")]
     pub feedback: Option<String>,
 }
 
@@ -510,7 +565,6 @@ pub struct CreateAgentRequest {
     pub kind: String,
     pub model: Option<String>,
     pub roles: Option<Vec<String>>,
-    pub priority: Option<i64>,
     pub max_concurrency: Option<i64>,
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
@@ -525,7 +579,6 @@ pub struct UpdateAgentRequest {
     pub kind: Option<String>,
     pub model: Option<String>,
     pub roles: Option<Vec<String>>,
-    pub priority: Option<i64>,
     pub max_concurrency: Option<i64>,
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
