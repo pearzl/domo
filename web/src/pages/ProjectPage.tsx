@@ -14,6 +14,7 @@ import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { JobDetailView } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
 import { RichContent } from "../components/RichContent";
+import { TaskDag } from "../components/TaskDag";
 import {
   Badge,
   Empty,
@@ -54,6 +55,8 @@ export function ProjectPage({
   const [taskAcceptance, setTaskAcceptance] = useState("");
   const [taskDeps, setTaskDeps] = useState<string[]>([]);
   const [taskMilestone, setTaskMilestone] = useState(false);
+  /// 任务面板视图只在页面内保持，不写入任务数据。
+  const [taskView, setTaskView] = useState<"list" | "dag">("list");
 
   async function refresh(silent = false) {
     try {
@@ -558,15 +561,37 @@ export function ProjectPage({
       <section className="panel">
         <div className="panel-head">
           <h2>{directMode ? "直接完成" : "任务"}</h2>
-          {!archived && !directMode && goal_proposal?.kind !== "direct" ? (
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => setAddTaskOpen((value) => !value)}
-            >
-              {addTaskOpen ? "取消添加" : "添加任务"}
-            </button>
-          ) : null}
+          <div className="task-panel-actions">
+            {!directMode ? (
+              <div className="view-toggle" role="group" aria-label="任务视图">
+                <button
+                  type="button"
+                  className={taskView === "list" ? "active" : undefined}
+                  aria-pressed={taskView === "list"}
+                  onClick={() => setTaskView("list")}
+                >
+                  列表
+                </button>
+                <button
+                  type="button"
+                  className={taskView === "dag" ? "active" : undefined}
+                  aria-pressed={taskView === "dag"}
+                  onClick={() => setTaskView("dag")}
+                >
+                  DAG
+                </button>
+              </div>
+            ) : null}
+            {!archived && !directMode && goal_proposal?.kind !== "direct" ? (
+              <button
+                className="secondary"
+                disabled={busy}
+                onClick={() => setAddTaskOpen((value) => !value)}
+              >
+                {addTaskOpen ? "取消添加" : "添加任务"}
+              </button>
+            ) : null}
+          </div>
         </div>
         {directMode ? (
           <div className="direct-mode">
@@ -687,6 +712,12 @@ export function ProjectPage({
         ) : null}
         {directMode ? null : tasks.length === 0 ? (
           <Empty title="还没有任务" hint="确认目标后，规划者会输出带依赖关系的任务列表。" />
+        ) : taskView === "dag" ? (
+          <TaskDag
+            tasks={tasks}
+            selectedTaskId={selectedTaskId}
+            onSelect={setSelectedTaskId}
+          />
         ) : (
           <div className="task-list">
             {tasks.map((task) => {
@@ -771,7 +802,7 @@ export function ProjectPage({
             })}
           </div>
         )}
-        {!directMode && tasks.length > 0 ? (
+        {!directMode && tasks.length > 0 && taskView === "list" ? (
           <div className="legend muted">
             阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。
           </div>

@@ -263,6 +263,7 @@ pre {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
 }
 
@@ -906,6 +907,213 @@ small {
 .legend {
   margin-top: 10px;
   font-size: 0.8rem;
+}
+
+.task-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  overflow: hidden;
+  background: white;
+}
+
+.view-toggle button {
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  background: white;
+  color: var(--muted);
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.view-toggle button:last-child {
+  border-right: 0;
+}
+
+.view-toggle button:hover:not(.active) {
+  background: #f2f5fa;
+  color: var(--text);
+}
+
+.view-toggle button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.dag-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dag-note {
+  font-size: 0.8rem;
+}
+
+.dag-scroll {
+  max-width: 100%;
+  max-height: 600px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(28, 36, 48, 0.06) 1px, transparent 0)
+      0 0 / 18px 18px,
+    #fbfcfe;
+}
+
+.dag-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.dag-canvas {
+  position: relative;
+}
+
+.dag-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.dag-edge {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.dag-edge-dependency {
+  stroke: #9aa7b8;
+}
+
+.dag-edge-derived {
+  stroke: #b07a2a;
+  stroke-dasharray: 6 5;
+  opacity: 0.85;
+}
+
+.dag-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: white;
+  box-shadow: 0 1px 2px rgba(18, 32, 56, 0.05);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dag-node:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+}
+
+.dag-node.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dag-node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dag-node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dag-node-key {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.dag-node-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dag-node-flags .badge,
+.dag-node-meta .badge {
+  padding: 1px 7px;
+  font-size: 0.68rem;
+}
+
+.dag-node-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.dag-node-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.dag-node-deps {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.dag-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  font-size: 0.78rem;
+}
+
+.dag-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dag-legend-line {
+  display: inline-block;
+  width: 26px;
+  height: 0;
+  border-top: 2px solid #9aa7b8;
+}
+
+.dag-legend-derived {
+  border-top-color: #b07a2a;
+  border-top-style: dashed;
 }
 
 .agent-pool-role {
