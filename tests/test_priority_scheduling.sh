@@ -349,7 +349,7 @@ assert any(
     for job in busy["jobs"]
 ), busy["jobs"]
 
-# 3. 项目池全部不可用时，阻塞原因逐个列出 Agent。
+# 3. 任务 Agent 池全部不可用时，阻塞原因逐个列出 Agent。
 blocked_id = create_project("PriorityBlocked", "全部执行 Agent 不可用")
 for agent in (high, flaky, low):
     call(
@@ -362,13 +362,13 @@ blocked = wait_for(
     blocked_id,
     lambda detail: detail["project"]["blocked_reason"]
     and all(name in detail["project"]["blocked_reason"] for name in ("Priority High", "Priority Flaky", "Priority Low"))
-    and "项目池中已禁用" in detail["project"]["blocked_reason"],
+    and "任务 Agent 池中已禁用" in detail["project"]["blocked_reason"],
     "全部 Agent 不可用的阻塞原因",
     30,
 )
 reason = blocked["project"]["blocked_reason"]
 for name in ("Priority High", "Priority Flaky", "Priority Low"):
-    assert f"「{name}」（项目池中已禁用）" in reason, reason
+    assert f"「{name}」（任务 Agent 池中已禁用）" in reason, reason
 assert task_by_key(blocked, "T1")["status"] == "queued", task_by_key(blocked, "T1")
 
 # 4. 失败换人后一次性跳过失败 Agent，派发成功后恢复高优先级选择。

@@ -1207,18 +1207,6 @@ small {
   font-size: 0.78rem;
 }
 
-.task-agent-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.task-agent-grid label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
 .jobs {
   display: flex;
   flex-direction: column;

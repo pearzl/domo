@@ -737,14 +737,6 @@ pub enum AgentGate {
     Limit(String),
 }
 
-impl AgentGate {
-    pub fn reason(&self) -> &str {
-        match self {
-            Self::Schedule(reason) | Self::Limit(reason) => reason,
-        }
-    }
-}
-
 /// Evaluates the availability plan before the concurrency and priority rules.
 pub async fn agent_gate(
     pool: &SqlitePool,

@@ -13,6 +13,7 @@ import type {
   ProjectSummary,
   Role,
   Task,
+  TaskAgentPool,
   UsageReport,
 } from "./types";
 
@@ -88,15 +89,34 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
-  setTaskAgents: (
+  getTaskAgentPool: (projectId: string, taskId: string) =>
+    request<TaskAgentPool>(`/api/projects/${projectId}/tasks/${taskId}/agents`),
+  addTaskAgent: (projectId: string, taskId: string, role: Role, agentId: string) =>
+    request<TaskAgentPool>(`/api/projects/${projectId}/tasks/${taskId}/agents`, {
+      method: "POST",
+      body: JSON.stringify({ role, agent_id: agentId }),
+    }),
+  updateTaskAgent: (
     projectId: string,
     taskId: string,
-    input: { executor_agent_id?: string | null; verifier_agent_id?: string | null },
+    role: Role,
+    agentId: string,
+    input: { enabled?: boolean; direction?: "up" | "down"; position?: number },
   ) =>
-    request<Task>(`/api/projects/${projectId}/tasks/${taskId}/agents`, {
-      method: "PATCH",
-      body: JSON.stringify(input),
-    }),
+    request<TaskAgentPool>(
+      `/api/projects/${projectId}/tasks/${taskId}/agents/${role}/${agentId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      },
+    ),
+  removeTaskAgent: (projectId: string, taskId: string, role: Role, agentId: string) =>
+    request<TaskAgentPool>(
+      `/api/projects/${projectId}/tasks/${taskId}/agents/${role}/${agentId}`,
+      {
+        method: "DELETE",
+      },
+    ),
   postGoalMessage: (
     id: string,
     message: string,

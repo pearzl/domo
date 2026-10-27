@@ -1029,7 +1029,7 @@ async fn handle_goal_plan(
     tasks: &[domain::NormalizedTask],
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
          AND COALESCE(status, '') != ?",
@@ -1084,6 +1084,7 @@ async fn handle_goal_plan(
         .bind(&timestamp)
         .execute(&mut *tx)
         .await?;
+        crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
     }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
@@ -1524,7 +1525,7 @@ async fn handle_executor_derive(
     }
     let pause = task_pause_intent(state, &parent.id).await?;
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let active_keys: Vec<String> = sqlx::query_scalar(
         "SELECT key FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ?",
     )
@@ -1571,6 +1572,7 @@ async fn handle_executor_derive(
         .bind(&timestamp)
         .execute(&mut *tx)
         .await?;
+        crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
         child_keys.push(child.key.clone());
     }
     let mut deps = parse_json_list(&parent.deps);

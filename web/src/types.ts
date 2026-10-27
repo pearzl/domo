@@ -126,6 +126,13 @@ export interface ProjectAgentPool {
   roles: ProjectRolePool[];
 }
 
+/** 任务专用 Agent 池：roles 与 ProjectAgentPool 相同形态，只有执行者与验收者。 */
+export interface TaskAgentPool {
+  project_id: string;
+  task_id: string;
+  roles: ProjectRolePool[];
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
-  ProjectAgentPool,
+  Agent,
   ProjectDetail,
   ProjectUsage,
   Role,
   Task,
+  TaskAgentPool,
   UsageGroup,
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
@@ -1262,9 +1263,9 @@ function TaskDrawer({
             {task.milestone ? "取消里程碑" : "标记为里程碑"}
           </button>
         </div>
-        <TaskAgentOverridePanel
+        <TaskAgentPoolPanel
           task={task}
-          pool={detail.agent_pool}
+          detail={detail}
           onRefresh={onRefresh}
           disabled={archived || task.stage === "completed" || task.status === "canceled"}
         />
@@ -1453,116 +1454,91 @@ function TaskDrawer({
   );
 }
 
-function TaskAgentOverridePanel({
+/** 任务 Agent 池：从项目池对应角色派生，复用项目池的 AgentPoolPanel 交互。 */
+function TaskAgentPoolPanel({
   task,
-  pool,
+  detail,
   onRefresh,
   disabled,
 }: {
   task: Task;
-  pool: ProjectAgentPool;
+  detail: ProjectDetail;
   onRefresh: () => Promise<void>;
   disabled: boolean;
 }) {
-  const [executor, setExecutor] = useState(task.executor_agent_id ?? "");
-  const [verifier, setVerifier] = useState(task.verifier_agent_id ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [pool, setPool] = useState<TaskAgentPool | null>(null);
+  const [loadError, setLoadError] = useState("");
 
-  useEffect(() => {
-    setExecutor(task.executor_agent_id ?? "");
-    setVerifier(task.verifier_agent_id ?? "");
-  }, [task.id, task.executor_agent_id, task.verifier_agent_id]);
-
-  const dirty =
-    executor !== (task.executor_agent_id ?? "") ||
-    verifier !== (task.verifier_agent_id ?? "");
-
-  async function save(nextExecutor: string, nextVerifier: string) {
-    setBusy(true);
-    setError("");
+  async function refreshPool() {
     try {
-      await api.setTaskAgents(task.project_id, task.id, {
-        executor_agent_id: nextExecutor || null,
-        verifier_agent_id: nextVerifier || null,
-      });
-      await onRefresh();
+      const next = await api.getTaskAgentPool(task.project_id, task.id);
+      setPool(next);
+      setLoadError("");
     } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
+      setLoadError(errorMessage(err));
     }
   }
 
-  const options = (role: Role) =>
-    pool.roles.find((group) => group.role === role)?.entries ?? [];
+  useEffect(() => {
+    setPool(null);
+    void refreshPool();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id, task.project_id]);
 
+  // 加入候选只来自项目池中具备该角色、全局仍存在且尚未出现在任务池里的 Agent。
+  const candidates = (role: Role): Agent[] =>
+    (detail.agent_pool.roles.find((group) => group.role === role)?.entries ?? [])
+      .filter((entry) => entry.kind !== "missing")
+      .map((entry) => ({
+        id: entry.agent_id,
+        name: entry.name,
+        kind: entry.kind === "missing" ? "mock" : entry.kind,
+        model: entry.model,
+        roles: [role],
+        max_concurrency: entry.max_concurrency,
+        enabled: entry.enabled,
+        command: [],
+        model_args: [],
+        cooldown_until: entry.cooldown_until,
+        last_error: entry.last_error,
+        failure_kind: entry.failure_kind,
+        transient_failures: entry.transient_failures,
+        availability: entry.availability,
+        usage_limit: entry.usage_limit,
+        usage_window: entry.usage_window,
+        created_at: "",
+        updated_at: "",
+      }));
+
+  if (!pool) {
+    if (!loadError) return null;
+    return <div className="error-box">{loadError}</div>;
+  }
   return (
-    <section>
-      <h3>任务 Agent 覆盖</h3>
-      <p className="muted">
-        指定后优先于项目 Agent 池；模型跟随所选 Agent。留空表示跟随项目池。
-      </p>
-      <div className="task-agent-grid">
-        <label>
-          <span>执行 Agent</span>
-          <select
-            value={executor}
-            disabled={disabled || busy}
-            onChange={(event) => setExecutor(event.target.value)}
-          >
-            <option value="">跟随项目池</option>
-            {options("executor").map((entry) => (
-              <option key={entry.agent_id} value={entry.agent_id} disabled={!entry.available}>
-                {entry.name}
-                {entry.available ? "" : "（不可用）"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>验收 Agent</span>
-          <select
-            value={verifier}
-            disabled={disabled || busy}
-            onChange={(event) => setVerifier(event.target.value)}
-          >
-            <option value="">跟随项目池</option>
-            {options("verifier").map((entry) => (
-              <option key={entry.agent_id} value={entry.agent_id} disabled={!entry.available}>
-                {entry.name}
-                {entry.available ? "" : "（不可用）"}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="button-row">
-        <button
-          className="primary"
-          disabled={disabled || busy || !dirty}
-          onClick={() => void save(executor, verifier)}
-        >
-          保存 Agent 覆盖
-        </button>
-        <button
-          className="secondary"
-          disabled={
-            disabled ||
-            busy ||
-            (!task.executor_agent_id && !task.verifier_agent_id)
-          }
-          onClick={() => {
-            setExecutor("");
-            setVerifier("");
-            void save("", "");
-          }}
-        >
-          清除覆盖
-        </button>
-      </div>
-      {error ? <div className="error-box">{error}</div> : null}
-    </section>
+    <AgentPoolPanel
+      title="任务 Agent 池"
+      subtitle="从项目 Agent 池对应角色快照初始化，只作用于本任务。顺序越靠前优先级越高，按严格优先级派发，池不可用时不回退项目池。"
+      roles={pool.roles}
+      disabled={disabled}
+      addCandidates={candidates}
+      onReorder={(role, agentId, position) =>
+        api.updateTaskAgent(task.project_id, task.id, role, agentId, { position })
+      }
+      onMove={(role, agentId, direction) =>
+        api.updateTaskAgent(task.project_id, task.id, role, agentId, { direction })
+      }
+      onToggle={(role, agentId, enabled) =>
+        api.updateTaskAgent(task.project_id, task.id, role, agentId, { enabled })
+      }
+      onAdd={(role, agentId) => api.addTaskAgent(task.project_id, task.id, role, agentId)}
+      onRemove={(role, agentId) =>
+        api.removeTaskAgent(task.project_id, task.id, role, agentId)
+      }
+      onRefresh={async () => {
+        await refreshPool();
+        await onRefresh();
+      }}
+    />
   );
 }
 

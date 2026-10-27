@@ -119,7 +119,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/projects/{id}/tasks/{task_id}/agents",
-            patch(set_task_agents),
+            get(get_task_agent_pool)
+                .post(add_task_agent)
+                .patch(set_task_agents),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/agents/{role}/{agent_id}",
+            patch(update_task_agent).delete(delete_task_agent),
         )
         .route("/api/projects/{id}/tasks/{task_id}/pause", post(pause_task))
         .route(
@@ -1049,6 +1055,356 @@ async fn move_project_agent_to(
     Ok(())
 }
 
+/// 任务池只允许执行者与验收者两个角色；规划者始终使用项目池。
+fn validate_task_pool_role(role: &str) -> Result<String, ApiError> {
+    match role {
+        ROLE_EXECUTOR | ROLE_VERIFIER => Ok(role.to_string()),
+        ROLE_PLANNER => Err(ApiError::bad("任务 Agent 池只有执行者与验收者两个角色")),
+        other => Err(ApiError::bad(format!("未知角色: {other}"))),
+    }
+}
+
+fn ensure_task_pool_mutable(task: &TaskRow) -> Result<(), ApiError> {
+    if task.stage == TASK_STAGE_COMPLETED {
+        return Err(ApiError::bad("任务已完成，任务 Agent 池只读"));
+    }
+    if task.status.as_deref() == Some(STATUS_CANCELED) {
+        return Err(ApiError::bad("任务已取消，任务 Agent 池只读"));
+    }
+    Ok(())
+}
+
+async fn get_task_agent_pool(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<Json<TaskAgentPool>, ApiError> {
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
+    Ok(Json(pool))
+}
+
+async fn add_task_agent(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(request): Json<AddProjectAgentRequest>,
+) -> Result<Json<TaskAgentPool>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档，任务 Agent 池只读"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    ensure_task_pool_mutable(&task)?;
+    let role = validate_task_pool_role(request.role.trim())?;
+    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
+        return Err(ApiError::not_found("Agent 不存在"));
+    };
+    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
+        return Err(ApiError::bad(format!(
+            "Agent {} 不能承担{}角色",
+            agent.name,
+            role_label(&role)
+        )));
+    }
+    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
+    // 加入候选只允许项目池中具备该角色且尚未在任务池中的 Agent。
+    let in_project: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&project_id)
+    .bind(&role)
+    .bind(&agent.id)
+    .fetch_one(&state.db)
+    .await?;
+    if in_project == 0 {
+        return Err(ApiError::bad("Agent 不在项目 Agent 池的该角色中"));
+    }
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&task.id)
+    .bind(&role)
+    .bind(&agent.id)
+    .fetch_one(&state.db)
+    .await?;
+    if exists > 0 {
+        return Err(ApiError::bad("Agent 已在任务池中"));
+    }
+    let priority: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(priority), -1) + 1 FROM task_agents WHERE task_id = ? AND role = ?",
+    )
+    .bind(&task.id)
+    .bind(&role)
+    .fetch_one(&state.db)
+    .await?;
+    let timestamp = now();
+    sqlx::query(
+        "INSERT INTO task_agents \
+         (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+    )
+    .bind(&task.id)
+    .bind(&role)
+    .bind(&agent.id)
+    .bind(&agent.name)
+    .bind(priority)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_agents_updated",
+        format!(
+            "任务 {} 加入{} Agent {}",
+            task.key,
+            role_label(&role),
+            agent.name
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
+    Ok(Json(pool))
+}
+
+async fn update_task_agent(
+    State(state): State<AppState>,
+    Path((project_id, task_id, role, agent_id)): Path<(String, String, String, String)>,
+    Json(request): Json<ProjectAgentUpdateRequest>,
+) -> Result<Json<TaskAgentPool>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档，任务 Agent 池只读"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    ensure_task_pool_mutable(&task)?;
+    let role = validate_task_pool_role(role.trim())?;
+    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
+    let current = sqlx::query_as::<_, TaskAgentRow>(
+        "SELECT * FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&task.id)
+    .bind(&role)
+    .bind(&agent_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let current = match current {
+        Some(row) => row,
+        // position 调整要求条目必须在该角色下，此时按参数错误处理。
+        None if request.position.is_some() => {
+            return Err(ApiError::bad("任务 Agent 池中没有该 Agent"))
+        }
+        None => return Err(ApiError::not_found("任务 Agent 池中没有该 Agent")),
+    };
+    if let Some(position) = request.position {
+        move_task_agent_to(&state, &task.id, &role, &current.agent_id, position).await?;
+    }
+    if let Some(direction) = request.direction.as_deref().map(str::trim) {
+        if !matches!(direction, "up" | "down") {
+            return Err(ApiError::bad("direction 必须是 up 或 down"));
+        }
+        let target = if direction == "up" {
+            sqlx::query_as::<_, TaskAgentRow>(
+                "SELECT * FROM task_agents WHERE task_id = ? AND role = ? \
+                 AND priority < ? ORDER BY priority DESC LIMIT 1",
+            )
+            .bind(&task.id)
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        } else {
+            sqlx::query_as::<_, TaskAgentRow>(
+                "SELECT * FROM task_agents WHERE task_id = ? AND role = ? \
+                 AND priority > ? ORDER BY priority ASC LIMIT 1",
+            )
+            .bind(&task.id)
+            .bind(&role)
+            .bind(current.priority)
+            .fetch_optional(&state.db)
+            .await?
+        };
+        if let Some(target) = target {
+            let timestamp = now();
+            let mut tx = state.db.begin().await?;
+            sqlx::query(
+                "UPDATE task_agents SET priority = ?, updated_at = ? \
+                 WHERE task_id = ? AND role = ? AND agent_id = ?",
+            )
+            .bind(target.priority)
+            .bind(&timestamp)
+            .bind(&task.id)
+            .bind(&role)
+            .bind(&current.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE task_agents SET priority = ?, updated_at = ? \
+                 WHERE task_id = ? AND role = ? AND agent_id = ?",
+            )
+            .bind(current.priority)
+            .bind(&timestamp)
+            .bind(&task.id)
+            .bind(&role)
+            .bind(&target.agent_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+    }
+    if let Some(enabled) = request.enabled {
+        sqlx::query(
+            "UPDATE task_agents SET enabled = ?, updated_at = ? \
+             WHERE task_id = ? AND role = ? AND agent_id = ?",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(now())
+        .bind(&task.id)
+        .bind(&role)
+        .bind(&current.agent_id)
+        .execute(&state.db)
+        .await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_agents_updated",
+        format!(
+            "任务 {} 更新{}角色配置（{}）",
+            task.key,
+            role_label(&role),
+            current.agent_id
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
+    Ok(Json(pool))
+}
+
+async fn delete_task_agent(
+    State(state): State<AppState>,
+    Path((project_id, task_id, role, agent_id)): Path<(String, String, String, String)>,
+) -> Result<Json<TaskAgentPool>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &project_id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档，任务 Agent 池只读"));
+    }
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    ensure_task_pool_mutable(&task)?;
+    let role = validate_task_pool_role(role.trim())?;
+    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
+    let result =
+        sqlx::query("DELETE FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?")
+            .bind(&task.id)
+            .bind(&role)
+            .bind(&agent_id)
+            .execute(&state.db)
+            .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("任务 Agent 池中没有该 Agent"));
+    }
+    renumber_task_agent_role(&state, &task.id, &role).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project_id),
+        Some(&task.id),
+        "task_agents_updated",
+        format!(
+            "任务 {} 移除{} Agent {}",
+            task.key,
+            role_label(&role),
+            agent_id
+        ),
+    )
+    .await;
+    state.notify_scheduler();
+    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
+    Ok(Json(pool))
+}
+
+/// 把任务池角色内指定 Agent 移动到 0 基目标位置，并在事务内把该角色优先级
+/// 重排为 0..n-1，其他角色不受影响。
+async fn move_task_agent_to(
+    state: &AppState,
+    task_id: &str,
+    role: &str,
+    agent_id: &str,
+    position: i64,
+) -> Result<(), ApiError> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_id FROM task_agents WHERE task_id = ? AND role = ? \
+         ORDER BY priority ASC, agent_id ASC",
+    )
+    .bind(task_id)
+    .bind(role)
+    .fetch_all(&state.db)
+    .await?;
+    let reordered = plan_role_reorder(members, "任务 Agent 池", agent_id, position)?;
+    let timestamp = now();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    for (priority, id) in reordered.iter().enumerate() {
+        sqlx::query(
+            "UPDATE task_agents SET priority = ?, updated_at = ? \
+             WHERE task_id = ? AND role = ? AND agent_id = ?",
+        )
+        .bind(priority as i64)
+        .bind(&timestamp)
+        .bind(task_id)
+        .bind(role)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 删除任务池条目后把该角色的优先级重排为 0..n-1，保持编号连续。
+async fn renumber_task_agent_role(
+    state: &AppState,
+    task_id: &str,
+    role: &str,
+) -> Result<(), ApiError> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_id FROM task_agents WHERE task_id = ? AND role = ? \
+         ORDER BY priority ASC, agent_id ASC",
+    )
+    .bind(task_id)
+    .bind(role)
+    .fetch_all(&state.db)
+    .await?;
+    let timestamp = now();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    for (priority, (agent_id,)) in members.iter().enumerate() {
+        sqlx::query(
+            "UPDATE task_agents SET priority = ?, updated_at = ? \
+             WHERE task_id = ? AND role = ? AND agent_id = ?",
+        )
+        .bind(priority as i64)
+        .bind(&timestamp)
+        .bind(task_id)
+        .bind(role)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 旧的任务 Agent 覆盖接口，作为兼容入口保留：指定 Agent 映射为“只含该
+/// Agent 的单 Agent 池”，清除覆盖映射为“重置为项目池快照”。旧字段只是
+/// 只读兼容展示，调度只看任务池。
 async fn set_task_agents(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
@@ -1060,51 +1416,80 @@ async fn set_task_agents(
         return Err(ApiError::bad("项目已归档"));
     }
     let task = load_project_task(&state, &project_id, &task_id).await?;
-    let mut executor = task.executor_agent_id.clone();
-    let mut verifier = task.verifier_agent_id.clone();
+    // 兼容入口同样先完成两角色的懒初始化，避免只写入一个角色。
+    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
+    let mut changes: Vec<(&str, &str)> = Vec::new();
     if let Some(value) = &request.executor_agent_id {
-        executor = resolve_task_agent(&state, value, ROLE_EXECUTOR).await?;
+        changes.push((ROLE_EXECUTOR, value.as_deref().unwrap_or("")));
     }
     if let Some(value) = &request.verifier_agent_id {
-        verifier = resolve_task_agent(&state, value, ROLE_VERIFIER).await?;
+        changes.push((ROLE_VERIFIER, value.as_deref().unwrap_or("")));
     }
-    sqlx::query(
-        "UPDATE tasks SET executor_agent_id = ?, verifier_agent_id = ?, updated_at = ? \
-         WHERE id = ?",
-    )
-    .bind(&executor)
-    .bind(&verifier)
-    .bind(now())
-    .bind(&task.id)
-    .execute(&state.db)
-    .await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&project_id),
-        Some(&task.id),
-        "task_agents_updated",
-        format!(
-            "任务 {} 的 Agent 覆盖已更新（执行：{}，验收：{}）",
-            task.key,
-            executor.as_deref().unwrap_or("跟随项目池"),
-            verifier.as_deref().unwrap_or("跟随项目池")
-        ),
-    )
-    .await;
+    for (role, raw) in &changes {
+        let mut snapshot = String::new();
+        if !raw.is_empty() {
+            snapshot = resolve_task_agent_from_single(&state, raw, role).await?;
+        }
+        if snapshot.is_empty() {
+            crate::db::reset_task_agent_role(&state.db, &project_id, &task.id, role).await?;
+        } else {
+            crate::db::set_single_task_agent(&state.db, &task.id, role, &snapshot).await?;
+        }
+    }
+    if !changes.is_empty() {
+        let executor = if changes.iter().any(|(role, _)| role == &ROLE_EXECUTOR) {
+            request
+                .executor_agent_id
+                .as_ref()
+                .and_then(|value| value.as_ref())
+                .cloned()
+        } else {
+            task.executor_agent_id.clone()
+        };
+        let verifier = if changes.iter().any(|(role, _)| role == &ROLE_VERIFIER) {
+            request
+                .verifier_agent_id
+                .as_ref()
+                .and_then(|value| value.as_ref())
+                .cloned()
+        } else {
+            task.verifier_agent_id.clone()
+        };
+        sqlx::query(
+            "UPDATE tasks SET executor_agent_id = ?, verifier_agent_id = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&executor)
+        .bind(&verifier)
+        .bind(now())
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project_id),
+            Some(&task.id),
+            "task_agents_updated",
+            format!(
+                "任务 {} 的 Agent 覆盖已更新（执行：{}，验收：{}）",
+                task.key,
+                executor.as_deref().unwrap_or("跟随项目池"),
+                verifier.as_deref().unwrap_or("跟随项目池")
+            ),
+        )
+        .await;
+    }
     state.notify_scheduler();
     let row = load_project_task(&state, &project_id, &task.id).await?;
     Ok(Json(TaskView::from_row(row)))
 }
 
-async fn resolve_task_agent(
+async fn resolve_task_agent_from_single(
     state: &AppState,
-    agent_id: &Option<String>,
+    agent_id: &str,
     role: &str,
-) -> Result<Option<String>, ApiError> {
-    let Some(agent_id) = agent_id else {
-        return Ok(None);
-    };
+) -> Result<String, ApiError> {
     let Some(agent) = crate::db::load_agent(&state.db, agent_id).await? else {
         return Err(ApiError::not_found(format!("Agent {agent_id} 不存在")));
     };
@@ -1115,7 +1500,7 @@ async fn resolve_task_agent(
             role_label(role)
         )));
     }
-    Ok(Some(agent.id))
+    Ok(agent.id)
 }
 
 async fn create_task(
@@ -1128,6 +1513,7 @@ async fn create_task(
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档，不能再添加任务"));
     }
+    crate::db::ensure_project_agents(&state.db, &id).await?;
     if !matches!(
         project.stage.as_str(),
         STAGE_GOAL_CONFIRM | STAGE_PLANNING | STAGE_EXECUTING | STAGE_SUMMARIZING | STAGE_COMPLETED
@@ -1160,7 +1546,7 @@ async fn create_task(
         request.deps,
     )
     .map_err(ApiError::bad)?;
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let max_seq: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM tasks WHERE project_id = ?")
             .bind(&id)
@@ -1195,6 +1581,8 @@ async fn create_task(
     .bind(&timestamp)
     .execute(&mut *tx)
     .await?;
+    // 新任务与任务池快照在同一事务里创建；旧字段为空就是纯项目池快照。
+    crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
     // A project in the planning, summarizing, or completed stage moves back to
     // executing so the DAG schedules the added task. A report that would not
     // cover every task is dropped and written again after the new work finishes.

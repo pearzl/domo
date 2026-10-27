@@ -198,6 +198,44 @@ pub struct ProjectAgentPool {
     pub roles: Vec<ProjectRolePool>,
 }
 
+/// 任务专用 Agent 池：由项目 Agent 池对应角色快照派生，按任务独立维护。
+/// 任务只使用执行者与验收者两个角色；规划者始终使用项目池。
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct TaskAgentRow {
+    pub task_id: String,
+    pub role: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub priority: i64,
+    pub enabled: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl TaskAgentRow {
+    pub fn into_project_row(self) -> ProjectAgentRow {
+        ProjectAgentRow {
+            project_id: String::new(),
+            role: self.role,
+            agent_id: self.agent_id,
+            agent_name: self.agent_name,
+            priority: self.priority,
+            enabled: self.enabled,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+/// 任务 Agent 池视图：roles 与 ProjectAgentPool 相同形态，便于前端复用面板。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskAgentPool {
+    pub project_id: String,
+    pub task_id: String,
+    pub roles: Vec<ProjectRolePool>,
+}
+
 /// 默认团队是系统级模板：新建项目的项目 Agent 池按它快照初始化。
 /// 视图复用 ProjectAgentPool 的形态（project_id 固定为 "default"）。
 #[derive(Debug, Clone, sqlx::FromRow)]

@@ -694,78 +694,56 @@ async fn choose_agent(
                 });
             }
         }
-        if let Some(override_id) = task_agent_override(task, role) {
-            let agent = crate::db::load_agent(&state.db, override_id).await?;
-            let has_role = agent
-                .as_ref()
-                .map(|agent| parse_list(&agent.roles).iter().any(|item| item == role))
-                .unwrap_or(false);
-            match agent {
-                Some(agent) if has_role => {
-                    if let Some(gate) = agent_gate(state, &agent).await? {
-                        return Ok(AgentChoice {
-                            agent: None,
-                            reason: Some(format!(
-                                "任务指定的{} Agent {} {}",
-                                role_label(role),
-                                agent.name,
-                                gate.reason()
-                            )),
-                        });
-                    }
-                    let running = running_jobs(state, &agent.id).await?;
-                    if running < agent.max_concurrency.max(1) {
-                        return Ok(AgentChoice {
-                            agent: Some(agent),
-                            reason: None,
-                        });
-                    }
-                    return Ok(AgentChoice {
-                        agent: None,
-                        reason: Some(format!(
-                            "等待任务指定的{} Agent {} 释放（并发 {running}/{}）",
-                            role_label(role),
-                            agent.name,
-                            agent.max_concurrency.max(1)
-                        )),
-                    });
-                }
-                _ => {
-                    clear_task_agent_override(state, task, role).await?;
-                    emit(
-                        &state.db,
-                        &state.bus,
-                        Some(&project.id),
-                        Some(&task.id),
-                        "task_agent_override_cleared",
-                        format!(
-                            "任务 {} 指定的{} Agent 已不可用，恢复项目 Agent 池调度",
-                            task.key,
-                            role_label(role)
-                        ),
-                    )
-                    .await;
-                }
-            }
-        }
     }
 
-    crate::db::ensure_project_agents(&state.db, &project.id).await?;
-    let rows = sqlx::query_as::<_, ProjectAgentRow>(
-        "SELECT * FROM project_agents WHERE project_id = ? AND role = ? \
-         ORDER BY priority ASC, agent_id ASC",
-    )
-    .bind(&project.id)
-    .bind(role)
-    .fetch_all(&state.db)
-    .await?;
+    // 执行者与验收者从任务专用 Agent 池按严格优先级选人：池为空或全不可用
+    // 时只等待，不回退到项目池；调度只读取任务池。规划者使用项目池。
+    let (rows, scope) = if role == ROLE_EXECUTOR || role == ROLE_VERIFIER {
+        let Some(task) = task else {
+            return Ok(AgentChoice {
+                agent: None,
+                reason: Some(format!(
+                    "{}角色只提供给任务使用，缺少任务上下文",
+                    role_label(role)
+                )),
+            });
+        };
+        crate::db::ensure_task_agents(&state.db, &project.id, &task.id).await?;
+        let rows = sqlx::query_as::<_, TaskAgentRow>(
+            "SELECT * FROM task_agents WHERE task_id = ? AND role = ? \
+             ORDER BY priority ASC, agent_id ASC",
+        )
+        .bind(&task.id)
+        .bind(role)
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|row| row.into_project_row())
+        .collect::<Vec<_>>();
+        (rows, "任务 Agent 池")
+    } else {
+        crate::db::ensure_project_agents(&state.db, &project.id).await?;
+        (
+            sqlx::query_as::<_, ProjectAgentRow>(
+                "SELECT * FROM project_agents WHERE project_id = ? AND role = ? \
+                 ORDER BY priority ASC, agent_id ASC",
+            )
+            .bind(&project.id)
+            .bind(role)
+            .fetch_all(&state.db)
+            .await?,
+            "项目 Agent 池",
+        )
+    };
     if rows.is_empty() {
+        let hint = if scope == "任务 Agent 池" {
+            "请在任务抽屉的任务 Agent 池中加入该角色 Agent"
+        } else {
+            "请在项目页配置"
+        };
         return Ok(AgentChoice {
             agent: None,
-            reason: Some(format!(
-                "项目 Agent 池没有{}角色 Agent，请在项目页配置",
-                role_label(role)
-            )),
+            reason: Some(format!("{scope}没有{}角色 Agent，{hint}", role_label(role))),
         });
     }
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
@@ -800,7 +778,7 @@ async fn choose_agent(
             continue;
         }
         if row.enabled == 0 {
-            unavailable.push(format!("「{}」（项目池中已禁用）", agent.name));
+            unavailable.push(format!("「{}」（{}中已禁用）", agent.name, scope));
             continue;
         }
         if agent.enabled == 0 {
@@ -855,7 +833,7 @@ async fn choose_agent(
     Ok(AgentChoice {
         agent: None,
         reason: Some(format!(
-            "项目 Agent 池没有可用的{} Agent（不可用：{}）",
+            "{scope}没有可用的{} Agent（不可用：{}）",
             role_label(role),
             unavailable.join("、")
         )),
@@ -877,30 +855,6 @@ async fn agent_gate(state: &AppState, agent: &AgentRow) -> Result<Option<usage::
         Utc::now(),
     )
     .await
-}
-
-fn task_agent_override<'a>(task: &'a TaskRow, role: &str) -> Option<&'a str> {
-    match role {
-        ROLE_EXECUTOR => task.executor_agent_id.as_deref(),
-        ROLE_VERIFIER => task.verifier_agent_id.as_deref(),
-        _ => None,
-    }
-}
-
-async fn clear_task_agent_override(state: &AppState, task: &TaskRow, role: &str) -> Result<()> {
-    let column = match role {
-        ROLE_EXECUTOR => "executor_agent_id",
-        ROLE_VERIFIER => "verifier_agent_id",
-        _ => return Ok(()),
-    };
-    sqlx::query(&format!(
-        "UPDATE tasks SET {column} = NULL, updated_at = ? WHERE id = ?"
-    ))
-    .bind(now())
-    .bind(&task.id)
-    .execute(&state.db)
-    .await?;
-    Ok(())
 }
 
 async fn running_jobs(state: &AppState, agent_id: &str) -> Result<i64> {
