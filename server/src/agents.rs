@@ -142,6 +142,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
     let context = read_context(&spec.job_dir)?;
+    let streamed = write_mock_stream(spec, &context).await?;
     let result = match spec.role.as_str() {
         JOB_ROLE_CONFIRM => mock_confirm(&context),
         JOB_ROLE_GOAL => mock_plan(&context),
@@ -155,7 +156,11 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
     let path = spec.job_dir.join("result.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&result)?).await?;
     let stdout = format!("mock job {} finished\n", spec.job_id);
-    let _ = tokio::fs::write(spec.job_dir.join("stdout.log"), &stdout).await;
+    if streamed {
+        append_stdout(&spec.job_dir, &stdout).await?;
+    } else {
+        let _ = tokio::fs::write(spec.job_dir.join("stdout.log"), &stdout).await;
+    }
     Ok(AgentRun {
         stdout,
         stderr: String::new(),
@@ -163,6 +168,57 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         timed_out: false,
         stalled: false,
     })
+}
+
+/// Mock streaming is opt-in through `DOMO_MOCK_STREAM=1`, optionally narrowed
+/// by `DOMO_MOCK_STREAM_GOAL`. Each segment is flushed to stdout.log so the
+/// output endpoint can observe growth while the job is still running.
+async fn write_mock_stream(spec: &AgentSpec, context: &serde_json::Value) -> Result<bool> {
+    let enabled = std::env::var("DOMO_MOCK_STREAM")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(false);
+    }
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let matches_goal = std::env::var("DOMO_MOCK_STREAM_GOAL")
+        .ok()
+        .map(|marker| goal.contains(&marker))
+        .unwrap_or(true);
+    if !matches_goal {
+        return Ok(false);
+    }
+    let interval = mock_env_i64("DOMO_MOCK_STREAM_INTERVAL_MS", 250).max(1) as u64;
+    let lines = mock_env_i64("DOMO_MOCK_STREAM_LINES", 8).max(1) as u64;
+    append_stdout(
+        &spec.job_dir,
+        &format!("mock job {} streaming\n", spec.job_id),
+    )
+    .await?;
+    for index in 1..=lines {
+        tokio::time::sleep(Duration::from_millis(interval)).await;
+        append_stdout(
+            &spec.job_dir,
+            &format!("mock job {} segment {index}\n", spec.job_id),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+async fn append_stdout(job_dir: &Path, text: &str) -> Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(job_dir.join("stdout.log"))
+        .await?;
+    file.write_all(text.as_bytes()).await?;
+    file.flush().await?;
+    Ok(())
 }
 
 fn read_context(job_dir: &Path) -> Result<serde_json::Value> {

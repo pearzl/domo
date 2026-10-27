@@ -8,7 +8,8 @@
 #   4. 直接完成模式下，人工确认后才修改仓库，并生成等待验收的报告；
 #   5. 自动确认的直接完成不等待人工确认；
 #   6. 人工确认模式忽略规划者的跳过请求；
-#   7. 作业运行输出可通过接口读取。
+#   7. 开启 mock 分段输出后，运行中的作业输出持续增长，结束后停止；
+#   8. 作业运行输出可通过接口读取。
 #
 # 约定：使用内置 mock Agent，不访问外网；临时数据全部放在 ${TMPDIR:-/tmp}。
 # 退出码 0 表示全部通过。
@@ -50,6 +51,10 @@ DOMO_WORKSPACE_ROOT="$TMP_ROOT/ws" \
 DOMO_LOG_ROOT="$TMP_ROOT/log" \
 DOMO_SERVER_PORT="$PORT" \
 DOMO_MOCK_DELAY_MS=40 \
+DOMO_MOCK_STREAM=1 \
+DOMO_MOCK_STREAM_GOAL='[stream]' \
+DOMO_MOCK_STREAM_INTERVAL_MS=150 \
+DOMO_MOCK_STREAM_LINES=12 \
 "$ROOT/server/target/debug/domo-server" >"$TMP_ROOT/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -266,7 +271,36 @@ wait_for(
     "人工确认后进入规划",
 )
 
-# 7. 作业输出可通过接口读取。
+# 7. 分段输出：运行期间 stdout 持续增长，结束后 running 变为 false。
+stream = create_project("Stream")
+submit_goal(stream["id"], "[stream] 观察实时输出")
+stream_detail = wait_for(
+    stream["id"],
+    lambda detail: any(
+        job["role"] == "confirm" and job["status"] == "running"
+        for job in detail["jobs"]
+    ),
+    "分段输出作业运行",
+)
+stream_job = next(
+    job
+    for job in stream_detail["jobs"]
+    if job["role"] == "confirm" and job["status"] == "running"
+)
+first = call("GET", f"/api/jobs/{stream_job['id']}/output")
+assert first["running"] is True, first
+time.sleep(0.5)
+second = call("GET", f"/api/jobs/{stream_job['id']}/output")
+assert second["running"] is True, second
+assert len(second["stdout"]) > len(first["stdout"]), (first, second)
+stream_ready = wait_proposal(stream["id"], "ready")
+final = call("GET", f"/api/jobs/{stream_job['id']}/output")
+assert final["running"] is False, final
+assert "mock job" in final["stdout"], final
+assert "segment" in final["stdout"], final
+call("POST", f"/api/projects/{stream['id']}/archive", {})
+
+# 8. 作业输出可通过接口读取。
 output = call("GET", f"/api/jobs/{forced_ready['jobs'][0]['id']}/output")
 assert "mock job" in output["stdout"], output
 assert output["running"] is False, output

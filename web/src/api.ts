@@ -125,7 +125,7 @@ export const api = {
       stderr: string;
       pid: number | null;
       running: boolean;
-    }>(`/api/jobs/${id}/output`),
+    }>(`/api/jobs/${id}/output`, { cache: "no-store" }),
   pauseProject: (id: string, force = false) =>
     request<{ ok: boolean; forced: boolean }>(`/api/projects/${id}/pause`, {
       method: "POST",

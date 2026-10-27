@@ -1035,6 +1035,81 @@ small {
   gap: 10px;
 }
 
+.job-live {
+  padding: 0 12px 12px;
+}
+
+.live-output {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+}
+
+.live-output-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.live-output-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: live-output-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes live-output-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.live-output-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.live-output-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.live-output-empty {
+  padding: 6px 0;
+  font-size: 0.82rem;
+}
+
+.live-output-error {
+  font-size: 0.8rem;
+  color: var(--danger);
+}
+
+.live-output-follow {
+  align-self: flex-end;
+  font-size: 0.78rem;
+  padding: 2px 8px;
+}
+
+.live-message {
+  border-color: #d4e1fb;
+  background: #f7faff;
+}
+
 .job-meta {
   font-size: 0.78rem;
   color: var(--muted);

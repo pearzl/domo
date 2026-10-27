@@ -12,6 +12,7 @@ import type {
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { JobDetailView } from "../components/JobDetailView";
+import { LiveOutput } from "../components/LiveOutput";
 import {
   Badge,
   Empty,
@@ -126,9 +127,14 @@ export function ProjectPage({
   const agentName = (agentId: string | null) =>
     agentId ? agents.find((agent) => agent.id === agentId)?.name ?? agentId : "—";
   const projectJobs = jobs.filter((job) => !job.task_id);
-  const confirmJob = jobs.find(
-    (job) => job.role === "confirm" && job.status === "running",
+  const confirmJobs = jobs.filter(
+    (job) => job.role === "confirm" && !job.task_id,
   );
+  const confirmJob =
+    confirmJobs.find((job) => job.status === "running") ?? null;
+  const latestConfirmJob = confirmJobs.length
+    ? confirmJobs[confirmJobs.length - 1]
+    : null;
   const directJob = jobs.find(
     (job) => job.role === "direct" && job.status === "running",
   );
@@ -413,6 +419,15 @@ export function ProjectPage({
             ))}
             {goalMessages.length === 0 ? (
               <div className="muted">还没有输入项目目标。</div>
+            ) : null}
+            {latestConfirmJob ? (
+              <div className="message message-planner live-message">
+                <div className="message-role">规划者（实时输出）</div>
+                <LiveOutput
+                  jobId={latestConfirmJob.id}
+                  running={latestConfirmJob.status === "running"}
+                />
+              </div>
             ) : null}
           </div>
           {confirmJob ? (
