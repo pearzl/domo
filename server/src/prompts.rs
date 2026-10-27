@@ -44,6 +44,7 @@ pub struct PromptData {
     pub project_id: String,
     pub project_name: String,
     pub goal: String,
+    pub cwd: String,
     pub repo_path: String,
     pub base_branch: String,
     pub project_branch: String,
@@ -78,11 +79,14 @@ pub fn render(data: &PromptData) -> String {
 fn common_header(data: &PromptData) -> String {
     format!(
         "你是 DOMO 本地多 Agent 协作平台中的团队成员。当前工作目录就是你的工作区，所有文件操作都必须限制在该目录内。\n\
+         工作区（唯一可写目录）：{}\n\
+         禁止 cd 到仓库主工作树或其他工作区，禁止在工作区以外读写文件。\n\
          作业目录（用于写结果，不在 Git 仓库内）：{}\n\
          项目：{} ({})\n\
          项目目标：\n{}\n\
-         仓库：{}\n\
+         仓库主工作树（只读参考，禁止写入）：{}\n\
          base 分支：{}，项目交付分支：{}\n",
+        data.cwd,
         data.job_dir,
         data.project_name,
         data.project_id,
@@ -325,9 +329,9 @@ fn executor_prompt(data: &PromptData) -> String {
          \n## 上一轮验收意见（必须逐条处理）\n{}\n\
          {}\
          \n## 执行要求\n\
-         - 在当前工作目录内完成实现，不要修改工作目录以外的文件；\n\
+         - 在当前工作区内完成实现，不要修改工作区以外的文件；禁止 cd 到仓库主工作树或其他工作区；\n\
          - 可以阅读仓库中的文档和源码，遵循项目现有结构、命名和风格；\n\
-         - 必须实际运行与改动相关的构建或测试，并在结果里说明运行了什么；\n\
+         - 必须实际运行与改动相关的构建或测试（在工作区内执行），并在结果里说明运行了什么；\n\
          - 不要执行 git commit、git checkout、git reset、git merge、git rebase 等改变历史或分支的命令；DOMO 会负责提交和合并；\n\
          - 如果无法完成，写清失败原因，不要伪造成功；\n\
          - 如果原计划存在事实错误，导致当前任务无法按描述完成，输出 replan 请求并说明原因；\n\
@@ -395,6 +399,7 @@ fn verifier_prompt(data: &PromptData) -> String {
          \n## 改动规模\n{}\n\
          \n## 验收要求\n\
          - 必须实际检查代码和改动，并运行相关构建或测试；不能只看执行者的自述；\n\
+         - 所有检查命令必须在当前验收工作区内执行，禁止 cd 到仓库主工作树或其他工作区；\n\
          - 只判断任务描述和验收标准是否被满足，不扩大范围；\n\
          - 如果发现真实缺陷、测试失败、遗漏或伪造，判定不通过；\n\
          - 不要修改任何文件；验收工作区在结束后会被删除；\n\

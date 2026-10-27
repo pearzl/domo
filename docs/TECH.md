@@ -164,7 +164,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
    - `goal` / `summary` → 项目 `repo/`（规划者与总结者在项目分支上工作）；
    - `executor` → 准备任务 worktree（见第 8 节）；
    - `verifier` → 准备验收 worktree（detached，基于任务分支）。
-3. 渲染提示词，写 `prompt.md` 与 `context.json`，prompt 全文落库到 `jobs.prompt`。
+3. 渲染提示词，写 `prompt.md` 与 `context.json`，prompt 全文落库到 `jobs.prompt`。启动前校验 `cwd` 是独立 worktree 根目录（`git rev-parse --show-toplevel` 与 `cwd` 一致），不一致则作业失败且不启动进程。
 4. 执行前再次检查项目/任务暂停与归档意图，暂停态下作业标记取消且不启动进程。
 5. 作业受两道看门狗约束：整体超时 `DOMO_JOB_TIMEOUT_SECS`（默认 30 分钟）与卡死阈值 `DOMO_STALL_SECS`（默认 10 分钟，0 关闭）。卡死判定基于每个作业独立的输出进度（stdout/stderr 每次读到数据即刷新），超过阈值无任何输出增长即判定卡死。任一触发都按 pid 文件杀掉该作业的进程组，记录 `job_stalled`（仅卡死）事件并按"进程失败"处理；其他作业的进程组与槽位不受影响。
 6. Agent 进程结束后：
@@ -251,7 +251,7 @@ SQLite 表结构（`db.rs` 内嵌，启动时 `CREATE TABLE IF NOT EXISTS`，旧
 | `opencode` | 调用 `opencode run --auto --format json`，可按 Agent 配置覆盖 `--model` |
 | `cli` | 按用户提供的 JSON 命令模板逐项展开，支持 `{prompt}`（参数或 stdin，自动选择）、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}` 占位符 |
 
-进程环境变量注入 `DOMO_JOB_ID` / `DOMO_JOB_ROLE` / `DOMO_JOB_DIR`，进程以 `cwd` 为工作目录并用 `process_group(0)` 建立独立进程组，保证超时/取消时可整组终止。stdout/stderr 采集上限各 2MB，仅入库存档，不作为协议通道。
+进程环境变量注入 `DOMO_JOB_ID` / `DOMO_JOB_ROLE` / `DOMO_JOB_DIR`，并把 `PWD` 同步为 `cwd`（部分 CLI 以 `PWD` 判定工作区），进程以 `cwd` 为工作目录并用 `process_group(0)` 建立独立进程组，保证超时/取消时可整组终止。stdout/stderr 采集上限各 2MB，仅入库存档，不作为协议通道。
 
 ## 12. API 层
 

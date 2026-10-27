@@ -70,8 +70,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
         other => return Err(anyhow!("未知作业角色: {other}")),
     };
+    ensure_worktree_root(&cwd).await?;
 
-    let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job).await?;
+    let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
     let prompt = prompts::render(&prompt_data);
     fs::write(job_dir.join("prompt.md"), &prompt).await?;
     let context = build_context(
@@ -542,6 +543,7 @@ async fn build_prompt_data(
     project: &ProjectRow,
     task: Option<&TaskRow>,
     job: &JobRow,
+    cwd: &Path,
 ) -> Result<PromptData> {
     let mut dependencies = Vec::new();
     let mut task_info = None;
@@ -667,6 +669,7 @@ async fn build_prompt_data(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         goal: project.goal.clone(),
+        cwd: cwd.to_string_lossy().to_string(),
         repo_path: project.repo_path.clone(),
         base_branch: project.base_branch.clone(),
         project_branch: project.branch.clone(),
@@ -757,6 +760,21 @@ fn build_context(
         })).collect::<Vec<_>>(),
         "diff_stat": data.diff_stat,
     })
+}
+
+/// Every job runs in a dedicated Git worktree root. A mismatch means the agent
+/// would read or write another checkout, so the job is rejected before spawn.
+async fn ensure_worktree_root(cwd: &Path) -> Result<()> {
+    let expected = fs::canonicalize(cwd).await?;
+    let root = fs::canonicalize(git::repo_root(cwd).await?).await?;
+    if root != expected {
+        return Err(anyhow!(
+            "工作目录 {} 不是独立 Git 工作树根目录（实际根目录 {}）",
+            expected.display(),
+            root.display()
+        ));
+    }
+    Ok(())
 }
 
 async fn prepare_task_worktree(

@@ -795,6 +795,9 @@ async fn run_process(
     command
         .args(args)
         .current_dir(&spec.cwd)
+        // CLIs may resolve their workspace from PWD; keep it aligned with cwd.
+        .env("PWD", &spec.cwd)
+        .env_remove("OLDPWD")
         .env("DOMO_JOB_ID", &spec.job_id)
         .env("DOMO_JOB_ROLE", &spec.role)
         .env("DOMO_JOB_DIR", &spec.job_dir)
@@ -944,6 +947,34 @@ mod tests {
         progress.record_stderr(3);
         assert_eq!(progress.output_bytes(), (7, 3));
         assert!(progress.idle_for() < Duration::from_millis(100));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawns_with_cwd_and_pwd_aligned() {
+        let dir = std::env::temp_dir().join(format!("domo-pwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = std::fs::canonicalize(&dir).unwrap();
+        let spec = AgentSpec {
+            job_id: "job_test".into(),
+            role: JOB_ROLE_EXECUTOR.into(),
+            cwd: cwd.clone(),
+            job_dir: cwd.clone(),
+            prompt: String::new(),
+            progress: JobProgress::new(),
+        };
+        let args = vec![
+            "-c".to_string(),
+            "printf '%s\\n%s\\n' \"$PWD\" \"$(pwd)\"".to_string(),
+        ];
+        let run = run_process("sh", &args, &spec, Duration::from_secs(10), None)
+            .await
+            .unwrap();
+        let expected = cwd.to_string_lossy();
+        let mut lines = run.stdout.lines();
+        assert_eq!(lines.next(), Some(expected.as_ref()));
+        assert_eq!(lines.next(), Some(expected.as_ref()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
