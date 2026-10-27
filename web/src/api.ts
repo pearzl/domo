@@ -249,6 +249,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, feedback: feedback || null }),
     }),
+  mergeProject: (id: string) =>
+    request<{
+      status: "merged" | "up_to_date";
+      message: string;
+      merged_at: string;
+      merged_commit: string;
+      project: ProjectDetail;
+    }>(`/api/projects/${id}/merge`, { method: "POST" }),
   getJob: (id: string) => request<JobDetail>(`/api/jobs/${id}`),
   listEvents: (projectId?: string, after?: number) => {
     const params = new URLSearchParams();

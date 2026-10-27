@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS projects (
     goal_proposal TEXT,
     goal_confirmed_at TEXT,
     completion_mode TEXT NOT NULL DEFAULT 'tasks',
+    merged_at TEXT,
+    merged_commit TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -240,6 +242,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         "TEXT NOT NULL DEFAULT 'tasks'",
     )
     .await?;
+    ensure_column(pool, "projects", "merged_at", "TEXT").await?;
+    ensure_column(pool, "projects", "merged_commit", "TEXT").await?;
     ensure_column(pool, "events", "job_id", "TEXT").await?;
     ensure_column(pool, "tasks", "guidance", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column(pool, "tasks", "parent_id", "TEXT").await?;

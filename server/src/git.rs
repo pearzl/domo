@@ -187,3 +187,220 @@ pub async fn has_branch(repo: &Path, branch: &str) -> bool {
         .await
         .is_ok()
 }
+
+pub async fn commit_of(repo: &Path, rev: &str) -> Result<String> {
+    let out = run_git(
+        repo,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )
+    .await?;
+    Ok(out.trim().to_string())
+}
+
+pub async fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .output()
+        .await
+        .context("执行 git merge-base --is-ancestor 失败")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "git merge-base --is-ancestor 失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+pub async fn count_merge_commits(repo: &Path, from: &str, to: &str) -> Result<i64> {
+    let out = run_git(
+        repo,
+        &["rev-list", "--merges", "--count", &format!("{from}..{to}")],
+    )
+    .await?;
+    Ok(out.trim().parse::<i64>().unwrap_or(0))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+pub fn parse_worktrees(text: &str) -> Vec<WorktreeEntry> {
+    let mut entries = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    for line in text.lines() {
+        if line.is_empty() {
+            if let Some(path) = path.take() {
+                entries.push(WorktreeEntry {
+                    path,
+                    branch: branch.take(),
+                });
+            }
+            continue;
+        }
+        if let Some(raw) = line.strip_prefix("worktree ") {
+            if let Some(previous) = path.take() {
+                entries.push(WorktreeEntry {
+                    path: previous,
+                    branch: branch.take(),
+                });
+            }
+            path = Some(PathBuf::from(raw));
+        } else if let Some(raw) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(raw.to_string());
+        }
+    }
+    if let Some(path) = path.take() {
+        entries.push(WorktreeEntry { path, branch });
+    }
+    entries
+}
+
+pub async fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let out = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
+    Ok(parse_worktrees(&out)
+        .into_iter()
+        .find(|entry| entry.branch.as_deref() == Some(branch))
+        .map(|entry| entry.path))
+}
+
+/// Rebases the current branch onto `upstream`. A failed rebase is aborted so the
+/// branch ref and working tree return to the state before the call.
+pub async fn rebase_onto(dir: &Path, upstream: &str) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "rebase.autoStash=false", "rebase", upstream])
+        .output()
+        .await
+        .context("执行 git rebase 失败")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let conflicts = run_git(dir, &["diff", "--name-only", "--diff-filter=U"])
+        .await
+        .unwrap_or_default();
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rebase", "--abort"])
+        .output()
+        .await;
+    Err(anyhow!("{}", rebase_failure_message(&conflicts, &detail)))
+}
+
+fn rebase_failure_message(conflicts: &str, detail: &str) -> String {
+    let files: Vec<&str> = conflicts
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let detail = truncate_chars(detail.trim(), 800);
+    let head = if files.is_empty() {
+        "rebase 失败，已中止".to_string()
+    } else {
+        format!("rebase 冲突，已中止；冲突文件：{}", files.join(", "))
+    };
+    if detail.is_empty() {
+        head
+    } else {
+        format!("{head}。{detail}")
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut truncated: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        truncated.push('…');
+    }
+    truncated
+}
+
+pub async fn merge_ff_only(worktree: &Path, branch: &str) -> Result<()> {
+    run_git(worktree, &["merge", "--ff-only", branch]).await?;
+    Ok(())
+}
+
+/// Moves `branch` to `commit` only when it still points at `expected`.
+pub async fn update_branch_ref(
+    repo: &Path,
+    branch: &str,
+    commit: &str,
+    expected: &str,
+) -> Result<()> {
+    run_git(
+        repo,
+        &[
+            "update-ref",
+            &format!("refs/heads/{branch}"),
+            commit,
+            expected,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn reset_hard_to(dir: &Path, commit: &str) -> Result<()> {
+    run_git(dir, &["reset", "--hard", commit]).await?;
+    Ok(())
+}
+
+pub async fn abort_rebase(dir: &Path) {
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rebase", "--abort"])
+        .output()
+        .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_worktrees_reads_branches_and_detached_entries() {
+        let text = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /tmp/task one
+HEAD 2222222222222222222222222222222222222222
+detached
+";
+        let entries = parse_worktrees(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/repo"));
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert_eq!(entries[1].path, PathBuf::from("/tmp/task one"));
+        assert_eq!(entries[1].branch, None);
+    }
+
+    #[test]
+    fn rebase_failure_message_lists_conflict_files() {
+        let message = rebase_failure_message("src/a.rs\nsrc/b.rs\n", "CONFLICT (content)");
+        assert!(message.contains("src/a.rs, src/b.rs"), "{message}");
+        assert!(message.contains("CONFLICT"), "{message}");
+    }
+
+    #[test]
+    fn rebase_failure_message_truncates_long_detail() {
+        let detail = "x".repeat(2000);
+        let message = rebase_failure_message("", &detail);
+        assert!(message.chars().count() < 900, "{}", message.chars().count());
+        assert!(message.ends_with('…'));
+    }
+}

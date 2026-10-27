@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import type { ProjectSummary } from "../types";
 import { api, errorMessage } from "../api";
 import {
+  Badge,
   Empty,
   ErrorBox,
   Progress,
@@ -188,6 +189,14 @@ function renderProjectCards(
           <h2>{project.name}</h2>
           <StageBadge stage={project.stage} />
           <StatusBadge status={project.status} />
+          {project.merged_at ? (
+            <Badge
+              tone="success"
+              title={`已合入 ${project.base_branch}：${formatTime(project.merged_at)}`}
+            >
+              已合入 {project.merged_commit?.slice(0, 7) ?? ""}
+            </Badge>
+          ) : null}
         </div>
         <p className="goal-line">{project.goal || "尚未输入项目目标"}</p>
         {project.blocked_reason ? (

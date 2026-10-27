@@ -111,6 +111,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/retry", post(retry_project))
         .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/report", post(submit_report))
+        .route("/api/projects/{id}/merge", post(merge_project))
         .route("/api/projects/{id}/tasks", post(create_task))
         .route("/api/projects/{id}/tasks/{task_id}/retry", post(retry_task))
         .route(
@@ -726,6 +727,8 @@ async fn list_projects(
             replan_source: row.replan_source,
             goal_confirm_mode: row.goal_confirm_mode,
             completion_mode: row.completion_mode,
+            merged_at: row.merged_at,
+            merged_commit: row.merged_commit,
             created_at: row.created_at,
             updated_at: row.updated_at,
         });
@@ -2550,6 +2553,257 @@ fn preview_opinion(feedback: &str) -> String {
     text
 }
 
+/// Rebases the project branch onto its base branch and fast-forwards the base
+/// branch. Only completed projects can be merged, and any failure leaves both
+/// branch refs at their pre-merge commits.
+async fn merge_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.stage != STAGE_COMPLETED {
+        return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
+    }
+    let _guard = state.git_lock.lock().await;
+    let project = require_project(&state, &id).await?;
+    if project.stage != STAGE_COMPLETED {
+        return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
+    }
+    let repo = PathBuf::from(&project.repo_path);
+    let worktree = PathBuf::from(&project.workspace).join("repo");
+    let base_branch = project.base_branch.clone();
+    let project_branch = project.branch.clone();
+
+    let base_before = git::commit_of(&repo, &base_branch)
+        .await
+        .map_err(|error| ApiError::bad(format!("无法读取目标分支 {base_branch}：{error:#}")))?;
+    let project_before = git::commit_of(&repo, &project_branch)
+        .await
+        .map_err(|error| ApiError::bad(format!("无法读取项目分支 {project_branch}：{error:#}")))?;
+
+    if git::is_ancestor(&repo, &project_before, &base_before).await? {
+        return finish_project_merge(
+            &state,
+            &project,
+            "up_to_date",
+            format!("已是最新：{base_branch} 已包含项目分支 {project_branch} 的全部提交"),
+            &project_before,
+        )
+        .await;
+    }
+
+    let base_worktree = git::worktree_for_branch(&repo, &base_branch).await?;
+    if let Some(path) = base_worktree.as_deref() {
+        ensure_base_worktree_clean(path, &base_branch).await?;
+    }
+
+    if let Err(error) = git::rebase_onto(&worktree, &base_branch).await {
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad(format!(
+            "合入失败：{error:#}；项目分支与目标分支均保持在操作前状态"
+        )));
+    }
+
+    let project_after = git::commit_of(&repo, &project_branch).await?;
+    let base_now = git::commit_of(&repo, &base_branch).await?;
+    if base_now != base_before {
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad(format!(
+            "目标分支 {base_branch} 在合入期间发生变化，已取消合入"
+        )));
+    }
+    if !git::is_ancestor(&repo, &base_before, &project_after).await? {
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad("rebase 结果未包含目标分支，已取消合入"));
+    }
+    if git::count_merge_commits(&repo, &base_before, &project_after).await? > 0 {
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad("rebase 结果包含合并提交，已取消合入"));
+    }
+    if git::is_ancestor(&repo, &project_after, &base_before).await? {
+        return finish_project_merge(
+            &state,
+            &project,
+            "up_to_date",
+            format!("已是最新：{base_branch} 已包含项目分支 {project_branch} 的全部提交"),
+            &project_after,
+        )
+        .await;
+    }
+
+    if let Some(path) = base_worktree.as_deref() {
+        if let Err(error) = ensure_base_worktree_clean(path, &base_branch).await {
+            restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+            return Err(error);
+        }
+        if let Err(error) = git::merge_ff_only(path, &project_branch).await {
+            restore_fast_forward_failure(path, &repo, &base_branch, &base_before).await;
+            restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+            return Err(ApiError::bad(format!(
+                "快进目标分支 {base_branch} 失败，已回滚项目分支：{error:#}"
+            )));
+        }
+    } else if let Err(error) =
+        git::update_branch_ref(&repo, &base_branch, &project_after, &base_before).await
+    {
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad(format!(
+            "快进目标分支 {base_branch} 失败，已回滚项目分支：{error:#}"
+        )));
+    }
+
+    let base_after = git::commit_of(&repo, &base_branch).await?;
+    if base_after != project_after {
+        if let Some(path) = base_worktree.as_deref() {
+            restore_fast_forward_failure(path, &repo, &base_branch, &base_before).await;
+        }
+        restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
+        return Err(ApiError::bad(format!(
+            "目标分支 {base_branch} 未快进到项目分支提交，已回滚"
+        )));
+    }
+
+    finish_project_merge(
+        &state,
+        &project,
+        "merged",
+        format!(
+            "已合入：{} 已 rebase 到 {base_branch} 并快进，提交 {}",
+            project_branch,
+            short_commit(&project_after)
+        ),
+        &project_after,
+    )
+    .await
+}
+
+async fn ensure_base_worktree_clean(path: &std::path::Path, branch: &str) -> Result<(), ApiError> {
+    let status = git::status_porcelain(path)
+        .await
+        .map_err(ApiError::internal)?;
+    if status.trim().is_empty() {
+        return Ok(());
+    }
+    let summary = status
+        .lines()
+        .take(6)
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(ApiError::bad(format!(
+        "目标分支 {branch} 在 {} 检出且有未提交改动，已取消合入。请先提交或清理改动后重试。\n{summary}",
+        path.display()
+    )))
+}
+
+async fn restore_project_branch(
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+    original: &str,
+) {
+    git::abort_rebase(worktree).await;
+    match git::commit_of(repo, branch).await {
+        Ok(current) if current == original => {}
+        Ok(_) => {
+            if let Err(error) = git::reset_hard_to(worktree, original).await {
+                tracing::error!(
+                    branch,
+                    error = %format!("{error:#}"),
+                    "回滚项目分支失败"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                branch,
+                error = %format!("{error:#}"),
+                "读取项目分支失败，无法回滚"
+            );
+        }
+    }
+}
+
+async fn restore_fast_forward_failure(
+    base_worktree: &std::path::Path,
+    repo: &std::path::Path,
+    branch: &str,
+    original: &str,
+) {
+    match git::commit_of(repo, branch).await {
+        Ok(current) if current == original => {}
+        Ok(_) => {
+            if let Err(error) = git::reset_hard_to(base_worktree, original).await {
+                tracing::error!(
+                    branch,
+                    error = %format!("{error:#}"),
+                    "回滚目标分支失败"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                branch,
+                error = %format!("{error:#}"),
+                "读取目标分支失败，无法回滚"
+            );
+        }
+    }
+}
+
+async fn finish_project_merge(
+    state: &AppState,
+    project: &ProjectRow,
+    status: &str,
+    message: String,
+    commit: &str,
+) -> Result<Json<Value>, ApiError> {
+    let (merged_at, merged_commit) = if status == "up_to_date" {
+        match (&project.merged_at, &project.merged_commit) {
+            (Some(at), Some(existing)) => (at.clone(), existing.clone()),
+            _ => (now(), commit.to_string()),
+        }
+    } else {
+        (now(), commit.to_string())
+    };
+    sqlx::query(
+        "UPDATE projects SET merged_at = ?, merged_commit = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&merged_at)
+    .bind(&merged_commit)
+    .bind(&merged_at)
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    if status == "merged" {
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "project_merged",
+            format!(
+                "项目分支 {} 已 rebase 到 {} 并合入，提交 {}",
+                project.branch,
+                project.base_branch,
+                short_commit(&merged_commit)
+            ),
+        )
+        .await;
+    }
+    Ok(Json(json!({
+        "status": status,
+        "message": message,
+        "merged_at": merged_at,
+        "merged_commit": merged_commit,
+        "project": load_detail(state, &project.id).await?,
+    })))
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(7).collect()
+}
+
 async fn retry_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3731,12 +3985,16 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
             created_at: job.created_at,
         })
         .collect();
+    let merged_at = project.merged_at.clone();
+    let merged_commit = project.merged_commit.clone();
     let goal_proposal = project
         .goal_proposal
         .as_deref()
         .and_then(|raw| serde_json::from_str::<GoalProposal>(raw).ok());
     Ok(ProjectDetail {
         project,
+        merged_at: merged_at.clone(),
+        merged_commit: merged_commit.clone(),
         tasks: task_views(tasks),
         jobs,
         messages,

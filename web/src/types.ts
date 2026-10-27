@@ -149,6 +149,8 @@ export interface ProjectSummary {
   replan_source: string | null;
   goal_confirm_mode: "manual" | "auto";
   completion_mode: "tasks" | "direct";
+  merged_at: string | null;
+  merged_commit: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -172,6 +174,8 @@ export interface Project {
   goal_confirm_mode: "manual" | "auto";
   goal_confirmed_at: string | null;
   completion_mode: "tasks" | "direct";
+  merged_at: string | null;
+  merged_commit: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -273,6 +277,8 @@ export interface GoalProposal {
 
 export interface ProjectDetail {
   project: Project;
+  merged_at: string | null;
+  merged_commit: string | null;
   tasks: Task[];
   jobs: JobSummary[];
   messages: Message[];

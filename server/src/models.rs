@@ -303,6 +303,8 @@ pub struct ProjectRow {
     pub goal_proposal: Option<String>,
     pub goal_confirmed_at: Option<String>,
     pub completion_mode: String,
+    pub merged_at: Option<String>,
+    pub merged_commit: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -409,6 +411,8 @@ pub struct ProjectSummary {
     pub replan_source: Option<String>,
     pub goal_confirm_mode: String,
     pub completion_mode: String,
+    pub merged_at: Option<String>,
+    pub merged_commit: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -544,6 +548,8 @@ pub struct JobView {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectDetail {
     pub project: ProjectRow,
+    pub merged_at: Option<String>,
+    pub merged_commit: Option<String>,
     pub tasks: Vec<TaskView>,
     pub jobs: Vec<JobSummary>,
     pub messages: Vec<MessageRow>,

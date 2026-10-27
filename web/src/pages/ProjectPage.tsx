@@ -58,6 +58,11 @@ export function ProjectPage({
   const [taskMilestone, setTaskMilestone] = useState(false);
   /// 任务面板视图只在页面内保持，不写入任务数据。
   const [taskView, setTaskView] = useState<"list" | "dag">("list");
+  const [merging, setMerging] = useState(false);
+  const [mergeNotice, setMergeNotice] = useState<{
+    tone: "ok" | "error";
+    text: string;
+  } | null>(null);
 
   async function refresh(silent = false) {
     try {
@@ -155,6 +160,27 @@ export function ProjectPage({
     task.attempts === 0 &&
     task.rejections === 0 &&
     task.status !== "canceled";
+
+  async function handleMerge() {
+    if (
+      !window.confirm(
+        `将项目分支 ${project.branch} rebase 到 ${project.base_branch}，并把 ${project.base_branch} 快进到项目分支提交。确认合入？`,
+      )
+    ) {
+      return;
+    }
+    setMerging(true);
+    setMergeNotice(null);
+    try {
+      const result = await api.mergeProject(project.id);
+      setMergeNotice({ tone: "ok", text: result.message });
+      await refresh();
+    } catch (err) {
+      setMergeNotice({ tone: "error", text: errorMessage(err) });
+    } finally {
+      setMerging(false);
+    }
+  }
 
   async function handleAddTask(event: FormEvent) {
     event.preventDefault();
@@ -300,9 +326,43 @@ export function ProjectPage({
           </div>
         ) : null}
         {project.stage === "completed" ? (
-          <div className="success-banner">
-            项目已完成。改动位于 <span className="mono">{project.branch}</span>，请审阅后手动合入{" "}
-            <span className="mono">{project.base_branch}</span>。
+          <div className="success-banner merge-banner">
+            <div>
+              {project.merged_at ? (
+                <>
+                  已合入 <span className="mono">{project.base_branch}</span>（
+                  {formatTime(project.merged_at)}，提交{" "}
+                  <span className="mono">
+                    {project.merged_commit?.slice(0, 7) ?? "—"}
+                  </span>
+                  ）。项目分支 <span className="mono">{project.branch}</span> 已 rebase
+                  到目标分支。
+                </>
+              ) : (
+                <>
+                  项目已完成。改动位于 <span className="mono">{project.branch}</span>
+                  ，请审阅后合入 <span className="mono">{project.base_branch}</span>。
+                </>
+              )}
+            </div>
+            <div className="button-row merge-actions">
+              <button
+                className="primary"
+                disabled={busy || merging}
+                onClick={() => void handleMerge()}
+              >
+                {merging ? "合入中…" : `合入到 ${project.base_branch}`}
+              </button>
+            </div>
+            {mergeNotice ? (
+              <div
+                className={`merge-result ${
+                  mergeNotice.tone === "error" ? "merge-error" : "merge-ok"
+                }`}
+              >
+                <RichContent content={mergeNotice.text} />
+              </div>
+            ) : null}
           </div>
         ) : null}
       </header>

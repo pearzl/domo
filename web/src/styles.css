@@ -613,6 +613,34 @@ small {
   padding: 12px;
 }
 
+.merge-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.merge-actions {
+  margin-top: 0;
+}
+
+.merge-result {
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.merge-ok {
+  background: #e9f7f1;
+  border: 1px solid #b9e6d6;
+  color: #0c6048;
+}
+
+.merge-error {
+  background: var(--danger-soft);
+  border: 1px solid #f3c2c2;
+  color: var(--danger);
+}
+
 .empty {
   padding: 34px;
   text-align: center;
