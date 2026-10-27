@@ -63,7 +63,7 @@ export const api = {
   updateDefaultTeamAgent: (
     role: Role,
     agentId: string,
-    input: { enabled?: boolean; direction?: "up" | "down" },
+    input: { enabled?: boolean; direction?: "up" | "down"; position?: number },
   ) =>
     request<DefaultTeamPool>(`/api/team/default/${role}/${agentId}`, {
       method: "PATCH",
@@ -82,7 +82,7 @@ export const api = {
     id: string,
     role: Role,
     agentId: string,
-    input: { enabled?: boolean; direction?: "up" | "down" },
+    input: { enabled?: boolean; direction?: "up" | "down"; position?: number },
   ) =>
     request<ProjectAgentPool>(`/api/projects/${id}/agents/${role}/${agentId}`, {
       method: "PATCH",

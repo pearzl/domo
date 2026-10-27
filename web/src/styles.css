@@ -934,6 +934,24 @@ small {
   border-color: #f1c9c9;
 }
 
+.agent-pool-row[draggable="true"] {
+  cursor: grab;
+}
+
+.agent-pool-row.dragging {
+  opacity: 0.45;
+}
+
+.agent-pool-row.drop-above {
+  border-top-color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.agent-pool-row.drop-below {
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 .agent-pool-rank {
   font-family: "JetBrains Mono", monospace;
   font-weight: 700;

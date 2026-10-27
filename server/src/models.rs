@@ -638,6 +638,8 @@ pub struct UpdateAgentRequest {
 pub struct ProjectAgentUpdateRequest {
     pub enabled: Option<bool>,
     pub direction: Option<String>,
+    /// 0 基目标位置：提供时把该 Agent 移动到角色内该位置，并把角色内优先级重排为 0..n-1。
+    pub position: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

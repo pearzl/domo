@@ -243,6 +243,9 @@ export function AgentsPage() {
           title="默认团队"
           subtitle="系统级团队模板：每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
           roles={team.roles}
+          onReorder={(role, agentId, position) =>
+            api.updateDefaultTeamAgent(role, agentId, { position })
+          }
           onMove={(role, agentId, direction) =>
             api.updateDefaultTeamAgent(role, agentId, { direction })
           }

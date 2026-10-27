@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { DragEvent } from "react";
 import type { Agent, ProjectRolePool, Role } from "../types";
 import {
   Badge,
@@ -18,6 +19,8 @@ export interface AgentPoolPanelProps {
   disabled?: boolean;
   /** 交换相邻两个 Agent 的顺序。 */
   onMove: (role: Role, agentId: string, direction: "up" | "down") => Promise<unknown>;
+  /** 把条目移动到该角色内 0 基目标位置；拖动排序经由这里持久化。 */
+  onReorder?: (role: Role, agentId: string, position: number) => Promise<unknown>;
   /** 切换条目启停。 */
   onToggle: (role: Role, agentId: string, enabled: boolean) => Promise<unknown>;
   /** 提供时展示移除按钮。 */
@@ -29,12 +32,42 @@ export interface AgentPoolPanelProps {
   addCandidates?: (role: Role) => Agent[];
 }
 
+interface DragItem {
+  role: Role;
+  agentId: string;
+}
+
+interface DropTarget {
+  role: Role;
+  index: number;
+  edge: "before" | "after";
+}
+
+/** 落点换算成移动后的 0 基目标位置；落点不改变顺序时返回 null。 */
+function resolveDropPosition(from: number, target: DropTarget): number | null {
+  const { index, edge } = target;
+  if (index === from) {
+    return null;
+  }
+  if (edge === "before") {
+    if (index > from) {
+      return index - 1 === from ? null : index - 1;
+    }
+    return index;
+  }
+  if (index < from) {
+    return index + 1 === from ? null : index + 1;
+  }
+  return index;
+}
+
 export function AgentPoolPanel({
   title,
   subtitle,
   roles,
   disabled = false,
   onMove,
+  onReorder,
   onToggle,
   onRemove,
   onAdd,
@@ -44,6 +77,8 @@ export function AgentPoolPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [adding, setAdding] = useState<Partial<Record<Role, string>>>({});
+  const [drag, setDrag] = useState<DragItem | null>(null);
+  const [drop, setDrop] = useState<DropTarget | null>(null);
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
@@ -53,10 +88,23 @@ export function AgentPoolPanel({
       await onRefresh?.();
     } catch (err) {
       setError(errorMessage(err));
+      // 操作失败后回到服务端顺序，避免面板显示与持久化结果不一致。
+      try {
+        await onRefresh?.();
+      } catch {
+        // 刷新失败时保留操作错误提示。
+      }
     } finally {
       setBusy(false);
     }
   }
+
+  function endDrag() {
+    setDrag(null);
+    setDrop(null);
+  }
+
+  const dragEnabled = Boolean(onReorder) && !disabled && !busy;
 
   return (
     <details className="panel agent-pool" open={typeof onAdd === "function"}>
@@ -68,16 +116,81 @@ export function AgentPoolPanel({
             !group.entries.some((entry) => entry.agent_id === agent.id),
         );
         return (
-          <div className="agent-pool-role" key={group.role}>
+          <div
+            className="agent-pool-role"
+            key={group.role}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setDrop(null);
+              }
+            }}
+          >
             <h3>{ROLE_LABELS[group.role] ?? group.role}</h3>
             {group.entries.length === 0 ? (
               <div className="muted">这个角色还没有 Agent。</div>
             ) : (
               <div className="agent-pool-list">
-                {group.entries.map((entry, index) => (
+                {group.entries.map((entry, index) => {
+                  const isDragSource =
+                    dragEnabled &&
+                    drag?.role === group.role &&
+                    drag.agentId === entry.agent_id;
+                  const dropMark =
+                    dragEnabled &&
+                    drop?.role === group.role &&
+                    drop.index === index
+                      ? drop.edge
+                      : null;
+                  return (
                   <div
-                    className={`agent-pool-row${entry.available ? "" : " unavailable"}`}
+                    className={`agent-pool-row${entry.available ? "" : " unavailable"}${
+                      isDragSource ? " dragging" : ""
+                    }${dropMark === "before" ? " drop-above" : ""}${
+                      dropMark === "after" ? " drop-below" : ""
+                    }`}
                     key={entry.agent_id}
+                    draggable={dragEnabled}
+                    title={dragEnabled ? "拖动调整顺序，或使用上移/下移按钮" : undefined}
+                    onDragStart={(event: DragEvent<HTMLDivElement>) => {
+                      const item: DragItem = {
+                        role: group.role,
+                        agentId: entry.agent_id,
+                      };
+                      setDrag(item);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", entry.agent_id);
+                    }}
+                    onDragEnd={endDrag}
+                    onDragOver={(event: DragEvent<HTMLDivElement>) => {
+                      if (!drag || !onReorder || drag.role !== group.role) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const edge =
+                        event.clientY < rect.top + rect.height / 2
+                          ? "before"
+                          : "after";
+                      setDrop({ role: group.role, index, edge });
+                    }}
+                    onDrop={(event: DragEvent<HTMLDivElement>) => {
+                      event.preventDefault();
+                      const item = drag;
+                      const target = drop;
+                      endDrag();
+                      if (!item || !target || !onReorder) {
+                        return;
+                      }
+                      const from = group.entries.findIndex(
+                        (it) => it.agent_id === item.agentId,
+                      );
+                      const position = resolveDropPosition(from, target);
+                      if (position === null) {
+                        return;
+                      }
+                      void act(() => onReorder(group.role, item.agentId, position));
+                    }}
                   >
                     <span className="agent-pool-rank">{index + 1}</span>
                     <span className="agent-pool-name">
@@ -183,7 +296,8 @@ export function AgentPoolPanel({
                       </span>
                     ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             {onAdd ? (

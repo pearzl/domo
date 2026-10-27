@@ -307,6 +307,9 @@ export function ProjectPage({
         subtitle="每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
         roles={detail.agent_pool.roles}
         disabled={archived}
+        onReorder={(role, agentId, position) =>
+          api.updateProjectAgent(project.id, role, agentId, { position })
+        }
         onMove={(role, agentId, direction) =>
           api.updateProjectAgent(project.id, role, agentId, { direction })
         }

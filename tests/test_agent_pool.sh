@@ -10,6 +10,8 @@
 #   6. 项目池配置在服务重启后保持；
 #   7. 全局 Agent 删除后项目池条目标记为不可用，并给出可读的阻塞原因；
 #   8. 项目池角色校验拒绝未知角色。
+#   9. PATCH position 把条目移动到指定位置（首位、中间、末位），角色内优先级
+#      连续重排为 0..n-1，其他角色不变；越界或角色下不存在该 Agent 返回 400。
 #
 # 使用内置 mock Agent，不访问外网；临时数据全部放在 ${TMPDIR:-/tmp}。
 # 退出码 0 表示全部通过。
@@ -325,6 +327,159 @@ assert all(
 ), reordered["jobs"]
 call("PATCH", f"/api/agents/{high['id']}", {"enabled": True})
 
+# 2b. PATCH position：默认团队与项目池都支持 0 基目标位置，并在事务内重排该角色。
+team_pool = call("GET", "/api/team/default")
+team_executor_before = next(
+    group for group in team_pool["roles"] if group["role"] == "executor"
+)["entries"]
+team_executor_ids = [entry["agent_id"] for entry in team_executor_before]
+team_planner_before = next(
+    group for group in team_pool["roles"] if group["role"] == "planner"
+)["entries"]
+assert low["id"] in team_executor_ids, team_executor_before
+count = len(team_executor_ids)
+
+# 末位中的条目移到首位。
+team_moved = call(
+    "PATCH",
+    f"/api/team/default/executor/{low['id']}",
+    {"position": 0},
+)
+team_executor_after = next(
+    group for group in team_moved["roles"] if group["role"] == "executor"
+)["entries"]
+team_executor_after_ids = [entry["agent_id"] for entry in team_executor_after]
+assert team_executor_after_ids == [low["id"]] + [
+    agent_id for agent_id in team_executor_ids if agent_id != low["id"]
+], team_executor_after
+assert [entry["priority"] for entry in team_executor_after] == list(
+    range(count)
+), team_executor_after
+team_planner_after = next(
+    group for group in team_moved["roles"] if group["role"] == "planner"
+)["entries"]
+assert team_planner_after == team_planner_before, team_planner_after
+low_original_index = team_executor_ids.index(low["id"])
+team_restored = call(
+    "PATCH",
+    f"/api/team/default/executor/{low['id']}",
+    {"position": low_original_index},
+)
+team_restored_ids = [
+    entry["agent_id"]
+    for entry in next(
+        group for group in team_restored["roles"] if group["role"] == "executor"
+    )["entries"]
+]
+assert team_restored_ids == team_executor_ids, team_restored
+assert [
+    entry["priority"]
+    for entry in next(
+        group for group in team_restored["roles"] if group["role"] == "executor"
+    )["entries"]
+] == list(range(count)), team_restored
+
+code = expect_error(
+    "PATCH",
+    f"/api/team/default/executor/{low['id']}",
+    {"position": -1},
+)
+assert code == 400, code
+code = expect_error(
+    "PATCH",
+    f"/api/team/default/executor/{low['id']}",
+    {"position": count},
+)
+assert code == 400, code
+code = expect_error(
+    "PATCH",
+    "/api/team/default/executor/not-in-team-agent",
+    {"position": 0},
+)
+assert code == 400, code
+
+# 项目池：条目移到中间、首位、末位，其他角色顺序保持不变。
+# 由条目移动结果推导目标顺序，不假设池中 Agent 的数量。
+def apply_move(ids, agent_id, position):
+    rest = [item for item in ids if item != agent_id]
+    return rest[:position] + [agent_id] + rest[position:]
+
+
+project_entries = pool_role(reordered_id, "executor")["entries"]
+assert len(project_entries) >= 3, project_entries
+project_ids_before = [entry["agent_id"] for entry in project_entries]
+mover = project_ids_before[2]
+
+stepped = call(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/{mover}",
+    {"position": 1},
+)
+stepped_entries = next(
+    group for group in stepped["roles"] if group["role"] == "executor"
+)["entries"]
+assert [entry["agent_id"] for entry in stepped_entries] == (
+    apply_move(project_ids_before, mover, 1)
+), stepped_entries
+assert [entry["priority"] for entry in stepped_entries] == list(
+    range(len(project_entries))
+), stepped_entries
+assert next(
+    group for group in stepped["roles"] if group["role"] == "planner"
+)["entries"] == planner_before, stepped["roles"]
+
+first = call(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/{mover}",
+    {"position": 0},
+)
+first_ids = [
+    entry["agent_id"]
+    for entry in next(
+        group for group in first["roles"] if group["role"] == "executor"
+    )["entries"]
+]
+assert first_ids == apply_move(
+    apply_move(project_ids_before, mover, 1), mover, 0
+), first["roles"]
+
+last = call(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/{mover}",
+    {"position": 2},
+)
+last_entries = next(
+    group for group in last["roles"] if group["role"] == "executor"
+)["entries"]
+executor_after = [entry["agent_id"] for entry in last_entries]
+assert executor_after == apply_move(first_ids, mover, 2), last_entries
+assert [entry["priority"] for entry in last_entries] == list(
+    range(len(project_entries))
+), last_entries
+planner_after = next(
+    group for group in last["roles"] if group["role"] == "planner"
+)["entries"]
+assert planner_after == planner_before, planner_after
+
+code = expect_error(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/{mover}",
+    {"position": -1},
+)
+assert code == 400, code
+code = expect_error(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/{mover}",
+    {"position": len(project_entries)},
+)
+assert code == 400, code
+code = expect_error(
+    "PATCH",
+    f"/api/projects/{reordered_id}/agents/executor/not-in-pool-agent",
+    {"position": 0},
+)
+assert code == 400, code
+
 # 3. 禁用最高优先级 Agent 后自动回退到下一优先级。
 fallback_id = create_project("PoolFallback", "禁用最高优先级后自动回退")
 for role in ("planner", "executor", "verifier"):
@@ -493,8 +648,9 @@ assert code == 400, code
 json.dump(
     {
         "project_id": reordered_id,
-        "executor_order": [entry["agent_id"] for entry in executor_after],
+        "executor_order": executor_after,
         "planner_order": [entry["agent_id"] for entry in planner_after],
+        "team_executor_order": team_restored_ids,
         "missing_project_id": missing_id,
         "missing_agents": [doomed_a["id"], doomed_b["id"]],
     },
@@ -536,6 +692,15 @@ assert [entry["agent_id"] for entry in roles["planner"]] == state["planner_order
 assert [entry["priority"] for entry in roles["executor"]] == list(
     range(len(roles["executor"]))
 ), roles["executor"]
+
+team_pool = call("/api/team/default")
+team_roles = {group["role"]: group["entries"] for group in team_pool["roles"]}
+assert [entry["agent_id"] for entry in team_roles["executor"]] == state[
+    "team_executor_order"
+], team_roles["executor"]
+assert [entry["priority"] for entry in team_roles["executor"]] == list(
+    range(len(team_roles["executor"]))
+), team_roles["executor"]
 
 missing = call(f"/api/projects/{state['missing_project_id']}/agents")
 missing_entries = {

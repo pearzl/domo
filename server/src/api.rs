@@ -429,14 +429,22 @@ async fn update_default_team_agent(
     Json(request): Json<ProjectAgentUpdateRequest>,
 ) -> Result<Json<ProjectAgentPool>, ApiError> {
     let role = validate_role(role.trim())?;
-    let current = sqlx::query_as::<_, DefaultTeamRow>(
+    let lookup = sqlx::query_as::<_, DefaultTeamRow>(
         "SELECT * FROM default_team WHERE role = ? AND agent_id = ?",
     )
     .bind(&role)
     .bind(&agent_id)
     .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::not_found("默认团队中没有该 Agent"))?;
+    .await?;
+    let current = match lookup {
+        Some(row) => row,
+        // position 调整要求条目必须在该角色下，此时按参数错误处理。
+        None if request.position.is_some() => return Err(ApiError::bad("默认团队中没有该 Agent")),
+        None => return Err(ApiError::not_found("默认团队中没有该 Agent")),
+    };
+    if let Some(position) = request.position {
+        move_default_team_agent_to(&state, &role, &current.agent_id, position).await?;
+    }
     if let Some(direction) = request.direction.as_deref().map(str::trim) {
         if !matches!(direction, "up" | "down") {
             return Err(ApiError::bad("direction 必须是 up 或 down"));
@@ -565,6 +573,60 @@ async fn renumber_default_team_role(state: &AppState, role: &str) -> Result<(), 
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// 把角色内指定 Agent 移动到 0 基目标位置，并在事务内把该角色优先级重排为 0..n-1。
+/// 其余角色的条目不参与本次重排。
+async fn move_default_team_agent_to(
+    state: &AppState,
+    role: &str,
+    agent_id: &str,
+    position: i64,
+) -> Result<(), ApiError> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_id FROM default_team WHERE role = ? ORDER BY priority ASC, agent_id ASC",
+    )
+    .bind(role)
+    .fetch_all(&state.db)
+    .await?;
+    let reordered = plan_role_reorder(members, "默认团队", agent_id, position)?;
+    let timestamp = now();
+    let mut tx = state.db.begin().await?;
+    for (priority, id) in reordered.iter().enumerate() {
+        sqlx::query(
+            "UPDATE default_team SET priority = ?, updated_at = ? WHERE role = ? AND agent_id = ?",
+        )
+        .bind(priority as i64)
+        .bind(&timestamp)
+        .bind(role)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 通用落位计划：校验 position 越界与 Agent 归属，返回移动后的 agent 顺序。
+/// `members` 必须已经按目标角色当前顺序排列。
+fn plan_role_reorder(
+    members: Vec<(String,)>,
+    scope: &str,
+    agent_id: &str,
+    position: i64,
+) -> Result<Vec<String>, ApiError> {
+    if position < 0 || position as usize >= members.len() {
+        return Err(ApiError::bad(format!(
+            "{scope}该角色的 position 超出条目范围"
+        )));
+    }
+    let Some(index) = members.iter().position(|(id,)| id == agent_id) else {
+        return Err(ApiError::bad(format!("{scope}该角色下没有该 Agent")));
+    };
+    let mut reordered: Vec<String> = members.into_iter().map(|(id,)| id).collect();
+    let moved = reordered.remove(index);
+    reordered.insert(position as usize, moved);
+    Ok(reordered)
 }
 
 async fn reset_agent_usage(
@@ -847,15 +909,25 @@ async fn update_project_agent(
     }
     let role = validate_role(role.trim())?;
     crate::db::ensure_project_agents(&state.db, &project_id).await?;
-    let current = sqlx::query_as::<_, ProjectAgentRow>(
+    let lookup = sqlx::query_as::<_, ProjectAgentRow>(
         "SELECT * FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
     )
     .bind(&project_id)
     .bind(&role)
     .bind(&agent_id)
     .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::not_found("项目 Agent 池中没有该 Agent"))?;
+    .await?;
+    let current = match lookup {
+        Some(row) => row,
+        // position 调整要求条目必须在该角色下，此时按参数错误处理。
+        None if request.position.is_some() => {
+            return Err(ApiError::bad("项目 Agent 池中没有该 Agent"))
+        }
+        None => return Err(ApiError::not_found("项目 Agent 池中没有该 Agent")),
+    };
+    if let Some(position) = request.position {
+        move_project_agent_to(&state, &project_id, &role, &current.agent_id, position).await?;
+    }
     if let Some(direction) = request.direction.as_deref().map(str::trim) {
         if !matches!(direction, "up" | "down") {
             return Err(ApiError::bad("direction 必须是 up 或 down"));
@@ -938,6 +1010,43 @@ async fn update_project_agent(
     state.notify_scheduler();
     let pool = crate::db::load_project_agent_pool(&state.db, &project_id).await?;
     Ok(Json(pool))
+}
+
+/// 把项目池角色内指定 Agent 移动到 0 基目标位置，并在事务内把该角色优先级重排为 0..n-1。
+/// 其余角色的条目不参与本次重排。
+async fn move_project_agent_to(
+    state: &AppState,
+    project_id: &str,
+    role: &str,
+    agent_id: &str,
+    position: i64,
+) -> Result<(), ApiError> {
+    let members: Vec<(String,)> = sqlx::query_as(
+        "SELECT agent_id FROM project_agents WHERE project_id = ? AND role = ? \
+         ORDER BY priority ASC, agent_id ASC",
+    )
+    .bind(project_id)
+    .bind(role)
+    .fetch_all(&state.db)
+    .await?;
+    let reordered = plan_role_reorder(members, "项目 Agent 池", agent_id, position)?;
+    let timestamp = now();
+    let mut tx = state.db.begin().await?;
+    for (priority, id) in reordered.iter().enumerate() {
+        sqlx::query(
+            "UPDATE project_agents SET priority = ?, updated_at = ? \
+             WHERE project_id = ? AND role = ? AND agent_id = ?",
+        )
+        .bind(priority as i64)
+        .bind(&timestamp)
+        .bind(project_id)
+        .bind(role)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn set_task_agents(
