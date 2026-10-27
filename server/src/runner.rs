@@ -1710,6 +1710,8 @@ async fn handle_executor_failure(
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, attempts = ?, last_agent_id = ?, \
          last_failure_kind = ?, last_error = ?, agent_id = NULL, waiting_reason = NULL, \
+         avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
          updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_EXECUTING)
@@ -1722,6 +1724,18 @@ async fn handle_executor_failure(
     })
     .bind(kind.as_str())
     .bind(reason)
+    .bind(effect.switch)
+    .bind(if effect.switch {
+        Some(agent.id.as_str())
+    } else {
+        None
+    })
+    .bind(effect.switch)
+    .bind(if effect.switch {
+        Some(ROLE_EXECUTOR)
+    } else {
+        None
+    })
     .bind(now())
     .bind(&task.id)
     .execute(&state.db)
@@ -1953,7 +1967,10 @@ async fn handle_verifier_failure(
     };
     sqlx::query(
         "UPDATE tasks SET attempts = ?, status = ?, last_agent_id = ?, last_failure_kind = ?, \
-         last_error = ?, agent_id = NULL, waiting_reason = NULL, updated_at = ? WHERE id = ?",
+         last_error = ?, agent_id = NULL, waiting_reason = NULL, \
+         avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
+         updated_at = ? WHERE id = ?",
     )
     .bind(attempts)
     .bind(status)
@@ -1964,6 +1981,18 @@ async fn handle_verifier_failure(
     })
     .bind(kind.as_str())
     .bind(reason)
+    .bind(effect.switch)
+    .bind(if effect.switch {
+        Some(agent.id.as_str())
+    } else {
+        None
+    })
+    .bind(effect.switch)
+    .bind(if effect.switch {
+        Some(ROLE_VERIFIER)
+    } else {
+        None
+    })
     .bind(now())
     .bind(&task.id)
     .execute(&state.db)
@@ -2375,6 +2404,9 @@ async fn has_usable_agent(
         let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
             continue;
         };
+        if agent.enabled == 0 {
+            continue;
+        }
         if !parse_json_list(&agent.roles)
             .iter()
             .any(|item| item == role)

@@ -291,6 +291,8 @@ pub struct TaskRow {
     pub status: Option<String>,
     pub agent_id: Option<String>,
     pub last_agent_id: Option<String>,
+    pub avoid_agent_id: Option<String>,
+    pub avoid_agent_role: Option<String>,
     pub worktree: Option<String>,
     pub branch: Option<String>,
     pub attempts: i64,

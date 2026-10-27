@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT,
     agent_id TEXT,
     last_agent_id TEXT,
+    avoid_agent_id TEXT,
+    avoid_agent_role TEXT,
     worktree TEXT,
     branch TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -225,6 +227,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "tasks", "queue_order", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(pool, "tasks", "last_failure_kind", "TEXT").await?;
     ensure_column(pool, "tasks", "waiting_reason", "TEXT").await?;
+    ensure_column(pool, "tasks", "avoid_agent_id", "TEXT").await?;
+    ensure_column(pool, "tasks", "avoid_agent_role", "TEXT").await?;
     ensure_column(pool, "agents", "failure_kind", "TEXT").await?;
     ensure_column(
         pool,
@@ -298,6 +302,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              status TEXT,
              agent_id TEXT,
              last_agent_id TEXT,
+             avoid_agent_id TEXT,
+             avoid_agent_role TEXT,
              worktree TEXT,
              branch TEXT,
              attempts INTEGER NOT NULL DEFAULT 0,
@@ -315,7 +321,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
-             agent_id, last_agent_id, worktree, branch, attempts, rejections, last_error,
+             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, worktree, branch,
+             attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at
          )
@@ -323,7 +330,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
-             agent_id, last_agent_id, worktree, branch, attempts, rejections, last_error,
+             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, worktree, branch,
+             attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at
          FROM tasks;

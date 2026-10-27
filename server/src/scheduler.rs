@@ -686,9 +686,10 @@ async fn choose_agent(
                 return Ok(AgentChoice {
                     agent: None,
                     reason: Some(format!(
-                        "人工指定的{} Agent {} 已达到并发上限",
+                        "等待人工指定的{} Agent {} 释放（并发 {running}/{}）",
                         role_label(role),
-                        agent.name
+                        agent.name,
+                        agent.max_concurrency.max(1)
                     )),
                 });
             }
@@ -722,9 +723,10 @@ async fn choose_agent(
                     return Ok(AgentChoice {
                         agent: None,
                         reason: Some(format!(
-                            "任务指定的{} Agent {} 已达到并发上限",
+                            "等待任务指定的{} Agent {} 释放（并发 {running}/{}）",
                             role_label(role),
-                            agent.name
+                            agent.name,
+                            agent.max_concurrency.max(1)
                         )),
                     });
                 }
@@ -779,12 +781,10 @@ async fn choose_agent(
         .filter_map(|(id, count)| id.map(|id| (id, count)))
         .collect();
     let now = Utc::now();
-    let mut candidates: Vec<AgentRow> = Vec::new();
-    let mut disabled = 0;
-    let mut missing = Vec::new();
-    let mut cooling = Vec::new();
-    let mut scheduled = Vec::new();
-    let mut limited = Vec::new();
+    let avoided = task
+        .filter(|task| task.avoid_agent_role.as_deref() == Some(role))
+        .and_then(|task| task.avoid_agent_id.as_deref());
+    let mut unavailable = Vec::new();
     for row in &rows {
         let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
             let name = if row.agent_name.trim().is_empty() {
@@ -792,15 +792,23 @@ async fn choose_agent(
             } else {
                 row.agent_name.clone()
             };
-            missing.push(format!("「{name}」（已删除）"));
+            unavailable.push(format!("「{name}」（已删除）"));
             continue;
         };
         if !parse_list(&agent.roles).iter().any(|item| item == role) {
-            missing.push(format!("「{}」（已不具备该角色）", agent.name));
+            unavailable.push(format!("「{}」（已不具备该角色）", agent.name));
             continue;
         }
         if row.enabled == 0 {
-            disabled += 1;
+            unavailable.push(format!("「{}」（项目池中已禁用）", agent.name));
+            continue;
+        }
+        if agent.enabled == 0 {
+            unavailable.push(format!("「{}」（全局已禁用）", agent.name));
+            continue;
+        }
+        if avoided == Some(agent.id.as_str()) {
+            unavailable.push(format!("「{}」（本次失败后暂不重试）", agent.name));
             continue;
         }
         let cooling_down = agent
@@ -810,85 +818,46 @@ async fn choose_agent(
             .map(|until| until.with_timezone(&Utc) > now)
             .unwrap_or(false);
         if cooling_down {
-            cooling.push(agent.name.clone());
+            let until = agent.cooldown_until.as_deref().unwrap_or_default();
+            unavailable.push(format!("「{}」（冷却中，至 {until}）", agent.name));
             continue;
         }
         match agent_gate(state, agent).await? {
             Some(usage::AgentGate::Schedule(reason)) => {
-                scheduled.push(format!("「{}」（{reason}）", agent.name));
+                unavailable.push(format!("「{}」（{reason}）", agent.name));
                 continue;
             }
             Some(usage::AgentGate::Limit(reason)) => {
-                limited.push(format!("「{}」（{reason}）", agent.name));
+                unavailable.push(format!("「{}」（{reason}）", agent.name));
                 continue;
             }
             None => {}
         }
-        candidates.push(agent.clone());
-    }
-    if candidates.is_empty() {
-        let mut parts = Vec::new();
-        if !missing.is_empty() {
-            parts.push(format!("不可用：{}", missing.join("、")));
-        }
-        if !cooling.is_empty() {
-            parts.push(format!("冷却中：{}", cooling.join("、")));
-        }
-        if !limited.is_empty() {
-            parts.push(format!("已达到用量限额：{}", limited.join("、")));
-        }
-        if !scheduled.is_empty() {
-            parts.push(format!("不在可用时段：{}", scheduled.join("、")));
-        }
-        let reason = if parts.is_empty() {
-            if disabled > 0 {
-                format!("项目 Agent 池中没有已启用的{} Agent", role_label(role))
-            } else {
-                format!("项目 Agent 池没有可用的{} Agent", role_label(role))
-            }
-        } else {
-            format!(
-                "项目 Agent 池没有可用的{} Agent（{}）",
-                role_label(role),
-                parts.join("；")
-            )
-        };
-        return Ok(AgentChoice {
-            agent: None,
-            reason: Some(reason),
-        });
-    }
-    let last_agent = task.and_then(|task| task.last_agent_id.clone());
-    let alternatives: Vec<AgentRow> = candidates
-        .iter()
-        .filter(|agent| Some(&agent.id) != last_agent.as_ref())
-        .cloned()
-        .collect();
-    let pool = if alternatives.is_empty() {
-        candidates
-    } else {
-        alternatives
-    };
-    for agent in &pool {
+        // Strict priority: the first usable agent owns this dispatch. When it
+        // is at capacity the task waits instead of falling through to a lower
+        // priority agent.
         let running = counts.get(&agent.id).copied().unwrap_or(0);
-        if running < agent.max_concurrency.max(1) {
+        let limit = agent.max_concurrency.max(1);
+        if running < limit {
             return Ok(AgentChoice {
                 agent: Some(agent.clone()),
                 reason: None,
             });
         }
+        return Ok(AgentChoice {
+            agent: None,
+            reason: Some(format!(
+                "等待 Agent {} 释放（并发 {running}/{limit}）",
+                agent.name
+            )),
+        });
     }
-    let names = pool
-        .iter()
-        .map(|agent| agent.name.clone())
-        .collect::<Vec<_>>()
-        .join("、");
     Ok(AgentChoice {
         agent: None,
         reason: Some(format!(
-            "项目 Agent 池中的{} Agent 均已达到并发上限：{}",
+            "项目 Agent 池没有可用的{} Agent（不可用：{}）",
             role_label(role),
-            names
+            unavailable.join("、")
         )),
     })
 }
@@ -978,7 +947,10 @@ async fn spawn_task_job(
     .await?;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_error = NULL, \
-         waiting_reason = NULL, forced_agent_id = NULL, forced_agent_role = NULL, updated_at = ? \
+         waiting_reason = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
+         avoid_agent_id = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_role END, \
+         updated_at = ? \
          WHERE id = ? AND status = ?",
     )
     .bind(if role == ROLE_VERIFIER {
@@ -988,6 +960,8 @@ async fn spawn_task_job(
     })
     .bind(STATUS_RUNNING)
     .bind(&agent.id)
+    .bind(role)
+    .bind(role)
     .bind(&timestamp)
     .bind(&task.id)
     .bind(STATUS_QUEUED)

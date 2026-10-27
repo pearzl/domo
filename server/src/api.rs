@@ -2223,7 +2223,8 @@ async fn retry_project(
                 } else {
                     sqlx::query(
                         "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-                         last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
+                         last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
+                         last_error = NULL, last_failure_kind = NULL, \
                          waiting_reason = NULL, updated_at = ? \
                          WHERE project_id = ? AND status = ?",
                     )
@@ -2882,7 +2883,10 @@ async fn submit_arbitration(
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE tasks SET status = ?, attempts = ?, rejections = ?, agent_id = NULL, \
-         last_agent_id = CASE WHEN ? THEN NULL ELSE last_agent_id END, last_error = NULL, \
+         last_agent_id = CASE WHEN ? THEN NULL ELSE last_agent_id END, \
+         avoid_agent_id = CASE WHEN ? THEN NULL ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN NULL ELSE avoid_agent_role END, \
+         last_error = NULL, \
          last_failure_kind = NULL, waiting_reason = NULL, human_gate = NULL, guidance = ?, \
          forced_agent_id = ?, forced_agent_role = ?, \
          updated_at = ? WHERE id = ? AND status = ?",
@@ -2890,6 +2894,8 @@ async fn submit_arbitration(
     .bind(STATUS_QUEUED)
     .bind(if reset_counts { 0 } else { task.attempts })
     .bind(if reset_counts { 0 } else { task.rejections })
+    .bind(reset_counts)
+    .bind(reset_counts)
     .bind(reset_counts)
     .bind(&next_guidance)
     .bind(&forced_agent_id)
@@ -3036,7 +3042,8 @@ async fn retry_task(
         let _guard = state.schedule_lock.lock().await;
         sqlx::query(
             "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-             last_agent_id = NULL, last_error = NULL, last_failure_kind = NULL, \
+             last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
+             last_error = NULL, last_failure_kind = NULL, \
              waiting_reason = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(STATUS_QUEUED)

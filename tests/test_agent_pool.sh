@@ -314,6 +314,8 @@ decoupled = pool_role(reordered_id, "planner")["entries"]
 assert next(entry for entry in decoupled if entry["agent_id"] == high["id"])[
     "enabled"
 ] is True, decoupled
+# 全局禁用属于调度不可用，恢复后再验证项目池内顺序。
+call("PATCH", f"/api/agents/{high['id']}", {"enabled": True})
 
 confirm(reordered_id)
 reordered = wait_completed(reordered_id, "调整顺序后项目完成")
@@ -325,7 +327,6 @@ assert role_jobs(reordered, "goal")[0]["agent_id"] == high["id"], reordered["job
 assert all(
     job["agent_id"] == high["id"] for job in role_jobs(reordered, "verifier")
 ), reordered["jobs"]
-call("PATCH", f"/api/agents/{high['id']}", {"enabled": True})
 
 # 2b. PATCH position：默认团队与项目池都支持 0 基目标位置，并在事务内重排该角色。
 team_pool = call("GET", "/api/team/default")
