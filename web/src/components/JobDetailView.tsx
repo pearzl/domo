@@ -3,6 +3,7 @@ import type { SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
 import { LiveOutput } from "./LiveOutput";
+import { RichContent } from "./RichContent";
 import {
   Badge,
   FAILURE_KIND_LABELS,
@@ -89,7 +90,11 @@ export function JobDetailView({ job }: { job: JobSummary }) {
               : "未知（Agent 未提供 token 或费用）"}
             {" · "}时长 {formatMillis(job.duration_ms)}
           </div>
-          {job.error ? <div className="error-box pre-wrap">{job.error}</div> : null}
+          {job.error ? (
+            <div className="error-box">
+              <RichContent content={job.error} />
+            </div>
+          ) : null}
           {loading ? <div className="muted">加载作业详情…</div> : null}
           {error ? <div className="error-box">{error}</div> : null}
           {detail ? <JobBlock title="结果" value={detail.result} /> : null}
@@ -108,7 +113,7 @@ function JobBlock({ title, value }: { title: string; value: string | null }) {
   return (
     <div className="job-block">
       <div className="job-block-title">{title}</div>
-      <pre>{value}</pre>
+      <RichContent content={value} />
     </div>
   );
 }

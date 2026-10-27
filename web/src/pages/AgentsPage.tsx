@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import { api, errorMessage } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { RichContent } from "../components/RichContent";
 import { Badge, ErrorBox, FAILURE_KIND_LABELS, formatTime } from "../ui";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
@@ -582,7 +583,9 @@ export function AgentsPage() {
               </div>
             ) : null}
             {agent.last_error ? (
-              <div className="error-box pre-wrap">{agent.last_error}</div>
+              <div className="error-box">
+                <RichContent content={agent.last_error} />
+              </div>
             ) : null}
           </article>
         ))}

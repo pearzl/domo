@@ -13,6 +13,7 @@ import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { JobDetailView } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
+import { RichContent } from "../components/RichContent";
 import {
   Badge,
   Empty,
@@ -291,7 +292,7 @@ export function ProjectPage({
         {project.blocked_reason ? (
           <div className="blocked-banner">
             <strong>{project.status === "blocked" ? "阻塞原因" : "提示"}</strong>
-            <div className="pre-wrap">{project.blocked_reason}</div>
+            <RichContent content={project.blocked_reason} />
           </div>
         ) : null}
         {project.stage === "completed" ? (
@@ -371,7 +372,7 @@ export function ProjectPage({
           {project.replan_reason ? (
             <div className="blocked-banner">
               <strong>最近一次重规划（来源：{replanSourceLabel(project.replan_source)}）</strong>
-              <div className="pre-wrap">{project.replan_reason}</div>
+              <RichContent content={project.replan_reason} />
               {project.replan_requested_at ? (
                 <div className="muted">{formatTime(project.replan_requested_at)}</div>
               ) : null}
@@ -417,7 +418,7 @@ export function ProjectPage({
             {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
                 <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
-                <div className="pre-wrap">{item.content}</div>
+                <RichContent content={item.content} className="message-content" />
               </div>
             ))}
             {goalMessages.length === 0 ? (
@@ -448,12 +449,14 @@ export function ProjectPage({
                 <Badge tone={goal_proposal.kind === "direct" ? "warn" : "success"}>
                   {goal_proposal.kind === "direct" ? "建议直接完成" : "目标已明确"}
                 </Badge>
-                <span>{goal_proposal.summary}</span>
+                <div className="goal-proposal-summary">
+                  <RichContent content={goal_proposal.summary} />
+                </div>
               </div>
               {goal_proposal.goal ? (
-                <div className="pre-wrap">
+                <div>
                   <strong>确认后的目标：</strong>
-                  {goal_proposal.goal}
+                  <RichContent content={goal_proposal.goal} />
                 </div>
               ) : null}
               {goal_proposal.plan.length ? (
@@ -545,7 +548,7 @@ export function ProjectPage({
             {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
                 <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
-                <div className="pre-wrap">{item.content}</div>
+                <RichContent content={item.content} className="message-content" />
               </div>
             ))}
           </div>
@@ -796,14 +799,14 @@ export function ProjectPage({
                 {reviewMessages.map((item) => (
                   <div key={item.id} className="message message-user">
                     <div className="message-role">你的意见</div>
-                    <div className="pre-wrap">{item.content}</div>
+                    <RichContent content={item.content} className="message-content" />
                   </div>
                 ))}
               </div>
             </details>
           ) : null}
           {project.report ? (
-            <pre className="report">{project.report}</pre>
+            <RichContent content={project.report} className="report" />
           ) : project.stage === "summarizing" ? (
             project.blocked_reason ? (
               <p className="muted">报告生成失败，可点击上方“重试项目”。</p>
@@ -1251,11 +1254,13 @@ function TaskDrawer({
           />
         ) : null}
         {task.last_error && task.human_gate !== "milestone" ? (
-          <div className="error-box pre-wrap">{task.last_error}</div>
+          <div className="error-box">
+            <RichContent content={task.last_error} />
+          </div>
         ) : null}
         <section>
           <h3>任务描述</h3>
-          <p className="pre-wrap">{task.description}</p>
+          <RichContent content={task.description} />
         </section>
         {parent || children.length > 0 ? (
           <section>
@@ -1290,8 +1295,11 @@ function TaskDrawer({
                         <span className="derive-child-title">{child.title}</span>
                         <TaskStateBadge stage={child.stage} status={child.status} />
                       </div>
-                      <div className="muted pre-wrap">
-                        {child.result_summary || child.last_error || "尚无结果"}
+                      <div className="muted">
+                        <RichContent
+                          content={child.result_summary || child.last_error}
+                          emptyText="尚无结果"
+                        />
                       </div>
                     </div>
                   ))}
@@ -1384,7 +1392,9 @@ function TaskDrawer({
             <h3>验收反馈</h3>
             <ul>
               {task.verifier_issues.map((issue) => (
-                <li key={issue}>{issue}</li>
+                <li key={issue}>
+                  <RichContent content={issue} />
+                </li>
               ))}
             </ul>
           </section>
@@ -1392,7 +1402,7 @@ function TaskDrawer({
         {task.result_summary ? (
           <section>
             <h3>执行摘要</h3>
-            <p className="pre-wrap">{task.result_summary}</p>
+            <RichContent content={task.result_summary} />
           </section>
         ) : null}
         <section>
@@ -1569,7 +1579,10 @@ function HumanAcceptancePanel({
       <h3>人工验收</h3>
       <div className="blocked-banner">
         <strong>验收者已通过，等待人工确认</strong>
-        <div className="pre-wrap">{task.last_error ?? "里程碑任务必须由人工确认。"}</div>
+        <RichContent
+          content={task.last_error}
+          emptyText="里程碑任务必须由人工确认。"
+        />
       </div>
       <textarea
         value={reason}
@@ -1698,7 +1711,9 @@ function ArbitrationPanel({
           </div>
           <div className="kv">
             <span>失败原因</span>
-            <span className="pre-wrap">{context.task.last_error ?? "—"}</span>
+            <div>
+              <RichContent content={context.task.last_error} emptyText="—" />
+            </div>
           </div>
           <div className="kv">
             <span>失败统计</span>
