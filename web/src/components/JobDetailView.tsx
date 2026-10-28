@@ -44,6 +44,7 @@ export function JobDetailView({ job }: { job: JobSummary }) {
     ? formatMillis(job.duration_ms)
     : formatDuration(job.started_at, job.finished_at);
   const pid = detail?.pid ?? null;
+  const tokenDetails = formatTokenDetails(job);
 
   return (
     <div className="job">
@@ -57,7 +58,7 @@ export function JobDetailView({ job }: { job: JobSummary }) {
           <span className="muted">第 {job.attempt} 次</span>
           <span className="muted job-duration">{duration}</span>
           {job.usage_known ? (
-            <span className="muted">
+            <span className="muted" title={tokenDetails || undefined}>
               {formatTokens(job.input_tokens)} in · {formatTokens(job.output_tokens)} out ·{" "}
               {formatCost(job.cost)}
             </span>
@@ -86,7 +87,9 @@ export function JobDetailView({ job }: { job: JobSummary }) {
             {job.usage_known
               ? `输入 ${formatTokens(job.input_tokens)} · 输出 ${formatTokens(
                   job.output_tokens,
-                )} · 费用 ${formatCost(job.cost)}`
+                )} · 费用 ${formatCost(job.cost)}${
+                  tokenDetails ? ` · ${tokenDetails}` : ""
+                }`
               : "未知（Agent 未提供 token 或费用）"}
             {" · "}时长 {formatMillis(job.duration_ms)}
           </div>
@@ -116,4 +119,18 @@ function JobBlock({ title, value }: { title: string; value: string | null }) {
       <RichContent content={value} />
     </div>
   );
+}
+
+function formatTokenDetails(job: JobSummary): string {
+  const parts: string[] = [];
+  if (job.cache_read_tokens != null) {
+    parts.push(`缓存读 ${formatTokens(job.cache_read_tokens)}`);
+  }
+  if (job.cache_write_tokens != null) {
+    parts.push(`缓存写 ${formatTokens(job.cache_write_tokens)}`);
+  }
+  if (job.reasoning_tokens != null) {
+    parts.push(`推理 ${formatTokens(job.reasoning_tokens)}`);
+  }
+  return parts.join(" · ");
 }

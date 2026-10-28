@@ -6,6 +6,7 @@ mod domain;
 mod events;
 mod git;
 mod models;
+mod opencode;
 mod prompts;
 mod replan;
 mod runner;

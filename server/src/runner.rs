@@ -141,9 +141,18 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
         prompt: prompt.clone(),
+        opencode_session_id: crate::opencode::session_id(&job.id),
         progress: progress.clone(),
     };
-    let run = run_agent_job(state, &job, &job_dir, &agent, &spec, &progress).await?;
+    let mut run = run_agent_job(state, &job, &job_dir, &agent, &spec, &progress).await?;
+    if agent.kind == AGENT_OPENCODE && !state.is_shutting_down() {
+        if run.process_failure() {
+            // The server-side session can outlive the killed CLI process. Stop it
+            // before taking the settlement snapshot so no further usage accrues.
+            crate::opencode::settle(&spec.opencode_session_id).await;
+        }
+        run.usage = crate::opencode::fetch_usage(&spec.opencode_session_id).await;
+    }
     state.unregister_job(&job_dir);
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
@@ -2108,9 +2117,11 @@ async fn finish_job(
     } else {
         None
     };
-    let usage = result
-        .as_deref()
-        .and_then(crate::usage::UsageRecord::from_result);
+    let usage = run.usage.clone().or_else(|| {
+        result
+            .as_deref()
+            .and_then(crate::usage::UsageRecord::from_result)
+    });
     let finished_at = now();
     let started_at: Option<String> = sqlx::query_scalar("SELECT started_at FROM jobs WHERE id = ?")
         .bind(&job.id)
@@ -2127,7 +2138,8 @@ async fn finish_job(
         });
     let updated = sqlx::query(
         "UPDATE jobs SET status = ?, result = ?, stdout = ?, stderr = ?, error = ?, \
-         exit_code = ?, failure_kind = ?, input_tokens = ?, output_tokens = ?, cost = ?, \
+         exit_code = ?, failure_kind = ?, input_tokens = ?, output_tokens = ?, \
+         cache_read_tokens = ?, cache_write_tokens = ?, reasoning_tokens = ?, cost = ?, \
          duration_ms = ?, usage_known = ?, finished_at = ? WHERE id = ? AND status = 'running'",
     )
     .bind(status)
@@ -2139,6 +2151,9 @@ async fn finish_job(
     .bind(failure_kind)
     .bind(usage.as_ref().and_then(|usage| usage.input_tokens))
     .bind(usage.as_ref().and_then(|usage| usage.output_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.cache_read_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.cache_write_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.reasoning_tokens))
     .bind(usage.as_ref().and_then(|usage| usage.cost))
     .bind(duration_ms)
     .bind(if usage.as_ref().is_some_and(|usage| usage.known()) {

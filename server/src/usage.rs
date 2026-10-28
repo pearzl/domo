@@ -1,11 +1,13 @@
 //! Cost and usage accounting, plus the availability gates used by scheduling.
 //!
-//! A result may carry an optional `usage` object. Token and cost values that the
-//! agent did not provide stay `None`; they are never coerced to zero, so
-//! aggregation can count unknown jobs separately and usage limits only consume
-//! known values. Availability windows are evaluated in the server's local
-//! timezone on every scheduling pass, which makes a new day or month restore an
-//! agent without an explicit enable action.
+//! Usage comes from the result protocol when an agent provides it, or from the
+//! OpenCode session ledger for OpenCode jobs. Token and cost values that remain
+//! unavailable stay `None`; they are never coerced to zero, so aggregation can
+//! count unknown jobs separately and usage limits only consume known values.
+//! Cache read, cache write, and reasoning tokens are stored as details of the
+//! total input and output counts. Availability windows are evaluated in the
+//! server's local timezone on every scheduling pass, which makes a new day or
+//! month restore an agent without an explicit enable action.
 
 use std::collections::HashMap;
 
@@ -28,13 +30,19 @@ pub const WINDOW_MONTH: &str = "month";
 pub const UNKNOWN_AGENT_KEY: &str = "unknown";
 pub const UNKNOWN_AGENT_LABEL: &str = "未记录";
 
-/// The optional usage object of a result protocol payload.
+/// A usage snapshot from a result payload or an OpenCode session ledger.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,11 +60,17 @@ impl UsageRecord {
         let record = Self {
             input_tokens: token_value(object.get("input_tokens")),
             output_tokens: token_value(object.get("output_tokens")),
+            cache_read_tokens: token_value(object.get("cache_read_tokens")),
+            cache_write_tokens: token_value(object.get("cache_write_tokens")),
+            reasoning_tokens: token_value(object.get("reasoning_tokens")),
             cost: cost_value(object.get("cost")),
             duration_ms: token_value(object.get("duration_ms")),
         };
         if record.input_tokens.is_none()
             && record.output_tokens.is_none()
+            && record.cache_read_tokens.is_none()
+            && record.cache_write_tokens.is_none()
+            && record.reasoning_tokens.is_none()
             && record.cost.is_none()
             && record.duration_ms.is_none()
         {
@@ -68,7 +82,12 @@ impl UsageRecord {
     /// Usage is "known" when at least one token or cost value is present.
     /// Duration alone does not make the accounting complete.
     pub fn known(&self) -> bool {
-        self.input_tokens.is_some() || self.output_tokens.is_some() || self.cost.is_some()
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cache_read_tokens.is_some()
+            || self.cache_write_tokens.is_some()
+            || self.reasoning_tokens.is_some()
+            || self.cost.is_some()
     }
 }
 
@@ -111,6 +130,9 @@ pub struct UsageJobRow {
     pub role: String,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
     pub cost: Option<f64>,
     pub duration_ms: Option<i64>,
     pub usage_known: i64,
@@ -120,7 +142,8 @@ pub struct UsageJobRow {
 }
 
 pub async fn load_jobs(pool: &SqlitePool, project_id: Option<&str>) -> Result<Vec<UsageJobRow>> {
-    const COLUMNS: &str = "SELECT project_id, agent_id, role, input_tokens, output_tokens, cost, \
+    const COLUMNS: &str = "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
+                          cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, \
                           duration_ms, usage_known, started_at, finished_at, created_at FROM jobs";
     let rows = match project_id {
         Some(project_id) => {
@@ -143,6 +166,9 @@ pub struct UsageTotals {
     pub jobs: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
     pub cost: f64,
     pub duration_ms: i64,
     pub unknown_jobs: i64,
@@ -153,6 +179,9 @@ impl UsageTotals {
         self.jobs += 1;
         self.input_tokens += row.input_tokens.unwrap_or(0);
         self.output_tokens += row.output_tokens.unwrap_or(0);
+        self.cache_read_tokens += row.cache_read_tokens.unwrap_or(0);
+        self.cache_write_tokens += row.cache_write_tokens.unwrap_or(0);
+        self.reasoning_tokens += row.reasoning_tokens.unwrap_or(0);
         self.cost += row.cost.unwrap_or(0.0);
         self.duration_ms += row_duration(row);
         if row.usage_known == 0 {
@@ -707,7 +736,8 @@ pub async fn agent_usage(
     let local = at.with_timezone(&Local);
     let (start, end) = window_bounds(&config, local, reset_at);
     let rows = sqlx::query_as::<_, UsageJobRow>(
-        "SELECT project_id, agent_id, role, input_tokens, output_tokens, cost, duration_ms, \
+        "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
+         cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, duration_ms, \
          usage_known, started_at, finished_at, created_at FROM jobs WHERE agent_id = ?",
     )
     .bind(agent_id)
@@ -780,6 +810,9 @@ mod tests {
             role: role.into(),
             input_tokens: input,
             output_tokens: output,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
             cost: known.then_some(0.5),
             duration_ms: None,
             usage_known: if known { 1 } else { 0 },
@@ -791,13 +824,24 @@ mod tests {
 
     #[test]
     fn parses_usage_object_from_result() {
-        let raw = r#"{"kind":"done","summary":"ok","usage":{"input_tokens":120,"output_tokens":30,"cost":0.25,"duration_ms":900}}"#;
+        let raw = r#"{"kind":"done","summary":"ok","usage":{"input_tokens":120,"output_tokens":30,"cache_read_tokens":40,"cache_write_tokens":5,"reasoning_tokens":12,"cost":0.25,"duration_ms":900}}"#;
         let usage = UsageRecord::from_result(raw).unwrap();
         assert_eq!(usage.input_tokens, Some(120));
         assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.cache_read_tokens, Some(40));
+        assert_eq!(usage.cache_write_tokens, Some(5));
+        assert_eq!(usage.reasoning_tokens, Some(12));
         assert_eq!(usage.cost, Some(0.25));
         assert_eq!(usage.duration_ms, Some(900));
         assert!(usage.known());
+    }
+
+    #[test]
+    fn token_details_alone_make_usage_known() {
+        let usage = UsageRecord::from_value(&serde_json::json!({"cache_read_tokens": 10})).unwrap();
+        assert!(usage.known());
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.cache_read_tokens, Some(10));
     }
 
     #[test]
@@ -861,6 +905,33 @@ mod tests {
         assert_eq!(verifier.totals.jobs, 1);
         assert_eq!(verifier.totals.unknown_jobs, 1);
         assert_eq!(verifier.totals.input_tokens, 0);
+    }
+
+    #[test]
+    fn aggregates_token_details() {
+        let mut job = row(
+            "p1",
+            Some("a"),
+            "executor",
+            Some(10),
+            Some(5),
+            true,
+            "2026-10-27T10:00:00+00:00",
+        );
+        job.cache_read_tokens = Some(7);
+        job.cache_write_tokens = Some(3);
+        job.reasoning_tokens = Some(2);
+        let report = summarize(
+            &[job],
+            &UsageFilter::default(),
+            UsageGroupBy::None,
+            &HashMap::new(),
+        );
+        assert_eq!(report.totals.input_tokens, 10);
+        assert_eq!(report.totals.output_tokens, 5);
+        assert_eq!(report.totals.cache_read_tokens, 7);
+        assert_eq!(report.totals.cache_write_tokens, 3);
+        assert_eq!(report.totals.reasoning_tokens, 2);
     }
 
     #[test]

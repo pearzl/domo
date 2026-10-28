@@ -3426,6 +3426,9 @@ async fn task_arbitration(
             "failure_kind": job.failure_kind,
             "input_tokens": job.input_tokens,
             "output_tokens": job.output_tokens,
+            "cache_read_tokens": job.cache_read_tokens,
+            "cache_write_tokens": job.cache_write_tokens,
+            "reasoning_tokens": job.reasoning_tokens,
             "cost": job.cost,
             "duration_ms": job.duration_ms,
             "usage_known": job.usage_known != 0,
@@ -3754,6 +3757,9 @@ async fn get_job(
         failure_kind: job.failure_kind,
         input_tokens: job.input_tokens,
         output_tokens: job.output_tokens,
+        cache_read_tokens: job.cache_read_tokens,
+        cache_write_tokens: job.cache_write_tokens,
+        reasoning_tokens: job.reasoning_tokens,
         cost: job.cost,
         duration_ms: job
             .duration_ms
@@ -3986,6 +3992,9 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
             failure_kind: job.failure_kind,
             input_tokens: job.input_tokens,
             output_tokens: job.output_tokens,
+            cache_read_tokens: job.cache_read_tokens,
+            cache_write_tokens: job.cache_write_tokens,
+            reasoning_tokens: job.reasoning_tokens,
             cost: job.cost,
             duration_ms: job
                 .duration_ms

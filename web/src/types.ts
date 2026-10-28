@@ -42,6 +42,9 @@ export interface UsageTotals {
   jobs: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
   cost: number;
   duration_ms: number;
   unknown_jobs: number;
@@ -230,6 +233,9 @@ export interface JobSummary {
   failure_kind: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
   cost: number | null;
   duration_ms: number | null;
   usage_known: boolean;

@@ -1069,6 +1069,18 @@ function UsagePanel({
           <strong>{formatUsageAmount(usage.totals.output_tokens)}</strong>
         </div>
         <div>
+          <span className="meta-label">缓存读</span>
+          <strong>{formatUsageAmount(usage.totals.cache_read_tokens)}</strong>
+        </div>
+        <div>
+          <span className="meta-label">缓存写</span>
+          <strong>{formatUsageAmount(usage.totals.cache_write_tokens)}</strong>
+        </div>
+        <div>
+          <span className="meta-label">推理</span>
+          <strong>{formatUsageAmount(usage.totals.reasoning_tokens)}</strong>
+        </div>
+        <div>
           <span className="meta-label">费用</span>
           <strong>{formatCost(usage.totals.cost)}</strong>
         </div>
@@ -1109,32 +1121,40 @@ function UsageTable({
       {groups.length === 0 ? (
         <div className="muted">还没有用量记录。</div>
       ) : (
-        <table className="usage-table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>作业</th>
-              <th>输入</th>
-              <th>输出</th>
-              <th>费用</th>
-              <th>时长</th>
-              <th>未知</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((group) => (
-              <tr key={group.key}>
-                <td>{nameOf(group)}</td>
-                <td>{group.jobs}</td>
-                <td>{formatUsageAmount(group.input_tokens)}</td>
-                <td>{formatUsageAmount(group.output_tokens)}</td>
-                <td>{formatCost(group.cost)}</td>
-                <td>{formatUsageDuration(group.duration_ms)}</td>
-                <td>{group.unknown_jobs}</td>
+        <div className="usage-table-wrap">
+          <table className="usage-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>作业</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>缓存读</th>
+                <th>缓存写</th>
+                <th>推理</th>
+                <th>费用</th>
+                <th>时长</th>
+                <th>未知</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {groups.map((group) => (
+                <tr key={group.key}>
+                  <td>{nameOf(group)}</td>
+                  <td>{group.jobs}</td>
+                  <td>{formatUsageAmount(group.input_tokens)}</td>
+                  <td>{formatUsageAmount(group.output_tokens)}</td>
+                  <td>{formatUsageAmount(group.cache_read_tokens)}</td>
+                  <td>{formatUsageAmount(group.cache_write_tokens)}</td>
+                  <td>{formatUsageAmount(group.reasoning_tokens)}</td>
+                  <td>{formatCost(group.cost)}</td>
+                  <td>{formatUsageDuration(group.duration_ms)}</td>
+                  <td>{group.unknown_jobs}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

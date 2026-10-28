@@ -129,6 +129,7 @@ function UsageTable({
     <section className="panel">
       <h2>{DIMENSION_LABELS[dimension]}</h2>
       <p className="subtitle">{DIMENSION_HINTS[dimension]}</p>
+      <p className="subtitle">输入 token 含缓存读写，输出 token 含推理。</p>
       {report.groups.length === 0 ? (
         <Empty
           title="当前筛选范围内没有作业记录"
@@ -143,6 +144,9 @@ function UsageTable({
                 <th className="num">作业</th>
                 <th className="num">输入 token</th>
                 <th className="num">输出 token</th>
+                <th className="num">缓存读</th>
+                <th className="num">缓存写</th>
+                <th className="num">推理</th>
                 <th className="num">费用</th>
                 <th className="num">时长</th>
                 <th className="num">未知</th>
@@ -168,6 +172,27 @@ function UsageTable({
                   <td className="num">
                     <MetricValue
                       value={group.output_tokens}
+                      totals={group}
+                      format={formatTokens}
+                    />
+                  </td>
+                  <td className="num">
+                    <MetricValue
+                      value={group.cache_read_tokens}
+                      totals={group}
+                      format={formatTokens}
+                    />
+                  </td>
+                  <td className="num">
+                    <MetricValue
+                      value={group.cache_write_tokens}
+                      totals={group}
+                      format={formatTokens}
+                    />
+                  </td>
+                  <td className="num">
+                    <MetricValue
+                      value={group.reasoning_tokens}
                       totals={group}
                       format={formatTokens}
                     />
@@ -231,6 +256,36 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
           </strong>
         </div>
         <div>
+          <span className="meta-label">缓存读</span>
+          <strong>
+            <MetricValue
+              value={totals.cache_read_tokens}
+              totals={totals}
+              format={formatTokens}
+            />
+          </strong>
+        </div>
+        <div>
+          <span className="meta-label">缓存写</span>
+          <strong>
+            <MetricValue
+              value={totals.cache_write_tokens}
+              totals={totals}
+              format={formatTokens}
+            />
+          </strong>
+        </div>
+        <div>
+          <span className="meta-label">推理</span>
+          <strong>
+            <MetricValue
+              value={totals.reasoning_tokens}
+              totals={totals}
+              format={formatTokens}
+            />
+          </strong>
+        </div>
+        <div>
           <span className="meta-label">费用</span>
           <strong>
             <MetricValue value={totals.cost} totals={totals} format={formatCost} />
@@ -254,7 +309,8 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
       {totals.unknown_jobs > 0 ? (
         <div className="warn-banner">
           {totals.unknown_jobs} 个作业未提供 token 或费用，已单独计为未知。输入/输出
-          token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。
+          token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。输入 token 含缓存
+          读写，输出 token 含推理。
         </div>
       ) : null}
     </>

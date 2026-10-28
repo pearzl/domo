@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     failure_kind TEXT,
     input_tokens INTEGER,
     output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER,
     cost REAL,
     duration_ms INTEGER,
     usage_known INTEGER NOT NULL DEFAULT 0,
@@ -269,6 +272,9 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "jobs", "failure_kind", "TEXT").await?;
     ensure_column(pool, "jobs", "input_tokens", "INTEGER").await?;
     ensure_column(pool, "jobs", "output_tokens", "INTEGER").await?;
+    ensure_column(pool, "jobs", "cache_read_tokens", "INTEGER").await?;
+    ensure_column(pool, "jobs", "cache_write_tokens", "INTEGER").await?;
+    ensure_column(pool, "jobs", "reasoning_tokens", "INTEGER").await?;
     ensure_column(pool, "jobs", "cost", "REAL").await?;
     ensure_column(pool, "jobs", "duration_ms", "INTEGER").await?;
     ensure_column(pool, "jobs", "usage_known", "INTEGER NOT NULL DEFAULT 0").await?;

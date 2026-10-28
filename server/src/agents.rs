@@ -15,6 +15,7 @@ use crate::models::{
     AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, GOAL_CONFIRM_AUTO, JOB_ROLE_CONFIRM,
     JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
+use crate::usage::UsageRecord;
 
 const OUTPUT_CAP: usize = 2 * 1024 * 1024;
 
@@ -97,6 +98,7 @@ pub struct AgentRun {
     pub exit_code: Option<i64>,
     pub timed_out: bool,
     pub stalled: bool,
+    pub usage: Option<UsageRecord>,
 }
 
 impl AgentRun {
@@ -114,6 +116,7 @@ pub struct AgentSpec {
     pub cwd: PathBuf,
     pub job_dir: PathBuf,
     pub prompt: String,
+    pub opencode_session_id: String,
     pub progress: JobProgress,
 }
 
@@ -167,6 +170,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         exit_code: Some(0),
         timed_out: false,
         stalled: false,
+        usage: None,
     })
 }
 
@@ -839,12 +843,18 @@ fn mock_summary(context: &serde_json::Value) -> serde_json::Value {
 }
 
 async fn run_opencode(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
-    let bin = std::env::var("DOMO_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
+    let bin = crate::opencode::bin();
     let mut args = vec![
         "run".to_string(),
         "--auto".into(),
         "--format".into(),
         "json".into(),
+        "--session".into(),
+        spec.opencode_session_id.clone(),
+        // An explicit title skips the separate title-generation model call, so
+        // the session ledger contains only this job's work.
+        "--title".into(),
+        format!("DOMO {} {}", spec.role, spec.job_id),
     ];
     if !agent.model.trim().is_empty() {
         args.push("--model".into());
@@ -989,6 +999,7 @@ async fn run_process(
         exit_code: status.code().map(|code| code as i64),
         timed_out,
         stalled: false,
+        usage: None,
     })
 }
 
@@ -1111,6 +1122,7 @@ mod tests {
             cwd: cwd.clone(),
             job_dir: cwd.clone(),
             prompt: String::new(),
+            opencode_session_id: crate::opencode::session_id("job_test"),
             progress: JobProgress::new(),
         };
         let args = vec![
@@ -1135,6 +1147,7 @@ mod tests {
             exit_code: None,
             timed_out: false,
             stalled: true,
+            usage: None,
         };
         assert!(run.process_failure());
         let clean = AgentRun {
@@ -1143,6 +1156,7 @@ mod tests {
             exit_code: Some(0),
             timed_out: false,
             stalled: false,
+            usage: None,
         };
         assert!(!clean.process_failure());
     }
