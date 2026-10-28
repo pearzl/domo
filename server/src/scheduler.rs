@@ -22,15 +22,20 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
     if let Err(error) = recover(&state).await {
         tracing::error!(error = %error, "启动恢复失败");
     }
+    let mut shutdown = state.shutdown_receiver();
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
+            _ = shutdown.wait_for(|stopping| *stopping) => break,
             message = rx.recv() => {
                 if message.is_none() {
                     break;
                 }
             }
+        }
+        if state.is_shutting_down() {
+            break;
         }
         let jobs = {
             let _guard = state.schedule_lock.lock().await;
@@ -42,6 +47,9 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
                 }
             }
         };
+        if state.is_shutting_down() {
+            break;
+        }
         for job_id in jobs {
             let state = state.clone();
             tokio::spawn(async move {

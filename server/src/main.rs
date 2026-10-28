@@ -25,6 +25,11 @@ use crate::config::Config;
 use crate::events::EventBus;
 use crate::state::AppState;
 
+/// Upper bound for draining in-flight connections after shutdown begins. Agents
+/// are already terminated at that point, so only HTTP responses can still be
+/// finishing.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
@@ -50,14 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let db = db::connect(&cfg.db_path()).await?;
     let bus = EventBus::new();
     let (notify, notify_rx) = tokio::sync::mpsc::channel(64);
-    let state = AppState {
-        db,
-        cfg: cfg.clone(),
-        bus,
-        notify,
-        schedule_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-        git_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-    };
+    let state = AppState::new(db, cfg.clone(), bus, notify);
 
     {
         let state = state.clone();
@@ -66,9 +64,25 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            tracing::info!("DOMO 正在关闭");
+            state.begin_shutdown();
+            state.kill_active_jobs();
+            // A second signal skips the grace period and always wins, so an
+            // unresponsive connection cannot trap the process.
+            wait_for_shutdown_signal().await;
+            tracing::warn!("再次收到关闭信号，强制退出");
+            state.kill_active_jobs();
+            std::process::exit(130);
+        });
+    }
+
     let web_dist = cfg.web_dist.clone();
     let index = web_dist.join("index.html");
-    let app = api::router(state)
+    let app = api::router(state.clone())
         .fallback_service(ServeDir::new(&web_dist).fallback(ServeFile::new(index)));
     let address = format!("{}:{}", cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -80,13 +94,34 @@ async fn main() -> anyhow::Result<()> {
         web = %web_dist.display(),
         "DOMO 已启动"
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let serve = axum::serve(listener, app).with_graceful_shutdown({
+        let state = state.clone();
+        async move { state.wait_for_shutdown().await }
+    });
+    let drain_timeout = {
+        let state = state.clone();
+        async move {
+            state.wait_for_shutdown().await;
+            tokio::time::sleep(SHUTDOWN_TIMEOUT).await;
+        }
+    };
+    let serve_result = tokio::select! {
+        result = serve => Some(result),
+        _ = drain_timeout => None,
+    };
+    state.kill_active_jobs();
+    match serve_result {
+        Some(result) => result?,
+        None => {
+            tracing::warn!(timeout = ?SHUTDOWN_TIMEOUT, "关闭超时，强制退出");
+            std::process::exit(0);
+        }
+    }
+    tracing::info!("DOMO 已关闭");
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -104,6 +139,4 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
-    tracing::info!("DOMO 正在关闭");
-    tokio::time::sleep(Duration::from_millis(100)).await;
 }

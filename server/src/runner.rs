@@ -58,6 +58,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
 
     let job_dir = PathBuf::from(&project.workspace).join("jobs").join(&job.id);
     fs::create_dir_all(&job_dir).await?;
+    state.register_job(job_dir.clone());
     let result_path = job_dir.join("result.json");
     let _ = fs::remove_file(&result_path).await;
 
@@ -143,6 +144,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         progress: progress.clone(),
     };
     let run = run_agent_job(state, &job, &job_dir, &agent, &spec, &progress).await?;
+    state.unregister_job(&job_dir);
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
     if job.role == JOB_ROLE_VERIFIER {

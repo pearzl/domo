@@ -12,7 +12,7 @@ use axum::routing::{any, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 use tokio_stream::StreamExt;
 
 use crate::agents::kill_job_dir;
@@ -3904,13 +3904,24 @@ async fn stream_events(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let receiver = state.bus.subscribe();
-    let stream = BroadcastStream::new(receiver).filter_map(|message| match message {
+    let events = BroadcastStream::new(receiver).filter_map(|message| match message {
         Ok(event) => {
             let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
             Some(Ok(Event::default().data(data)))
         }
         Err(_) => None,
     });
+    // The broadcast bus outlives every connection, so the response only ends
+    // when shutdown is requested. Without this the graceful drain would wait
+    // for an event stream that can never finish.
+    let shutdown = WatchStream::new(state.shutdown_receiver())
+        .filter(|stopping| *stopping)
+        .map(|_| None::<Result<Event, Infallible>>);
+    let stream = events
+        .map(Some)
+        .merge(shutdown)
+        .take_while(Option::is_some)
+        .map(|item| item.expect("event stream item passes the shutdown guard"));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
