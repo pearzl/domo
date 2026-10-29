@@ -92,39 +92,39 @@ def call(method, path, data=None):
         method == "POST"
         and path.startswith("/api/projects/")
         and path.endswith("/confirm")
-        and not path.endswith("/goal/confirm")
+        and not path.endswith("/analysis/confirm")
     ):
         project_id = path.split("/")[-2]
         detail = _call_raw("GET", f"/api/projects/{project_id}")
         if not detail["messages"] and project_id in _pending_goals:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
+                f"/api/projects/{project_id}/analysis/messages",
                 {
                     "message": _pending_goals.pop(project_id),
-                    "goal_confirm_mode": "auto",
+                    "confirm_mode": "auto",
                 },
             )
         message = (data or {}).get("message")
         if message:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
-                {"message": message, "goal_confirm_mode": "auto"},
+                f"/api/projects/{project_id}/analysis/messages",
+                {"message": message, "confirm_mode": "auto"},
             )
         deadline = time.time() + 30
         while time.time() < deadline:
             detail = _call_raw("GET", f"/api/projects/{project_id}")
-            if detail["project"]["stage"] != "goal_confirm":
+            if detail["project"]["stage"] != "analysis":
                 return detail
-            if detail.get("goal_proposal") and not detail["jobs"]:
+            if detail.get("proposal") and not detail["jobs"]:
                 return _call_raw(
                     "POST",
-                    f"/api/projects/{project_id}/goal/confirm",
-                    {"message": None},
+                    f"/api/projects/{project_id}/analysis/confirm",
+                    {},
                 )
             last = detail["messages"][-1] if detail["messages"] else None
-            if last and last["role"] == "planner" and not detail.get("goal_proposal"):
+            if last and last["role"] == "planner" and not detail.get("proposal"):
                 return detail
             time.sleep(0.1)
         return _call_raw("GET", f"/api/projects/{project_id}")
@@ -290,7 +290,7 @@ assert detail["project"]["report"] is None, detail["project"]
 assert detail["project"]["status"] == "running", detail["project"]
 call("POST", f"/api/projects/{project_id}/archive", {})
 
-# ---- 项目 B：目标确认阶段添加任务，确认后与规划任务一起执行 --------------------------------
+# ---- 项目 B：项目分析阶段添加任务，确认方案后与人工任务一起执行 --------------------------------
 planning = call(
     "POST",
     "/api/projects",
@@ -303,15 +303,15 @@ planning = call(
 planning_id = planning["id"]
 _call_raw(
     "POST",
-    f"/api/projects/{planning_id}/goal/messages",
-    {"message": "生成一个 mock 文件", "goal_confirm_mode": "manual"},
+    f"/api/projects/{planning_id}/analysis/messages",
+    {"message": "生成一个 mock 文件", "confirm_mode": "manual"},
 )
 wait_for(
     planning_id,
-    lambda d: d.get("goal_proposal")
-    and d["project"]["stage"] == "goal_confirm"
+    lambda d: d.get("proposal")
+    and d["project"]["stage"] == "analysis"
     and d["project"]["status"] == "blocked",
-    "目标确认提议",
+    "项目分析方案",
     30,
 )
 
@@ -319,13 +319,13 @@ created = add_task(planning_id, "M1")
 assert created["stage"] == "pending"
 assert created["status"] == "queued"
 
-_call_raw("POST", f"/api/projects/{planning_id}/goal/confirm", {})
+_call_raw("POST", f"/api/projects/{planning_id}/analysis/confirm", {})
 detail = wait_for(
     planning_id,
     lambda d: d["project"]["stage"] == "summarizing"
     and d["project"]["report"]
     and all(task["stage"] == "completed" for task in d["tasks"]),
-    "目标确认前添加的任务完成",
+    "项目分析确认前添加的任务完成",
 )
 assert "M1" in {task["key"] for task in detail["tasks"]}, detail["tasks"]
 kinds = [event["kind"] for event in detail["events"]]

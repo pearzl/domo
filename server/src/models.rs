@@ -13,8 +13,7 @@ pub const AGENT_MOCK: &str = "mock";
 pub const AGENT_OPENCODE: &str = "opencode";
 pub const AGENT_CLI: &str = "cli";
 
-pub const STAGE_GOAL_CONFIRM: &str = "goal_confirm";
-pub const STAGE_PLANNING: &str = "planning";
+pub const STAGE_ANALYSIS: &str = "analysis";
 pub const STAGE_EXECUTING: &str = "executing";
 pub const STAGE_SUMMARIZING: &str = "summarizing";
 pub const STAGE_COMPLETED: &str = "completed";
@@ -59,15 +58,14 @@ pub const FAILURE_TRANSIENT: &str = "transient";
 pub const FAILURE_PERMANENT: &str = "permanent";
 pub const FAILURE_TASK: &str = "task";
 
-pub const JOB_ROLE_CONFIRM: &str = "confirm";
-pub const JOB_ROLE_GOAL: &str = "goal";
+pub const JOB_ROLE_ANALYSIS: &str = "analysis";
 pub const JOB_ROLE_DIRECT: &str = "direct";
 pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
 pub const JOB_ROLE_VERIFIER: &str = ROLE_VERIFIER;
 pub const JOB_ROLE_SUMMARY: &str = "summary";
 
-pub const GOAL_CONFIRM_MANUAL: &str = "manual";
-pub const GOAL_CONFIRM_AUTO: &str = "auto";
+pub const CONFIRM_MANUAL: &str = "manual";
+pub const CONFIRM_AUTO: &str = "auto";
 
 pub const COMPLETION_TASKS: &str = "tasks";
 pub const COMPLETION_DIRECT: &str = "direct";
@@ -264,7 +262,18 @@ pub fn default_team_row_to_pool(row: DefaultTeamRow) -> ProjectAgentRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalProposal {
+pub struct ProposalTask {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisProposal {
     pub kind: String,
     pub summary: String,
     #[serde(default)]
@@ -273,6 +282,8 @@ pub struct GoalProposal {
     pub assumptions: Vec<String>,
     #[serde(default)]
     pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub tasks: Vec<ProposalTask>,
     #[serde(default)]
     pub plan: Vec<String>,
     #[serde(default)]
@@ -298,10 +309,10 @@ pub struct ProjectRow {
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
     pub replan_requested_at: Option<String>,
-    pub goal_confirm_mode: String,
+    pub confirm_mode: String,
     #[serde(skip_serializing)]
-    pub goal_proposal: Option<String>,
-    pub goal_confirmed_at: Option<String>,
+    pub proposal: Option<String>,
+    pub confirmed_at: Option<String>,
     pub completion_mode: String,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
@@ -412,7 +423,7 @@ pub struct ProjectSummary {
     pub task_completed: i64,
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
-    pub goal_confirm_mode: String,
+    pub confirm_mode: String,
     pub completion_mode: String,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
@@ -566,7 +577,7 @@ pub struct ProjectDetail {
     pub agents: Vec<AgentView>,
     pub agent_pool: ProjectAgentPool,
     pub usage: ProjectUsage,
-    pub goal_proposal: Option<GoalProposal>,
+    pub proposal: Option<AnalysisProposal>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -577,20 +588,18 @@ pub struct CreateProjectRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GoalMessageRequest {
+pub struct AnalysisMessageRequest {
     pub message: String,
-    pub goal_confirm_mode: Option<String>,
+    pub confirm_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GoalPolicyRequest {
+pub struct AnalysisPolicyRequest {
     pub mode: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct ConfirmGoalRequest {
-    pub message: Option<String>,
-}
+pub struct ConfirmAnalysisRequest {}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {

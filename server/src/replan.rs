@@ -106,10 +106,10 @@ pub async fn request(
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
-         completion_mode = ?, replan_reason = ?, replan_source = ?, replan_requested_at = ?, \
-         updated_at = ? WHERE id = ?",
+         completion_mode = ?, proposal = NULL, replan_reason = ?, replan_source = ?, \
+         replan_requested_at = ?, updated_at = ? WHERE id = ?",
     )
-    .bind(STAGE_PLANNING)
+    .bind(STAGE_ANALYSIS)
     .bind(STATUS_RUNNING)
     .bind(COMPLETION_TASKS)
     .bind(reason)
@@ -164,6 +164,24 @@ pub async fn request(
         retained_tasks,
         canceled_jobs: canceled_jobs.len(),
     }))
+}
+
+/// A replan returns the project to analysis without a new user message. The
+/// analysis job that follows the latest replan request runs unconditionally;
+/// later analysis jobs still wait for user input.
+pub async fn pending(pool: &SqlitePool, project: &ProjectRow) -> Result<bool> {
+    let Some(requested_at) = project.replan_requested_at.as_deref() else {
+        return Ok(false);
+    };
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND role = ? AND created_at >= ?",
+    )
+    .bind(&project.id)
+    .bind(JOB_ROLE_ANALYSIS)
+    .bind(requested_at)
+    .fetch_one(pool)
+    .await?;
+    Ok(count == 0)
 }
 
 fn source_label(source: &str) -> &'static str {

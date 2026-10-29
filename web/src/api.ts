@@ -117,25 +117,25 @@ export const api = {
         method: "DELETE",
       },
     ),
-  postGoalMessage: (
+  postAnalysisMessage: (
     id: string,
     message: string,
-    goalConfirmMode?: "manual" | "auto",
+    confirmMode?: "manual" | "auto",
   ) =>
-    request<ProjectDetail>(`/api/projects/${id}/goal/messages`, {
+    request<ProjectDetail>(`/api/projects/${id}/analysis/messages`, {
       method: "POST",
       body: JSON.stringify({
         message,
-        goal_confirm_mode: goalConfirmMode ?? null,
+        confirm_mode: confirmMode ?? null,
       }),
     }),
-  confirmGoal: (id: string, message?: string) =>
-    request<ProjectDetail>(`/api/projects/${id}/goal/confirm`, {
+  confirmAnalysis: (id: string) =>
+    request<ProjectDetail>(`/api/projects/${id}/analysis/confirm`, {
       method: "POST",
-      body: JSON.stringify({ message: message || null }),
+      body: JSON.stringify({}),
     }),
-  updateGoalPolicy: (id: string, mode: "manual" | "auto") =>
-    request<ProjectDetail>(`/api/projects/${id}/goal/policy`, {
+  updateAnalysisPolicy: (id: string, mode: "manual" | "auto") =>
+    request<ProjectDetail>(`/api/projects/${id}/analysis/policy`, {
       method: "PATCH",
       body: JSON.stringify({ mode }),
     }),

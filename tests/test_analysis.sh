@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 目标确认阶段冒烟测试。
+# 项目分析阶段冒烟测试。
 #
 # 覆盖范围：
 #   1. 项目创建后等待输入目标，不派发作业；
-#   2. 人工确认模式下，规划者多轮提问、给出目标理解、人工确认后进入规划；
-#   3. 自动确认模式下，规划者可以直接跳过人工确认；
+#   2. 人工确认模式下，规划者多轮提问、给出包含任务清单的方案，人工确认后才创建任务并进入执行；
+#   3. 自动确认模式下，规划者可以直接跳过人工确认开始执行；
 #   4. 直接完成模式下，人工确认后才修改仓库，并生成等待验收的报告；
 #   5. 自动确认的直接完成不等待人工确认；
 #   6. 人工确认模式忽略规划者的跳过请求；
@@ -17,8 +17,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_ROOT="${TMPDIR:-/tmp}/domo-goal-confirm.$$"
-PORT="${DOMO_GOAL_CONFIRM_PORT:-$(python3 - <<'PY'
+TMP_ROOT="${TMPDIR:-/tmp}/domo-analysis.$$"
+PORT="${DOMO_ANALYSIS_PORT:-$(python3 - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -120,22 +120,22 @@ def create_project(name):
     )["project"]
 
 
-def submit_goal(project_id, goal, mode="manual"):
+def submit(project_id, message, mode="manual"):
     return call(
         "POST",
-        f"/api/projects/{project_id}/goal/messages",
-        {"message": goal, "goal_confirm_mode": mode},
+        f"/api/projects/{project_id}/analysis/messages",
+        {"message": message, "confirm_mode": mode},
     )
 
 
 def wait_proposal(project_id, kind):
     return wait_for(
         project_id,
-        lambda detail: detail.get("goal_proposal")
-        and detail["goal_proposal"]["kind"] == kind
-        and detail["project"]["stage"] == "goal_confirm"
+        lambda detail: detail.get("proposal")
+        and detail["proposal"]["kind"] == kind
+        and detail["project"]["stage"] == "analysis"
         and detail["project"]["status"] == "blocked",
-        f"{kind} 目标提议",
+        f"{kind} 项目方案",
     )
 
 
@@ -154,7 +154,7 @@ mock = call(
     "POST",
     "/api/agents",
     {
-        "name": "Goal Mock",
+        "name": "Analysis Mock",
         "kind": "mock",
         "roles": ["planner", "executor", "verifier"],
         "max_concurrency": 2,
@@ -167,54 +167,52 @@ for role in ("planner", "executor", "verifier"):
 empty = create_project("Empty")
 assert empty["goal"] == "", empty
 empty_detail = call("GET", f"/api/projects/{empty['id']}")
-assert empty_detail["project"]["stage"] == "goal_confirm", empty_detail["project"]
+assert empty_detail["project"]["stage"] == "analysis", empty_detail["project"]
 assert empty_detail["project"]["status"] == "blocked", empty_detail["project"]
 assert empty_detail["jobs"] == [], empty_detail["jobs"]
 
-# 2. 人工确认：多轮提问 -> 目标理解 -> 确认 -> 规划。
+# 2. 人工确认：多轮提问 -> 包含任务的方案 -> 确认 -> 创建任务并执行。
 questions = create_project("Questions")
-submit_goal(questions["id"], "[ask] 先讨论再规划")
+submit(questions["id"], "[ask] 先讨论再规划")
 asked = wait_for(
     questions["id"],
     lambda detail: any(message["role"] == "planner" for message in detail["messages"])
-    and detail["goal_proposal"] is None
-    and detail["project"]["stage"] == "goal_confirm",
+    and detail["proposal"] is None
+    and detail["project"]["stage"] == "analysis",
     "规划者提问",
 )
 assert "哪个使用场景" in asked["messages"][-1]["content"], asked["messages"]
-call(
-    "POST",
-    f"/api/projects/{questions['id']}/goal/messages",
-    {"message": "没有偏好，请直接规划。"},
-)
-ready = wait_proposal(questions["id"], "ready")
-assert ready["project"]["status"] == "blocked", ready["project"]
-call("POST", f"/api/projects/{questions['id']}/goal/confirm", {})
+submit(questions["id"], "没有偏好，请直接规划。")
+proposal = wait_proposal(questions["id"], "plan")
+assert proposal["project"]["status"] == "blocked", proposal["project"]
+assert proposal["proposal"]["tasks"], proposal["proposal"]
+assert proposal["tasks"] == [], proposal["tasks"]
+call("POST", f"/api/projects/{questions['id']}/analysis/confirm", {})
 planned = wait_for(
     questions["id"],
     lambda detail: detail["project"]["stage"] in ("executing", "summarizing"),
-    "确认后进入规划/执行",
+    "确认方案后进入执行",
 )
 assert planned["project"]["stage"] in ("executing", "summarizing"), planned["project"]
-assert any(job["role"] == "confirm" for job in planned["jobs"]), planned["jobs"]
-assert any(job["role"] == "goal" for job in planned["jobs"]), planned["jobs"]
+assert len(planned["tasks"]) == 2, planned["tasks"]
+assert any(job["role"] == "analysis" for job in planned["jobs"]), planned["jobs"]
 call("POST", f"/api/projects/{questions['id']}/archive", {})
 
-# 3. 自动确认：规划者直接进入规划，不等待人工确认。
+# 3. 自动确认：规划者直接进入执行，不等待人工确认。
 auto = create_project("AutoPlan")
-submit_goal(auto["id"], "[skip] 自动确认普通目标", "auto")
+submit(auto["id"], "[skip] 自动确认普通目标", "auto")
 auto_detail = wait_for(
     auto["id"],
-    lambda detail: detail["project"]["stage"] in ("planning", "executing", "summarizing"),
-    "自动确认后进入规划",
+    lambda detail: detail["project"]["stage"] in ("executing", "summarizing"),
+    "自动确认后进入执行",
 )
-assert auto_detail["project"]["goal_confirm_mode"] == "auto", auto_detail["project"]
-assert any(job["role"] == "confirm" for job in auto_detail["jobs"]), auto_detail["jobs"]
+assert auto_detail["project"]["confirm_mode"] == "auto", auto_detail["project"]
+assert any(job["role"] == "analysis" for job in auto_detail["jobs"]), auto_detail["jobs"]
 call("POST", f"/api/projects/{auto['id']}/archive", {})
 
 # 4. 人工确认的直接完成：确认前不修改仓库，确认后提交并生成报告。
 direct = create_project("Direct")
-submit_goal(direct["id"], "[direct] 直接完成一个简单目标")
+submit(direct["id"], "[direct] 直接完成一个简单目标")
 proposal = wait_proposal(direct["id"], "direct")
 branch = proposal["project"]["branch"]
 try:
@@ -225,7 +223,7 @@ try:
     raise AssertionError("人工确认前仓库不应出现产物")
 except subprocess.CalledProcessError:
     pass
-call("POST", f"/api/projects/{direct['id']}/goal/confirm", {})
+call("POST", f"/api/projects/{direct['id']}/analysis/confirm", {})
 direct_done = wait_report(direct["id"])
 assert direct_done["project"]["completion_mode"] == "direct", direct_done["project"]
 assert direct_done["tasks"] == [], direct_done["tasks"]
@@ -252,32 +250,32 @@ call("POST", f"/api/projects/{direct['id']}/report", {"action": "accept"})
 
 # 5. 自动确认的直接完成：不需要人工确认。
 auto_direct = create_project("AutoDirect")
-submit_goal(auto_direct["id"], "[direct] 自动直接完成", "auto")
+submit(auto_direct["id"], "[direct] 自动直接完成", "auto")
 auto_direct_done = wait_report(auto_direct["id"])
 assert any(job["role"] == "direct" for job in auto_direct_done["jobs"]), auto_direct_done["jobs"]
-assert auto_direct_done["project"]["goal_confirm_mode"] == "auto", auto_direct_done["project"]
+assert auto_direct_done["project"]["confirm_mode"] == "auto", auto_direct_done["project"]
 
 # 6. 人工确认模式忽略规划者的跳过请求。
 forced = create_project("ForcedManual")
-submit_goal(forced["id"], "[skipforce] 人工确认不能被跳过")
-forced_ready = wait_proposal(forced["id"], "ready")
-assert forced_ready["goal_proposal"]["skip_confirmation"] is True, forced_ready["goal_proposal"]
-assert forced_ready["project"]["stage"] == "goal_confirm", forced_ready["project"]
+submit(forced["id"], "[skipforce] 人工确认不能被跳过")
+forced_ready = wait_proposal(forced["id"], "plan")
+assert forced_ready["proposal"]["skip_confirmation"] is True, forced_ready["proposal"]
+assert forced_ready["project"]["stage"] == "analysis", forced_ready["project"]
 assert forced_ready["project"]["status"] == "blocked", forced_ready["project"]
-call("POST", f"/api/projects/{forced['id']}/goal/confirm", {})
+call("POST", f"/api/projects/{forced['id']}/analysis/confirm", {})
 wait_for(
     forced["id"],
     lambda detail: detail["project"]["stage"] in ("executing", "summarizing"),
-    "人工确认后进入规划",
+    "人工确认后进入执行",
 )
 
 # 7. 分段输出：运行期间 stdout 持续增长，结束后 running 变为 false。
 stream = create_project("Stream")
-submit_goal(stream["id"], "[stream] 观察实时输出")
+submit(stream["id"], "[stream] 观察实时输出")
 stream_detail = wait_for(
     stream["id"],
     lambda detail: any(
-        job["role"] == "confirm" and job["status"] == "running"
+        job["role"] == "analysis" and job["status"] == "running"
         for job in detail["jobs"]
     ),
     "分段输出作业运行",
@@ -285,7 +283,7 @@ stream_detail = wait_for(
 stream_job = next(
     job
     for job in stream_detail["jobs"]
-    if job["role"] == "confirm" and job["status"] == "running"
+    if job["role"] == "analysis" and job["status"] == "running"
 )
 first = call("GET", f"/api/jobs/{stream_job['id']}/output")
 assert first["running"] is True, first
@@ -293,7 +291,7 @@ time.sleep(0.5)
 second = call("GET", f"/api/jobs/{stream_job['id']}/output")
 assert second["running"] is True, second
 assert len(second["stdout"]) > len(first["stdout"]), (first, second)
-stream_ready = wait_proposal(stream["id"], "ready")
+stream_ready = wait_proposal(stream["id"], "plan")
 final = call("GET", f"/api/jobs/{stream_job['id']}/output")
 assert final["running"] is False, final
 assert "mock job" in final["stdout"], final
@@ -305,7 +303,7 @@ output = call("GET", f"/api/jobs/{forced_ready['jobs'][0]['id']}/output")
 assert "mock job" in output["stdout"], output
 assert output["running"] is False, output
 
-print("目标确认阶段测试通过")
+print("项目分析阶段测试通过")
 PY
 
 echo "==> 通过：$(basename "$0")"

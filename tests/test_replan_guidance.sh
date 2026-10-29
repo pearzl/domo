@@ -100,39 +100,39 @@ def call(method, path, data=None):
         method == "POST"
         and path.startswith("/api/projects/")
         and path.endswith("/confirm")
-        and not path.endswith("/goal/confirm")
+        and not path.endswith("/analysis/confirm")
     ):
         project_id = path.split("/")[-2]
         detail = _call_raw("GET", f"/api/projects/{project_id}")
         if not detail["messages"] and project_id in _pending_goals:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
+                f"/api/projects/{project_id}/analysis/messages",
                 {
                     "message": _pending_goals.pop(project_id),
-                    "goal_confirm_mode": "auto",
+                    "confirm_mode": "auto",
                 },
             )
         message = (data or {}).get("message")
         if message:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
-                {"message": message, "goal_confirm_mode": "auto"},
+                f"/api/projects/{project_id}/analysis/messages",
+                {"message": message, "confirm_mode": "auto"},
             )
         deadline = time.time() + 30
         while time.time() < deadline:
             detail = _call_raw("GET", f"/api/projects/{project_id}")
-            if detail["project"]["stage"] != "goal_confirm":
+            if detail["project"]["stage"] != "analysis":
                 return detail
-            if detail.get("goal_proposal") and not detail["jobs"]:
+            if detail.get("proposal") and not detail["jobs"]:
                 return _call_raw(
                     "POST",
-                    f"/api/projects/{project_id}/goal/confirm",
-                    {"message": None},
+                    f"/api/projects/{project_id}/analysis/confirm",
+                    {},
                 )
             last = detail["messages"][-1] if detail["messages"] else None
-            if last and last["role"] == "planner" and not detail.get("goal_proposal"):
+            if last and last["role"] == "planner" and not detail.get("proposal"):
                 return detail
             time.sleep(0.1)
         return _call_raw("GET", f"/api/projects/{project_id}")
@@ -201,7 +201,7 @@ def new_project(name, goal):
 
 
 def goal_jobs(detail):
-    return [job for job in detail["jobs"] if job["role"] == "goal"]
+    return [job for job in detail["jobs"] if job["role"] == "analysis"]
 
 
 def active_tasks(detail):
@@ -362,16 +362,16 @@ paused_detail = call(
     f"/api/projects/{paused_project}/replan",
     {"reason": paused_reason},
 )
-assert paused_detail["project"]["stage"] == "planning", paused_detail["project"]
+assert paused_detail["project"]["stage"] == "analysis", paused_detail["project"]
 assert paused_detail["project"]["status"] == "paused", paused_detail["project"]
 assert paused_detail["project"]["replan_source"] == "human", paused_detail["project"]
 assert any(task["status"] == "canceled" for task in paused_detail["tasks"]), paused_detail["tasks"]
 
 time.sleep(1.5)
 paused_detail = call("GET", f"/api/projects/{paused_project}")
-assert paused_detail["project"]["stage"] == "planning", paused_detail["project"]
+assert paused_detail["project"]["stage"] == "analysis", paused_detail["project"]
 assert paused_detail["project"]["status"] == "paused", paused_detail["project"]
-assert len(goal_jobs(paused_detail)) == goal_before, "暂停期间不应产生新的规划作业"
+assert len(goal_jobs(paused_detail)) == goal_before, "暂停期间不应产生新的项目分析作业"
 
 call("POST", f"/api/projects/{paused_project}/resume", {})
 detail = wait_for(
@@ -380,7 +380,7 @@ detail = wait_for(
     "暂停恢复后的项目报告",
 )
 assert all(task["stage"] == "completed" for task in active_tasks(detail)), active_tasks(detail)
-assert len(goal_jobs(detail)) == goal_before + 1, "恢复后应只产生一次新的规划作业"
+assert len(goal_jobs(detail)) == goal_before + 1, "恢复后应只产生一次新的项目分析作业"
 assert detail["project"]["replan_reason"] == paused_reason, detail["project"]
 
 # 4. 归档中的重规划被拒绝，不改变状态、不产生规划作业。
@@ -407,7 +407,7 @@ assert code == 400, (code, body)
 time.sleep(1.0)
 archived_detail = call("GET", f"/api/projects/{archived_project}")
 assert archived_detail["project"]["status"] == "archived", archived_detail["project"]
-assert len(goal_jobs(archived_detail)) == goal_before_archive, "归档项目不应产生规划作业"
+assert len(goal_jobs(archived_detail)) == goal_before_archive, "归档项目不应产生项目分析作业"
 assert [
     event for event in archived_detail["events"] if event["kind"] == "replan_requested"
 ] == replan_events_before, "归档项目不应写入重规划事件"

@@ -12,8 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::models::{
-    AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, GOAL_CONFIRM_AUTO, JOB_ROLE_CONFIRM,
-    JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, CONFIRM_AUTO, JOB_ROLE_ANALYSIS,
+    JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
 use crate::usage::UsageRecord;
 
@@ -147,8 +147,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
     let context = read_context(&spec.job_dir)?;
     let streamed = write_mock_stream(spec, &context).await?;
     let result = match spec.role.as_str() {
-        JOB_ROLE_CONFIRM => mock_confirm(&context),
-        JOB_ROLE_GOAL => mock_plan(&context),
+        JOB_ROLE_ANALYSIS => mock_analysis(&context),
         JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
         JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
         JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
@@ -285,7 +284,7 @@ fn mock_env_f64(key: &str, fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
-fn mock_confirm(context: &serde_json::Value) -> serde_json::Value {
+fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
     let goal = context
         .get("project")
         .and_then(|value| value.get("goal"))
@@ -293,73 +292,12 @@ fn mock_confirm(context: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_default();
     let mode = context
         .get("project")
-        .and_then(|value| value.get("goal_confirm_mode"))
+        .and_then(|value| value.get("confirm_mode"))
         .and_then(|value| value.as_str())
         .unwrap_or("manual");
     let has_planner_message = context
         .get("messages")
         .and_then(|value| value.as_array())
-        .map(|messages| {
-            messages
-                .iter()
-                .any(|message| message.get("role").and_then(|v| v.as_str()) == Some("planner"))
-        })
-        .unwrap_or(false);
-    if goal.contains("[ask]") && !has_planner_message {
-        return serde_json::json!({
-            "kind": "questions",
-            "summary": "需要确认目标",
-            "questions": ["希望优先实现哪个使用场景？"]
-        });
-    }
-    let skip = goal.contains("[skipforce]") || mode == GOAL_CONFIRM_AUTO;
-    if goal.contains("[direct]") {
-        return serde_json::json!({
-            "kind": "direct",
-            "summary": "这个目标足够简单，可以直接完成",
-            "plan": ["创建目标文件", "检查文件内容"],
-            "verification": ["读取文件确认内容"],
-            "skip_confirmation": skip
-        });
-    }
-    serde_json::json!({
-        "kind": "ready",
-        "summary": "已理解目标",
-        "goal": goal,
-        "assumptions": ["使用 mock Agent"],
-        "acceptance": ["产物符合目标描述"],
-        "skip_confirmation": skip
-    })
-}
-
-fn mock_direct(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
-    let goal = context
-        .get("project")
-        .and_then(|value| value.get("goal"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let dir = cwd.join("domo_mock");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("direct.txt"), "mock direct completion\n")?;
-    Ok(serde_json::json!({
-        "kind": "direct_done",
-        "summary": "已直接完成目标",
-        "report": format!(
-            "# Mock 直接完成报告\n\n目标：{}\n\n已完成 `domo_mock/direct.txt` 并通过自检。",
-            goal
-        )
-    }))
-}
-
-fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
-    let goal = context
-        .get("project")
-        .and_then(|v| v.get("goal"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let has_planner_message = context
-        .get("messages")
-        .and_then(|v| v.as_array())
         .map(|messages| {
             messages
                 .iter()
@@ -382,11 +320,21 @@ fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
     {
         return mock_replan_plan(context, reason);
     }
-    if goal.contains("[single]") {
+    let skip = goal.contains("[skipforce]") || mode == CONFIRM_AUTO;
+    if goal.contains("[direct]") {
         return serde_json::json!({
-            "kind": "plan",
-            "summary": "mock 规划：单个任务",
-            "tasks": [
+            "kind": "direct",
+            "summary": "这个目标足够简单，可以直接完成",
+            "goal": goal,
+            "plan": ["创建目标文件", "检查文件内容"],
+            "verification": ["读取文件确认内容"],
+            "skip_confirmation": skip
+        });
+    }
+    let (summary, tasks) = if goal.contains("[single]") {
+        (
+            "mock 分析：单个任务",
+            serde_json::json!([
                 {
                     "key": "T1",
                     "title": "单任务",
@@ -394,14 +342,12 @@ fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
                     "acceptance": ["domo_mock/T1.txt 存在且包含 T1"],
                     "deps": []
                 }
-            ]
-        });
-    }
-    if goal.contains("[parallel]") {
-        return serde_json::json!({
-            "kind": "plan",
-            "summary": "mock 规划：三个可并行的实现任务",
-            "tasks": [
+            ]),
+        )
+    } else if goal.contains("[parallel]") {
+        (
+            "mock 分析：三个可并行的实现任务",
+            serde_json::json!([
                 {
                     "key": "T1",
                     "title": "并行任务一",
@@ -423,29 +369,57 @@ fn mock_plan(context: &serde_json::Value) -> serde_json::Value {
                     "acceptance": ["domo_mock/T3.txt 存在且包含 T3"],
                     "deps": []
                 }
-            ]
-        });
-    }
+            ]),
+        )
+    } else {
+        (
+            "mock 分析：两个有依赖的实现任务",
+            serde_json::json!([
+                {
+                    "key": "T1",
+                    "title": "写入基础文件",
+                    "description": "在 domo_mock/T1.txt 写入任务一的内容。",
+                    "acceptance": ["domo_mock/T1.txt 存在且包含 T1"],
+                    "deps": []
+                },
+                {
+                    "key": "T2",
+                    "title": "基于前置结果写入文件",
+                    "description": "确认 domo_mock/T1.txt 存在，然后写入 domo_mock/T2.txt。",
+                    "acceptance": ["domo_mock/T1.txt 与 domo_mock/T2.txt 均存在"],
+                    "deps": ["T1"]
+                }
+            ]),
+        )
+    };
     serde_json::json!({
         "kind": "plan",
-        "summary": "mock 规划：两个有依赖的实现任务",
-        "tasks": [
-            {
-                "key": "T1",
-                "title": "写入基础文件",
-                "description": "在 domo_mock/T1.txt 写入任务一的内容。",
-                "acceptance": ["domo_mock/T1.txt 存在且包含 T1"],
-                "deps": []
-            },
-            {
-                "key": "T2",
-                "title": "基于前置结果写入文件",
-                "description": "确认 domo_mock/T1.txt 存在，然后写入 domo_mock/T2.txt。",
-                "acceptance": ["domo_mock/T1.txt 与 domo_mock/T2.txt 均存在"],
-                "deps": ["T1"]
-            }
-        ]
+        "summary": summary,
+        "goal": goal,
+        "assumptions": ["使用 mock Agent"],
+        "acceptance": ["产物符合目标描述"],
+        "tasks": tasks,
+        "skip_confirmation": skip
     })
+}
+
+fn mock_direct(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let dir = cwd.join("domo_mock");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("direct.txt"), "mock direct completion\n")?;
+    Ok(serde_json::json!({
+        "kind": "direct_done",
+        "summary": "已直接完成目标",
+        "report": format!(
+            "# Mock 直接完成报告\n\n目标：{}\n\n已完成 `domo_mock/direct.txt` 并通过自检。",
+            goal
+        )
+    }))
 }
 
 fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Value {

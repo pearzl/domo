@@ -150,7 +150,7 @@ export interface ProjectSummary {
   task_completed: number;
   replan_reason: string | null;
   replan_source: string | null;
-  goal_confirm_mode: "manual" | "auto";
+  confirm_mode: "manual" | "auto";
   completion_mode: "tasks" | "direct";
   merged_at: string | null;
   merged_commit: string | null;
@@ -174,8 +174,8 @@ export interface Project {
   replan_reason: string | null;
   replan_source: string | null;
   replan_requested_at: string | null;
-  goal_confirm_mode: "manual" | "auto";
-  goal_confirmed_at: string | null;
+  confirm_mode: "manual" | "auto";
+  confirmed_at: string | null;
   completion_mode: "tasks" | "direct";
   merged_at: string | null;
   merged_commit: string | null;
@@ -270,12 +270,21 @@ export interface AuditEvent {
   created_at: string;
 }
 
-export interface GoalProposal {
-  kind: "ready" | "direct";
+export interface ProposalTask {
+  key: string;
+  title: string;
+  description: string;
+  acceptance: string[];
+  deps: string[];
+}
+
+export interface AnalysisProposal {
+  kind: "plan" | "direct";
   summary: string;
   goal: string | null;
   assumptions: string[];
   acceptance: string[];
+  tasks: ProposalTask[];
   plan: string[];
   verification: string[];
   skip_confirmation: boolean;
@@ -292,7 +301,7 @@ export interface ProjectDetail {
   agents: Agent[];
   agent_pool: ProjectAgentPool;
   usage: ProjectUsage;
-  goal_proposal: GoalProposal | null;
+  proposal: AnalysisProposal | null;
 }
 
 export interface ArbitrationAgent {

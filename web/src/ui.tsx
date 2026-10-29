@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
 
 export const STAGE_LABELS: Record<string, string> = {
-  goal_confirm: "目标确认",
-  planning: "规划中",
+  analysis: "项目分析",
   executing: "执行中",
   summarizing: "总结中",
   completed: "已完成",
@@ -25,8 +24,7 @@ export const TASK_STAGE_LABELS: Record<string, string> = {
 };
 
 export const ROLE_LABELS: Record<string, string> = {
-  confirm: "目标确认",
-  goal: "规划",
+  analysis: "项目分析",
   direct: "直接完成",
   planner: "规划",
   executor: "执行",
@@ -134,7 +132,7 @@ export function StageBadge({ stage }: { stage: string }) {
       ? "success"
       : stage === "executing" || stage === "summarizing"
         ? "info"
-        : stage === "planning"
+        : stage === "analysis"
           ? "warn"
           : "muted";
   return <Badge tone={tone}>{STAGE_LABELS[stage] ?? stage}</Badge>;

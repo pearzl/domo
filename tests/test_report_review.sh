@@ -4,7 +4,7 @@
 # 覆盖范围：
 #   1. 人工对报告提交意见（评议记录持久化为 messages，事件与作业提示词可回溯）；
 #   2. 报告被拒绝后规划者依据评议意见重写报告，多轮拒绝/重写可重复；
-#   3. 处置「要求重新规划」：项目回到规划阶段并生成规划作业；
+#   3. 处置「要求重新规划」：项目回到项目分析阶段并生成分析作业；
 #   4. 处置「增加新任务」：复用人工加任务端点，项目回到执行阶段、新任务按 DAG 调度、原报告作废；
 #   5. 处置结果（report_rejected / replan_requested / task_created / project_reopened / project_completed）在事件流可查询。
 #
@@ -91,39 +91,39 @@ def call(method, path, data=None):
         method == "POST"
         and path.startswith("/api/projects/")
         and path.endswith("/confirm")
-        and not path.endswith("/goal/confirm")
+        and not path.endswith("/analysis/confirm")
     ):
         project_id = path.split("/")[-2]
         detail = _call_raw("GET", f"/api/projects/{project_id}")
         if not detail["messages"] and project_id in _pending_goals:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
+                f"/api/projects/{project_id}/analysis/messages",
                 {
                     "message": _pending_goals.pop(project_id),
-                    "goal_confirm_mode": "auto",
+                    "confirm_mode": "auto",
                 },
             )
         message = (data or {}).get("message")
         if message:
             _call_raw(
                 "POST",
-                f"/api/projects/{project_id}/goal/messages",
-                {"message": message, "goal_confirm_mode": "auto"},
+                f"/api/projects/{project_id}/analysis/messages",
+                {"message": message, "confirm_mode": "auto"},
             )
         deadline = time.time() + 30
         while time.time() < deadline:
             detail = _call_raw("GET", f"/api/projects/{project_id}")
-            if detail["project"]["stage"] != "goal_confirm":
+            if detail["project"]["stage"] != "analysis":
                 return detail
-            if detail.get("goal_proposal") and not detail["jobs"]:
+            if detail.get("proposal") and not detail["jobs"]:
                 return _call_raw(
                     "POST",
-                    f"/api/projects/{project_id}/goal/confirm",
-                    {"message": None},
+                    f"/api/projects/{project_id}/analysis/confirm",
+                    {},
                 )
             last = detail["messages"][-1] if detail["messages"] else None
-            if last and last["role"] == "planner" and not detail.get("goal_proposal"):
+            if last and last["role"] == "planner" and not detail.get("proposal"):
                 return detail
             time.sleep(0.1)
         return _call_raw("GET", f"/api/projects/{project_id}")
@@ -263,14 +263,17 @@ assert detail["project"]["status"] is None, detail["project"]
 # ---- 阶段 B：处置「要求重新规划」---------------------------------------------
 pid_b = make_project("ReviewB", "[single] 生成单任务 mock 文件")
 project_report_ready(pid_b, "阶段 B 报告")
+before = call("GET", f"/api/projects/{pid_b}")
+analysis_before = len([j for j in before["jobs"] if j["role"] == "analysis"])
 call("POST", f"/api/projects/{pid_b}/report", {
     "action": "replan",
     "feedback": "范围太小，需要纳入对 ReqC 的支持，请重新规划",
 })
 detail = wait_for(
     pid_b,
-    lambda d: d["project"]["stage"] == "planning" and d["project"]["status"] == "running",
-    "回到规划阶段",
+    lambda d: d["project"]["stage"] in ("analysis", "executing")
+    and len([j for j in d["jobs"] if j["role"] == "analysis"]) > analysis_before,
+    "回到项目分析阶段",
     45,
 )
 assert detail["project"]["report"] is None, detail["project"]
@@ -279,7 +282,7 @@ kinds = [e["kind"] for e in events]
 assert "replan_requested" in kinds and "plan_superseded" in kinds, kinds
 replan_event = next(e for e in events if e["kind"] == "replan_requested")
 assert "人工" in replan_event["message"] and "ReqC" in replan_event["message"], replan_event
-goal_jobs = [j for j in detail["jobs"] if j["role"] == "goal"]
+goal_jobs = [j for j in detail["jobs"] if j["role"] == "analysis"]
 assert goal_jobs, detail["jobs"]
 plan_job = call("GET", f"/api/jobs/{sorted(goal_jobs, key=lambda j: j['created_at'])[-1]['id']}")
 assert "ReqC" in plan_job["prompt"], plan_job["prompt"]

@@ -56,9 +56,9 @@ CREATE TABLE IF NOT EXISTS projects (
     replan_reason TEXT,
     replan_source TEXT,
     replan_requested_at TEXT,
-    goal_confirm_mode TEXT NOT NULL DEFAULT 'manual',
-    goal_proposal TEXT,
-    goal_confirmed_at TEXT,
+    confirm_mode TEXT NOT NULL DEFAULT 'manual',
+    proposal TEXT,
+    confirmed_at TEXT,
     completion_mode TEXT NOT NULL DEFAULT 'tasks',
     merged_at TEXT,
     merged_commit TEXT,
@@ -229,15 +229,18 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
     ensure_column(pool, "projects", "replan_source", "TEXT").await?;
     ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
+    rename_column(pool, "projects", "goal_confirm_mode", "confirm_mode").await?;
+    rename_column(pool, "projects", "goal_proposal", "proposal").await?;
+    rename_column(pool, "projects", "goal_confirmed_at", "confirmed_at").await?;
     ensure_column(
         pool,
         "projects",
-        "goal_confirm_mode",
+        "confirm_mode",
         "TEXT NOT NULL DEFAULT 'manual'",
     )
     .await?;
-    ensure_column(pool, "projects", "goal_proposal", "TEXT").await?;
-    ensure_column(pool, "projects", "goal_confirmed_at", "TEXT").await?;
+    ensure_column(pool, "projects", "proposal", "TEXT").await?;
+    ensure_column(pool, "projects", "confirmed_at", "TEXT").await?;
     ensure_column(
         pool,
         "projects",
@@ -284,9 +287,14 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_jobs_agent ON jobs(agent_id, created_at)")
         .execute(pool)
         .await?;
-    sqlx::raw_sql("UPDATE tasks SET queue_order = seq WHERE queue_order = 0 AND seq > 0")
-        .execute(pool)
-        .await?;
+    sqlx::raw_sql(
+        "UPDATE projects SET stage = 'analysis' WHERE stage IN ('goal_confirm', 'planning');
+         UPDATE jobs SET role = 'analysis' WHERE role IN ('confirm', 'goal');
+         UPDATE projects SET proposal = NULL WHERE proposal LIKE '%\"kind\":\"ready\"%';
+         UPDATE tasks SET queue_order = seq WHERE queue_order = 0 AND seq > 0;",
+    )
+    .execute(pool)
+    .await?;
     sqlx::raw_sql(
         "CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(project_id, queue_order, seq)",
     )
@@ -388,6 +396,27 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         .await;
     migrated?;
     enabled?;
+    Ok(())
+}
+
+async fn rename_column(pool: &SqlitePool, table: &str, old: &str, new: &str) -> anyhow::Result<()> {
+    let old_exists: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
+    ))
+    .bind(old)
+    .fetch_one(pool)
+    .await?;
+    let new_exists: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
+    ))
+    .bind(new)
+    .fetch_one(pool)
+    .await?;
+    if old_exists > 0 && new_exists == 0 {
+        sqlx::raw_sql(&format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new}"))
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 

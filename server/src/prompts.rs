@@ -2,8 +2,8 @@
 //! write JSON there; stdout is captured for audit but is not the protocol channel.
 
 use crate::models::{
-    MessageRow, JOB_ROLE_CONFIRM, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_GOAL,
-    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPORT_MESSAGE_ROLE,
+    MessageRow, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY,
+    JOB_ROLE_VERIFIER, REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -64,13 +64,12 @@ pub struct PromptData {
     pub report_feedback: Option<String>,
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
-    pub goal_confirm_mode: String,
+    pub confirm_mode: String,
 }
 
 pub fn render(data: &PromptData) -> String {
     match data.role.as_str() {
-        JOB_ROLE_CONFIRM => confirm_prompt(data),
-        JOB_ROLE_GOAL => goal_prompt(data),
+        JOB_ROLE_ANALYSIS => analysis_prompt(data),
         JOB_ROLE_DIRECT => direct_prompt(data),
         JOB_ROLE_EXECUTOR => executor_prompt(data),
         JOB_ROLE_VERIFIER => verifier_prompt(data),
@@ -132,65 +131,48 @@ fn conversation_history(data: &PromptData) -> String {
     history
 }
 
-fn confirm_prompt(data: &PromptData) -> String {
-    let auto = data.goal_confirm_mode == crate::models::GOAL_CONFIRM_AUTO;
+fn analysis_prompt(data: &PromptData) -> String {
+    let auto = data.confirm_mode == crate::models::CONFIRM_AUTO;
+    let replan = replan_section(data);
     format!(
-        "{}你当前扮演**规划者**，正在与用户确认项目目标。此阶段只讨论目标，不生成任务计划，不修改代码。\n\
-         判断目标是否足够明确：只有确实缺少会影响实现的关键信息时才提问；目标足够清晰时，给出对目标的理解、关键假设和验收口径。\n\
-         如果目标简单到不需要拆分任务，可以提出直接完成，说明执行步骤和自检方式。\n\
+        "{}你当前扮演**规划者**，负责项目分析：理解目标、核对仓库现状，并给出可以直接执行的项目方案。\n\
+         \n## 分析要求\n\
+         - 先阅读仓库再给方案：优先看 README.md、docs/DEV.md、与目标相关的源码和测试；\n\
+         - 方案必须具体到可执行，禁止只给方法论、最佳实践清单或泛泛的目标复述；\n\
+         - 必须说明可交付物、范围边界（明确不做什么）、关键假设、验收口径和主要风险；\n\
+         - 验收口径要可观察或可执行，例如具体命令、文件内容或接口行为；\n\
+         - 需要拆分时，给出 1 到 8 个任务，每个任务写清涉及的文件或模块、具体改动和验收方式；\n\
+         - 任务必须可以独立执行、独立验收；任务之间用 deps 表示前置依赖，必须是无环 DAG；\n\
+         - 任务产物由执行者在独立任务 worktree 中完成，验收通过后由 DOMO 自动合并到项目交付分支；\n\
+         - 验收标准不要要求执行者直接提交、合并或推送到项目交付分支，也不要要求执行者执行 git commit；\n\
+         - 不要修改任何代码或文件，当前工作区只用于阅读；\n\
+         - 只有答案会改变任务拆分时才提问，最多 3 个；其余信息写进 assumptions，由用户在确认方案时修正；\n\
+         - 项目目标是最初输入；对话中的后续消息可能包含补充或修订，以对话为准；\n\
+         - 用户在对话中提出修改意见时，基于历史对话修订方案，不要从头重新分析；\n\
+         - 目标简单到不需要拆分时输出 direct；direct 仅用于单文件、小改动、没有架构决策的工作。\n\
+         {}\
          \n## 人工确认设置\n{}\n\
-         \n## 目标确认对话\n{}\n\
+         \n## 项目分析对话\n{}\n\
          \n## 输出 schema\n\
-         如果需要澄清，输出：\n\
-         {{\"kind\":\"questions\",\"summary\":\"为什么需要澄清\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
-         如果目标明确但需要任务规划，输出：\n\
-         {{\"kind\":\"ready\",\"summary\":\"对目标的理解\",\"goal\":\"确认后的目标\",\"assumptions\":[\"关键假设\"],\"acceptance\":[\"验收口径\"],\"skip_confirmation\":false}}\n\
-         如果目标足够简单、可以直接完成，输出：\n\
-         {{\"kind\":\"direct\",\"summary\":\"为什么可以直接完成\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方式\"],\"skip_confirmation\":false}}\n\
+         如果确实缺少会改变方案的关键信息，输出：\n\
+         {{\"kind\":\"questions\",\"summary\":\"为什么必须澄清\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
+         需要拆分任务时输出：\n\
+         {{\"kind\":\"plan\",\"summary\":\"分析结论：现状、方案取舍与风险\",\"goal\":\"确认后的目标\",\"assumptions\":[\"关键假设\"],\"acceptance\":[\"项目级验收口径\"],\"tasks\":[{{\"key\":\"T1\",\"title\":\"短标题\",\"description\":\"涉及文件或模块、具体改动和边界\",\"acceptance\":[\"可执行的验收标准\"],\"deps\":[]}},{{\"key\":\"T2\",\"title\":\"...\",\"description\":\"...\",\"acceptance\":[\"...\"],\"deps\":[\"T1\"]}}],\"skip_confirmation\":false}}\n\
+         可以直接完成时输出：\n\
+         {{\"kind\":\"direct\",\"summary\":\"为什么不需要拆分\",\"goal\":\"确认后的目标\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方式\"],\"skip_confirmation\":false}}\n\
+         key 使用 T1、T2 这类短标识；deps 引用其他任务的 key。\n\
          {}",
         common_header(data),
+        replan,
         if auto {
-            "当前为自动确认模式：目标足够明确时可以把 skip_confirmation 设为 true，DOMO 会直接进入规划或直接完成；仍有歧义时必须提问或等待用户确认。"
+            "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true，DOMO 会直接开始执行；仍有歧义时必须提问或等待用户确认。"
         } else {
-            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认后继续。"
+            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认方案后开始执行。"
         },
         conversation_history(data),
         result_rules(
             data,
-            "{\"kind\":\"questions\",\"questions\":[...]}、{\"kind\":\"ready\",\"goal\":\"...\",...} 或 {\"kind\":\"direct\",\"plan\":[...],\"verification\":[...],...}"
-        )
-    )
-}
-
-fn goal_prompt(data: &PromptData) -> String {
-    let replan = replan_section(data);
-    format!(
-        "{}你当前扮演**规划者**。目标已经确认，现在只负责任务规划：把目标拆成可独立执行、独立验收的最小任务。\n\
-         不要再向用户确认目标；如果确实发现目标无法规划，可以返回 questions 让项目回到目标确认阶段。\n\
-         \n## 已确认目标与对话\n{}\n\
-         {}\
-         \n## 规划约束\n\
-         - 任务必须是可以独立执行、独立验收的最小单元；\n\
-         - 任务之间用 deps 表示前置依赖，必须是无环 DAG；\n\
-         - 每个任务都要有清晰描述和可核查的验收标准；\n\
-         - 任务数量控制在 1 到 8 个，能合并的不要拆碎；\n\
-         - 任务产物由执行者在独立任务 worktree 中完成，验收通过后由 DOMO 自动合并到项目交付分支；\n\
-         - 验收标准不要要求执行者直接提交、合并或推送到项目交付分支，也不要要求执行者执行 git commit；\n\
-         - 不要修改任何代码或文件，当前工作区只用于阅读；\n\
-         - 需要阅读仓库时，优先看 README.md、docs/DEV.md 和相关源码。\n\
-         \n## 输出 schema\n\
-         如果需要退回目标确认，输出：\n\
-         {{\"kind\":\"questions\",\"summary\":\"为什么需要重新确认\",\"questions\":[\"问题1\",\"问题2\"]}}\n\
-         正常规划输出：\n\
-         {{\"kind\":\"plan\",\"summary\":\"规划说明\",\"tasks\":[{{\"key\":\"T1\",\"title\":\"短标题\",\"description\":\"详细目标和边界\",\"acceptance\":[\"可执行的验收标准\"],\"deps\":[]}},{{\"key\":\"T2\",\"title\":\"...\",\"description\":\"...\",\"acceptance\":[\"...\"],\"deps\":[\"T1\"]}}]}}\n\
-         key 使用 T1、T2 这类短标识；deps 引用其他任务的 key。\n\
-         {}",
-        common_header(data),
-        conversation_history(data),
-        replan,
-        result_rules(
-            data,
-            "{\"kind\":\"plan\",\"summary\":\"...\",\"tasks\":[...]} 或 {\"kind\":\"questions\",\"questions\":[...]}"
+            "{\"kind\":\"questions\",\"questions\":[...]}、{\"kind\":\"plan\",\"goal\":\"...\",\"tasks\":[...],...} 或 {\"kind\":\"direct\",\"plan\":[...],\"verification\":[...],...}"
         )
     )
 }
@@ -212,7 +194,7 @@ fn direct_prompt(data: &PromptData) -> String {
          - 完成后必须把结果 JSON 写入结果文件；\n\
          - 报告必须包含：变更内容、自检命令与结果、未覆盖的风险。\n\
          {}\
-         \n## 目标确认对话\n{}\n\
+         \n## 项目分析对话\n{}\n\
          \n## 输出 schema\n\
          {{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告，包含变更、自检结果和风险\"}}\n\
          {}",

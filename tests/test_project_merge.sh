@@ -140,8 +140,8 @@ def make_project(repo, name, base="main"):
     )["project"]
     call_raw(
         "POST",
-        f"/api/projects/{project['id']}/goal/messages",
-        {"message": "[direct] 生成合并测试文件", "goal_confirm_mode": "auto"},
+        f"/api/projects/{project['id']}/analysis/messages",
+        {"message": "[direct] 生成合并测试文件", "confirm_mode": "auto"},
     )
     return project
 

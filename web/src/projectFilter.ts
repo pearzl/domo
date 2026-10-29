@@ -3,8 +3,7 @@ import type { ProjectSummary } from "./types";
 /// 项目列表的阶段与状态标签取值；
 /// 排序顺序即页面展示顺序。
 export const PROJECT_STAGES = [
-  "goal_confirm",
-  "planning",
+  "analysis",
   "executing",
   "summarizing",
   "completed",

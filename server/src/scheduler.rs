@@ -108,30 +108,17 @@ async fn recover(state: &AppState) -> Result<()> {
                     .await?;
                 }
             }
-        } else if job.role == JOB_ROLE_CONFIRM {
+        } else if job.role == JOB_ROLE_ANALYSIS {
             sqlx::query(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
                  THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? \
                  WHERE id = ? AND stage = ?",
             )
-            .bind(STAGE_GOAL_CONFIRM)
+            .bind(STAGE_ANALYSIS)
             .bind(STATUS_RUNNING)
             .bind(now())
             .bind(&job.project_id)
-            .bind(STAGE_GOAL_CONFIRM)
-            .execute(&state.db)
-            .await?;
-        } else if job.role == JOB_ROLE_GOAL {
-            sqlx::query(
-                "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-                 THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? \
-                 WHERE id = ? AND stage = ?",
-            )
-            .bind(STAGE_PLANNING)
-            .bind(STATUS_RUNNING)
-            .bind(now())
-            .bind(&job.project_id)
-            .bind(STAGE_PLANNING)
+            .bind(STAGE_ANALYSIS)
             .execute(&state.db)
             .await?;
         } else if job.role == JOB_ROLE_DIRECT {
@@ -324,19 +311,20 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
             continue;
         }
         match project.stage.as_str() {
-            STAGE_GOAL_CONFIRM => {
-                if has_project_job(&state.db, &project.id, JOB_ROLE_CONFIRM).await? {
+            STAGE_ANALYSIS => {
+                if has_project_job(&state.db, &project.id, JOB_ROLE_ANALYSIS).await? {
                     continue;
                 }
+                let replan_pending = crate::replan::pending(&state.db, &project).await?;
                 let last_role = latest_message_role(&state.db, &project.id).await?;
-                if last_role.as_deref() != Some("user") {
+                if !replan_pending && last_role.as_deref() != Some("user") {
                     sqlx::query(
                         "UPDATE projects SET status = ?, blocked_reason = COALESCE(blocked_reason, ?), \
                          updated_at = ? WHERE id = ? AND status = ?",
                     )
                     .bind(STATUS_BLOCKED)
                     .bind(if last_role.is_some() {
-                        "等待用户答复或确认目标"
+                        "等待用户答复或确认方案"
                     } else {
                         "等待用户输入项目目标"
                     })
@@ -358,27 +346,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     continue;
                 };
                 if let Some(job_id) =
-                    spawn_project_job(state, &project, &agent, JOB_ROLE_CONFIRM).await?
-                {
-                    spawns.push(job_id);
-                }
-            }
-            STAGE_PLANNING => {
-                if has_project_job(&state.db, &project.id, JOB_ROLE_GOAL).await? {
-                    continue;
-                }
-                let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
-                let Some(agent) = choice.agent else {
-                    note_waiting(
-                        state,
-                        &project,
-                        choice.reason.as_deref().unwrap_or("等待可用的规划 Agent"),
-                    )
-                    .await?;
-                    continue;
-                };
-                if let Some(job_id) =
-                    spawn_project_job(state, &project, &agent, JOB_ROLE_GOAL).await?
+                    spawn_project_job(state, &project, &agent, JOB_ROLE_ANALYSIS).await?
                 {
                     spawns.push(job_id);
                 }
@@ -1096,8 +1064,7 @@ fn parse_list(raw: &str) -> Vec<String> {
 
 fn role_label(role: &str) -> &'static str {
     match role {
-        JOB_ROLE_CONFIRM => "目标确认",
-        JOB_ROLE_GOAL => "规划",
+        JOB_ROLE_ANALYSIS => "项目分析",
         JOB_ROLE_DIRECT => "直接完成",
         ROLE_PLANNER => "规划",
         ROLE_EXECUTOR => "执行",

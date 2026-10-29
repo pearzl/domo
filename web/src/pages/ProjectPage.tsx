@@ -117,7 +117,7 @@ export function ProjectPage({
     );
   }
 
-  const { project, tasks, jobs, messages, events, agents, goal_proposal } = detail;
+  const { project, tasks, jobs, messages, events, agents, proposal } = detail;
   const activeTasks = tasks.filter((task) => task.status !== "canceled");
   const completed = activeTasks.filter((task) => task.stage === "completed").length;
   const archived = project.status === "archived";
@@ -137,13 +137,13 @@ export function ProjectPage({
   const agentName = (agentId: string | null) =>
     agentId ? agents.find((agent) => agent.id === agentId)?.name ?? agentId : "—";
   const projectJobs = jobs.filter((job) => !job.task_id);
-  const confirmJobs = jobs.filter(
-    (job) => job.role === "confirm" && !job.task_id,
+  const analysisJobs = jobs.filter(
+    (job) => job.role === "analysis" && !job.task_id,
   );
-  const confirmJob =
-    confirmJobs.find((job) => job.status === "running") ?? null;
-  const latestConfirmJob = confirmJobs.length
-    ? confirmJobs[confirmJobs.length - 1]
+  const analysisJob =
+    analysisJobs.find((job) => job.status === "running") ?? null;
+  const latestAnalysisJob = analysisJobs.length
+    ? analysisJobs[analysisJobs.length - 1]
     : null;
   const directJob = jobs.find(
     (job) => job.role === "direct" && job.status === "running",
@@ -151,8 +151,8 @@ export function ProjectPage({
   const directMode = project.completion_mode === "direct";
   const lastGoalMessage = goalMessages[goalMessages.length - 1];
   const waitingGoal =
-    project.stage === "goal_confirm" &&
-    !confirmJob &&
+    project.stage === "analysis" &&
+    !analysisJob &&
     lastGoalMessage?.role === "planner";
   const canReorder = (task: Task) =>
     !archived &&
@@ -454,20 +454,20 @@ export function ProjectPage({
         </section>
       ) : null}
 
-      {project.stage === "goal_confirm" ? (
+      {project.stage === "analysis" ? (
         <section className="panel">
-          <h2>目标确认</h2>
+          <h2>项目分析</h2>
           <p className="subtitle">
-            规划者会分析目标、提出问题并给出自己的理解。你可以多轮补充，确认后再开始规划。
+            规划者会阅读仓库、澄清目标并给出完整方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
           </p>
           <label className="goal-policy">
             <input
               type="checkbox"
-              checked={project.goal_confirm_mode === "auto"}
-              disabled={busy || archived || paused || !!confirmJob}
+              checked={project.confirm_mode === "auto"}
+              disabled={busy || archived || paused || !!analysisJob}
               onChange={(event) =>
                 run(() =>
-                  api.updateGoalPolicy(
+                  api.updateAnalysisPolicy(
                     project.id,
                     event.target.checked ? "auto" : "manual",
                   ),
@@ -475,7 +475,7 @@ export function ProjectPage({
               }
             />
             <span>
-              自动确认：目标足够清晰时允许 AI 跳过人工确认，直接开始规划或直接完成
+              自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行
             </span>
           </label>
           <div className="messages">
@@ -488,56 +488,105 @@ export function ProjectPage({
             {goalMessages.length === 0 ? (
               <div className="muted">还没有输入项目目标。</div>
             ) : null}
-            {latestConfirmJob ? (
+            {latestAnalysisJob ? (
               <div className="message message-planner live-message">
                 <div className="message-role">规划者（实时输出）</div>
                 <LiveOutput
-                  jobId={latestConfirmJob.id}
-                  running={latestConfirmJob.status === "running"}
+                  jobId={latestAnalysisJob.id}
+                  running={latestAnalysisJob.status === "running"}
                 />
               </div>
             ) : null}
           </div>
-          {confirmJob ? (
+          {analysisJob ? (
             <div className="goal-running">
               <Badge tone="info">规划者正在分析</Badge>
               <span className="muted">
-                {confirmJob.agent_name ?? "规划 Agent"} ·{" "}
-                {formatTime(confirmJob.started_at)}
+                {analysisJob.agent_name ?? "规划 Agent"} ·{" "}
+                {formatTime(analysisJob.started_at)}
               </span>
             </div>
           ) : null}
-          {goal_proposal ? (
+          {proposal ? (
             <div className="goal-proposal">
               <div className="goal-proposal-head">
-                <Badge tone={goal_proposal.kind === "direct" ? "warn" : "success"}>
-                  {goal_proposal.kind === "direct" ? "建议直接完成" : "目标已明确"}
+                <Badge tone={proposal.kind === "direct" ? "warn" : "success"}>
+                  {proposal.kind === "direct" ? "建议直接完成" : "项目方案"}
                 </Badge>
                 <div className="goal-proposal-summary">
-                  <RichContent content={goal_proposal.summary} />
+                  <RichContent content={proposal.summary} />
                 </div>
               </div>
-              {goal_proposal.goal ? (
+              {proposal.goal ? (
                 <div>
                   <strong>确认后的目标：</strong>
-                  <RichContent content={goal_proposal.goal} />
+                  <RichContent content={proposal.goal} />
                 </div>
               ) : null}
-              {goal_proposal.plan.length ? (
+              {proposal.assumptions.length ? (
                 <div>
-                  <strong>执行步骤</strong>
+                  <strong>关键假设</strong>
                   <ul>
-                    {goal_proposal.plan.map((item) => (
+                    {proposal.assumptions.map((item) => (
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
                 </div>
               ) : null}
-              {goal_proposal.verification.length ? (
+              {proposal.acceptance.length ? (
+                <div>
+                  <strong>验收口径</strong>
+                  <ul>
+                    {proposal.acceptance.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {proposal.tasks.length ? (
+                <div>
+                  <strong>任务方案</strong>
+                  <ul>
+                    {proposal.tasks.map((task) => (
+                      <li key={task.key}>
+                        <div>
+                          <strong>
+                            {task.key} {task.title}
+                          </strong>
+                          {task.deps.length ? (
+                            <span className="muted">
+                              （依赖 {task.deps.join("、")}）
+                            </span>
+                          ) : null}
+                        </div>
+                        <RichContent content={task.description} />
+                        {task.acceptance.length ? (
+                          <ul>
+                            {task.acceptance.map((item) => (
+                              <li key={item}>验收：{item}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {proposal.plan.length ? (
+                <div>
+                  <strong>执行步骤</strong>
+                  <ul>
+                    {proposal.plan.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {proposal.verification.length ? (
                 <div>
                   <strong>自检方式</strong>
                   <ul>
-                    {goal_proposal.verification.map((item) => (
+                    {proposal.verification.map((item) => (
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
@@ -545,7 +594,7 @@ export function ProjectPage({
               ) : null}
             </div>
           ) : null}
-          {!confirmJob ? (
+          {!analysisJob ? (
             <div className="confirm-row">
               <textarea
                 value={message}
@@ -555,7 +604,7 @@ export function ProjectPage({
                 placeholder={
                   goalMessages.length === 0
                     ? "描述项目目标、边界和验收预期。"
-                    : "补充信息或回答规划者的问题。"
+                    : "补充信息、回答规划者的问题，或对方案提出修改意见。"
                 }
               />
               <div className="button-row">
@@ -564,41 +613,44 @@ export function ProjectPage({
                   disabled={busy || paused || archived || !message.trim()}
                   onClick={() =>
                     run(async () => {
-                      await api.postGoalMessage(
+                      await api.postAnalysisMessage(
                         project.id,
                         message,
-                        project.goal_confirm_mode,
+                        project.confirm_mode,
                       );
                       setMessage("");
                     })
                   }
                 >
-                  {goalMessages.length === 0 ? "开始讨论" : "发送"}
+                  {goalMessages.length === 0 ? "开始分析" : "发送"}
                 </button>
-                {goal_proposal ? (
+                {proposal ? (
                   <button
                     className="primary"
                     disabled={
                       busy ||
                       paused ||
                       archived ||
-                      (goal_proposal.kind === "direct" && activeTasks.length > 0)
+                      !!message.trim() ||
+                      (proposal.kind === "direct" && activeTasks.length > 0)
                     }
                     title={
-                      goal_proposal.kind === "direct" && activeTasks.length > 0
-                        ? "项目已有任务，不能直接完成"
-                        : undefined
+                      message.trim()
+                        ? "请先发送修改意见或清空输入后再确认"
+                        : proposal.kind === "direct" && activeTasks.length > 0
+                          ? "项目已有任务，不能直接完成"
+                          : undefined
                     }
                     onClick={() =>
                       run(async () => {
-                        await api.confirmGoal(project.id, message || undefined);
+                        await api.confirmAnalysis(project.id);
                         setMessage("");
                       })
                     }
                   >
-                    {goal_proposal.kind === "direct"
+                    {proposal.kind === "direct"
                       ? "确认并直接完成"
-                      : "确认目标，开始规划"}
+                      : "确认方案，开始执行"}
                   </button>
                 ) : null}
               </div>
@@ -607,7 +659,7 @@ export function ProjectPage({
         </section>
       ) : goalMessages.length > 1 ? (
         <details className="panel">
-          <summary>目标确认记录</summary>
+          <summary>项目分析记录</summary>
           <div className="messages compact">
             {goalMessages.map((item) => (
               <div key={item.id} className={`message message-${item.role}`}>
@@ -643,7 +695,7 @@ export function ProjectPage({
                 </button>
               </div>
             ) : null}
-            {!archived && !directMode && goal_proposal?.kind !== "direct" ? (
+            {!archived && !directMode && proposal?.kind !== "direct" ? (
               <button
                 className="secondary"
                 disabled={busy}
@@ -676,7 +728,7 @@ export function ProjectPage({
             )}
           </div>
         ) : null}
-        {addTaskOpen && !archived && !directMode && goal_proposal?.kind !== "direct" ? (
+        {addTaskOpen && !archived && !directMode && proposal?.kind !== "direct" ? (
           <form className="form add-task-form" onSubmit={handleAddTask}>
             <div className="form-grid">
               <label>
@@ -872,7 +924,7 @@ export function ProjectPage({
 
       {projectJobs.length > 0 ? (
         <section className="panel">
-          <h2>目标确认 / 规划 / 总结作业</h2>
+          <h2>项目分析 / 直接完成 / 总结作业</h2>
           <div className="jobs">
             {projectJobs.map((job) => (
               <JobDetailView key={job.id} job={job} />
@@ -960,7 +1012,7 @@ export function ProjectPage({
                       setFeedback("");
                     })
                   }
-                  title="记录意见并要求重新规划，项目回到规划阶段"
+                  title="记录意见并要求重新规划，项目回到项目分析阶段"
                 >
                   要求重新规划
                 </button>
