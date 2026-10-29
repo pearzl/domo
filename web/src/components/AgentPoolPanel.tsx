@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DragEvent } from "react";
 import type { Agent, ProjectRolePool, Role } from "../types";
 import {
@@ -32,6 +32,8 @@ export interface AgentPoolPanelProps {
   /** 任一操作成功后刷新数据。 */
   onRefresh?: () => Promise<unknown>;
   addCandidates?: (role: Role) => Agent[];
+  /** 初始展开状态；省略时沿用按是否提供加入控件决定。 */
+  defaultOpen?: boolean;
 }
 
 interface DragItem {
@@ -75,12 +77,18 @@ export function AgentPoolPanel({
   onAdd,
   onRefresh,
   addCandidates,
+  defaultOpen,
 }: AgentPoolPanelProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [adding, setAdding] = useState<Partial<Record<Role, string>>>({});
   const [drag, setDrag] = useState<DragItem | null>(null);
   const [drop, setDrop] = useState<DropTarget | null>(null);
+  const initialOpen = defaultOpen ?? typeof onAdd === "function";
+  const [open, setOpen] = useState(initialOpen);
+  useEffect(() => {
+    setOpen(initialOpen);
+  }, [initialOpen]);
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
@@ -109,7 +117,11 @@ export function AgentPoolPanel({
   const dragEnabled = Boolean(onReorder) && !disabled && !busy;
 
   return (
-    <details className="panel agent-pool" open={typeof onAdd === "function"}>
+    <details
+      className="panel agent-pool"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>{title}</summary>
       <p className="subtitle">{subtitle}</p>
       {roles.map((group) => {

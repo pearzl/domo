@@ -1253,6 +1253,10 @@ function TaskDrawer({
   }, [task.id, task.guidance]);
   const guidanceLocked = archived || task.stage === "completed" || task.status === "canceled";
   const taskPaused = task.status === "paused" || task.status === "pausing";
+  // 已完成或已取消的任务先回答结果；等待人工验收的里程碑任务仍保留验收操作。
+  const resultFirst =
+    task.status === "canceled" ||
+    (task.stage === "completed" && task.human_gate !== "milestone");
   const canControl =
     !archived && task.stage !== "completed" && task.status !== "canceled";
   const canReorder =
@@ -1272,6 +1276,294 @@ function TaskDrawer({
       setControlBusy(false);
     }
   }
+  const summarySection = (
+    <section className="task-result">
+      <h3>执行摘要</h3>
+      <RichContent content={task.result_summary} emptyText="没有记录执行摘要。" />
+    </section>
+  );
+  const jobsSection = (
+    <section>
+      <h3>作业（{jobs.length}）</h3>
+      {jobs.length === 0 ? (
+        <div className="muted">还没有作业。</div>
+      ) : (
+        <div className="jobs">
+          {jobs.map((job) => (
+            <JobDetailView key={job.id} job={job} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+  const acceptanceSection = (
+    <section>
+      <h3>验收标准</h3>
+      <ul>
+        {task.acceptance.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </section>
+  );
+  const verifierSection =
+    task.verifier_issues.length > 0 ? (
+      <section>
+        <h3>验收反馈</h3>
+        <ul>
+          {task.verifier_issues.map((issue) => (
+            <li key={issue}>
+              <RichContent content={issue} />
+            </li>
+          ))}
+        </ul>
+      </section>
+    ) : null;
+  const descriptionSection = (
+    <section>
+      <h3>任务描述</h3>
+      <RichContent content={task.description} />
+    </section>
+  );
+  const deriveSection =
+    parent || children.length > 0 ? (
+      <section>
+        <h3>派生关系</h3>
+        {parent ? (
+          <>
+            <div className="kv">
+              <span>父任务</span>
+              <span>
+                {parent.key} {parent.title}
+              </span>
+            </div>
+            <p className="muted">
+              派生任务跳过验收，执行成功后直接提交并合入父任务分支。
+            </p>
+          </>
+        ) : null}
+        {children.length > 0 ? (
+          <>
+            <div className="kv">
+              <span>子任务</span>
+              <span>
+                {childCompleted}/{children.length} 已完成
+                {waitingChildren ? "，父任务等待中" : ""}
+              </span>
+            </div>
+            <div className="derive-list">
+              {children.map((child) => (
+                <div className="derive-child" key={child.id}>
+                  <div className="derive-child-head">
+                    <span className="task-key">{child.key}</span>
+                    <span className="derive-child-title">{child.title}</span>
+                    <TaskStateBadge stage={child.stage} status={child.status} />
+                  </div>
+                  <div className="muted">
+                    <RichContent
+                      content={child.result_summary || child.last_error}
+                      emptyText="尚无结果"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : null}
+      </section>
+    ) : null;
+  const depsSection = (
+    <section>
+      <h3>依赖与位置</h3>
+      <div className="kv">
+        <span>依赖</span>
+        <span>{task.deps.length ? task.deps.join(", ") : "无"}</span>
+      </div>
+      <div className="kv">
+        <span>分支</span>
+        <span className="mono">{task.branch ?? "—"}</span>
+      </div>
+      <div className="kv">
+        <span>工作区</span>
+        <span className="mono">{task.worktree ?? "尚未创建"}</span>
+      </div>
+      <div className="kv">
+        <span>排队位置</span>
+        <span>
+          {task.queue_position !== null ? `第 ${task.queue_position} 位` : "未在队列中"}
+        </span>
+      </div>
+      <div className="kv">
+        <span>等待原因</span>
+        <span>{task.waiting_reason ?? "—"}</span>
+      </div>
+      <div className="kv">
+        <span>失败分类</span>
+        <span>
+          {task.last_failure_kind
+            ? FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind
+            : "—"}
+        </span>
+      </div>
+      <div className="kv">
+        <span>Agent</span>
+        <span>{agentName(task.agent_id)}</span>
+      </div>
+      {resultFirst && task.last_error ? (
+        <details className="raw-error">
+          <summary>查看原始错误</summary>
+          <div className="error-box">
+            <RichContent content={task.last_error} />
+          </div>
+        </details>
+      ) : null}
+    </section>
+  );
+  const guidanceEditor = (
+    <section>
+      <h3>人工指导</h3>
+      <textarea
+        value={guidance}
+        onChange={(event) => setGuidance(event.target.value)}
+        rows={4}
+        disabled={guidanceLocked || busy}
+        placeholder="指导会在该任务下一次执行作业时生效。"
+      />
+      <div className="button-row guidance-actions">
+        <button
+          className="primary"
+          disabled={
+            guidanceLocked ||
+            busy ||
+            !guidance.trim() ||
+            guidance.trim() === task.guidance.trim()
+          }
+          onClick={() => onSaveGuidance(guidance)}
+        >
+          保存指导
+        </button>
+        {guidanceLocked ? (
+          <span className="muted">
+            {task.status === "canceled"
+              ? "任务已取消，不能再编辑指导。"
+              : task.stage === "completed"
+                ? "任务已完成，不能再编辑指导。"
+                : "项目已归档，不能再编辑指导。"}
+          </span>
+        ) : null}
+      </div>
+    </section>
+  );
+  const guidanceReadonly = (
+    <details className="drawer-fold">
+      <summary>人工指导</summary>
+      <RichContent content={task.guidance} emptyText="没有人工指导。" />
+    </details>
+  );
+  const agentPoolSection = (
+    <TaskAgentPoolPanel
+      task={task}
+      detail={detail}
+      onRefresh={onRefresh}
+      defaultOpen={!resultFirst}
+      disabled={archived || task.stage === "completed" || task.status === "canceled"}
+    />
+  );
+  const controlSection = canControl ? (
+    <div className="task-control-bar">
+      {taskPaused ? (
+        <button
+          className="secondary"
+          disabled={controlBusy}
+          onClick={() => void control(() => api.resumeTask(task.project_id, task.id))}
+        >
+          继续
+        </button>
+      ) : (
+        <>
+          <button
+            className="secondary"
+            disabled={controlBusy}
+            onClick={() => void control(() => api.pauseTask(task.project_id, task.id))}
+          >
+            暂停
+          </button>
+          <button
+            className="danger"
+            disabled={controlBusy}
+            onClick={() => {
+              if (window.confirm("强制暂停会终止当前作业，确认继续？")) {
+                void control(() => api.pauseTask(task.project_id, task.id, true));
+              }
+            }}
+          >
+            强制暂停
+          </button>
+        </>
+      )}
+      {canReorder ? (
+        <>
+          <button
+            className="ghost"
+            disabled={controlBusy}
+            onClick={() =>
+              void control(() => api.reorderTaskQueue(task.project_id, task.id, "up"))
+            }
+          >
+            排队上移
+          </button>
+          <button
+            className="ghost"
+            disabled={controlBusy}
+            onClick={() =>
+              void control(() => api.reorderTaskQueue(task.project_id, task.id, "down"))
+            }
+          >
+            排队下移
+          </button>
+        </>
+      ) : null}
+    </div>
+  ) : null;
+  const milestoneSection = (
+    <div className="milestone-bar">
+      <span className="muted">
+        {task.milestone
+          ? "验收者通过后不会自动合并，需要人工确认。"
+          : "把任务标记为里程碑，验收通过后交给人工确认。"}
+      </span>
+      <button
+        className={task.milestone ? "secondary" : "ghost"}
+        disabled={
+          archived ||
+          busy ||
+          task.stage === "completed" ||
+          task.status === "canceled" ||
+          task.human_gate === "milestone"
+        }
+        onClick={onToggleMilestone}
+      >
+        {task.milestone ? "取消里程碑" : "标记为里程碑"}
+      </button>
+    </div>
+  );
+  const gateSection =
+    task.human_gate === "milestone" ? (
+      <HumanAcceptancePanel
+        task={task}
+        projectId={task.project_id}
+        onRefresh={onRefresh}
+        disabled={archived}
+      />
+    ) : task.status === "blocked" ? (
+      <ArbitrationPanel
+        projectId={task.project_id}
+        task={task}
+        onRefresh={onRefresh}
+        disabled={archived}
+        onLegacyRetry={onRetry}
+      />
+    ) : null;
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <aside className="drawer" onClick={(event) => event.stopPropagation()}>
@@ -1286,299 +1578,63 @@ function TaskDrawer({
         </div>
         <div className="badge-row">
           <TaskStateBadge stage={task.stage} status={task.status} />
-          <Badge tone="muted">{TASK_STAGE_LABELS[task.stage] ?? task.stage}</Badge>
           {task.attempts ? <Badge tone="warn">执行 {task.attempts} 次</Badge> : null}
           {task.rejections ? <Badge tone="warn">拒绝 {task.rejections} 次</Badge> : null}
-          {task.last_failure_kind ? (
+          {!resultFirst && task.last_failure_kind ? (
             <Badge tone="danger">
               失败分类 ·{" "}
               {FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind}
             </Badge>
           ) : null}
-          {task.parent_id ? <Badge tone="info">派生任务 · 跳过验收</Badge> : null}
-          {task.milestone ? <Badge tone="warn">里程碑 · 需人工验收</Badge> : null}
-          {task.human_gate === "milestone" ? (
+          {!resultFirst && task.parent_id ? (
+            <Badge tone="info">派生任务 · 跳过验收</Badge>
+          ) : null}
+          {!resultFirst && task.milestone ? (
+            <Badge tone="warn">里程碑 · 需人工验收</Badge>
+          ) : null}
+          {!resultFirst && task.human_gate === "milestone" ? (
             <Badge tone="danger">等待人工验收</Badge>
           ) : null}
-          {waitingChildren ? (
+          {!resultFirst && waitingChildren ? (
             <Badge tone="warn">
               等待子任务 {childCompleted}/{children.length}
             </Badge>
           ) : null}
         </div>
-        {canControl ? (
-          <div className="task-control-bar">
-            {taskPaused ? (
-              <button
-                className="secondary"
-                disabled={controlBusy}
-                onClick={() =>
-                  void control(() => api.resumeTask(task.project_id, task.id))
-                }
-              >
-                继续
-              </button>
-            ) : (
-              <>
-                <button
-                  className="secondary"
-                  disabled={controlBusy}
-                  onClick={() =>
-                    void control(() => api.pauseTask(task.project_id, task.id))
-                  }
-                >
-                  暂停
-                </button>
-                <button
-                  className="danger"
-                  disabled={controlBusy}
-                  onClick={() => {
-                    if (window.confirm("强制暂停会终止当前作业，确认继续？")) {
-                      void control(() =>
-                        api.pauseTask(task.project_id, task.id, true),
-                      );
-                    }
-                  }}
-                >
-                  强制暂停
-                </button>
-              </>
-            )}
-            {canReorder ? (
-              <>
-                <button
-                  className="ghost"
-                  disabled={controlBusy}
-                  onClick={() =>
-                    void control(() =>
-                      api.reorderTaskQueue(task.project_id, task.id, "up"),
-                    )
-                  }
-                >
-                  排队上移
-                </button>
-                <button
-                  className="ghost"
-                  disabled={controlBusy}
-                  onClick={() =>
-                    void control(() =>
-                      api.reorderTaskQueue(task.project_id, task.id, "down"),
-                    )
-                  }
-                >
-                  排队下移
-                </button>
-              </>
+        {resultFirst ? (
+          <>
+            {summarySection}
+            {jobsSection}
+            {acceptanceSection}
+            {verifierSection}
+            {descriptionSection}
+            {deriveSection}
+            {depsSection}
+            {guidanceReadonly}
+            {agentPoolSection}
+          </>
+        ) : (
+          <>
+            {controlSection}
+            {controlError ? <div className="error-box">{controlError}</div> : null}
+            {milestoneSection}
+            {agentPoolSection}
+            {gateSection}
+            {task.last_error && task.human_gate !== "milestone" ? (
+              <div className="error-box">
+                <RichContent content={task.last_error} />
+              </div>
             ) : null}
-          </div>
-        ) : null}
-        {controlError ? <div className="error-box">{controlError}</div> : null}
-        <div className="milestone-bar">
-          <span className="muted">
-            {task.milestone
-              ? "验收者通过后不会自动合并，需要人工确认。"
-              : "把任务标记为里程碑，验收通过后交给人工确认。"}
-          </span>
-          <button
-            className={task.milestone ? "secondary" : "ghost"}
-            disabled={
-              archived ||
-              busy ||
-              task.stage === "completed" ||
-              task.status === "canceled" ||
-              task.human_gate === "milestone"
-            }
-            onClick={onToggleMilestone}
-          >
-            {task.milestone ? "取消里程碑" : "标记为里程碑"}
-          </button>
-        </div>
-        <TaskAgentPoolPanel
-          task={task}
-          detail={detail}
-          onRefresh={onRefresh}
-          disabled={archived || task.stage === "completed" || task.status === "canceled"}
-        />
-        {task.human_gate === "milestone" ? (
-          <HumanAcceptancePanel
-            task={task}
-            projectId={task.project_id}
-            onRefresh={onRefresh}
-            disabled={archived}
-          />
-        ) : task.status === "blocked" ? (
-          <ArbitrationPanel
-            projectId={task.project_id}
-            task={task}
-            onRefresh={onRefresh}
-            disabled={archived}
-            onLegacyRetry={onRetry}
-          />
-        ) : null}
-        {task.last_error && task.human_gate !== "milestone" ? (
-          <div className="error-box">
-            <RichContent content={task.last_error} />
-          </div>
-        ) : null}
-        <section>
-          <h3>任务描述</h3>
-          <RichContent content={task.description} />
-        </section>
-        {parent || children.length > 0 ? (
-          <section>
-            <h3>派生关系</h3>
-            {parent ? (
-              <>
-                <div className="kv">
-                  <span>父任务</span>
-                  <span>
-                    {parent.key} {parent.title}
-                  </span>
-                </div>
-                <p className="muted">
-                  派生任务跳过验收，执行成功后直接提交并合入父任务分支。
-                </p>
-              </>
-            ) : null}
-            {children.length > 0 ? (
-              <>
-                <div className="kv">
-                  <span>子任务</span>
-                  <span>
-                    {childCompleted}/{children.length} 已完成
-                    {waitingChildren ? "，父任务等待中" : ""}
-                  </span>
-                </div>
-                <div className="derive-list">
-                  {children.map((child) => (
-                    <div className="derive-child" key={child.id}>
-                      <div className="derive-child-head">
-                        <span className="task-key">{child.key}</span>
-                        <span className="derive-child-title">{child.title}</span>
-                        <TaskStateBadge stage={child.stage} status={child.status} />
-                      </div>
-                      <div className="muted">
-                        <RichContent
-                          content={child.result_summary || child.last_error}
-                          emptyText="尚无结果"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-          </section>
-        ) : null}
-        <section>
-          <h3>人工指导</h3>
-          <textarea
-            value={guidance}
-            onChange={(event) => setGuidance(event.target.value)}
-            rows={4}
-            disabled={guidanceLocked || busy}
-            placeholder="指导会在该任务下一次执行作业时生效。"
-          />
-          <div className="button-row guidance-actions">
-            <button
-              className="primary"
-              disabled={
-                guidanceLocked ||
-                busy ||
-                !guidance.trim() ||
-                guidance.trim() === task.guidance.trim()
-              }
-              onClick={() => onSaveGuidance(guidance)}
-            >
-              保存指导
-            </button>
-            {guidanceLocked ? (
-              <span className="muted">
-                {task.status === "canceled"
-                  ? "任务已取消，不能再编辑指导。"
-                  : task.stage === "completed"
-                    ? "任务已完成，不能再编辑指导。"
-                    : "项目已归档，不能再编辑指导。"}
-              </span>
-            ) : null}
-          </div>
-        </section>
-        <section>
-          <h3>验收标准</h3>
-          <ul>
-            {task.acceptance.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </section>
-        <section>
-          <h3>依赖与位置</h3>
-          <div className="kv">
-            <span>依赖</span>
-            <span>{task.deps.length ? task.deps.join(", ") : "无"}</span>
-          </div>
-          <div className="kv">
-            <span>分支</span>
-            <span className="mono">{task.branch ?? "—"}</span>
-          </div>
-          <div className="kv">
-            <span>工作区</span>
-            <span className="mono">{task.worktree ?? "尚未创建"}</span>
-          </div>
-          <div className="kv">
-            <span>排队位置</span>
-            <span>
-              {task.queue_position !== null ? `第 ${task.queue_position} 位` : "未在队列中"}
-            </span>
-          </div>
-          <div className="kv">
-            <span>等待原因</span>
-            <span>{task.waiting_reason ?? "—"}</span>
-          </div>
-          <div className="kv">
-            <span>失败分类</span>
-            <span>
-              {task.last_failure_kind
-                ? FAILURE_KIND_LABELS[task.last_failure_kind] ??
-                  task.last_failure_kind
-                : "—"}
-            </span>
-          </div>
-          <div className="kv">
-            <span>Agent</span>
-            <span>{agentName(task.agent_id)}</span>
-          </div>
-        </section>
-        {task.verifier_issues.length > 0 ? (
-          <section>
-            <h3>验收反馈</h3>
-            <ul>
-              {task.verifier_issues.map((issue) => (
-                <li key={issue}>
-                  <RichContent content={issue} />
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-        {task.result_summary ? (
-          <section>
-            <h3>执行摘要</h3>
-            <RichContent content={task.result_summary} />
-          </section>
-        ) : null}
-        <section>
-          <h3>作业（{jobs.length}）</h3>
-          {jobs.length === 0 ? (
-            <div className="muted">还没有作业。</div>
-          ) : (
-            <div className="jobs">
-              {jobs.map((job) => (
-                <JobDetailView key={job.id} job={job} />
-              ))}
-            </div>
-          )}
-        </section>
+            {descriptionSection}
+            {deriveSection}
+            {guidanceEditor}
+            {acceptanceSection}
+            {depsSection}
+            {verifierSection}
+            {task.result_summary ? summarySection : null}
+            {jobsSection}
+          </>
+        )}
       </aside>
     </div>
   );
@@ -1589,11 +1645,13 @@ function TaskAgentPoolPanel({
   task,
   detail,
   onRefresh,
+  defaultOpen,
   disabled,
 }: {
   task: Task;
   detail: ProjectDetail;
   onRefresh: () => Promise<void>;
+  defaultOpen: boolean;
   disabled: boolean;
 }) {
   const [pool, setPool] = useState<TaskAgentPool | null>(null);
@@ -1647,9 +1705,11 @@ function TaskAgentPoolPanel({
   }
   return (
     <AgentPoolPanel
+      key={task.id}
       title="任务 Agent 池"
       subtitle="从项目 Agent 池对应角色快照初始化，只作用于本任务。顺序越靠前优先级越高，按严格优先级派发，池不可用时不回退项目池。"
       roles={pool.roles}
+      defaultOpen={defaultOpen}
       disabled={disabled}
       addCandidates={candidates}
       onReorder={(role, agentId, position) =>
@@ -1885,15 +1945,27 @@ function ArbitrationPanel({
           {context.jobs.length > 0 ? (
             <div className="arbitration-jobs">
               {context.jobs.slice(-4).map((job) => (
-                <div className="muted" key={job.id}>
-                  {ROLE_LABELS[job.role] ?? job.role} · {job.agent_name ?? "—"} ·{" "}
-                  {job.status}
-                  {job.failure_summary
-                    ? ` · ${failureSummaryLabel(job.failure_summary.kind)} · ${shortText(
-                        job.failure_summary.message,
-                        100,
-                      )}`
-                    : ""}
+                <div className="arbitration-job" key={job.id}>
+                  <div className="muted">
+                    {ROLE_LABELS[job.role] ?? job.role} · {job.agent_name ?? "—"} ·{" "}
+                    {job.status}
+                    {job.failure_summary
+                      ? ` · ${failureSummaryLabel(job.failure_summary.kind)} · ${shortText(
+                          job.failure_summary.message,
+                          100,
+                        )}`
+                      : job.error
+                        ? " · 失败 · 摘要不可用"
+                        : ""}
+                  </div>
+                  {job.error ? (
+                    <details className="raw-error">
+                      <summary>查看原始错误</summary>
+                      <div className="error-box">
+                        <RichContent content={job.error} />
+                      </div>
+                    </details>
+                  ) : null}
                 </div>
               ))}
             </div>

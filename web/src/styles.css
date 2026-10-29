@@ -2029,6 +2029,32 @@ button.event-job-title:hover:not(:disabled) {
   align-items: flex-start;
 }
 
+/* 已完成任务的执行摘要优先展示，使用柔和底色与后续明细区分。 */
+.drawer .task-result {
+  border: 1px solid #bfe6d6;
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--success-soft);
+}
+
+.drawer .task-result h3 {
+  color: var(--success);
+}
+
+.drawer-fold {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.drawer-fold > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.drawer-fold > .rich-content {
+  margin-top: 8px;
+}
+
 .drawer section {
   border-top: 1px solid var(--line);
   padding-top: 14px;
@@ -2080,11 +2106,22 @@ button.event-job-title:hover:not(:disabled) {
 .arbitration-jobs {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   background: #f7f9fc;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;
+}
+
+.arbitration-job {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.arbitration-job + .arbitration-job {
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
 }
 
 .kv {
