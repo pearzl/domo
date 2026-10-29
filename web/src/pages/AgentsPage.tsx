@@ -14,7 +14,16 @@ import type {
 import { api, errorMessage } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { RichContent } from "../components/RichContent";
-import { Badge, ErrorBox, FAILURE_KIND_LABELS, failureSummaryLabel, formatTime, shortText } from "../ui";
+import {
+  Badge,
+  Empty,
+  ErrorBox,
+  FAILURE_KIND_LABELS,
+  failureSummaryLabel,
+  formatTime,
+  formatUsageAmount,
+  shortText,
+} from "../ui";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
 const ROLE_TEXT: Record<Role, string> = {
@@ -88,6 +97,7 @@ export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [team, setTeam] = useState<DefaultTeamPool | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editing, setEditing] = useState<Agent | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -105,6 +115,8 @@ export function AgentsPage() {
       setError("");
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -204,6 +216,20 @@ export function AgentsPage() {
     }
   }
 
+  async function removeAgent(agent: Agent) {
+    if (!window.confirm(`删除 Agent「${agent.name}」？`)) return;
+    setBusyId(agent.id);
+    setError("");
+    try {
+      await api.deleteAgent(agent.id);
+      await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
   function toggleRole(role: Role) {
     setForm((current) => ({
       ...current,
@@ -238,6 +264,12 @@ export function AgentsPage() {
       </header>
 
       {error ? <ErrorBox message={error} /> : null}
+
+      {loading ? (
+        <section className="panel">
+          <div className="muted">正在加载 Agent…</div>
+        </section>
+      ) : null}
 
       {team ? (
         <AgentPoolPanel
@@ -490,7 +522,13 @@ export function AgentsPage() {
       ) : null}
 
       <div className="agent-grid">
-        {agents.map((agent) => (
+        {!loading && agents.length === 0 ? (
+          <Empty
+            title="还没有 Agent"
+            hint="点击右上角「添加 Agent」创建第一个 Agent，之后可在默认团队与项目 Agent 池中按角色配置它。"
+          />
+        ) : (
+          agents.map((agent) => (
           <article key={agent.id} className={`agent-card panel ${agent.enabled ? "" : "disabled"}`}>
             <div className="agent-head">
               <div>
@@ -515,14 +553,8 @@ export function AgentsPage() {
                 </button>
                 <button
                   className="ghost danger-text"
-                  onClick={() => {
-                    if (window.confirm(`删除 Agent「${agent.name}」？`)) {
-                      void api
-                        .deleteAgent(agent.id)
-                        .then(refresh)
-                        .catch((err) => setError(errorMessage(err)));
-                    }
-                  }}
+                  disabled={busyId === agent.id}
+                  onClick={() => void removeAgent(agent)}
                 >
                   删除
                 </button>
@@ -553,8 +585,11 @@ export function AgentsPage() {
                 <span>
                   {WINDOW_LABELS[agent.usage_window.window]} ·
                   {METRIC_LABELS[agent.usage_window.metric]} 用量{" "}
-                  <strong>{formatAmount(agent.usage_window.used)}</strong> /{" "}
-                  {formatAmount(agent.usage_window.limit)}
+                  <strong>
+                    {formatUsageAmount(agent.usage_window.used, agent.usage_window.metric)}
+                  </strong>{" "}
+                  /{" "}
+                  {formatUsageAmount(agent.usage_window.limit, agent.usage_window.metric)}
                   {agent.usage_window.exceeded
                     ? ` · 已跳过，${formatTime(agent.usage_window.window_end)} 后自动恢复`
                     : ""}
@@ -600,7 +635,8 @@ export function AgentsPage() {
               </details>
             ) : null}
           </article>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );
@@ -641,11 +677,6 @@ function scheduleSummary(availability: AgentAvailability): string {
         `${DAY_LABELS[slot.weekday - 1] ?? `周${slot.weekday}`} ${slot.start}-${slot.end}`,
     )
     .join("、");
-}
-
-function formatAmount(value: number): string {
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function parseJsonArray(raw: string): string[] {

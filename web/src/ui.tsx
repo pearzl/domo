@@ -97,7 +97,14 @@ export function formatTokens(value: number | null | undefined): string {
 export function formatCost(value: number | null | undefined): string {
   if (value === null || value === undefined) return "未知";
   if (!value) return "0";
+  if (value < 0.0001) return "<0.0001";
   return value < 1 ? value.toFixed(4) : value.toFixed(2);
+}
+
+/** 按计量维度格式化用量：费用走 formatCost，其余 token 指标走 formatTokens。 */
+export function formatUsageAmount(value: number | null | undefined, metric: string): string {
+  if (metric === "cost") return formatCost(value);
+  return formatTokens(value);
 }
 
 export function formatMillis(value: number | null | undefined): string {

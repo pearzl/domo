@@ -8,7 +8,7 @@ import {
   ROLE_LABELS,
   failureSummaryLabel,
   formatTime,
-  formatTokens as formatUsageAmount,
+  formatUsageAmount,
   shortText,
 } from "../ui";
 
@@ -251,7 +251,7 @@ export function AgentPoolPanel({
                       {entry.usage_window?.exceeded ? (
                         <Badge
                           tone="danger"
-                          title={`已用 ${formatUsageAmount(entry.usage_window.used)} / 限额 ${formatUsageAmount(entry.usage_window.limit)}`}
+                          title={`已用 ${formatUsageAmount(entry.usage_window.used, entry.usage_window.metric)} / 限额 ${formatUsageAmount(entry.usage_window.limit, entry.usage_window.metric)}`}
                         >
                           用量限额已触发
                         </Badge>

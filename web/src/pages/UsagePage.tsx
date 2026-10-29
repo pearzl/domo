@@ -30,10 +30,10 @@ const DIMENSION_LABELS: Record<Dimension, string> = {
 const DIMENSION_HINTS: Record<Dimension, string> = {
   project: "每个项目内所有作业的用量合计。",
   agent: "每个 Agent 承担的作业用量；未记录 Agent 的作业单独归入未知分组。",
-  role: "按作业角色汇总，便于对比项目分析、执行、验收与总结的成本。",
+  role: "按作业角色汇总，便于对比项目分析、直接完成、执行、验收与总结的成本。",
 };
 
-const ROLE_FILTERS = ["analysis", "executor", "verifier", "summary"];
+const ROLE_FILTERS = ["analysis", "direct", "executor", "verifier", "summary"];
 
 const EMPTY_REPORTS: Record<Dimension, UsageReport | null> = {
   project: null,
