@@ -328,7 +328,7 @@ export function ProjectPage({
         {project.stage === "completed" ? (
           <div className="success-banner merge-banner">
             <div>
-              {project.merged_at ? (
+              {project.merged_at && detail.merged_into_base ? (
                 <>
                   已合入 <span className="mono">{project.base_branch}</span>（
                   {formatTime(project.merged_at)}，提交{" "}
@@ -338,6 +338,11 @@ export function ProjectPage({
                   ）。项目分支 <span className="mono">{project.branch}</span> 已 rebase
                   到目标分支。
                 </>
+              ) : detail.merged_into_base ? (
+                <>
+                  目标分支 <span className="mono">{project.base_branch}</span> 已包含项目分支{" "}
+                  <span className="mono">{project.branch}</span> 的全部提交。
+                </>
               ) : (
                 <>
                   项目已完成。改动位于 <span className="mono">{project.branch}</span>
@@ -345,15 +350,17 @@ export function ProjectPage({
                 </>
               )}
             </div>
-            <div className="button-row merge-actions">
-              <button
-                className="primary"
-                disabled={busy || merging}
-                onClick={() => void handleMerge()}
-              >
-                {merging ? "合入中…" : `合入到 ${project.base_branch}`}
-              </button>
-            </div>
+            {!detail.merged_into_base ? (
+              <div className="button-row merge-actions">
+                <button
+                  className="primary"
+                  disabled={busy || merging}
+                  onClick={() => void handleMerge()}
+                >
+                  {merging ? "合入中…" : `合入到 ${project.base_branch}`}
+                </button>
+              </div>
+            ) : null}
             {mergeNotice ? (
               <div
                 className={`merge-result ${

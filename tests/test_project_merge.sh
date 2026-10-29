@@ -7,7 +7,10 @@
 #      历史保持线性且没有 merge commit；
 #   3. 重复合入返回“已是最新”，不新增提交、不改变引用；
 #   4. base 在 worktree 检出且有未提交改动时拒绝合入，两侧引用不变；
-#   5. rebase 冲突时中止并回滚，两侧引用不变，错误信息列出冲突文件。
+#   5. rebase 冲突时中止并回滚，两侧引用不变，错误信息列出冲突文件；
+#   6. 目标分支已包含项目分支提交时（包括在 DOMO 之外完成的合入），
+#      详情返回 merged_into_base；
+#   7. 合入后追加任务会清空合入记录，新工作完成后重新提供合入入口。
 #
 # 约定：使用内置 mock Agent 与本地临时仓库，不访问外网；临时数据全部放在
 # ${TMPDIR:-/tmp}。退出码 0 表示全部通过。
@@ -168,6 +171,36 @@ def complete_project(repo, name, base="main"):
     return detail
 
 
+def complete_task_project(repo, name):
+    project = call_raw(
+        "POST",
+        "/api/projects",
+        {"name": name, "repo_path": repo, "base_branch": "main"},
+    )["project"]
+    project_id = project["id"]
+    call_raw(
+        "POST",
+        f"/api/projects/{project_id}/analysis/messages",
+        {"message": "[single] 外部合入检测", "confirm_mode": "auto"},
+    )
+    wait_for(
+        project_id,
+        lambda d: d["project"]["stage"] == "summarizing"
+        and bool(d["project"]["report"]),
+        "项目报告",
+    )
+    call_raw(
+        "POST",
+        f"/api/projects/{project_id}/report",
+        {"action": "accept", "feedback": None},
+    )
+    return wait_for(
+        project_id,
+        lambda d: d["project"]["stage"] == "completed",
+        "项目完成",
+    )
+
+
 def branch_heads(detail):
     branch = detail["project"]["branch"]
     workspace = os.path.join(detail["project"]["workspace"], "repo")
@@ -203,6 +236,7 @@ project_id = detail["project"]["id"]
 branch, project_head, worktree = branch_heads(detail)
 base_before = git(repo_ok, "rev-parse", "main")
 assert project_head != base_before, (project_head, base_before)
+assert detail["merged_into_base"] is False, detail
 
 result = call_raw("POST", f"/api/projects/{project_id}/merge")
 assert result["status"] == "merged", result
@@ -221,6 +255,7 @@ detail = call_raw("GET", f"/api/projects/{project_id}")
 assert detail["project"]["merged_at"], detail["project"]
 assert detail["project"]["merged_commit"] == project_head, detail["project"]
 assert detail["merged_commit"] == project_head, detail
+assert detail["merged_into_base"] is True, detail
 assert any(event["kind"] == "project_merged" for event in detail["events"]), detail["events"]
 
 commit_count = git(repo_ok, "rev-list", "--count", "main")
@@ -233,6 +268,60 @@ assert git(repo_ok, "rev-parse", branch) == project_after
 assert git(repo_ok, "rev-list", "--count", "main") == commit_count
 detail = call_raw("GET", f"/api/projects/{project_id}")
 assert detail["project"]["merged_at"] == merged_at, detail["project"]
+assert detail["merged_into_base"] is True, detail
+
+# ---- 合入后追加任务：旧合入记录失效，重新提供合入入口 ------------------------
+print("--> 合入后追加任务")
+call_raw(
+    "POST",
+    f"/api/projects/{project_id}/tasks",
+    {
+        "key": "M1",
+        "title": "追加任务",
+        "description": "在 domo_mock/M1.txt 写入追加内容。",
+        "acceptance": ["domo_mock/M1.txt 存在且包含 M1"],
+        "deps": [],
+        "milestone": False,
+    },
+)
+reopened = wait_for(
+    project_id,
+    lambda d: d["project"]["stage"] == "summarizing" and bool(d["project"]["report"]),
+    "追加任务后的报告",
+)
+assert reopened["project"]["merged_at"] is None, reopened["project"]
+assert reopened["merged_into_base"] is False, reopened
+call_raw(
+    "POST",
+    f"/api/projects/{project_id}/report",
+    {"action": "accept", "feedback": None},
+)
+completed_again = wait_for(
+    project_id,
+    lambda d: d["project"]["stage"] == "completed",
+    "追加任务后完成",
+)
+assert completed_again["project"]["merged_at"] is None, completed_again["project"]
+assert completed_again["merged_into_base"] is False, completed_again
+again = call_raw("POST", f"/api/projects/{project_id}/merge")
+assert again["status"] == "merged", again
+after_again = call_raw("GET", f"/api/projects/{project_id}")
+assert after_again["merged_into_base"] is True, after_again
+
+# ---- 外部合入后不再显示合入入口 ----------------------------------------------
+print("--> 外部合入检测")
+manual = complete_task_project(repo_ok, "ManualMerged")
+manual_id = manual["project"]["id"]
+manual_branch, manual_head, _ = branch_heads(manual)
+assert manual["merged_into_base"] is False, manual
+assert not manual["project"]["merged_at"], manual["project"]
+git(repo_ok, "merge", "--ff-only", manual_branch)
+manual_after = call_raw("GET", f"/api/projects/{manual_id}")
+assert manual_after["merged_into_base"] is True, manual_after
+assert not manual_after["project"]["merged_at"], manual_after["project"]
+manual_result = call_raw("POST", f"/api/projects/{manual_id}/merge")
+assert manual_result["status"] == "up_to_date", manual_result
+assert git(repo_ok, "rev-parse", "main") == manual_head
 
 # ---- base 未被 worktree 检出时更新引用 --------------------------------------
 print("--> base 未检出时更新引用")

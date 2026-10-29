@@ -1604,8 +1604,8 @@ async fn create_task(
         sqlx::query(
             "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
              ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
-             report = NULL, report_feedback = NULL, completion_mode = ?, updated_at = ? \
-             WHERE id = ?",
+             report = NULL, report_feedback = NULL, completion_mode = ?, merged_at = NULL, \
+             merged_commit = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(STAGE_EXECUTING)
         .bind(STATUS_RUNNING)
@@ -4018,6 +4018,7 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
         .collect();
     let merged_at = project.merged_at.clone();
     let merged_commit = project.merged_commit.clone();
+    let merged_into_base = project_merged_into_base(&project).await;
     let proposal = project
         .proposal
         .as_deref()
@@ -4026,6 +4027,7 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
         project,
         merged_at: merged_at.clone(),
         merged_commit: merged_commit.clone(),
+        merged_into_base,
         tasks: task_views(tasks),
         jobs,
         messages,
@@ -4035,6 +4037,24 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
         usage: project_usage,
         proposal,
     })
+}
+
+/// 目标分支是否已经包含项目分支提交。比较当前分支提交，覆盖 DOMO 记录的
+/// 合入和用户在 DOMO 之外完成的合入；分支不可读时退回已记录的合入状态。
+async fn project_merged_into_base(project: &ProjectRow) -> bool {
+    if project.stage != STAGE_COMPLETED {
+        return false;
+    }
+    let repo = PathBuf::from(&project.repo_path);
+    let Ok(project_commit) = git::commit_of(&repo, &project.branch).await else {
+        return project.merged_at.is_some();
+    };
+    let Ok(base_commit) = git::commit_of(&repo, &project.base_branch).await else {
+        return project.merged_at.is_some();
+    };
+    git::is_ancestor(&repo, &project_commit, &base_commit)
+        .await
+        .unwrap_or(false)
 }
 
 fn job_duration(started_at: &Option<String>, finished_at: &Option<String>) -> Option<i64> {

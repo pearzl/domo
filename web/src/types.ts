@@ -294,6 +294,7 @@ export interface ProjectDetail {
   project: Project;
   merged_at: string | null;
   merged_commit: string | null;
+  merged_into_base: boolean;
   tasks: Task[];
   jobs: JobSummary[];
   messages: Message[];

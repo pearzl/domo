@@ -570,6 +570,8 @@ pub struct ProjectDetail {
     pub project: ProjectRow,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
+    /// 目标分支已经包含项目分支提交；包括 DOMO 记录的合入和人工在外部完成的合入。
+    pub merged_into_base: bool,
     pub tasks: Vec<TaskView>,
     pub jobs: Vec<JobSummary>,
     pub messages: Vec<MessageRow>,
