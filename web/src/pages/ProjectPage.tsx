@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
@@ -20,6 +20,7 @@ import { LiveOutput } from "../components/LiveOutput";
 import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
+import { isReordableQueueTask, queueEdge, reordableQueueIds } from "../taskQueue";
 import {
   Badge,
   Empty,
@@ -157,12 +158,8 @@ export function ProjectPage({
     !(project.stage === "summarizing" && project.report)
       ? latestFailedJobId(projectJobs)
       : null;
-  const canReorder = (task: Task) =>
-    !archived &&
-    task.stage === "pending" &&
-    task.attempts === 0 &&
-    task.rejections === 0 &&
-    task.status !== "canceled";
+  // 队列位置由可调整任务的 (queue_order, seq) 顺序推导，与服务端重排口径一致。
+  const queueIds = reordableQueueIds(tasks, archived);
 
   async function handleMerge() {
     if (
@@ -847,7 +844,9 @@ export function ProjectPage({
                   tabIndex={0}
                   onClick={() => setSelectedTaskId(task.id)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
+                    if (event.key === " " || event.key === "Enter") {
+                      // Space 默认会滚动页面，打开抽屉时阻止滚动。
+                      event.preventDefault();
                       setSelectedTaskId(task.id);
                     }
                   }}
@@ -874,12 +873,13 @@ export function ProjectPage({
                   <span className="task-counts muted">
                     {task.attempts ? `执行 ${task.attempts}` : ""}
                     {task.rejections ? ` 拒绝 ${task.rejections}` : ""}
-                    {canReorder(task) ? (
+                    {isReordableQueueTask(task, archived) ? (
                       <span className="queue-controls">
                         <button
                           className="ghost"
                           title="排队上移"
-                          disabled={busy || task.queue_position === 1}
+                          aria-label={`${task.key} 排队上移`}
+                          disabled={busy || !queueEdge(queueIds, task.id).canMoveUp}
                           onClick={(event) => {
                             event.stopPropagation();
                             void run(() =>
@@ -892,7 +892,8 @@ export function ProjectPage({
                         <button
                           className="ghost"
                           title="排队下移"
-                          disabled={busy}
+                          aria-label={`${task.key} 排队下移`}
+                          disabled={busy || !queueEdge(queueIds, task.id).canMoveDown}
                           onClick={(event) => {
                             event.stopPropagation();
                             void run(() =>
@@ -1359,11 +1360,62 @@ function TaskDrawer({
     (task.stage === "completed" && task.human_gate !== "milestone");
   const canControl =
     !archived && task.stage !== "completed" && task.status !== "canceled";
-  const canReorder =
-    canControl &&
-    task.stage === "pending" &&
-    task.attempts === 0 &&
-    task.rejections === 0;
+  const canReorder = isReordableQueueTask(task, archived);
+  const edge = queueEdge(reordableQueueIds(detail.tasks, archived), task.id);
+  const titleId = useId();
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  // 打开时记录焦点来源，关闭后把焦点还给打开前的任务行或卡片。
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const active = document.activeElement;
+    returnFocusRef.current = active instanceof HTMLElement ? active : null;
+    closeRef.current?.focus();
+    return () => {
+      const target = returnFocusRef.current;
+      if (target?.isConnected) target.focus();
+      returnFocusRef.current = null;
+    };
+  }, []);
+  // 抽屉内 Tab 循环，Esc 关闭；焦点不会被背后的页面接走。
+  function handleDrawerKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+    const focusable = Array.from(
+      drawer.querySelectorAll<HTMLElement>(
+        'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter(
+      (element) =>
+        !element.hasAttribute("disabled") &&
+        element.getAttribute("aria-hidden") !== "true" &&
+        element.tabIndex !== -1 &&
+        element.getClientRects().length > 0,
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const current = document.activeElement;
+    if (event.shiftKey) {
+      if (current === first || !drawer.contains(current)) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else if (current === last || !drawer.contains(current)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
   async function control(action: () => Promise<unknown>) {
     setControlBusy(true);
     setControlError("");
@@ -1495,7 +1547,11 @@ function TaskDrawer({
       <div className="kv">
         <span>排队位置</span>
         <span>
-          {task.queue_position !== null ? `第 ${task.queue_position} 位` : "未在队列中"}
+          {edge.position > 0
+            ? `可调整队列第 ${edge.position}/${edge.size} 位`
+            : task.queue_position !== null
+              ? `派发队列第 ${task.queue_position} 位`
+              : "未在队列中"}
         </span>
       </div>
       <div className="kv">
@@ -1610,7 +1666,8 @@ function TaskDrawer({
         <>
           <button
             className="ghost"
-            disabled={controlBusy}
+            disabled={controlBusy || !edge.canMoveUp}
+            title={edge.canMoveUp ? "排队上移" : "已经在可调整队列首位"}
             onClick={() =>
               void control(() => api.reorderTaskQueue(task.project_id, task.id, "up"))
             }
@@ -1619,7 +1676,8 @@ function TaskDrawer({
           </button>
           <button
             className="ghost"
-            disabled={controlBusy}
+            disabled={controlBusy || !edge.canMoveDown}
+            title={edge.canMoveDown ? "排队下移" : "已经在可调整队列末位"}
             onClick={() =>
               void control(() => api.reorderTaskQueue(task.project_id, task.id, "down"))
             }
@@ -1671,16 +1729,25 @@ function TaskDrawer({
     ) : null;
   return (
     <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="drawer" onClick={(event) => event.stopPropagation()}>
+      <aside
+        className="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        ref={drawerRef}
+        onKeyDown={handleDrawerKeyDown}
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="drawer-header">
           <div>
             <div className="muted">{task.key}</div>
-            <h2>{task.title}</h2>
+            <h2 id={titleId}>{task.title}</h2>
           </div>
-          <button className="ghost" onClick={onClose}>
+          <button className="ghost" ref={closeRef} onClick={onClose}>
             关闭
           </button>
         </div>
+        <div className="drawer-body">
         <div className="badge-row">
           <TaskStateBadge stage={task.stage} status={task.status} />
           {task.attempts ? <Badge tone="warn">执行 {task.attempts} 次</Badge> : null}
@@ -1740,6 +1807,7 @@ function TaskDrawer({
             {jobsSection}
           </>
         )}
+        </div>
       </aside>
     </div>
   );

@@ -181,7 +181,10 @@ function renderProjectCards(
       role="button"
       tabIndex={0}
       onKeyDown={(event) => {
-        if (event.key === "Enter") onOpen(project.id);
+        if (event.key === "Enter" || event.key === " ") {
+          if (event.key === " ") event.preventDefault();
+          onOpen(project.id);
+        }
       }}
     >
       <div className="project-card-main">

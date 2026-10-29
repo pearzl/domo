@@ -712,6 +712,13 @@ small {
   transform: translateY(-1px);
 }
 
+/* 卡片位于纵向列表中，焦点环用内描边避免被容器裁切。 */
+.project-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-color: var(--accent);
+}
+
 .project-card-main {
   min-width: 0;
 }
@@ -1105,6 +1112,14 @@ small {
 
 .task-row.selected {
   background: var(--accent-soft);
+}
+
+/* 任务行被 .task-list 的 overflow 裁切，焦点环画在行内不越界。 */
+.task-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  position: relative;
+  z-index: 1;
 }
 
 .task-state {
@@ -2015,11 +2030,18 @@ button.event-job-title:hover:not(:disabled) {
   height: 100%;
   background: var(--panel);
   padding: 22px;
-  overflow: auto;
+  overflow: hidden;
   box-shadow: -12px 0 40px rgba(15, 23, 42, 0.18);
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .drawer-header {
@@ -2027,6 +2049,7 @@ button.event-job-title:hover:not(:disabled) {
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+  flex: 0 0 auto;
 }
 
 /* 已完成任务的执行摘要优先展示，使用柔和底色与后续明细区分。 */
