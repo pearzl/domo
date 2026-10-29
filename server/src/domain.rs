@@ -367,6 +367,23 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// Trims each dependency, drops empties, and keeps the first occurrence of
+/// every value so duplicate deps never reach task deps, prompts, or the DAG.
+fn normalize_deps(deps: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for item in deps {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if seen.insert(item.to_string()) {
+            result.push(item.to_string());
+        }
+    }
+    result
+}
+
 pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, String> {
     if raw_tasks.is_empty() {
         return Err("规划结果没有任何任务".into());
@@ -404,12 +421,7 @@ pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, St
         if acceptance.is_empty() {
             acceptance.push("实现任务描述中的要求，并通过项目已有测试".into());
         }
-        let deps: Vec<String> = raw
-            .deps
-            .into_iter()
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect();
+        let deps = normalize_deps(raw.deps);
         tasks.push(NormalizedTask {
             key,
             title,
@@ -594,11 +606,7 @@ pub fn validate_manual_task(
     if acceptance.is_empty() {
         acceptance.push("实现任务描述中的要求，并通过项目已有测试".into());
     }
-    let deps: Vec<String> = deps
-        .into_iter()
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-        .collect();
+    let deps = normalize_deps(deps);
     let keys: HashSet<String> = active.iter().map(|task| task.key.clone()).collect();
     for dep in &deps {
         if dep == key {
@@ -1053,6 +1061,32 @@ mod tests {
         let completed: HashSet<String> = ["A".to_string()].into_iter().collect();
         assert!(deps_complete(&["A".into()], &completed));
         assert!(!deps_complete(&["A".into(), "B".into()], &completed));
+    }
+
+    #[test]
+    fn plan_collapses_duplicate_dependencies() {
+        let result = validate_plan(vec![
+            task("A", &[]),
+            task("B", &[]),
+            task("C", &["B", "A", "B"]),
+        ])
+        .unwrap();
+        assert_eq!(result[2].deps, vec!["B".to_string(), "A".to_string()]);
+    }
+
+    #[test]
+    fn manual_task_collapses_duplicate_dependencies() {
+        let active = vec![normalized("A", &[]), normalized("B", &["A"])];
+        let task = validate_manual_task(
+            &active,
+            "C",
+            "补充任务",
+            "完成补充工作",
+            vec!["产物存在".into()],
+            vec!["B".into(), "A".into(), "B".into()],
+        )
+        .unwrap();
+        assert_eq!(task.deps, vec!["B".to_string(), "A".to_string()]);
     }
 
     #[test]
