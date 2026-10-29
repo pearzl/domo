@@ -9,6 +9,7 @@ import type {
   Task,
   TaskAgentPool,
   UsageGroup,
+  UsageTotals,
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
@@ -1088,6 +1089,60 @@ export function ProjectPage({
   );
 }
 
+function usageAllUnknown(totals: UsageTotals): boolean {
+  return totals.jobs > 0 && totals.known_jobs === 0;
+}
+
+function usagePartial(totals: UsageTotals): boolean {
+  return totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
+}
+
+function UsageCoverageBadge({ totals }: { totals: UsageTotals }) {
+  if (totals.jobs === 0) return null;
+  const tone =
+    totals.known_jobs === 0
+      ? "warn"
+      : totals.known_jobs < totals.jobs
+        ? "info"
+        : "muted";
+  return (
+    <Badge
+      tone={tone}
+      title="已记录 token 或费用的作业数 / 作业总数；未知作业不参与 token 与费用合计"
+    >
+      用量记录覆盖 {totals.known_jobs}/{totals.jobs} 个作业
+    </Badge>
+  );
+}
+
+function UsageAmount({
+  value,
+  totals,
+  cost = false,
+}: {
+  value: number;
+  totals: UsageTotals;
+  cost?: boolean;
+}) {
+  if (usageAllUnknown(totals)) {
+    return (
+      <span className="muted" title="全部作业未记录用量">
+        —
+      </span>
+    );
+  }
+  return (
+    <>
+      {cost ? formatCost(value) : formatUsageAmount(value)}
+      {usagePartial(totals) ? (
+        <span className="muted usage-coverage-note">
+          （{totals.known_jobs}/{totals.jobs} 个作业）
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function UsagePanel({
   usage,
   agents,
@@ -1108,31 +1163,46 @@ function UsagePanel({
   };
   return (
     <details className="panel usage-panel">
-      <summary>项目用量（{usage.totals.jobs} 个作业）</summary>
+      <summary>
+        项目用量（{usage.totals.jobs} 个作业）
+        <UsageCoverageBadge totals={usage.totals} />
+      </summary>
       <div className="usage-cards">
         <div>
           <span className="meta-label">输入 token</span>
-          <strong>{formatUsageAmount(usage.totals.input_tokens)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.input_tokens} totals={usage.totals} />
+          </strong>
         </div>
         <div>
           <span className="meta-label">输出 token</span>
-          <strong>{formatUsageAmount(usage.totals.output_tokens)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.output_tokens} totals={usage.totals} />
+          </strong>
         </div>
         <div>
           <span className="meta-label">缓存读</span>
-          <strong>{formatUsageAmount(usage.totals.cache_read_tokens)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.cache_read_tokens} totals={usage.totals} />
+          </strong>
         </div>
         <div>
           <span className="meta-label">缓存写</span>
-          <strong>{formatUsageAmount(usage.totals.cache_write_tokens)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.cache_write_tokens} totals={usage.totals} />
+          </strong>
         </div>
         <div>
           <span className="meta-label">推理</span>
-          <strong>{formatUsageAmount(usage.totals.reasoning_tokens)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.reasoning_tokens} totals={usage.totals} />
+          </strong>
         </div>
         <div>
           <span className="meta-label">费用</span>
-          <strong>{formatCost(usage.totals.cost)}</strong>
+          <strong>
+            <UsageAmount value={usage.totals.cost} totals={usage.totals} cost />
+          </strong>
         </div>
         <div>
           <span className="meta-label">时长</span>
@@ -1143,9 +1213,14 @@ function UsagePanel({
           <strong>{usage.totals.unknown_jobs} 个作业</strong>
         </div>
       </div>
-      {usage.totals.unknown_jobs > 0 ? (
+      {usage.totals.jobs > 0 && usage.totals.known_jobs === 0 ? (
         <div className="warn-banner">
-          {usage.totals.unknown_jobs} 个作业未提供 token 或费用，已单独计数，不参与限额扣减。
+          全部作业未记录用量：token 与费用无法合计，显示为“—”。作业数与时长仍包含这些作业。
+        </div>
+      ) : usage.totals.unknown_jobs > 0 ? (
+        <div className="warn-banner">
+          已记录 {usage.totals.known_jobs}/{usage.totals.jobs} 个作业的用量；其余{" "}
+          {usage.totals.unknown_jobs} 个作业未提供 token 或费用，已单独计数，不参与限额扣减。作业数与时长仍包含未知作业。
         </div>
       ) : null}
       <div className="usage-tables">
@@ -1190,14 +1265,34 @@ function UsageTable({
             <tbody>
               {groups.map((group) => (
                 <tr key={group.key}>
-                  <td>{nameOf(group)}</td>
+                  <td>
+                    {nameOf(group)}
+                    {group.jobs > 0 && group.known_jobs < group.jobs ? (
+                      <>
+                        {" "}
+                        <UsageCoverageBadge totals={group} />
+                      </>
+                    ) : null}
+                  </td>
                   <td>{group.jobs}</td>
-                  <td>{formatUsageAmount(group.input_tokens)}</td>
-                  <td>{formatUsageAmount(group.output_tokens)}</td>
-                  <td>{formatUsageAmount(group.cache_read_tokens)}</td>
-                  <td>{formatUsageAmount(group.cache_write_tokens)}</td>
-                  <td>{formatUsageAmount(group.reasoning_tokens)}</td>
-                  <td>{formatCost(group.cost)}</td>
+                  <td>
+                    <UsageAmount value={group.input_tokens} totals={group} />
+                  </td>
+                  <td>
+                    <UsageAmount value={group.output_tokens} totals={group} />
+                  </td>
+                  <td>
+                    <UsageAmount value={group.cache_read_tokens} totals={group} />
+                  </td>
+                  <td>
+                    <UsageAmount value={group.cache_write_tokens} totals={group} />
+                  </td>
+                  <td>
+                    <UsageAmount value={group.reasoning_tokens} totals={group} />
+                  </td>
+                  <td>
+                    <UsageAmount value={group.cost} totals={group} cost />
+                  </td>
                   <td>{formatUsageDuration(group.duration_ms)}</td>
                   <td>{group.unknown_jobs}</td>
                 </tr>

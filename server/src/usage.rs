@@ -171,6 +171,8 @@ pub struct UsageTotals {
     pub reasoning_tokens: i64,
     pub cost: f64,
     pub duration_ms: i64,
+    /// Jobs with a recorded token or cost value; `jobs = known_jobs + unknown_jobs`.
+    pub known_jobs: i64,
     pub unknown_jobs: i64,
 }
 
@@ -186,6 +188,8 @@ impl UsageTotals {
         self.duration_ms += row_duration(row);
         if row.usage_known == 0 {
             self.unknown_jobs += 1;
+        } else {
+            self.known_jobs += 1;
         }
     }
 }
@@ -895,7 +899,12 @@ mod tests {
         assert_eq!(report.totals.jobs, 3);
         assert_eq!(report.totals.input_tokens, 30);
         assert_eq!(report.totals.output_tokens, 10);
+        assert_eq!(report.totals.known_jobs, 2);
         assert_eq!(report.totals.unknown_jobs, 1);
+        assert_eq!(
+            report.totals.jobs,
+            report.totals.known_jobs + report.totals.unknown_jobs
+        );
         assert_eq!(report.groups.len(), 2);
         let verifier = report
             .groups
@@ -903,8 +912,117 @@ mod tests {
             .find(|group| group.key == "verifier")
             .unwrap();
         assert_eq!(verifier.totals.jobs, 1);
+        assert_eq!(verifier.totals.known_jobs, 0);
         assert_eq!(verifier.totals.unknown_jobs, 1);
         assert_eq!(verifier.totals.input_tokens, 0);
+    }
+
+    #[test]
+    fn totals_serialize_known_and_unknown_jobs() {
+        let totals = UsageTotals {
+            jobs: 3,
+            known_jobs: 2,
+            unknown_jobs: 1,
+            ..UsageTotals::default()
+        };
+        let value = serde_json::to_value(&totals).unwrap();
+        assert_eq!(value["jobs"], 3);
+        assert_eq!(value["known_jobs"], 2);
+        assert_eq!(value["unknown_jobs"], 1);
+        assert_eq!(
+            value["jobs"].as_i64().unwrap(),
+            value["known_jobs"].as_i64().unwrap() + value["unknown_jobs"].as_i64().unwrap()
+        );
+    }
+
+    #[test]
+    fn usage_coverage_tracks_known_and_unknown_jobs() {
+        let all_unknown = vec![
+            row(
+                "p1",
+                Some("a"),
+                "executor",
+                None,
+                None,
+                false,
+                "2026-10-27T10:00:00+00:00",
+            ),
+            row(
+                "p1",
+                Some("a"),
+                "executor",
+                None,
+                None,
+                false,
+                "2026-10-27T11:00:00+00:00",
+            ),
+        ];
+        let report = summarize(
+            &all_unknown,
+            &UsageFilter::default(),
+            UsageGroupBy::None,
+            &HashMap::new(),
+        );
+        assert_eq!(report.totals.jobs, 2);
+        assert_eq!(report.totals.known_jobs, 0);
+        assert_eq!(report.totals.unknown_jobs, 2);
+        assert_eq!(
+            report.totals.jobs,
+            report.totals.known_jobs + report.totals.unknown_jobs
+        );
+
+        let partial = vec![
+            row(
+                "p1",
+                Some("a"),
+                "executor",
+                Some(12),
+                Some(3),
+                true,
+                "2026-10-27T10:00:00+00:00",
+            ),
+            row(
+                "p1",
+                Some("a"),
+                "verifier",
+                Some(8),
+                Some(2),
+                true,
+                "2026-10-27T11:00:00+00:00",
+            ),
+            row(
+                "p1",
+                Some("a"),
+                "summary",
+                None,
+                None,
+                false,
+                "2026-10-27T12:00:00+00:00",
+            ),
+        ];
+        let report = summarize(
+            &partial,
+            &UsageFilter::default(),
+            UsageGroupBy::None,
+            &HashMap::new(),
+        );
+        assert_eq!(report.totals.jobs, 3);
+        assert_eq!(report.totals.known_jobs, 2);
+        assert_eq!(report.totals.unknown_jobs, 1);
+        assert_eq!(
+            report.totals.jobs,
+            report.totals.known_jobs + report.totals.unknown_jobs
+        );
+
+        let empty = summarize(
+            &[],
+            &UsageFilter::default(),
+            UsageGroupBy::None,
+            &HashMap::new(),
+        );
+        assert_eq!(empty.totals.jobs, 0);
+        assert_eq!(empty.totals.known_jobs, 0);
+        assert_eq!(empty.totals.unknown_jobs, 0);
     }
 
     #[test]

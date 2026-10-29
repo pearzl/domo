@@ -48,8 +48,12 @@ function toIso(value: string): string | undefined {
   return new Date(time).toISOString();
 }
 
-function unknownOnly(totals: UsageTotals): boolean {
-  return totals.jobs > 0 && totals.unknown_jobs >= totals.jobs;
+function usageAllUnknown(totals: UsageTotals): boolean {
+  return totals.jobs > 0 && totals.known_jobs === 0;
+}
+
+function usagePartial(totals: UsageTotals): boolean {
+  return totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
 }
 
 function MetricValue({
@@ -61,8 +65,41 @@ function MetricValue({
   totals: UsageTotals;
   format: (value: number) => string;
 }) {
-  if (unknownOnly(totals)) return <span className="muted">未知</span>;
-  return <>{format(value)}</>;
+  if (usageAllUnknown(totals)) {
+    return (
+      <span className="muted" title="全部作业未记录用量">
+        —
+      </span>
+    );
+  }
+  return (
+    <>
+      {format(value)}
+      {usagePartial(totals) ? (
+        <span className="muted usage-coverage-note">
+          （{totals.known_jobs}/{totals.jobs} 个作业）
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+function UsageCoverageBadge({ totals }: { totals: UsageTotals }) {
+  if (totals.jobs === 0) return null;
+  const tone =
+    totals.known_jobs === 0
+      ? "warn"
+      : totals.known_jobs < totals.jobs
+        ? "info"
+        : "muted";
+  return (
+    <Badge
+      tone={tone}
+      title="已记录 token 或费用的作业数 / 作业总数；未知作业不参与 token 与费用合计"
+    >
+      用量记录覆盖 {totals.known_jobs}/{totals.jobs} 个作业
+    </Badge>
+  );
 }
 
 function groupName(
@@ -104,11 +141,9 @@ function GroupBadges({
       </Badge>,
     );
   }
-  if (unknownOnly(group)) {
+  if (group.jobs > 0 && group.known_jobs < group.jobs) {
     badges.push(
-      <Badge key="usage" tone="warn" title="该分组内所有作业都没有提供 token 或费用">
-        用量未知
-      </Badge>,
+      <UsageCoverageBadge key="usage-coverage" totals={group} />,
     );
   }
   return <>{badges}</>;
@@ -236,6 +271,18 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
           <strong>{totals.jobs}</strong>
         </div>
         <div>
+          <span className="meta-label">用量记录覆盖</span>
+          <strong>
+            {totals.jobs > 0 ? (
+              <>
+                {totals.known_jobs}/{totals.jobs} 个作业
+              </>
+            ) : (
+              "—"
+            )}
+          </strong>
+        </div>
+        <div>
           <span className="meta-label">输入 token</span>
           <strong>
             <MetricValue
@@ -306,11 +353,16 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
           </strong>
         </div>
       </div>
-      {totals.unknown_jobs > 0 ? (
+      {totals.jobs > 0 && totals.known_jobs === 0 ? (
         <div className="warn-banner">
+          全部作业未记录用量：token 与费用无法合计，显示为“—”。作业数与时长仍包含这些作业。
+        </div>
+      ) : totals.unknown_jobs > 0 ? (
+        <div className="warn-banner">
+          已记录 {totals.known_jobs}/{totals.jobs} 个作业的用量；其余{" "}
           {totals.unknown_jobs} 个作业未提供 token 或费用，已单独计为未知。输入/输出
-          token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。输入 token 含缓存
-          读写，输出 token 含推理。
+          token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。输入 token
+          含缓存读写，输出 token 含推理。
         </div>
       ) : null}
     </>
@@ -502,6 +554,10 @@ export function UsagePage() {
       {totals ? (
         <section className="panel">
           <h2>汇总</h2>
+          <div className="button-row usage-coverage-row">
+            <UsageCoverageBadge totals={totals} />
+            <span className="muted">未知作业不参与 token 与费用合计。</span>
+          </div>
           <TotalsCards totals={totals} />
         </section>
       ) : null}

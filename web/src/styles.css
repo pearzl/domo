@@ -2251,6 +2251,20 @@ summary {
   margin: 12px 0;
 }
 
+.usage-coverage-row {
+  margin-bottom: 0;
+}
+
+.usage-coverage-note {
+  margin-left: 4px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.usage-panel summary .badge {
+  margin-left: 8px;
+}
+
 .usage-cards > div {
   display: flex;
   flex-direction: column;

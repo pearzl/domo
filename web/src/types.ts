@@ -55,6 +55,7 @@ export interface UsageTotals {
   reasoning_tokens: number;
   cost: number;
   duration_ms: number;
+  known_jobs: number;
   unknown_jobs: number;
 }
 
