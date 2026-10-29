@@ -744,6 +744,15 @@ async fn choose_agent(
                 .then_some(project.avoid_agent_id.as_deref())
                 .flatten()
         });
+    // A manual retry of a blocked job names the agent that should get the next
+    // dispatch for this role. It bypasses that agent's cooldown once; the
+    // backoff is cleared only when the dispatch actually succeeds.
+    let retry_target = match task {
+        Some(task) if task.retry_role.as_deref() == Some(role) => task.retry_agent_id.as_deref(),
+        Some(_) => None,
+        None if project.retry_role.as_deref() == Some(role) => project.retry_agent_id.as_deref(),
+        None => None,
+    };
     let mut unavailable = Vec::new();
     for row in &rows {
         let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
@@ -777,7 +786,7 @@ async fn choose_agent(
             .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
             .map(|until| until.with_timezone(&Utc) > now)
             .unwrap_or(false);
-        if cooling_down {
+        if cooling_down && retry_target != Some(agent.id.as_str()) {
             let until = agent.cooldown_until.as_deref().unwrap_or_default();
             unavailable.push(format!("「{}」（冷却中，至 {until}）", agent.name));
             continue;
@@ -866,6 +875,8 @@ async fn spawn_task_job(
     };
     let forced = task.forced_agent_id.as_deref() == Some(agent.id.as_str())
         && task.forced_agent_role.as_deref() == Some(role);
+    let retry = task.retry_role.as_deref() == Some(role)
+        && task.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
     sqlx::query(
         "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, created_at) \
@@ -881,9 +892,10 @@ async fn spawn_task_job(
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
-    sqlx::query(
+    let dispatched = sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_error = NULL, \
          waiting_reason = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
+         retry_agent_id = NULL, retry_role = NULL, \
          avoid_agent_id = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_id END, \
          avoid_agent_role = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_role END, \
          updated_at = ? \
@@ -903,6 +915,9 @@ async fn spawn_task_job(
     .bind(STATUS_QUEUED)
     .execute(&state.db)
     .await?;
+    if retry && dispatched.rows_affected() > 0 {
+        crate::db::clear_agent_backoff(&state.db, &agent.id).await?;
+    }
     clear_waiting(&state.db, &project.id).await?;
     emit_job(
         &state.db,
@@ -933,6 +948,8 @@ async fn spawn_project_job(
         return Ok(None);
     }
     let job_id = domain::new_id("job");
+    let retry = project.retry_role.as_deref() == Some(role)
+        && project.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
     sqlx::query(
         "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, created_at) \
@@ -946,10 +963,11 @@ async fn spawn_project_job(
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
-    sqlx::query(
+    let dispatched = sqlx::query(
         "UPDATE projects SET avoid_agent_id = CASE WHEN avoid_agent_role = ? THEN NULL \
          ELSE avoid_agent_id END, \
          avoid_agent_role = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_role END, \
+         retry_agent_id = NULL, retry_role = NULL, \
          updated_at = ? WHERE id = ?",
     )
     .bind(role)
@@ -958,6 +976,9 @@ async fn spawn_project_job(
     .bind(&project.id)
     .execute(&state.db)
     .await?;
+    if retry && dispatched.rows_affected() > 0 {
+        crate::db::clear_agent_backoff(&state.db, &agent.id).await?;
+    }
     clear_waiting(&state.db, &project.id).await?;
     emit_job(
         &state.db,

@@ -7,7 +7,8 @@
 #   2. 总结时高优先级规划 Agent 被限流：同样自动切换，总结作业由下一
 #      优先级的规划 Agent 完成；
 #   3. 项目池里只剩一个规划 Agent 且被限流：项目阻塞并记录限流原因，调度器
-#      不会自行重派；人工重试会清除跳过状态与冷却，把作业重新派给该 Agent。
+#      不会自行重派；人工重试失败作业会重新派给该 Agent，并在派发成功后
+#      清除它的冷却。
 #
 # 使用内置 mock Agent 与脚本化 CLI Agent，不访问外网；临时数据全部放在
 # ${TMPDIR:-/tmp}。退出码 0 表示全部通过。
@@ -303,10 +304,11 @@ detail = call("GET", f"/api/projects/{project_id}")
 assert detail["project"]["status"] == "blocked", detail["project"]
 assert len(role_jobs(detail, "analysis")) == 1, role_jobs(detail, "analysis")
 
-# 人工重试清除跳过状态与冷却，作业重新派给重新启用的同一个规划 Agent。
+# 人工重试把失败作业重新排队，只有该作业的目标 Agent 获得一次跳过冷却的派发机会。
 call("PATCH", f"/api/agents/{flaky}", {"roles": ["planner", "executor", "verifier"]})
 call("PATCH", f"/api/agents/{flaky}", {"enabled": True})
-call("POST", f"/api/projects/{project_id}/retry", {})
+failed_job = role_jobs(detail, "analysis")[0]
+call("POST", f"/api/jobs/{failed_job['id']}/retry", {})
 detail = wait_for(
     project_id,
     lambda detail: detail["project"]["status"] == "blocked"

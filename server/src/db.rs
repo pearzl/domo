@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS projects (
     merged_commit TEXT,
     avoid_agent_id TEXT,
     avoid_agent_role TEXT,
+    retry_agent_id TEXT,
+    retry_role TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -137,6 +139,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_agent_id TEXT,
     avoid_agent_id TEXT,
     avoid_agent_role TEXT,
+    retry_agent_id TEXT,
+    retry_role TEXT,
     worktree TEXT,
     branch TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -257,6 +261,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "projects", "merged_commit", "TEXT").await?;
     ensure_column(pool, "projects", "avoid_agent_id", "TEXT").await?;
     ensure_column(pool, "projects", "avoid_agent_role", "TEXT").await?;
+    ensure_column(pool, "projects", "retry_agent_id", "TEXT").await?;
+    ensure_column(pool, "projects", "retry_role", "TEXT").await?;
     ensure_column(pool, "events", "job_id", "TEXT").await?;
     ensure_column(pool, "tasks", "guidance", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column(pool, "tasks", "parent_id", "TEXT").await?;
@@ -271,6 +277,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "tasks", "waiting_reason", "TEXT").await?;
     ensure_column(pool, "tasks", "avoid_agent_id", "TEXT").await?;
     ensure_column(pool, "tasks", "avoid_agent_role", "TEXT").await?;
+    ensure_column(pool, "tasks", "retry_agent_id", "TEXT").await?;
+    ensure_column(pool, "tasks", "retry_role", "TEXT").await?;
     ensure_column(pool, "agents", "failure_kind", "TEXT").await?;
     ensure_column(
         pool,
@@ -353,6 +361,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              last_agent_id TEXT,
              avoid_agent_id TEXT,
              avoid_agent_role TEXT,
+             retry_agent_id TEXT,
+             retry_role TEXT,
              worktree TEXT,
              branch TEXT,
              attempts INTEGER NOT NULL DEFAULT 0,
@@ -370,7 +380,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
-             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, worktree, branch,
+             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
+             worktree, branch,
              attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at
@@ -379,7 +390,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
-             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, worktree, branch,
+             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
+             worktree, branch,
              attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at
@@ -559,6 +571,20 @@ pub async fn load_agent(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Ag
             .fetch_optional(pool)
             .await?,
     )
+}
+
+/// Manual retry clears the backoff of the one agent that receives the retried
+/// dispatch, after that dispatch succeeds.
+pub async fn clear_agent_backoff(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(crate::domain::now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// A project inherits a snapshot of the default team configuration when it is

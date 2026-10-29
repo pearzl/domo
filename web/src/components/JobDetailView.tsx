@@ -19,7 +19,15 @@ import {
   toneForStatus,
 } from "../ui";
 
-export function JobDetailView({ job }: { job: JobSummary }) {
+export function JobDetailView({
+  job,
+  retryable = false,
+  onRetry,
+}: {
+  job: JobSummary;
+  retryable?: boolean;
+  onRetry?: () => void;
+}) {
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -83,6 +91,19 @@ export function JobDetailView({ job }: { job: JobSummary }) {
           ) : null}
           {job.exit_code !== null ? (
             <span className="muted">exit {job.exit_code}</span>
+          ) : null}
+          {retryable && onRetry ? (
+            <button
+              className="secondary"
+              title="让这个失败作业重新排队"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onRetry();
+              }}
+            >
+              重试
+            </button>
           ) : null}
         </summary>
         {open ? (

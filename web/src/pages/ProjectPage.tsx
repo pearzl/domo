@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
   Agent,
+  JobSummary,
   ProjectDetail,
   ProjectUsage,
   Role,
@@ -127,7 +128,6 @@ export function ProjectPage({
   const completed = activeTasks.filter((task) => task.stage === "completed").length;
   const archived = project.status === "archived";
   const paused = project.status === "paused" || project.status === "pausing";
-  const waitingReport = project.stage === "summarizing" && project.report;
   const goalMessages = messages.filter((item) => item.role !== "review");
   const reviewMessages = messages.filter((item) => item.role === "review");
   const canReplan =
@@ -151,11 +151,12 @@ export function ProjectPage({
     (job) => job.role === "direct" && job.status === "running",
   );
   const directMode = project.completion_mode === "direct";
-  const lastGoalMessage = goalMessages[goalMessages.length - 1];
-  const waitingGoal =
-    project.stage === "analysis" &&
-    !analysisJob &&
-    lastGoalMessage?.role === "planner";
+  const retryableProjectJobId =
+    !archived &&
+    project.status === "blocked" &&
+    !(project.stage === "summarizing" && project.report)
+      ? latestFailedJobId(projectJobs)
+      : null;
   const canReorder = (task: Task) =>
     !archived &&
     task.stage === "pending" &&
@@ -262,19 +263,6 @@ export function ProjectPage({
                   </button>
                 </>
               )
-            ) : null}
-            {!archived &&
-            project.status === "blocked" &&
-            project.stage !== "completed" &&
-            !waitingReport &&
-            !waitingGoal ? (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => run(() => api.retryProject(project.id))}
-              >
-                重试项目
-              </button>
             ) : null}
             {canReplan ? (
               <button
@@ -934,7 +922,12 @@ export function ProjectPage({
           <h2>项目分析 / 直接完成 / 总结作业</h2>
           <div className="jobs">
             {projectJobs.map((job) => (
-              <JobDetailView key={job.id} job={job} />
+              <JobDetailView
+                key={job.id}
+                job={job}
+                retryable={job.id === retryableProjectJobId}
+                onRetry={() => run(() => api.retryJob(job.id))}
+              />
             ))}
           </div>
         </section>
@@ -960,7 +953,7 @@ export function ProjectPage({
             <RichContent content={project.report} className="report" />
           ) : project.stage === "summarizing" ? (
             project.blocked_reason ? (
-              <p className="muted">报告生成失败，可点击上方“重试项目”。</p>
+              <p className="muted">报告生成失败，可在上方失败作业上重试。</p>
             ) : (
               <p className="muted">规划者正在依据评议意见重写报告…</p>
             )
@@ -1065,6 +1058,7 @@ export function ProjectPage({
               await api.retryTask(project.id, selectedTask.id);
             })
           }
+          onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
           onSaveGuidance={(guidance) =>
             run(async () => {
               await api.saveTaskGuidance(project.id, selectedTask.id, guidance);
@@ -1087,6 +1081,11 @@ export function ProjectPage({
       ) : null}
     </div>
   );
+}
+
+function latestFailedJobId(jobs: JobSummary[]): string | null {
+  const last = jobs[jobs.length - 1];
+  return last?.status === "failed" ? last.id : null;
 }
 
 function usageAllUnknown(totals: UsageTotals): boolean {
@@ -1310,6 +1309,7 @@ function TaskDrawer({
   detail,
   onClose,
   onRetry,
+  onRetryJob,
   onSaveGuidance,
   onToggleMilestone,
   onRefresh,
@@ -1321,6 +1321,7 @@ function TaskDrawer({
   detail: ProjectDetail;
   onClose: () => void;
   onRetry: () => void;
+  onRetryJob: (jobId: string) => void;
   onSaveGuidance: (guidance: string) => void;
   onToggleMilestone: () => void;
   onRefresh: () => Promise<void>;
@@ -1329,6 +1330,10 @@ function TaskDrawer({
   agentName: (id: string | null) => string;
 }) {
   const jobs = detail.jobs.filter((job) => job.task_id === task.id);
+  const retryableJobId =
+    task.status === "blocked" && task.human_gate !== "milestone"
+      ? latestFailedJobId(jobs)
+      : null;
   const children = detail.tasks.filter((item) => item.parent_id === task.id);
   const parent = task.parent_id
     ? detail.tasks.find((item) => item.id === task.parent_id) ?? null
@@ -1385,7 +1390,12 @@ function TaskDrawer({
       ) : (
         <div className="jobs">
           {jobs.map((job) => (
-            <JobDetailView key={job.id} job={job} />
+            <JobDetailView
+              key={job.id}
+              job={job}
+              retryable={job.id === retryableJobId}
+              onRetry={() => onRetryJob(job.id)}
+            />
           ))}
         </div>
       )}

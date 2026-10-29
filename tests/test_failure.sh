@@ -3,7 +3,7 @@
 #
 # 场景：
 #   1. 执行者连续超时，任务在 3 次失败后阻塞，项目进入人工处理状态；
-#   2. 重启服务并降低执行延迟后，人工重试项目；
+#   2. 重启服务并降低执行延迟后，人工重试失败作业；
 #   3. 项目继续完成并产出报告。
 #
 # 使用内置 mock Agent，不访问外网；临时数据全部放在 ${TMPDIR:-/tmp}。
@@ -209,7 +209,15 @@ def call(method, path, data=None):
         raw = response.read()
         return json.loads(raw) if raw else None
 
-call("POST", f"/api/projects/{project_id}/retry", {})
+detail = call("GET", f"/api/projects/{project_id}")
+blocked_task = next(task for task in detail["tasks"] if task["status"] == "blocked")
+failed_jobs = [
+    job
+    for job in detail["jobs"]
+    if job["task_id"] == blocked_task["id"] and job["status"] == "failed"
+]
+job = max(failed_jobs, key=lambda item: item["created_at"])
+call("POST", f"/api/jobs/{job['id']}/retry", {})
 deadline = time.time() + 90
 while time.time() < deadline:
     detail = call("GET", f"/api/projects/{project_id}")

@@ -117,7 +117,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
         .route("/api/projects/{id}/archive", post(archive_project))
-        .route("/api/projects/{id}/retry", post(retry_project))
         .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/report", post(submit_report))
         .route("/api/projects/{id}/merge", post(merge_project))
@@ -163,6 +162,7 @@ pub fn router(state: AppState) -> Router {
             get(task_arbitration).post(submit_arbitration),
         )
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/api/jobs/{id}/output", get(get_job_output))
         .route("/api/jobs/{id}/activity", get(get_job_activity))
         .route("/api/events", get(list_events))
@@ -2826,125 +2826,184 @@ fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
-async fn retry_project(
+async fn retry_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
-    let project = require_project(&state, &id).await?;
+    let _guard = state.schedule_lock.lock().await;
+    let job = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("作业不存在"))?;
+    if job.status != JOB_STATUS_FAILED {
+        return Err(ApiError::bad("只有失败的作业可以重试"));
+    }
+    let project = require_project(&state, &job.project_id).await?;
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档"));
     }
-    {
-        let _guard = state.schedule_lock.lock().await;
-        match project.stage.as_str() {
-            STAGE_ANALYSIS => {
-                let last_message_role: Option<String> = sqlx::query_scalar(
-                    "SELECT role FROM messages WHERE project_id = ? \
-                     ORDER BY created_at DESC, id DESC LIMIT 1",
-                )
-                .bind(&id)
-                .fetch_optional(&state.db)
-                .await?;
-                let replan_pending = replan::pending(&state.db, &project).await?;
-                let waiting_user = !replan_pending
-                    && (project.proposal.is_some() || last_message_role.as_deref() != Some("user"));
-                let reason = if project.proposal.is_some() {
-                    "等待用户确认方案"
-                } else {
-                    "等待用户答复"
-                };
-                sqlx::query(
-                    "UPDATE projects SET status = ?, blocked_reason = ?, avoid_agent_id = NULL, \
-                     avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
-                )
-                .bind(if waiting_user {
-                    STATUS_BLOCKED
-                } else {
-                    STATUS_RUNNING
-                })
-                .bind(if waiting_user { Some(reason) } else { None })
-                .bind(now())
-                .bind(&id)
-                .execute(&state.db)
-                .await?;
-                clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
-            }
-            STAGE_EXECUTING => {
-                if project.completion_mode == COMPLETION_DIRECT {
-                    sqlx::query(
-                        "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
-                         avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
-                    )
-                    .bind(STATUS_RUNNING)
-                    .bind(now())
-                    .bind(&id)
-                    .execute(&state.db)
-                    .await?;
-                    clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
-                } else {
-                    let blocked_tasks: Vec<String> = sqlx::query_scalar(
-                        "SELECT id FROM tasks WHERE project_id = ? AND status = ?",
-                    )
-                    .bind(&id)
-                    .bind(STATUS_BLOCKED)
-                    .fetch_all(&state.db)
-                    .await?;
-                    sqlx::query(
-                        "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-                         last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
-                         last_error = NULL, last_failure_kind = NULL, \
-                         waiting_reason = NULL, updated_at = ? \
-                         WHERE project_id = ? AND status = ?",
-                    )
-                    .bind(STATUS_QUEUED)
-                    .bind(now())
-                    .bind(&id)
-                    .bind(STATUS_BLOCKED)
-                    .execute(&state.db)
-                    .await?;
-                    for task_id in &blocked_tasks {
-                        clear_task_agent_backoff(&state, task_id, crate::db::TASK_POOL_ROLES)
-                            .await?;
-                    }
-                    sqlx::query(
-                        "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-                    )
-                    .bind(STATUS_RUNNING)
-                    .bind(now())
-                    .bind(&id)
-                    .execute(&state.db)
-                    .await?;
-                }
-            }
-            STAGE_SUMMARIZING => {
-                if project.report.is_some() {
-                    return Err(ApiError::bad("报告正在等待人工验收"));
-                }
-                sqlx::query(
-                    "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
-                     avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
-                )
-                .bind(STATUS_RUNNING)
-                .bind(now())
-                .bind(&id)
-                .execute(&state.db)
-                .await?;
-                clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
-            }
-            _ => return Err(ApiError::bad("当前阶段没有可重试的内容")),
-        }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成"));
     }
+    let latest: Option<String> = match job.task_id.as_deref() {
+        Some(task_id) => {
+            sqlx::query_scalar(
+                "SELECT id FROM jobs WHERE task_id = ? AND role = ? \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(task_id)
+            .bind(&job.role)
+            .fetch_optional(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT id FROM jobs WHERE project_id = ? AND task_id IS NULL AND role = ? \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&project.id)
+            .bind(&job.role)
+            .fetch_optional(&state.db)
+            .await?
+        }
+    };
+    if latest.as_deref() != Some(job.id.as_str()) {
+        return Err(ApiError::bad("该作业已有后续尝试，请重试最新的失败作业"));
+    }
+    let running: i64 =
+        match job.task_id.as_deref() {
+            Some(task_id) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM jobs WHERE task_id = ? AND role = ? AND status = 'running'",
+            )
+            .bind(task_id)
+            .bind(&job.role)
+            .fetch_one(&state.db)
+            .await?,
+            None => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND task_id IS NULL \
+                 AND role = ? AND status = 'running'",
+                )
+                .bind(&project.id)
+                .bind(&job.role)
+                .fetch_one(&state.db)
+                .await?
+            }
+        };
+    if running > 0 {
+        return Err(ApiError::bad("该作业所属阶段仍在运行"));
+    }
+    let paused = matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    );
+    let task_key = match job.task_id.as_deref() {
+        Some(task_id) => {
+            let task =
+                sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+                    .bind(task_id)
+                    .bind(&project.id)
+                    .fetch_optional(&state.db)
+                    .await?
+                    .ok_or_else(|| ApiError::not_found("任务不存在"))?;
+            if task.stage == TASK_STAGE_COMPLETED {
+                return Err(ApiError::bad("任务已完成"));
+            }
+            if task.status.as_deref() != Some(STATUS_BLOCKED) {
+                return Err(ApiError::bad("只有阻塞中的任务可以重试"));
+            }
+            if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
+                return Err(ApiError::bad("任务正在等待人工验收，请使用人工验收操作"));
+            }
+            let expected = if task.stage == TASK_STAGE_VERIFYING {
+                ROLE_VERIFIER
+            } else {
+                ROLE_EXECUTOR
+            };
+            if job.role != expected {
+                return Err(ApiError::bad("作业与任务当前阶段不一致"));
+            }
+            sqlx::query(
+                "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
+                 last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
+                 last_error = NULL, last_failure_kind = NULL, waiting_reason = NULL, \
+                 retry_agent_id = ?, retry_role = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(STATUS_QUEUED)
+            .bind(&job.agent_id)
+            .bind(&job.role)
+            .bind(now())
+            .bind(&task.id)
+            .execute(&state.db)
+            .await?;
+            Some(task.key)
+        }
+        None => {
+            let stage_matches = match job.role.as_str() {
+                JOB_ROLE_ANALYSIS => project.stage == STAGE_ANALYSIS,
+                JOB_ROLE_DIRECT => {
+                    project.stage == STAGE_EXECUTING && project.completion_mode == COMPLETION_DIRECT
+                }
+                JOB_ROLE_SUMMARY => project.stage == STAGE_SUMMARIZING,
+                _ => false,
+            };
+            if !stage_matches {
+                return Err(ApiError::bad("作业与项目当前阶段不一致"));
+            }
+            if job.role == JOB_ROLE_SUMMARY && project.report.is_some() {
+                return Err(ApiError::bad("报告正在等待人工验收"));
+            }
+            if project.status.as_deref() != Some(STATUS_BLOCKED) {
+                return Err(ApiError::bad("项目没有阻塞"));
+            }
+            None
+        }
+    };
+    if job.task_id.is_none() {
+        sqlx::query(
+            "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
+             avoid_agent_id = NULL, avoid_agent_role = NULL, retry_agent_id = ?, retry_role = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_RUNNING)
+        .bind(paused)
+        .bind("人工重试已记录，等待项目恢复后生效")
+        .bind(&job.agent_id)
+        .bind(ROLE_PLANNER)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+             THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_RUNNING)
+        .bind(paused)
+        .bind("人工重试已记录，等待项目恢复后生效")
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+    }
+    let subject = task_key
+        .map(|key| format!("任务 {key} "))
+        .unwrap_or_default();
     emit(
         &state.db,
         &state.bus,
-        Some(&id),
-        None,
-        "project_retry",
-        "已请求重试项目",
+        Some(&project.id),
+        job.task_id.as_deref(),
+        "job_retry",
+        format!("人工重试{subject}{}作业", role_label(&job.role)),
     )
     .await;
     state.notify_scheduler();
-    load_detail(&state, &id).await.map(Json)
+    load_detail(&state, &project.id).await.map(Json)
 }
 
 async fn replan_project(
@@ -3554,6 +3613,13 @@ async fn submit_arbitration(
         _ => {}
     }
     let reset_counts = matches!(action.as_str(), ARBITRATION_RETRY | ARBITRATION_GUIDE);
+    let retry_agent = if reset_counts {
+        latest_failed_job(&state, &project_id, Some(&task.id), role)
+            .await?
+            .and_then(|job| job.agent_id)
+    } else {
+        None
+    };
     let next_guidance = guidance.unwrap_or_else(|| task.guidance.clone());
     let paused = matches!(
         project.status.as_deref(),
@@ -3567,7 +3633,7 @@ async fn submit_arbitration(
          avoid_agent_role = CASE WHEN ? THEN NULL ELSE avoid_agent_role END, \
          last_error = NULL, \
          last_failure_kind = NULL, waiting_reason = NULL, human_gate = NULL, guidance = ?, \
-         forced_agent_id = ?, forced_agent_role = ?, \
+         forced_agent_id = ?, forced_agent_role = ?, retry_agent_id = ?, retry_role = ?, \
          updated_at = ? WHERE id = ? AND status = ?",
     )
     .bind(STATUS_QUEUED)
@@ -3579,6 +3645,8 @@ async fn submit_arbitration(
     .bind(&next_guidance)
     .bind(&forced_agent_id)
     .bind(&forced_agent_role)
+    .bind(retry_agent)
+    .bind(reset_counts.then_some(role))
     .bind(now())
     .bind(&task.id)
     .bind(STATUS_BLOCKED)
@@ -3597,7 +3665,6 @@ async fn submit_arbitration(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    clear_task_agent_backoff(&state, &task.id, crate::db::TASK_POOL_ROLES).await?;
     emit(
         &state.db,
         &state.bus,
@@ -3611,49 +3678,40 @@ async fn submit_arbitration(
     load_detail(&state, &project_id).await.map(Json)
 }
 
-/// Human retry overrides automatic backoff only for the agents that the retried
-/// dispatch can reach. Clearing every agent in the project pool would drop the
-/// backoff of roles that the retry does not involve.
-async fn clear_project_agent_backoff(
+/// The manual retry target is the agent that ran the latest failed job of the
+/// role being retried. It bypasses its cooldown once, and the backoff is
+/// cleared only when the retried dispatch succeeds.
+async fn latest_failed_job(
     state: &AppState,
     project_id: &str,
-    roles: &[&str],
-) -> Result<(), ApiError> {
-    for role in roles {
-        sqlx::query(
-            "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
-             updated_at = ? WHERE id IN \
-             (SELECT agent_id FROM project_agents WHERE project_id = ? AND role = ?)",
-        )
-        .bind(now())
-        .bind(project_id)
-        .bind(role)
-        .execute(&state.db)
-        .await?;
-    }
-    Ok(())
-}
-
-/// Task retry reaches the executor and verifier pools, which are the task's
-/// own snapshot; the planner keeps its backoff.
-async fn clear_task_agent_backoff(
-    state: &AppState,
-    task_id: &str,
-    roles: &[&str],
-) -> Result<(), ApiError> {
-    for role in roles {
-        sqlx::query(
-            "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
-             updated_at = ? WHERE id IN \
-             (SELECT agent_id FROM task_agents WHERE task_id = ? AND role = ?)",
-        )
-        .bind(now())
-        .bind(task_id)
-        .bind(role)
-        .execute(&state.db)
-        .await?;
-    }
-    Ok(())
+    task_id: Option<&str>,
+    role: &str,
+) -> Result<Option<JobRow>, ApiError> {
+    let job = match task_id {
+        Some(task_id) => {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT * FROM jobs WHERE task_id = ? AND role = ? AND status = ? \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(task_id)
+            .bind(role)
+            .bind(JOB_STATUS_FAILED)
+            .fetch_optional(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT * FROM jobs WHERE project_id = ? AND task_id IS NULL AND role = ? \
+                 AND status = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(project_id)
+            .bind(role)
+            .bind(JOB_STATUS_FAILED)
+            .fetch_optional(&state.db)
+            .await?
+        }
+    };
+    Ok(job)
 }
 
 async fn load_project_task(
@@ -3750,18 +3808,23 @@ async fn retry_task(
     }
     {
         let _guard = state.schedule_lock.lock().await;
+        let role = arbitration_role(&task);
+        let retry_agent = latest_failed_job(&state, &project_id, Some(&task.id), role)
+            .await?
+            .and_then(|job| job.agent_id);
         sqlx::query(
             "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
              last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
-             last_error = NULL, last_failure_kind = NULL, \
-             waiting_reason = NULL, updated_at = ? WHERE id = ?",
+             last_error = NULL, last_failure_kind = NULL, waiting_reason = NULL, \
+             retry_agent_id = ?, retry_role = ?, updated_at = ? WHERE id = ?",
         )
         .bind(STATUS_QUEUED)
+        .bind(retry_agent)
+        .bind(role)
         .bind(now())
         .bind(&task.id)
         .execute(&state.db)
         .await?;
-        clear_task_agent_backoff(&state, &task.id, crate::db::TASK_POOL_ROLES).await?;
         sqlx::query(
             "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
         )

@@ -180,8 +180,8 @@ export const api = {
       `/api/projects/${projectId}/tasks/${taskId}/queue`,
       { method: "PATCH", body: JSON.stringify({ direction }) },
     ),
-  retryProject: (id: string) =>
-    request<ProjectDetail>(`/api/projects/${id}/retry`, { method: "POST" }),
+  retryJob: (id: string) =>
+    request<ProjectDetail>(`/api/jobs/${id}/retry`, { method: "POST" }),
   retryTask: (projectId: string, taskId: string) =>
     request<{ ok: boolean }>(
       `/api/projects/${projectId}/tasks/${taskId}/retry`,

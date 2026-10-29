@@ -327,6 +327,13 @@ pub struct ProjectRow {
     pub avoid_agent_id: Option<String>,
     #[serde(skip_serializing)]
     pub avoid_agent_role: Option<String>,
+    /// Agent targeted by a manual retry of the current project phase. The
+    /// scheduler lets it bypass its cooldown once; a successful dispatch
+    /// clears its backoff and this marker.
+    #[serde(skip_serializing)]
+    pub retry_agent_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub retry_role: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -355,6 +362,8 @@ pub struct TaskRow {
     pub last_agent_id: Option<String>,
     pub avoid_agent_id: Option<String>,
     pub avoid_agent_role: Option<String>,
+    pub retry_agent_id: Option<String>,
+    pub retry_role: Option<String>,
     pub worktree: Option<String>,
     pub branch: Option<String>,
     pub attempts: i64,
