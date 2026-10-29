@@ -278,6 +278,8 @@ export interface AuditEvent {
   job_id: string | null;
   kind: string;
   message: string;
+  message_length: number;
+  message_truncated: boolean;
   created_at: string;
 }
 

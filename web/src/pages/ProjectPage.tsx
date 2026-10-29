@@ -12,6 +12,7 @@ import type {
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
 import { RichContent } from "../components/RichContent";
@@ -451,15 +452,14 @@ export function ProjectPage({
               ) : null}
             </div>
           ) : null}
-          <div className="events">
-            {[...replanEvents].reverse().map((event) => (
-              <div className="event" key={event.id}>
-                <Badge tone={eventTone(event.kind)}>{event.kind}</Badge>
-                <span className="event-message">{event.message}</span>
-                <span className="event-time muted">{formatTime(event.created_at)}</span>
-              </div>
-            ))}
-          </div>
+          <EventTimeline
+            events={replanEvents}
+            tasks={tasks}
+            jobs={jobs}
+            defaultFilter="all"
+            showFilters={false}
+            emptyText="暂无重规划事件"
+          />
         </section>
       ) : null}
 
@@ -1053,15 +1053,7 @@ export function ProjectPage({
       <section className="panel">
         <details>
           <summary>活动与审计（{events.length}）</summary>
-          <div className="events">
-            {[...events].reverse().map((event) => (
-              <div className="event" key={event.id}>
-                <Badge tone={eventTone(event.kind)}>{event.kind}</Badge>
-                <span className="event-message">{event.message}</span>
-                <span className="event-time muted">{formatTime(event.created_at)}</span>
-              </div>
-            ))}
-          </div>
+          <EventTimeline events={events} tasks={tasks} jobs={jobs} />
         </details>
       </section>
 
@@ -1963,26 +1955,4 @@ function ArbitrationPanel({
       {error ? <div className="error-box">{error}</div> : null}
     </section>
   );
-}
-
-function eventTone(kind: string): string {
-  if (kind.includes("failed") || kind.includes("blocked") || kind.includes("conflict")) {
-    return "danger";
-  }
-  if (kind.includes("completed") || kind.includes("passed") || kind.includes("ready")) {
-    return "success";
-  }
-  if (kind.includes("replan") || kind.includes("superseded")) {
-    return "warn";
-  }
-  if (
-    kind.includes("job") ||
-    kind.includes("task") ||
-    kind.includes("plan") ||
-    kind.includes("project") ||
-    kind.includes("guidance")
-  ) {
-    return "info";
-  }
-  return "muted";
 }

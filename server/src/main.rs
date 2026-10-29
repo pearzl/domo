@@ -3,6 +3,7 @@ mod api;
 mod config;
 mod db;
 mod domain;
+mod event_preview;
 mod events;
 mod failure;
 mod git;

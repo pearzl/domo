@@ -264,6 +264,7 @@ export const api = {
     if (after) params.set("after", String(after));
     return request<AuditEvent[]>(`/api/events?${params.toString()}`);
   },
+  getEvent: (id: number) => request<AuditEvent>(`/api/events/${id}`),
   listAgents: () => request<Agent[]>("/api/agents"),
   createAgent: (input: AgentInput) =>
     request<Agent>("/api/agents", {

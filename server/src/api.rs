@@ -165,6 +165,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{id}/output", get(get_job_output))
         .route("/api/events", get(list_events))
         .route("/api/events/stream", get(stream_events))
+        .route("/api/events/{id}", get(get_event))
         .route("/api/{*rest}", any(api_not_found))
         .with_state(state)
 }
@@ -3907,7 +3908,7 @@ struct EventQuery {
 async fn list_events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
-) -> Result<Json<Vec<EventRow>>, ApiError> {
+) -> Result<Json<Vec<EventView>>, ApiError> {
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
     let rows = if let Some(project_id) = &query.project_id {
         sqlx::query_as::<_, EventRow>(
@@ -3925,7 +3926,19 @@ async fn list_events(
             .fetch_all(&state.db)
             .await?
     };
-    Ok(Json(rows))
+    Ok(Json(rows.into_iter().map(EventView::from_row).collect()))
+}
+
+async fn get_event(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventView>, ApiError> {
+    let event = sqlx::query_as::<_, EventRow>("SELECT * FROM events WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("事件不存在"))?;
+    Ok(Json(EventView::full(event)))
 }
 
 async fn stream_events(
@@ -3974,6 +3987,7 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
     .fetch_all(&state.db)
     .await?;
     events.reverse();
+    let events = events.into_iter().map(EventView::from_row).collect();
     let agent_rows =
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
             .fetch_all(&state.db)

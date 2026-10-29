@@ -419,6 +419,55 @@ pub struct EventRow {
     pub created_at: String,
 }
 
+/// List view of an audit event. `message` is bounded to the preview length and
+/// `message_length` reports the stored character count so the UI can offer the
+/// full document on demand.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventView {
+    pub id: i64,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub job_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    pub message_length: usize,
+    pub message_truncated: bool,
+    pub created_at: String,
+}
+
+impl EventView {
+    pub fn from_row(row: EventRow) -> Self {
+        let preview = crate::event_preview::preview(&row.message);
+        Self {
+            id: row.id,
+            project_id: row.project_id,
+            task_id: row.task_id,
+            job_id: row.job_id,
+            kind: row.kind,
+            message: preview.message,
+            message_length: preview.message_length,
+            message_truncated: preview.message_truncated,
+            created_at: row.created_at,
+        }
+    }
+
+    /// Full event view used by the single-event endpoint.
+    pub fn full(row: EventRow) -> Self {
+        let message_length = row.message.chars().count();
+        Self {
+            id: row.id,
+            project_id: row.project_id,
+            task_id: row.task_id,
+            job_id: row.job_id,
+            kind: row.kind,
+            message: row.message,
+            message_length,
+            message_truncated: false,
+            created_at: row.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
     pub id: String,
@@ -588,7 +637,7 @@ pub struct ProjectDetail {
     pub tasks: Vec<TaskView>,
     pub jobs: Vec<JobSummary>,
     pub messages: Vec<MessageRow>,
-    pub events: Vec<EventRow>,
+    pub events: Vec<EventView>,
     pub agents: Vec<AgentView>,
     pub agent_pool: ProjectAgentPool,
     pub usage: ProjectUsage,
