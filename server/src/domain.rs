@@ -739,6 +739,15 @@ pub fn transient_retry_limit() -> i64 {
 
 fn parse_retry_after(reason: &str) -> Option<i64> {
     let lowered = reason.to_lowercase();
+    // 毫秒标记必须先于秒级标记匹配：`retry_after_ms` 含 `retry_after` 前缀，
+    // 先按秒解析会把窗口放大 1000 倍。毫秒值只取紧跟标记的数字，不做单位换算。
+    for marker in ["retry_after_ms", "retry-after-ms", "retryafterms"] {
+        if let Some(position) = lowered.find(marker) {
+            if let Some(millis) = parse_millis(&lowered[position + marker.len()..]) {
+                return Some((millis + 999) / 1000);
+            }
+        }
+    }
     for marker in [
         "retry after",
         "retry_after",
@@ -770,6 +779,18 @@ fn parse_retry_after(reason: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// 毫秒字段的值可能紧跟 JSON 的引号、逗号与花括号，只取前导数字。
+fn parse_millis(text: &str) -> Option<i64> {
+    let digits: String = text
+        .trim_start_matches(|ch: char| {
+            ch.is_whitespace() || ch == '=' || ch == ':' || ch == '：' || ch == '"'
+        })
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse::<i64>().ok()
 }
 
 fn parse_amount(text: &str) -> Option<i64> {
@@ -1140,5 +1161,15 @@ mod tests {
             120
         );
         assert!(rate_limit_cooldown("429 rate limit").num_seconds() >= 60);
+    }
+
+    #[test]
+    fn parses_rate_limit_cooldown_from_millis_field() {
+        let reason = r#"{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":32933000}}"#;
+        assert_eq!(rate_limit_cooldown(reason).num_seconds(), 32933);
+        assert_eq!(
+            rate_limit_cooldown(r#""retry_after_ms":"120000""#).num_seconds(),
+            120
+        );
     }
 }

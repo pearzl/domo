@@ -2867,7 +2867,7 @@ async fn retry_project(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
-                clear_project_agent_backoff(&state, &id).await?;
+                clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
             }
             STAGE_EXECUTING => {
                 if project.completion_mode == COMPLETION_DIRECT {
@@ -2880,8 +2880,15 @@ async fn retry_project(
                     .bind(&id)
                     .execute(&state.db)
                     .await?;
-                    clear_project_agent_backoff(&state, &id).await?;
+                    clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
                 } else {
+                    let blocked_tasks: Vec<String> = sqlx::query_scalar(
+                        "SELECT id FROM tasks WHERE project_id = ? AND status = ?",
+                    )
+                    .bind(&id)
+                    .bind(STATUS_BLOCKED)
+                    .fetch_all(&state.db)
+                    .await?;
                     sqlx::query(
                         "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
                          last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
@@ -2895,7 +2902,10 @@ async fn retry_project(
                     .bind(STATUS_BLOCKED)
                     .execute(&state.db)
                     .await?;
-                    clear_project_agent_backoff(&state, &id).await?;
+                    for task_id in &blocked_tasks {
+                        clear_task_agent_backoff(&state, task_id, crate::db::TASK_POOL_ROLES)
+                            .await?;
+                    }
                     sqlx::query(
                         "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                     )
@@ -2919,7 +2929,7 @@ async fn retry_project(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
-                clear_project_agent_backoff(&state, &id).await?;
+                clear_project_agent_backoff(&state, &id, &[ROLE_PLANNER]).await?;
             }
             _ => return Err(ApiError::bad("当前阶段没有可重试的内容")),
         }
@@ -3587,7 +3597,7 @@ async fn submit_arbitration(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    clear_project_agent_backoff(&state, &project_id).await?;
+    clear_task_agent_backoff(&state, &task.id, crate::db::TASK_POOL_ROLES).await?;
     emit(
         &state.db,
         &state.bus,
@@ -3601,16 +3611,48 @@ async fn submit_arbitration(
     load_detail(&state, &project_id).await.map(Json)
 }
 
-/// Human retry overrides automatic backoff for every agent in the project pool.
-async fn clear_project_agent_backoff(state: &AppState, project_id: &str) -> Result<(), ApiError> {
-    sqlx::query(
-        "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
-         updated_at = ? WHERE id IN (SELECT agent_id FROM project_agents WHERE project_id = ?)",
-    )
-    .bind(now())
-    .bind(project_id)
-    .execute(&state.db)
-    .await?;
+/// Human retry overrides automatic backoff only for the agents that the retried
+/// dispatch can reach. Clearing every agent in the project pool would drop the
+/// backoff of roles that the retry does not involve.
+async fn clear_project_agent_backoff(
+    state: &AppState,
+    project_id: &str,
+    roles: &[&str],
+) -> Result<(), ApiError> {
+    for role in roles {
+        sqlx::query(
+            "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
+             updated_at = ? WHERE id IN \
+             (SELECT agent_id FROM project_agents WHERE project_id = ? AND role = ?)",
+        )
+        .bind(now())
+        .bind(project_id)
+        .bind(role)
+        .execute(&state.db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Task retry reaches the executor and verifier pools, which are the task's
+/// own snapshot; the planner keeps its backoff.
+async fn clear_task_agent_backoff(
+    state: &AppState,
+    task_id: &str,
+    roles: &[&str],
+) -> Result<(), ApiError> {
+    for role in roles {
+        sqlx::query(
+            "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
+             updated_at = ? WHERE id IN \
+             (SELECT agent_id FROM task_agents WHERE task_id = ? AND role = ?)",
+        )
+        .bind(now())
+        .bind(task_id)
+        .bind(role)
+        .execute(&state.db)
+        .await?;
+    }
     Ok(())
 }
 
@@ -3719,7 +3761,7 @@ async fn retry_task(
         .bind(&task.id)
         .execute(&state.db)
         .await?;
-        clear_project_agent_backoff(&state, &project_id).await?;
+        clear_task_agent_backoff(&state, &task.id, crate::db::TASK_POOL_ROLES).await?;
         sqlx::query(
             "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
         )
