@@ -39,7 +39,6 @@ cd server && cargo run --release
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 产品设计：主要功能介绍，设计思路说明 |
 | [docs/DEV.md](docs/DEV.md) | 开发模式和约定：目录、文档职责、测试与变更要求 |
-| [docs/notes/](docs/notes/) | 所有其他值得保存的内容：决策依据和过程、未决讨论与思考 |
 
 ## 技术栈
 
