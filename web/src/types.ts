@@ -38,6 +38,14 @@ export interface AgentUsageWindow {
   exceeded: boolean;
 }
 
+/** 从原始错误派生的可读摘要；原文仍保留在 error/last_error。 */
+export interface FailureSummary {
+  kind: string;
+  message: string;
+  status: number | null;
+  retry_after_ms: number | null;
+}
+
 export interface UsageTotals {
   jobs: number;
   input_tokens: number;
@@ -90,6 +98,7 @@ export interface Agent {
   cooldown_until: string | null;
   last_error: string | null;
   failure_kind: string | null;
+  failure_summary: FailureSummary | null;
   transient_failures: number;
   availability: AgentAvailability | null;
   usage_limit: AgentUsageLimit | null;
@@ -112,6 +121,7 @@ export interface ProjectAgentEntry {
   cooldown_until: string | null;
   last_error: string | null;
   failure_kind: string | null;
+  failure_summary: FailureSummary | null;
   transient_failures: number;
   availability: AgentAvailability | null;
   availability_reason: string | null;
@@ -231,6 +241,7 @@ export interface JobSummary {
   error: string | null;
   exit_code: number | null;
   failure_kind: string | null;
+  failure_summary: FailureSummary | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;
@@ -312,6 +323,7 @@ export interface ArbitrationAgent {
   enabled: boolean;
   cooldown_until: string | null;
   last_error: string | null;
+  failure_summary: FailureSummary | null;
 }
 
 export interface ArbitrationJob {
@@ -322,6 +334,7 @@ export interface ArbitrationJob {
   status: string;
   attempt: number;
   error: string | null;
+  failure_summary: FailureSummary | null;
   exit_code: number | null;
   started_at: string | null;
   finished_at: string | null;
@@ -335,6 +348,7 @@ export interface ArbitrationTask {
   stage: string;
   status: string | null;
   last_error: string | null;
+  failure_summary: FailureSummary | null;
   attempts: number;
   rejections: number;
   milestone: boolean;

@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::failure::FailureSummary;
 use crate::usage::{AvailabilityConfig, ProjectUsage, UsageLimitConfig, UsageWindow};
 
 pub const ROLE_PLANNER: &str = "planner";
@@ -108,6 +109,7 @@ pub struct AgentView {
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
     pub failure_kind: Option<String>,
+    pub failure_summary: Option<FailureSummary>,
     pub transient_failures: i64,
     pub availability: Option<AvailabilityConfig>,
     pub usage_limit: Option<UsageLimitConfig>,
@@ -118,6 +120,7 @@ pub struct AgentView {
 
 impl AgentView {
     pub fn from_row(row: AgentRow) -> Self {
+        let failure_summary = crate::failure::summarize(row.last_error.as_deref());
         Self {
             id: row.id,
             name: row.name,
@@ -139,6 +142,7 @@ impl AgentView {
             cooldown_until: row.cooldown_until,
             last_error: row.last_error,
             failure_kind: row.failure_kind,
+            failure_summary,
             transient_failures: row.transient_failures,
             availability: crate::usage::parse_availability(row.availability_json.as_deref()),
             usage_limit: crate::usage::parse_usage_limit(row.usage_limit_json.as_deref()),
@@ -177,6 +181,7 @@ pub struct ProjectAgentEntry {
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
     pub failure_kind: Option<String>,
+    pub failure_summary: Option<FailureSummary>,
     pub transient_failures: i64,
     pub availability: Option<AvailabilityConfig>,
     pub availability_reason: Option<String>,
@@ -527,6 +532,7 @@ pub struct JobSummary {
     pub error: Option<String>,
     pub exit_code: Option<i64>,
     pub failure_kind: Option<String>,
+    pub failure_summary: Option<FailureSummary>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
@@ -558,6 +564,7 @@ pub struct JobView {
     pub exit_code: Option<i64>,
     pub pid: Option<i64>,
     pub failure_kind: Option<String>,
+    pub failure_summary: Option<FailureSummary>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,

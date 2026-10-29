@@ -14,7 +14,7 @@ import type {
 import { api, errorMessage } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { RichContent } from "../components/RichContent";
-import { Badge, ErrorBox, FAILURE_KIND_LABELS, formatTime } from "../ui";
+import { Badge, ErrorBox, FAILURE_KIND_LABELS, failureSummaryLabel, formatTime, shortText } from "../ui";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
 const ROLE_TEXT: Record<Role, string> = {
@@ -582,10 +582,22 @@ export function AgentsPage() {
                 冷却至 {formatTime(agent.cooldown_until)}
               </div>
             ) : null}
-            {agent.last_error ? (
-              <div className="error-box">
-                <RichContent content={agent.last_error} />
+            {agent.failure_summary ? (
+              <div className="warn-banner">
+                <strong>{failureSummaryLabel(agent.failure_summary.kind)}</strong>
+                <span> · {shortText(agent.failure_summary.message, 160)}</span>
+                {agent.failure_summary.status !== null
+                  ? ` · HTTP ${agent.failure_summary.status}`
+                  : ""}
               </div>
+            ) : null}
+            {agent.last_error ? (
+              <details className="raw-error">
+                <summary>查看原始错误</summary>
+                <div className="error-box">
+                  <RichContent content={agent.last_error} />
+                </div>
+              </details>
             ) : null}
           </article>
         ))}

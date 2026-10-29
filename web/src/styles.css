@@ -1277,6 +1277,38 @@ small {
   gap: 10px;
 }
 
+.failure-summary {
+  background: var(--danger-soft);
+  border: 1px solid #f2c6c2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.88rem;
+  color: #7a1a14;
+  overflow-wrap: anywhere;
+}
+
+.failure-summary-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.raw-error summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.raw-error .error-box {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
 .job-live {
   padding: 0 12px 12px;
 }

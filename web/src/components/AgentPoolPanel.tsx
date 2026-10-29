@@ -6,8 +6,10 @@ import {
   ErrorBox,
   FAILURE_KIND_LABELS,
   ROLE_LABELS,
+  failureSummaryLabel,
   formatTime,
   formatTokens as formatUsageAmount,
+  shortText,
 } from "../ui";
 
 export interface AgentPoolPanelProps {
@@ -290,9 +292,10 @@ export function AgentPoolPanel({
                       <span className="agent-pool-reason muted">
                         {entry.unavailable_reason}
                       </span>
-                    ) : entry.last_error ? (
-                      <span className="agent-pool-reason muted" title={entry.last_error}>
-                        {entry.last_error}
+                    ) : entry.failure_summary ? (
+                      <span className="agent-pool-reason muted">
+                        {failureSummaryLabel(entry.failure_summary.kind)} ·{" "}
+                        {shortText(entry.failure_summary.message, 100)}
                       </span>
                     ) : null}
                   </div>

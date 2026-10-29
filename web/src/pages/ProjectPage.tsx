@@ -31,6 +31,8 @@ import {
   formatMillis as formatUsageDuration,
   formatTime,
   formatTokens as formatUsageAmount,
+  failureSummaryLabel,
+  shortText,
 } from "../ui";
 
 export function ProjectPage({
@@ -1641,6 +1643,7 @@ function TaskAgentPoolPanel({
         cooldown_until: entry.cooldown_until,
         last_error: entry.last_error,
         failure_kind: entry.failure_kind,
+        failure_summary: entry.failure_summary,
         transient_failures: entry.transient_failures,
         availability: entry.availability,
         usage_limit: entry.usage_limit,
@@ -1858,7 +1861,26 @@ function ArbitrationPanel({
           <div className="kv">
             <span>失败原因</span>
             <div>
-              <RichContent content={context.task.last_error} emptyText="—" />
+              {context.task.failure_summary ? (
+                <div className="failure-summary">
+                  <div className="failure-summary-head">
+                    <Badge tone="danger">
+                      {failureSummaryLabel(context.task.failure_summary.kind)}
+                    </Badge>
+                    <span>{shortText(context.task.failure_summary.message, 160)}</span>
+                  </div>
+                </div>
+              ) : null}
+              {context.task.last_error ? (
+                <details className="raw-error">
+                  <summary>查看原始错误</summary>
+                  <div className="error-box">
+                    <RichContent content={context.task.last_error} />
+                  </div>
+                </details>
+              ) : (
+                <span className="muted">—</span>
+              )}
             </div>
           </div>
           <div className="kv">
@@ -1877,7 +1899,12 @@ function ArbitrationPanel({
                 <div className="muted" key={job.id}>
                   {ROLE_LABELS[job.role] ?? job.role} · {job.agent_name ?? "—"} ·{" "}
                   {job.status}
-                  {job.error ? ` · ${job.error}` : ""}
+                  {job.failure_summary
+                    ? ` · ${failureSummaryLabel(job.failure_summary.kind)} · ${shortText(
+                        job.failure_summary.message,
+                        100,
+                      )}`
+                    : ""}
                 </div>
               ))}
             </div>

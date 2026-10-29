@@ -14,6 +14,8 @@ import {
   formatMillis,
   formatTime,
   formatTokens,
+  failureSummaryLabel,
+  shortText,
   toneForStatus,
 } from "../ui";
 
@@ -45,6 +47,7 @@ export function JobDetailView({ job }: { job: JobSummary }) {
     : formatDuration(job.started_at, job.finished_at);
   const pid = detail?.pid ?? null;
   const tokenDetails = formatTokenDetails(job);
+  const failure = job.failure_summary;
 
   return (
     <div className="job">
@@ -62,12 +65,12 @@ export function JobDetailView({ job }: { job: JobSummary }) {
               {formatTokens(job.input_tokens)} in · {formatTokens(job.output_tokens)} out ·{" "}
               {formatCost(job.cost)}
             </span>
-          ) : (
-            <Badge tone="warn" title="Agent 未在结果中提供 token 或费用">
-              用量未知
+          ) : null}
+          {failure ? (
+            <Badge tone="danger">
+              {failureSummaryLabel(failure.kind)} · {shortText(failure.message, 60)}
             </Badge>
-          )}
-          {job.failure_kind ? (
+          ) : job.failure_kind ? (
             <Badge tone="danger">
               {FAILURE_KIND_LABELS[job.failure_kind] ?? job.failure_kind}
             </Badge>
@@ -90,13 +93,33 @@ export function JobDetailView({ job }: { job: JobSummary }) {
                 )} · 费用 ${formatCost(job.cost)}${
                   tokenDetails ? ` · ${tokenDetails}` : ""
                 }`
-              : "未知（Agent 未提供 token 或费用）"}
+              : "未记录（Agent 未提供 token/费用）"}
             {" · "}时长 {formatMillis(job.duration_ms)}
           </div>
-          {job.error ? (
-            <div className="error-box">
-              <RichContent content={job.error} />
+          {failure ? (
+            <div className="failure-summary">
+              <div className="failure-summary-head">
+                <Badge tone="danger">{failureSummaryLabel(failure.kind)}</Badge>
+                <span>{failure.message}</span>
+              </div>
+              {failure.status !== null || failure.retry_after_ms !== null ? (
+                <div className="job-meta">
+                  {failure.status !== null ? `HTTP ${failure.status}` : ""}
+                  {failure.status !== null && failure.retry_after_ms !== null ? " · " : ""}
+                  {failure.retry_after_ms !== null
+                    ? `${formatMillis(failure.retry_after_ms)} 后重试`
+                    : ""}
+                </div>
+              ) : null}
             </div>
+          ) : null}
+          {job.error ? (
+            <details className="raw-error">
+              <summary>查看原始错误</summary>
+              <div className="error-box">
+                <RichContent content={job.error} />
+              </div>
+            </details>
           ) : null}
           {loading ? <div className="muted">加载作业详情…</div> : null}
           {error ? <div className="error-box">{error}</div> : null}

@@ -168,6 +168,13 @@ task = detail["tasks"][0]
 assert task["attempts"] == 3, task
 assert "超时" in (task["last_error"] or ""), task
 assert any(event["kind"] == "task_blocked" for event in detail["events"])
+failed_jobs = [job for job in detail["jobs"] if job["status"] == "failed"]
+assert failed_jobs, detail["jobs"]
+for job in failed_jobs:
+    summary = job.get("failure_summary")
+    assert summary and summary.get("message"), job
+    assert len(summary["message"]) <= 300, job
+    assert job.get("error") and "超时" in job["error"], job
 print(project["id"])
 PY
 )"

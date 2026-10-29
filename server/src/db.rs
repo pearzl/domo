@@ -728,6 +728,8 @@ async fn build_role_pools(
                 }
                 None => None,
             };
+            let last_error = agent.and_then(|agent| agent.last_error.clone());
+            let failure_summary = crate::failure::summarize(last_error.as_deref());
             entries.push(ProjectAgentEntry {
                 agent_id: row.agent_id.clone(),
                 name: agent
@@ -744,8 +746,9 @@ async fn build_role_pools(
                 unavailable_reason,
                 max_concurrency: agent.map(|agent| agent.max_concurrency.max(1)).unwrap_or(1),
                 cooldown_until: agent.and_then(|agent| agent.cooldown_until.clone()),
-                last_error: agent.and_then(|agent| agent.last_error.clone()),
+                last_error,
                 failure_kind: agent.and_then(|agent| agent.failure_kind.clone()),
+                failure_summary,
                 transient_failures: agent.map(|agent| agent.transient_failures).unwrap_or(0),
                 availability,
                 availability_reason,

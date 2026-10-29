@@ -3412,6 +3412,7 @@ async fn task_arbitration(
             "stage": task.stage,
             "status": task.status,
             "last_error": task.last_error,
+            "failure_summary": crate::failure::summarize(task.last_error.as_deref()),
             "last_failure_kind": task.last_failure_kind,
             "waiting_reason": task.waiting_reason,
             "attempts": task.attempts,
@@ -3430,6 +3431,7 @@ async fn task_arbitration(
             "cooldown_until": agent.cooldown_until,
             "last_error": agent.last_error,
             "failure_kind": agent.failure_kind,
+            "failure_summary": crate::failure::summarize(agent.last_error.as_deref()),
             "transient_failures": agent.transient_failures,
         })).collect::<Vec<_>>(),
         "jobs": jobs.iter().map(|job| json!({
@@ -3440,6 +3442,7 @@ async fn task_arbitration(
             "status": job.status,
             "attempt": job.attempt,
             "error": job.error,
+            "failure_summary": crate::failure::summarize(job.error.as_deref()),
             "exit_code": job.exit_code,
             "failure_kind": job.failure_kind,
             "input_tokens": job.input_tokens,
@@ -3755,6 +3758,7 @@ async fn get_job(
         Some(pid) => Some(pid),
         None => job_pid_file(&state, &job).await,
     };
+    let failure_summary = crate::failure::summarize(job.error.as_deref());
     Ok(Json(JobView {
         id: job.id,
         project_id: job.project_id,
@@ -3772,6 +3776,7 @@ async fn get_job(
         exit_code: job.exit_code,
         pid,
         failure_kind: job.failure_kind,
+        failure_summary,
         input_tokens: job.input_tokens,
         output_tokens: job.output_tokens,
         cache_read_tokens: job.cache_read_tokens,
@@ -4004,6 +4009,7 @@ async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiErr
                 .and_then(|agent_id| agent_names.get(agent_id).cloned()),
             status: job.status,
             attempt: job.attempt,
+            failure_summary: crate::failure::summarize(job.error.as_deref()),
             error: job.error,
             exit_code: job.exit_code,
             failure_kind: job.failure_kind,

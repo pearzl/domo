@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod domain;
 mod events;
+mod failure;
 mod git;
 mod models;
 mod opencode;

@@ -46,6 +46,30 @@ export const FAILURE_KIND_LABELS: Record<string, string> = {
   task: "任务失败",
 };
 
+export const FAILURE_SUMMARY_LABELS: Record<string, string> = {
+  rate_limit: "限流",
+  timeout: "超时",
+  stalled: "卡死",
+  process_exit: "进程退出",
+  protocol: "结果异常",
+  permanent: "配置错误",
+  provider_error: "供应商错误",
+  unknown: "失败",
+};
+
+export function failureSummaryLabel(kind?: string | null): string {
+  if (!kind) return "失败";
+  return FAILURE_SUMMARY_LABELS[kind] ?? kind;
+}
+
+/** 行内只放摘要，避免长文本撑开列表。 */
+export function shortText(value: string | null | undefined, max = 80): string {
+  const collapsed = (value ?? "").split(/\s+/).filter(Boolean).join(" ");
+  const chars = Array.from(collapsed);
+  if (chars.length <= max) return collapsed;
+  return `${chars.slice(0, max - 1).join("")}…`;
+}
+
 export function formatTime(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
