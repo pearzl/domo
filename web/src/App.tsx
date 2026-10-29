@@ -8,14 +8,27 @@ import { UsagePage } from "./pages/UsagePage";
 
 const HEALTH_POLL_MS = 5000;
 
+// 路由以无尾斜杠的形式比较与呈现；根路径保持为 "/"。
+function normalizePath(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
+}
+
 export default function App() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [path, setPath] = useState(() => normalizePath(window.location.pathname));
   const [health, setHealth] = useState<Health | null>(null);
   const [healthOnline, setHealthOnline] = useState(false);
   const [eventsOnline, setEventsOnline] = useState(false);
 
   useEffect(() => {
-    const handlePop = () => setPath(window.location.pathname);
+    const canonical = normalizePath(window.location.pathname);
+    if (window.location.pathname !== canonical) {
+      window.history.replaceState(window.history.state, "", canonical);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePop = () => setPath(normalizePath(window.location.pathname));
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
   }, []);
@@ -51,13 +64,17 @@ export default function App() {
   }, []);
 
   function navigate(next: string) {
-    window.history.pushState({}, "", next);
-    setPath(next);
+    const target = normalizePath(next);
+    window.history.pushState({}, "", target);
+    setPath(target);
+    window.scrollTo(0, 0);
   }
 
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   const isAgents = path === "/agents";
   const isUsage = path === "/usage";
+  // 项目详情、根路径与未知路径都回退或落在项目视图，导航高亮“项目”。
+  const isProjects = !isAgents && !isUsage;
   const online = healthOnline || eventsOnline;
 
   return (
@@ -70,7 +87,7 @@ export default function App() {
 
         <nav className="nav-links sidebar-nav">
           <button
-            className={path === "/" || projectMatch ? "nav-link active" : "nav-link"}
+            className={isProjects ? "nav-link active" : "nav-link"}
             onClick={() => navigate("/")}
           >
             项目
