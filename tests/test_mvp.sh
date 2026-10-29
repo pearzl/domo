@@ -228,6 +228,13 @@ assert any(
 ), "未覆盖验收拒绝后的再次验收"
 assert tasks["T1"]["attempts"] >= 1, tasks["T1"]
 
+completed_job = next((job for job in jobs if job["status"] == "succeeded"), None)
+assert completed_job is not None, jobs
+activity = call("GET", f"/api/jobs/{completed_job['id']}/activity")
+assert activity["format"], activity
+assert activity["bytes"] > 0, activity
+assert activity["items"], activity
+
 branch = detail["project"]["branch"]
 import subprocess
 

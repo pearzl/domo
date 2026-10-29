@@ -7,6 +7,7 @@ import type {
   CreateTaskInput,
   DefaultTeamPool,
   Health,
+  JobActivity,
   JobDetail,
   ProjectAgentPool,
   ProjectDetail,
@@ -146,6 +147,8 @@ export const api = {
       pid: number | null;
       running: boolean;
     }>(`/api/jobs/${id}/output`, { cache: "no-store" }),
+  getJobActivity: (id: string) =>
+    request<JobActivity>(`/api/jobs/${id}/activity`, { cache: "no-store" }),
   pauseProject: (id: string, force = false) =>
     request<{ ok: boolean; forced: boolean }>(`/api/projects/${id}/pause`, {
       method: "POST",

@@ -263,6 +263,31 @@ export interface JobDetail extends JobSummary {
   pid: number | null;
 }
 
+/** 作业活动条目：助手消息、工具调用、步骤或纯文本行预览。 */
+export interface JobActivityItem {
+  kind: "message" | "tool" | "step" | "line";
+  text: string | null;
+  tool: string | null;
+  target: string | null;
+  status: string | null;
+  error: string | null;
+}
+
+export interface JobActivitySummary {
+  messages: number;
+  tool_calls: number;
+  tool_failures: number;
+  steps: number;
+  truncated: boolean;
+}
+
+export interface JobActivity {
+  format: "opencode" | "text";
+  bytes: number;
+  items: JobActivityItem[];
+  summary: JobActivitySummary;
+}
+
 export interface Message {
   id: string;
   project_id: string;

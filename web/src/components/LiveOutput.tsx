@@ -94,6 +94,9 @@ export function LiveOutput({
           {running ? "实时输出" : "运行输出"}
         </span>
         {running ? <span className="live-output-dot" aria-hidden="true" /> : null}
+        {output ? (
+          <span className="live-output-bytes">{formatBytes(stdout, stderr)}</span>
+        ) : null}
       </div>
       {error ? (
         <div className="live-output-error" role="status">
@@ -113,6 +116,17 @@ export function LiveOutput({
   );
 }
 
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function formatBytes(stdout: string, stderr: string): string {
+  const total = byteLength(stdout) + byteLength(stderr);
+  if (total < 1024) return `${total} 字节`;
+  if (total < 1024 * 1024) return `${(total / 1024).toFixed(1)} KB`;
+  return `${(total / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function OutputSection({
   title,
   value,
@@ -121,8 +135,7 @@ function OutputSection({
   title: string;
   value: string;
   running: boolean;
-}) {
-  return (
+}) {  return (
     <section className="live-output-section">
       <div className="job-block-title">{title}</div>
       {value ? (

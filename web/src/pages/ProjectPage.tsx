@@ -145,9 +145,6 @@ export function ProjectPage({
   );
   const analysisJob =
     analysisJobs.find((job) => job.status === "running") ?? null;
-  const latestAnalysisJob = analysisJobs.length
-    ? analysisJobs[analysisJobs.length - 1]
-    : null;
   const directJob = jobs.find(
     (job) => job.role === "direct" && job.status === "running",
   );
@@ -497,13 +494,10 @@ export function ProjectPage({
             {goalMessages.length === 0 ? (
               <div className="muted">还没有输入项目目标。</div>
             ) : null}
-            {latestAnalysisJob ? (
+            {analysisJob ? (
               <div className="message message-planner live-message">
                 <div className="message-role">规划者（实时输出）</div>
-                <LiveOutput
-                  jobId={latestAnalysisJob.id}
-                  running={latestAnalysisJob.status === "running"}
-                />
+                <LiveOutput jobId={analysisJob.id} running />
               </div>
             ) : null}
           </div>

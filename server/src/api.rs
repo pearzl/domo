@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 use tokio_stream::StreamExt;
 
+use crate::activity;
 use crate::agents::kill_job_dir;
 use crate::domain::{self, deps_complete, now, short_id};
 use crate::events::emit;
@@ -163,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/output", get(get_job_output))
+        .route("/api/jobs/{id}/activity", get(get_job_activity))
         .route("/api/events", get(list_events))
         .route("/api/events/stream", get(stream_events))
         .route("/api/events/{id}", get(get_event))
@@ -3815,6 +3817,28 @@ struct JobOutput {
     stderr: String,
     pid: Option<i64>,
     running: bool,
+}
+
+async fn get_job_activity(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<activity::JobActivity>, ApiError> {
+    let job = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("作业不存在"))?;
+    let project = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
+        .bind(&job.project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let dir = PathBuf::from(project.workspace).join("jobs").join(&job.id);
+    let raw = match tokio::fs::read(dir.join("stdout.log")).await {
+        Ok(bytes) => bytes,
+        Err(_) => job.stdout.clone().unwrap_or_default().into_bytes(),
+    };
+    Ok(Json(activity::report_from_bytes(&raw)))
 }
 
 async fn get_job_output(
