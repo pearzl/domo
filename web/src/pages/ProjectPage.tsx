@@ -15,6 +15,7 @@ import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
+import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import {
@@ -298,7 +299,7 @@ export function ProjectPage({
             ) : null}
           </div>
         </div>
-        <p className="goal-line goal-large">{project.goal}</p>
+        <ProjectGoal goal={project.goal} />
         <div className="meta-grid">
           <div>
             <span className="meta-label">仓库</span>
@@ -373,6 +374,8 @@ export function ProjectPage({
           </div>
         ) : null}
       </header>
+
+      <ProjectOverview detail={detail} />
 
       <AgentPoolPanel
         title="项目 Agent 池"
