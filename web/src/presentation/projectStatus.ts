@@ -13,6 +13,8 @@ export interface ProjectStatusInput {
   jobs: JobSummary[];
   messages: Message[];
   proposal: AnalysisProposal | null;
+  /// 目标分支是否已包含项目分支提交，包含 DOMO 之外的合入。
+  mergedIntoBase: boolean;
   /// 计算项目用时的参照时刻；页面传入当前时间，调用方可固定时间。
   now: number;
 }
@@ -114,6 +116,7 @@ export function projectStatus(input: ProjectStatusInput): ProjectStatus {
 }
 
 /// 概览的“当前需要你处理”只描述现状与下一步，不执行任何项目操作。
+/// 暂停状态优先于阶段判断：暂停中的项目不会继续推进，也不产生阶段内的待办。
 export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
   const { project } = input;
 
@@ -121,8 +124,20 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
     return guidance("muted", "只读", "项目已归档", "只读状态，没有待办。");
   }
 
-  // 分析阶段的阻塞来自等待目标、提问或方案确认，应继续走分析对话。
+  if (project.status === "paused" || project.status === "pausing") {
+    return guidance(
+      "warn",
+      "已暂停",
+      "恢复项目",
+      "项目已暂停；恢复后继续派发任务。",
+    );
+  }
+
+  // 分析阶段的阻塞来自等待目标、提问、方案确认或无法自动处理的失败。
   if (project.stage === "analysis") {
+    if (analysisNeedsManualHandling(project)) {
+      return blockedGuidance(project);
+    }
     if (projectHasRunningJob(input.jobs, "analysis")) {
       return guidance(
         "info",
@@ -161,20 +176,19 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
         `已合入 ${project.base_branch}${mergedCommitLabel(project.merged_commit)}。`,
       );
     }
+    if (input.mergedIntoBase) {
+      return guidance(
+        "success",
+        "已交付",
+        "已交付",
+        `目标分支 ${project.base_branch} 已包含项目分支 ${project.branch}。`,
+      );
+    }
     return guidance(
       "success",
       "待合入",
       "审阅并合入",
       `改动位于 ${project.branch}，审阅后合入 ${project.base_branch}。`,
-    );
-  }
-
-  if (project.status === "paused" || project.status === "pausing") {
-    return guidance(
-      "warn",
-      "已暂停",
-      "恢复项目",
-      "项目已暂停；恢复后继续派发任务。",
     );
   }
 
@@ -242,9 +256,31 @@ export function formatElapsed(milliseconds: number | null): string {
   return `${days} 天 ${hours % 24} 小时`;
 }
 
+function hasGoal(goal: string): boolean {
+  return goal.trim().length > 0;
+}
+
+/// 分析阶段已提交目标、阻塞原因非空且没有规划对话可推进时，需要人工处理，
+/// 例如规划作业失败或没有可用的 Agent。
+function analysisNeedsManualHandling(project: Project): boolean {
+  if (project.status !== "blocked") return false;
+  if (!hasGoal(project.goal)) return false;
+  return firstLine(project.blocked_reason) !== null;
+}
+
+/// 分析阶段待办按目标、方案与规划对话描述下一步。
 function analysisGuidance(
   input: ProjectStatusInput,
 ): ProjectGuidance {
+  if (!hasGoal(input.project.goal)) {
+    return guidance(
+      "warn",
+      "待输入",
+      "输入项目目标",
+      "在项目分析中输入目标、边界和验收预期。",
+    );
+  }
+
   const goalMessages = input.messages.filter(
     (message) => message.role !== "review",
   );
@@ -258,15 +294,7 @@ function analysisGuidance(
         : "方案已生成：确认后开始执行，或回复规划者继续讨论。";
     return guidance("success", "待确认", "确认或继续讨论方案", detail);
   }
-  if (!lastMessage) {
-    return guidance(
-      "warn",
-      "待输入",
-      "输入项目目标",
-      "在项目分析中输入目标、边界和验收预期。",
-    );
-  }
-  if (lastMessage.role === "planner") {
+  if (lastMessage?.role === "planner") {
     return guidance(
       "warn",
       "待回复",

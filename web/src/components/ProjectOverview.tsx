@@ -69,6 +69,7 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
     jobs,
     messages,
     proposal,
+    mergedIntoBase: detail.merged_into_base,
     now: Date.now(),
   });
 
