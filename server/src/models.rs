@@ -316,6 +316,12 @@ pub struct ProjectRow {
     pub completion_mode: String,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
+    /// Project-level agents skipped by the next project job dispatch, mirroring
+    /// the task-level pair.
+    #[serde(skip_serializing)]
+    pub avoid_agent_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub avoid_agent_role: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

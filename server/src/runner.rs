@@ -215,7 +215,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Err(parse_error) => (
                 JOB_STATUS_FAILED,
                 Some(raw.clone()),
-                Some(format!("结果协议不合法: {parse_error}")),
+                Some(match job.role.as_str() {
+                    JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => parse_error,
+                    _ => format!("结果协议不合法: {parse_error}"),
+                }),
             ),
         }
     } else {
@@ -233,6 +236,61 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     } else {
         None
     };
+    if job.role == JOB_ROLE_ANALYSIS {
+        // A failed analysis is settled only after the failure handling decides
+        // whether to switch agents; otherwise the job stays running and the
+        // scheduler would dispatch a parallel analysis for the same project.
+        if status != JOB_STATUS_SUCCEEDED {
+            let reason = error.as_deref().unwrap_or("项目分析失败");
+            let transition = handle_analysis_failure(
+                state,
+                &project,
+                reason,
+                Some(&agent),
+                run.process_failure(),
+            )
+            .await;
+            let finished = finish_job(
+                state,
+                &job,
+                status,
+                result_text,
+                &run,
+                error.as_deref(),
+                parsed.clone(),
+            )
+            .await?;
+            if finished {
+                transition?;
+            }
+            return Ok(());
+        }
+        if parsed.is_none() {
+            let reason = error.as_deref().unwrap_or("项目分析失败");
+            let transition = handle_analysis_failure(
+                state,
+                &project,
+                reason,
+                Some(&agent),
+                run.process_failure(),
+            )
+            .await;
+            let finished = finish_job(
+                state,
+                &job,
+                JOB_STATUS_FAILED,
+                result_text,
+                &run,
+                Some(reason),
+                None,
+            )
+            .await?;
+            if finished {
+                transition?;
+            }
+            return Ok(());
+        }
+    }
     if status == JOB_STATUS_SUCCEEDED {
         if let Some(ParsedResult::ExecutorDerive { tasks, .. }) = parsed.as_ref() {
             if let Some(reason) =
@@ -254,7 +312,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             };
             if let Err(commit_error) = commit {
                 let error_text = format!("提交直接完成结果失败: {commit_error:#}");
-                let transition = handle_direct_failure(state, &project, &error_text).await;
+                let transition =
+                    handle_direct_failure(state, &project, &error_text, None, false).await;
                 let finished = finish_job(
                     state,
                     &job,
@@ -460,11 +519,26 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             .await
         }
         (JOB_ROLE_ANALYSIS, _) => {
-            handle_analysis_failure(state, &project, error.as_deref().unwrap_or("项目分析失败"))
-                .await
+            let process_failure = run.process_failure();
+            handle_analysis_failure(
+                state,
+                &project,
+                error.as_deref().unwrap_or("项目分析失败"),
+                Some(&agent),
+                process_failure,
+            )
+            .await
         }
         (JOB_ROLE_DIRECT, _) => {
-            handle_direct_failure(state, &project, error.as_deref().unwrap_or("直接完成失败")).await
+            let process_failure = run.process_failure();
+            handle_direct_failure(
+                state,
+                &project,
+                error.as_deref().unwrap_or("直接完成失败"),
+                Some(&agent),
+                process_failure,
+            )
+            .await
         }
         (JOB_ROLE_EXECUTOR, Some(ParsedResult::ExecutorDone { summary })) => {
             if let Some(task) = task.as_ref() {
@@ -518,7 +592,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             handle_report(state, &project, summary).await
         }
         (JOB_ROLE_SUMMARY, _) => {
-            handle_summary_failure(state, &project, error.as_deref().unwrap_or("总结失败")).await
+            let process_failure = run.process_failure();
+            handle_summary_failure(
+                state,
+                &project,
+                error.as_deref().unwrap_or("总结失败"),
+                Some(&agent),
+                process_failure,
+            )
+            .await
         }
         _ => Ok(()),
     };
@@ -1381,21 +1463,41 @@ async fn handle_direct_success(
     Ok(())
 }
 
-async fn handle_direct_failure(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
+async fn handle_direct_failure(
+    state: &AppState,
+    project: &ProjectRow,
+    reason: &str,
+    agent: Option<&AgentRow>,
+    process_failure: bool,
+) -> Result<()> {
     {
         let _guard = state.git_lock.lock().await;
         let _ = git::reset_hard(&PathBuf::from(&project.workspace).join("repo")).await;
     }
+    let failure = plan_project_failure(
+        state,
+        project,
+        reason,
+        agent.map(|agent| (agent, process_failure)),
+    )
+    .await?;
     let _guard = state.schedule_lock.lock().await;
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, proposal = NULL, \
-         confirmed_at = NULL, updated_at = ? WHERE id = ?",
+         confirmed_at = NULL, \
+         avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
+         updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_ANALYSIS)
-    .bind(STATUS_BLOCKED)
-    .bind(reason)
+    .bind(failure.status())
+    .bind(&failure.blocked_reason)
     .bind(COMPLETION_TASKS)
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())
     .bind(&project.id)
     .execute(&state.db)
@@ -1405,8 +1507,8 @@ async fn handle_direct_failure(state: &AppState, project: &ProjectRow, reason: &
         &state.bus,
         Some(&project.id),
         None,
-        "direct_failed",
-        format!("直接完成失败：{reason}"),
+        failure.event_kind("direct_failed"),
+        format!("直接完成{}：{reason}", failure.label()),
     )
     .await;
     Ok(())
@@ -1416,7 +1518,16 @@ async fn handle_analysis_failure(
     state: &AppState,
     project: &ProjectRow,
     reason: &str,
+    agent: Option<&AgentRow>,
+    process_failure: bool,
 ) -> Result<()> {
+    let failure = plan_project_failure(
+        state,
+        project,
+        reason,
+        agent.map(|agent| (agent, process_failure)),
+    )
+    .await?;
     let _guard = state.schedule_lock.lock().await;
     if has_active_tasks(&state.db, &project.id).await? {
         return apply_stale_result(
@@ -1429,11 +1540,18 @@ async fn handle_analysis_failure(
     }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-         THEN status ELSE ? END, blocked_reason = ?, proposal = NULL, updated_at = ? WHERE id = ?",
+         THEN status ELSE ? END, blocked_reason = ?, proposal = NULL, \
+         avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
+         updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_ANALYSIS)
-    .bind(STATUS_BLOCKED)
-    .bind(reason)
+    .bind(failure.status())
+    .bind(&failure.blocked_reason)
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())
     .bind(&project.id)
     .execute(&state.db)
@@ -1443,8 +1561,8 @@ async fn handle_analysis_failure(
         &state.bus,
         Some(&project.id),
         None,
-        "analysis_failed",
-        format!("项目分析失败：{reason}"),
+        failure.event_kind("analysis_failed"),
+        format!("项目分析{}：{reason}", failure.label()),
     )
     .await;
     Ok(())
@@ -2068,7 +2186,16 @@ async fn handle_summary_failure(
     state: &AppState,
     project: &ProjectRow,
     reason: &str,
+    agent: Option<&AgentRow>,
+    process_failure: bool,
 ) -> Result<()> {
+    let failure = plan_project_failure(
+        state,
+        project,
+        reason,
+        agent.map(|agent| (agent, process_failure)),
+    )
+    .await?;
     let _guard = state.schedule_lock.lock().await;
     if has_active_tasks(&state.db, &project.id).await? {
         return apply_stale_result(
@@ -2081,11 +2208,18 @@ async fn handle_summary_failure(
     }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-         THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
+         THEN status ELSE ? END, blocked_reason = ?, \
+         avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
+         updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_SUMMARIZING)
-    .bind(STATUS_BLOCKED)
-    .bind(reason)
+    .bind(failure.status())
+    .bind(&failure.blocked_reason)
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(failure.switch)
+    .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())
     .bind(&project.id)
     .execute(&state.db)
@@ -2095,8 +2229,8 @@ async fn handle_summary_failure(
         &state.bus,
         Some(&project.id),
         None,
-        "summary_failed",
-        format!("总结失败：{reason}"),
+        failure.event_kind("summary_failed"),
+        format!("总结{}：{reason}", failure.label()),
     )
     .await;
     Ok(())
@@ -2229,17 +2363,18 @@ async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -> Result<()
     .execute(&state.db)
     .await?;
     let project_id = job.project_id.clone();
+    let job_agent = match &job.agent_id {
+        Some(agent_id) => crate::db::load_agent(&state.db, agent_id).await?,
+        None => None,
+    };
     if let Some(project) = load_project(&state.db, &project_id).await? {
         if let Some(task_id) = &job.task_id {
             if let Some(task) = load_task(&state.db, task_id).await? {
-                let agent = match &job.agent_id {
-                    Some(agent_id) => crate::db::load_agent(&state.db, agent_id).await?,
-                    None => None,
-                };
+                let agent = job_agent.as_ref();
                 match job.role.as_str() {
                     JOB_ROLE_EXECUTOR => {
                         if let Some(agent) = agent {
-                            handle_executor_failure(state, &project, &task, reason, &agent, true)
+                            handle_executor_failure(state, &project, &task, reason, agent, true)
                                 .await?;
                         } else {
                             block_task(state, &project, &task, reason).await?;
@@ -2247,23 +2382,24 @@ async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -> Result<()
                     }
                     JOB_ROLE_VERIFIER => {
                         if let Some(agent) = agent {
-                            handle_verifier_failure(state, &project, &task, reason, &agent, true)
+                            handle_verifier_failure(state, &project, &task, reason, agent, true)
                                 .await?;
                         } else {
                             block_task(state, &project, &task, reason).await?;
                         }
                     }
-                    JOB_ROLE_ANALYSIS => handle_analysis_failure(state, &project, reason).await?,
-                    JOB_ROLE_SUMMARY => handle_summary_failure(state, &project, reason).await?,
+                    JOB_ROLE_ANALYSIS => {
+                        handle_analysis_failure(state, &project, reason, agent, true).await?
+                    }
                     _ => {}
                 }
             }
         } else if job.role == JOB_ROLE_ANALYSIS {
-            handle_analysis_failure(state, &project, reason).await?;
+            handle_analysis_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         } else if job.role == JOB_ROLE_DIRECT {
-            handle_direct_failure(state, &project, reason).await?;
+            handle_direct_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         } else if job.role == JOB_ROLE_SUMMARY {
-            handle_summary_failure(state, &project, reason).await?;
+            handle_summary_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         }
     }
     emit_job(
@@ -2356,8 +2492,8 @@ async fn apply_agent_failure(
     kind: FailureKind,
 ) -> Result<AgentFailureEffect> {
     let mut switch = false;
-    let mut cooldown: Option<String> = None;
     let mut transient_failures = agent.transient_failures;
+    let mut cooldown: Option<String> = None;
     match kind {
         FailureKind::RateLimit => {
             let until = chrono::Utc::now() + domain::rate_limit_cooldown(reason);
@@ -2366,7 +2502,7 @@ async fn apply_agent_failure(
             switch = true;
         }
         FailureKind::Transient => {
-            let next = agent.transient_failures + 1;
+            let next = transient_failures + 1;
             transient_failures = next;
             if next >= domain::transient_retry_limit() {
                 cooldown = Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
@@ -2393,6 +2529,79 @@ async fn apply_agent_failure(
     .execute(&state.db)
     .await?;
     Ok(AgentFailureEffect { switch })
+}
+
+/// Failure handling shared by project jobs. Their skip state lives on the
+/// project row instead of a task, and there is no attempt budget.
+struct ProjectFailure {
+    kind: FailureKind,
+    switch: bool,
+    blocked: bool,
+    blocked_reason: Option<String>,
+}
+
+impl ProjectFailure {
+    fn status(&self) -> &'static str {
+        if self.blocked {
+            STATUS_BLOCKED
+        } else {
+            STATUS_RUNNING
+        }
+    }
+
+    fn label(&self) -> String {
+        let kind = failure_kind_label(self.kind);
+        if self.blocked {
+            format!("失败（{kind}，没有其他可用 Agent），等待人工处理")
+        } else if self.switch {
+            format!("失败（{kind}），已切换 Agent 重试")
+        } else {
+            format!("失败（{kind}），将在原 Agent 上重试")
+        }
+    }
+
+    fn event_kind(&self, failed: &str) -> &'static str {
+        if self.blocked {
+            "project_blocked"
+        } else if self.switch {
+            "project_retry"
+        } else {
+            match failed {
+                "direct_failed" => "direct_failed",
+                "summary_failed" => "summary_retry",
+                _ => "analysis_retry",
+            }
+        }
+    }
+}
+
+async fn plan_project_failure(
+    state: &AppState,
+    project: &ProjectRow,
+    reason: &str,
+    agent: Option<(&AgentRow, bool)>,
+) -> Result<ProjectFailure> {
+    let Some((agent, process_failure)) = agent else {
+        return Ok(ProjectFailure {
+            kind: FailureKind::Task,
+            switch: false,
+            blocked: true,
+            blocked_reason: Some(reason.to_string()),
+        });
+    };
+    let kind = domain::classify_failure(reason, process_failure);
+    let effect = apply_agent_failure(state, agent, reason, kind).await?;
+    // Project jobs (analysis, direct, summary) all dispatch from the planner
+    // group of the project pool.
+    let blocked = kind.is_agent_failure()
+        && effect.switch
+        && !has_usable_agent(state, &project.id, ROLE_PLANNER, Some(&agent.id)).await?;
+    Ok(ProjectFailure {
+        kind,
+        switch: effect.switch,
+        blocked,
+        blocked_reason: blocked.then(|| reason.to_string()),
+    })
 }
 
 async fn has_usable_agent(

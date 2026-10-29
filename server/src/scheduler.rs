@@ -737,7 +737,13 @@ async fn choose_agent(
     let now = Utc::now();
     let avoided = task
         .filter(|task| task.avoid_agent_role.as_deref() == Some(role))
-        .and_then(|task| task.avoid_agent_id.as_deref());
+        .and_then(|task| task.avoid_agent_id.as_deref())
+        .or_else(|| {
+            // Project jobs carry the skip state on the project row.
+            (task.is_none() && project.avoid_agent_role.as_deref() == Some(role))
+                .then_some(project.avoid_agent_id.as_deref())
+                .flatten()
+        });
     let mut unavailable = Vec::new();
     for row in &rows {
         let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
@@ -938,6 +944,18 @@ async fn spawn_project_job(
     .bind(&agent.id)
     .bind(JOB_STATUS_RUNNING)
     .bind(&timestamp)
+    .execute(&state.db)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET avoid_agent_id = CASE WHEN avoid_agent_role = ? THEN NULL \
+         ELSE avoid_agent_id END, \
+         avoid_agent_role = CASE WHEN avoid_agent_role = ? THEN NULL ELSE avoid_agent_role END, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(role)
+    .bind(role)
+    .bind(&timestamp)
+    .bind(&project.id)
     .execute(&state.db)
     .await?;
     clear_waiting(&state.db, &project.id).await?;

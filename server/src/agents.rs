@@ -146,13 +146,16 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
 
     let context = read_context(&spec.job_dir)?;
     let streamed = write_mock_stream(spec, &context).await?;
-    let result = match spec.role.as_str() {
-        JOB_ROLE_ANALYSIS => mock_analysis(&context),
-        JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
-        JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
-        JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
-        JOB_ROLE_SUMMARY => mock_summary(&context),
-        other => return Err(anyhow!("mock 不支持角色 {other}")),
+    let result = match mock_role_failure(&spec.role, &context) {
+        Some(result) => result,
+        None => match spec.role.as_str() {
+            JOB_ROLE_ANALYSIS => mock_analysis(&context),
+            JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
+            JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
+            JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
+            JOB_ROLE_SUMMARY => mock_summary(&context),
+            other => return Err(anyhow!("mock 不支持角色 {other}")),
+        },
     };
     let result = attach_mock_usage(result, &context);
     let path = spec.job_dir.join("result.json");
@@ -517,6 +520,33 @@ fn mock_switch_matches(context: &serde_json::Value, switch_env: &str, key: &str)
         .map(|marker| marker == agent_name)
         .unwrap_or(true);
     matches_goal && matches_key && matches_agent
+}
+
+/// Planned failures for the project roles (analysis, direct completion and
+/// summary). The mock writes a failed result before running the role logic, so
+/// project jobs can exercise the same failure policy as task jobs. The switches
+/// are separate from the task-level ones so goals and pools stay orthogonal.
+fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_json::Value> {
+    if !matches!(role, JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY) {
+        return None;
+    }
+    let failed = |reason: String| Some(serde_json::json!({ "kind": "failed", "reason": reason }));
+    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_RATE_LIMIT", "") {
+        let secs = std::env::var("DOMO_MOCK_PLANNER_RATE_LIMIT_RETRY")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(900);
+        return failed(format!(
+            "HTTP 429 too many requests; retry after {secs} seconds"
+        ));
+    }
+    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_TRANSIENT", "") {
+        return failed("provider temporarily unavailable (503)".into());
+    }
+    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_PERMANENT", "") {
+        return failed("永久错误：Agent 配置无效".into());
+    }
+    None
 }
 
 fn mock_flag_matches(context: &serde_json::Value, flag_env: &str, key: &str) -> bool {

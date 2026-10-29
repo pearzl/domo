@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS projects (
     completion_mode TEXT NOT NULL DEFAULT 'tasks',
     merged_at TEXT,
     merged_commit TEXT,
+    avoid_agent_id TEXT,
+    avoid_agent_role TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -240,6 +242,9 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .await?;
     ensure_column(pool, "projects", "proposal", "TEXT").await?;
+    sqlx::raw_sql("UPDATE projects SET proposal = NULL WHERE proposal LIKE '%\"kind\":\"ready\"%'")
+        .execute(pool)
+        .await?;
     ensure_column(pool, "projects", "confirmed_at", "TEXT").await?;
     ensure_column(
         pool,
@@ -250,6 +255,8 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     .await?;
     ensure_column(pool, "projects", "merged_at", "TEXT").await?;
     ensure_column(pool, "projects", "merged_commit", "TEXT").await?;
+    ensure_column(pool, "projects", "avoid_agent_id", "TEXT").await?;
+    ensure_column(pool, "projects", "avoid_agent_role", "TEXT").await?;
     ensure_column(pool, "events", "job_id", "TEXT").await?;
     ensure_column(pool, "tasks", "guidance", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column(pool, "tasks", "parent_id", "TEXT").await?;
@@ -290,7 +297,6 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::raw_sql(
         "UPDATE projects SET stage = 'analysis' WHERE stage IN ('goal_confirm', 'planning');
          UPDATE jobs SET role = 'analysis' WHERE role IN ('confirm', 'goal');
-         UPDATE projects SET proposal = NULL WHERE proposal LIKE '%\"kind\":\"ready\"%';
          UPDATE tasks SET queue_order = seq WHERE queue_order = 0 AND seq > 0;",
     )
     .execute(pool)

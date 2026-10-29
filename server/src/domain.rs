@@ -156,6 +156,9 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
 }
 
 fn parse_analysis_result(value: &Value) -> Result<ParsedResult, String> {
+    if let Some(reason) = parse_project_failure(value) {
+        return Err(reason);
+    }
     let kind = value
         .get("kind")
         .and_then(|v| v.as_str())
@@ -212,6 +215,9 @@ fn parse_analysis_result(value: &Value) -> Result<ParsedResult, String> {
 }
 
 fn parse_direct_result(value: &Value) -> Result<ParsedResult, String> {
+    if let Some(reason) = parse_project_failure(value) {
+        return Err(reason);
+    }
     let kind = value
         .get("kind")
         .and_then(|v| v.as_str())
@@ -318,7 +324,18 @@ fn parse_verifier_result(value: &Value) -> Result<ParsedResult, String> {
     })
 }
 
+/// A failed project job reports the provider error as-is in `reason`, so the
+/// message carries the same markers (429, 503, …) that the executor protocol
+/// uses for failure classification.
+fn parse_project_failure(value: &Value) -> Option<String> {
+    let reason = value.get("reason").and_then(|v| v.as_str())?;
+    (!reason.trim().is_empty()).then(|| reason.trim().to_string())
+}
+
 fn parse_report_result(value: &Value) -> Result<ParsedResult, String> {
+    if let Some(reason) = parse_project_failure(value) {
+        return Err(reason);
+    }
     let summary = string_field(value, "report")
         .or_else(|| string_field(value, "summary"))
         .ok_or_else(|| "总结结果缺少 report 内容".to_string())?;

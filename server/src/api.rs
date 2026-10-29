@@ -2851,7 +2851,8 @@ async fn retry_project(
                     "等待用户答复"
                 };
                 sqlx::query(
-                    "UPDATE projects SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE projects SET status = ?, blocked_reason = ?, avoid_agent_id = NULL, \
+                     avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
                 )
                 .bind(if waiting_user {
                     STATUS_BLOCKED
@@ -2863,17 +2864,20 @@ async fn retry_project(
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
+                clear_project_agent_backoff(&state, &id).await?;
             }
             STAGE_EXECUTING => {
                 if project.completion_mode == COMPLETION_DIRECT {
                     sqlx::query(
-                        "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                        "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
+                         avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
                     )
                     .bind(STATUS_RUNNING)
                     .bind(now())
                     .bind(&id)
                     .execute(&state.db)
                     .await?;
+                    clear_project_agent_backoff(&state, &id).await?;
                 } else {
                     sqlx::query(
                         "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
@@ -2904,13 +2908,15 @@ async fn retry_project(
                     return Err(ApiError::bad("报告正在等待人工验收"));
                 }
                 sqlx::query(
-                    "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
+                     avoid_agent_role = NULL, updated_at = ? WHERE id = ?",
                 )
                 .bind(STATUS_RUNNING)
                 .bind(now())
                 .bind(&id)
                 .execute(&state.db)
                 .await?;
+                clear_project_agent_backoff(&state, &id).await?;
             }
             _ => return Err(ApiError::bad("当前阶段没有可重试的内容")),
         }
