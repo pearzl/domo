@@ -28,7 +28,7 @@ cd server && cargo run --release
 - **团队分工**：团队由三类角色组成。**规划者**负责项目分析和任务拆解，**执行者**负责执行，**验收者**负责核查。
 - **动态调度**：可根据任务不同使用不同的 Agent 和模型，支持按优先级的顺序调度、错误退避和限额保护。
 - **审计与回溯**：整个执行过程，包括每次对 Agent 调用的输入与输出有完整记录。
-- **自备 Agent**：你提供 Agent 与模型配置。
+- **自备 Agent**：内置支持 OpenCode、Codex CLI、WorkBuddy（CodeBuddy Code CLI，可执行文件 `codebuddy`）和自定义 CLI 四类 Agent。前三类内置默认命令，只需填写名称与模型；自定义 CLI 通过命令模板描述参数，模板占位符包括 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}`，未写 `{prompt}` 时提示词从 stdin 传入。可执行文件不在 `PATH` 中时用 `DOMO_CODEX_BIN`、`DOMO_WORKBUDDY_BIN` 指向文件路径，例如 `DOMO_CODEX_BIN=/opt/bin/codex DOMO_WORKBUDDY_BIN=/opt/bin/codebuddy cd server && cargo run --release`。
 - **Git 仓库优先**：通过 worktree 进行隔离，支持同一工程下多个项目并行。
 - **完全本地**：数据、日志和产物都保存在本地。
 
