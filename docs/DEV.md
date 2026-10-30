@@ -16,8 +16,8 @@
 - `DESIGN.md` 是唯一的产品设计文档；`DEV.md` 是唯一的仓库级开发规范。
 - `docs/notes/` 保存所有值得长期保留的思考，包括但不限于已采纳、已否决、未决与被取代的方案；它不是当前行为说明，也不承担路线图。
 - **禁止**在 `docs/` 新建测试用例说明、验收标准说明、冒烟报告、阶段总结、截图、过程记录。这些内容：
-  - 用例与验收标准 → 写进 `tests/test_*.sh` 的头部注释；
-  - 运行结果、日志、快照 → 放 `data/`（已忽略）或 `${TMPDIR:-/tmp}`；
+  - 用例与验收标准 → 写进 `tests/test_*.py` 的头部注释；
+  - 运行结果、日志、快照 → 放 `data/`（已忽略）或系统临时目录；
   - 模块级约定 → 写进对应源码文件头。
 - 需要新增一篇文档（例如 API 契约）时，先确认它会被长期维护，再在本文的第一节登记；否则不建。
 
@@ -41,7 +41,7 @@
 - 源代码与测试代码（Rust `#[test]`、前端源码）。
 - 构建与依赖配置、锁文件：`Cargo.toml` / `Cargo.lock`、`package.json` / `package-lock.json`、`tsconfig`、`vite` 配置。
 - 值得维护的文档：`README.md`、`docs/DESIGN.md`、`docs/DEV.md`、`docs/notes/`。
-- 测试脚本：`tests/test_*.sh`。
+- 测试脚本：`tests/test_*.py`、`tests/harness.py`、`tests/run.py`。
 
 **不得入库**
 
@@ -77,9 +77,9 @@ cargo test
 npm run build    # tsc + vite，类型错误即失败
 ```
 
-- 冒烟脚本放 `tests/test_*.sh`；跨平台冒烟脚本放 `tests/test_*.mjs`，只使用 Node.js 内置模块，不引入 npm 依赖。**默认使用 mock agent**，不依赖真实模型与外网；真实模型用例通过环境变量传模型（如 `DOMO_RT_MODEL`），**不把模型名写死在脚本里**。
-- 临时目录统一用 `${TMPDIR:-/tmp}`（Node.js 用系统临时目录）；端口通过 `DOMO_*_PORT` 覆盖；脚本退出码 `0` = 全部通过，结束必须清理自己启动的进程与临时文件。
-- Windows 改动必须额外运行 `node tests/test_smoke.mjs`；`.sh` 用例可在 Git Bash 中运行，依赖 `python3` 与 `curl`。依赖 Unix 信号或 shebang 脚本的用例（如 `test_shutdown.sh`、`test_agent_adapters.sh`）仍需在 Linux/WSL 中运行。
+- 测试脚本统一放 `tests/test_*.py`，只使用 Python 3 标准库，跨平台共享 `tests/harness.py`。**默认使用 mock agent**，不依赖真实模型与外网；真实模型用例通过环境变量传模型（如 `DOMO_RT_MODEL`），**不把模型名写死在脚本里**。
+- 临时目录统一用系统临时目录；端口通过 `DOMO_*_PORT` 覆盖；脚本退出码 `0` = 全部通过，结束必须清理自己启动的进程与临时文件。
+- 全部用例运行 `python3 tests/run.py`（Windows 用 `python tests/run.py`）；单个用例可直接运行，例如 `python3 tests/test_mvp.py`。
 - **修缺陷必须带回归用例**：Rust 单测（纯逻辑 / 解析 / 数据）或冒烟断言（流程 / 接口 / 事件），至少其一。
 - 涉及并发、锁、调度、恢复的改动，必须验证错误路径：进程被杀、Agent 超时、限流熔断、数据库锁竞争。
 - 验收以“能实际使用”为准：改完后服务要能启动、视图要能刷出数据，不以“编译通过”作为完成标准。

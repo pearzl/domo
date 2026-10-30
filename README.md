@@ -20,7 +20,18 @@ cd server && cargo run --release
 # 默认端口被占用时自动改用相邻空闲端口；显式设置 DOMO_SERVER_PORT 时端口冲突会直接报错
 ```
 
-Windows（PowerShell）使用同样的命令。数据默认保存在 `%USERPROFILE%\.domo`，可用 `DOMO_DATA_ROOT`、`DOMO_WORKSPACE_ROOT`、`DOMO_LOG_ROOT` 覆盖。npm 安装的 `opencode`、`codebuddy` 等 `.cmd` 入口会被自动解析为实际可执行文件；命令行工具不在 `PATH` 中时用 `DOMO_*_BIN` 指向 `.exe` 路径。
+Windows 使用同样的命令。数据默认保存在 `%USERPROFILE%\.domo`，可用 `DOMO_DATA_ROOT`、`DOMO_WORKSPACE_ROOT`、`DOMO_LOG_ROOT` 覆盖。npm 安装的 `opencode`、`codebuddy` 等 `.cmd` 入口会被自动解析为实际可执行文件；命令行工具不在 `PATH` 中时用 `DOMO_*_BIN` 指向 `.exe` 路径。
+
+
+## 测试
+
+跨平台测试使用 Python 3 标准库，无第三方依赖：
+
+```bash
+python3 tests/run.py
+```
+
+Windows 使用 `python tests/run.py`。单个用例可直接运行，例如 `python3 tests/test_mvp.py`；真实模型用例通过环境变量启用，见 [docs/DEV.md](docs/DEV.md)。
 
 
 ## 主要特性

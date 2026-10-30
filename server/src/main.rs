@@ -166,6 +166,14 @@ async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    #[cfg(windows)]
+    let ctrl_break = async {
+        if let Ok(mut signal) = tokio::signal::windows::ctrl_break() {
+            signal.recv().await;
+        }
+    };
+    #[cfg(not(windows))]
+    let ctrl_break = std::future::pending::<()>();
     #[cfg(unix)]
     let terminate = async {
         if let Ok(mut signal) =
@@ -178,6 +186,7 @@ async fn wait_for_shutdown_signal() {
     let terminate = std::future::pending::<()>();
     tokio::select! {
         _ = ctrl_c => {}
+        _ = ctrl_break => {}
         _ = terminate => {}
     }
 }

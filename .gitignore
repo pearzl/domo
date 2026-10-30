@@ -6,6 +6,10 @@
 /web/node_modules/
 /web/dist/
 
+# ---------- Python 测试产物 ----------
+__pycache__/
+*.pyc
+
 # ---------- 运行时数据（数据库 / 日志 / 工作区 / 归档 / 冒烟产物）----------
 /server/data/
 /data/
