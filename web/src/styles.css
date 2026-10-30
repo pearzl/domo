@@ -1016,9 +1016,189 @@ small {
   }
 }
 
+/* 执行现场：运行中作业、排队任务与最近关键事件。 */
+.execution-now {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fbfcfe;
+}
+
+.execution-now-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+
+.execution-jobs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.execution-job {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid #d4e1fb;
+  border-left: 3px solid var(--accent);
+  border-radius: 9px;
+  background: white;
+}
+
+.execution-job-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.execution-job-target {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.execution-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 0.75rem;
+}
+
+.execution-idle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  background: white;
+  font-size: 0.84rem;
+}
+
+.execution-idle span {
+  color: #475467;
+  overflow-wrap: anywhere;
+}
+
+.execution-idle-info {
+  border-color: #c5d8f7;
+  background: #f7faff;
+}
+
+.execution-idle-warn {
+  border-color: #f0ddb5;
+  background: #fffaf0;
+}
+
+.execution-idle-danger {
+  border-color: #f1c8c2;
+  background: #fff7f6;
+  color: var(--danger);
+}
+
+.execution-section-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.execution-queue,
+.execution-events {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.execution-queue-list,
+.execution-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.execution-queue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  font-size: 0.8rem;
+}
+
+.execution-queue-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.execution-queue-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.execution-queue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 0.75rem;
+}
+
+.execution-event {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  font-size: 0.8rem;
+}
+
+.execution-event-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.execution-event-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+
+
 @media (max-width: 560px) {
   .overview-stats {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .execution-jobs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .execution-event {
+    flex-direction: column;
+    gap: 2px;
   }
 }
 
@@ -1578,6 +1758,32 @@ small {
   min-width: 0;
 }
 
+/* 运行中作业的活动区限高跟随，读到底部时自动滚到最新一条。 */
+.activity-scroll {
+  position: relative;
+  min-width: 0;
+}
+
+.activity-scroll-live .activity-list {
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.activity-follow {
+  position: sticky;
+  bottom: 8px;
+  float: right;
+  margin-top: -32px;
+  margin-right: 8px;
+  font-size: 0.78rem;
+  padding: 3px 10px;
+  background: white;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+}
+
 .activity-message {
   background: #f8fbff;
   border: 1px solid #d9e6fa;
@@ -1921,6 +2127,29 @@ button.event-filter.active .event-filter-count {
 .event-preview {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.event-job-task {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.8rem;
+  color: #475467;
+  overflow-wrap: anywhere;
+}
+
+.event-failure {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.event-failure-message {
+  min-width: 0;
 }
 
 .event-message-body {

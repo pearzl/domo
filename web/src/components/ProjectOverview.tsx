@@ -11,6 +11,7 @@ import type {
   ProjectStats,
 } from "../presentation/projectStatus";
 import { Badge } from "../ui";
+import { ExecutionNow } from "./ExecutionNow";
 
 /// 项目标题下的目标文本固定为三行，超出时由用户主动展开。
 export function ProjectGoal({ goal }: { goal: string }) {
@@ -113,6 +114,7 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
         </div>
         <Guidance guidance={status.guidance} />
       </div>
+      <ExecutionNow detail={detail} />
     </section>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SyntheticEvent } from "react";
 import type { JobActivity, JobActivityItem } from "../types";
 import { api, errorMessage } from "../api";
@@ -8,6 +8,8 @@ import { Markdown } from "./markdown";
 
 const ACTIVITY_REFRESH_MS = 1500;
 const ACTIVITY_PREVIEW_LIMIT = 300;
+/** 距离底部多近仍视为跟随最新活动。 */
+const FOLLOW_THRESHOLD_PX = 24;
 
 interface ActivityGroup {
   tool: boolean;
@@ -17,12 +19,19 @@ interface ActivityGroup {
 /**
  * Renders the job's activity transcript. Only mounted while the job is
  * expanded; running jobs refresh on a timer that stops when the job ends.
+ * A running job's transcript follows new activity until the reader scrolls
+ * up, then shows a control to return to the latest item.
  */
 export function JobActivity({ jobId, running }: { jobId: string; running: boolean }) {
   const [activity, setActivity] = useState<JobActivity | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [rawOpen, setRawOpen] = useState(false);
+  const [following, setFollowing] = useState(true);
+  /// 活动内容的变化计数；每条活动条数都可能不变而文本增长。
+  const [revision, setRevision] = useState(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followingRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,6 +42,7 @@ export function JobActivity({ jobId, running }: { jobId: string; running: boolea
         const next = await api.getJobActivity(jobId);
         if (cancelled) return;
         setActivity(next);
+        setRevision((value) => value + 1);
         setError("");
       } catch (err) {
         if (cancelled) return;
@@ -54,6 +64,29 @@ export function JobActivity({ jobId, running }: { jobId: string; running: boolea
 
   const groups = useMemo(() => groupItems(activity?.items ?? []), [activity]);
   const summary = activity?.summary;
+
+  useLayoutEffect(() => {
+    if (!followingRef.current) return;
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [revision, running]);
+
+  function handleScroll() {
+    const element = scrollRef.current;
+    if (!element) return;
+    const atBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight <=
+      FOLLOW_THRESHOLD_PX;
+    followingRef.current = atBottom;
+    setFollowing(atBottom);
+  }
+
+  function followLatest() {
+    const element = scrollRef.current;
+    followingRef.current = true;
+    setFollowing(true);
+    if (element) element.scrollTop = element.scrollHeight;
+  }
 
   function handleRawToggle(event: SyntheticEvent<HTMLDetailsElement>) {
     setRawOpen(event.currentTarget.open);
@@ -84,16 +117,27 @@ export function JobActivity({ jobId, running }: { jobId: string; running: boolea
       {activity && activity.items.length === 0 ? (
         <div className="muted">还没有可展示的活动。</div>
       ) : null}
-      <div className="activity-list">
-        {groups.map((group, index) =>
-          group.tool ? (
-            <ToolGroup key={`tools-${index}`} items={group.items} />
-          ) : (
-            group.items.map((item, itemIndex) => (
-              <ActivityRow key={`${index}-${itemIndex}`} item={item} />
-            ))
-          ),
-        )}
+      <div className={`activity-scroll${running ? " activity-scroll-live" : ""}`}>
+        <div className="activity-list" ref={scrollRef} onScroll={handleScroll}>
+          {groups.map((group, index) =>
+            group.tool ? (
+              <ToolGroup key={`tools-${index}`} items={group.items} />
+            ) : (
+              group.items.map((item, itemIndex) => (
+                <ActivityRow key={`${index}-${itemIndex}`} item={item} />
+              ))
+            ),
+          )}
+        </div>
+        {running && !following ? (
+          <button
+            type="button"
+            className="ghost activity-follow"
+            onClick={followLatest}
+          >
+            回到最新
+          </button>
+        ) : null}
       </div>
       <details className="activity-raw" onToggle={handleRawToggle}>
         <summary>原始输出</summary>

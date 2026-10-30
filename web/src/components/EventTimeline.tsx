@@ -2,7 +2,15 @@ import { useMemo, useState } from "react";
 import type { AuditEvent, JobSummary, Task } from "../types";
 import { api, errorMessage } from "../api";
 import { RichContent } from "./RichContent";
-import { Badge, JOB_STATUS_LABELS, ROLE_LABELS, formatMillis, formatTime } from "../ui";
+import {
+  Badge,
+  JOB_STATUS_LABELS,
+  ROLE_LABELS,
+  failureSummaryLabel,
+  formatMillis,
+  formatTime,
+  shortText,
+} from "../ui";
 
 export type EventFilter = "key" | "all" | "jobs" | "config";
 
@@ -33,6 +41,15 @@ const CONFIG_KINDS = new Set([
   "agent_usage_reset",
   "analysis_policy_updated",
   "agent_unavailable",
+]);
+
+/// “关键”视图里作业只保留失败、卡死与恢复；正常排队、开始、结束留在“作业”视图。
+/// 与 presentation/execution.ts 的关键事件集合保持一致。
+const KEY_JOB_KINDS = new Set([
+  "job_failed",
+  "job_stalled",
+  "job_recovered",
+  "job_stall_recovered",
 ]);
 
 /// 连续出现的同类配置事件折叠成一组，展开后仍逐条可读。
@@ -207,7 +224,31 @@ function matchesFilter(kind: string, filter: EventFilter): boolean {
   if (filter === "all") return true;
   if (filter === "jobs") return isJobKind(kind);
   if (filter === "config") return isConfigKind(kind);
-  return !isJobKind(kind) && !isConfigKind(kind);
+  return isKeyEventKind(kind);
+}
+
+export function isKeyEventKind(kind: string): boolean {
+  if (isConfigKind(kind)) return false;
+  if (isJobKind(kind)) return KEY_JOB_KINDS.has(kind);
+  return true;
+}
+
+/// 关键视图按作业整体保留：某个作业出现失败、卡死或恢复时带上它的全部阶段。
+function filterEvents(events: AuditEvent[], filter: EventFilter): AuditEvent[] {
+  if (filter !== "key") {
+    return events.filter((event) => matchesFilter(event.kind, filter));
+  }
+  const keyJobs = new Set<string>();
+  for (const event of events) {
+    if (event.job_id && KEY_JOB_KINDS.has(event.kind)) keyJobs.add(event.job_id);
+  }
+  return events.filter((event) => {
+    if (isConfigKind(event.kind)) return false;
+    if (isJobKind(event.kind)) {
+      return event.job_id ? keyJobs.has(event.job_id) : KEY_JOB_KINDS.has(event.kind);
+    }
+    return true;
+  });
 }
 
 type TimelineItem =
@@ -264,21 +305,43 @@ function taskKeyFor(event: AuditEvent, taskKeys: Map<string, string>): string | 
   return taskKeys.get(event.task_id) ?? null;
 }
 
+/// 作业行优先用结构化作业记录定位任务，事件只作为结构化记录缺失时的补充。
+interface JobTaskRef {
+  key: string | null;
+  title: string | null;
+}
+
+function jobTask(
+  jobId: string,
+  events: AuditEvent[],
+  jobMap: Map<string, JobSummary>,
+  taskMap: Map<string, Task>,
+  taskKeys: Map<string, string>,
+): JobTaskRef {
+  const job = jobMap.get(jobId);
+  const taskId =
+    job?.task_id ??
+    events.find((event) => event.task_id)?.task_id ??
+    null;
+  const task = taskId ? taskMap.get(taskId) : undefined;
+  if (task) return { key: task.key, title: task.title };
+  return {
+    key: taskId ? taskKeys.get(taskId) ?? null : taskKeyFor(events[0], taskKeys),
+    title: null,
+  };
+}
+
 function stageTime(event: AuditEvent): number {
   return new Date(event.created_at).getTime();
 }
 
-function jobRoleLabel(events: AuditEvent[]): string {
-  for (const event of events) {
-    const matched = event.message.match(/^(.+?) ?作业/);
-    if (matched?.[1]) return matched[1].trim();
-  }
+function jobRoleLabel(job: JobSummary | undefined): string {
+  if (job) return ROLE_LABELS[job.role] ?? job.role;
   return "执行";
 }
 
-function jobAgentName(events: AuditEvent[], jobs: Map<string, JobSummary>, jobId: string): string {
-  const job = jobs.get(jobId);
-  if (job?.agent_name) return job.agent_name;
+function jobAgentName(job: JobSummary | undefined, events: AuditEvent[]): string {
+  if (job) return job.agent_name ?? "未知 Agent";
   for (const event of events) {
     const dispatched = event.message.match(/作业已派发给 (.+?)(?:（|$)/);
     if (dispatched?.[1]) return dispatched[1].trim();
@@ -366,18 +429,22 @@ export function EventTimeline({
     return map;
   }, [jobs]);
 
+  const taskMap = useMemo(() => {
+    const map = new Map<string, Task>();
+    for (const task of tasks) map.set(task.id, task);
+    return map;
+  }, [tasks]);
+
   const counts = useMemo(() => {
     const result: Record<EventFilter, number> = { key: 0, all: 0, jobs: 0, config: 0 };
     for (const definition of FILTERS) {
-      const filtered = events.filter((event) => matchesFilter(event.kind, definition.key));
-      result[definition.key] = buildTimeline(filtered).length;
+      result[definition.key] = buildTimeline(filterEvents(events, definition.key)).length;
     }
     return result;
   }, [events]);
 
   const items = useMemo(() => {
-    const filtered = events.filter((event) => matchesFilter(event.kind, filter));
-    return buildTimeline(filtered).reverse();
+    return buildTimeline(filterEvents(events, filter)).reverse();
   }, [events, filter]);
 
   return (
@@ -413,7 +480,7 @@ export function EventTimeline({
                 <JobRow
                   key={`job-${item.jobId}`}
                   item={item}
-                  taskKey={taskKeyFor(item.events[0], taskKeys)}
+                  task={jobTask(item.jobId, item.events, jobMap, taskMap, taskKeys)}
                   jobs={jobMap}
                 />
               );
@@ -497,18 +564,19 @@ function GroupRow({ item }: { item: Extract<TimelineItem, { type: "group" }> }) 
 
 function JobRow({
   item,
-  taskKey,
+  task,
   jobs,
 }: {
   item: Extract<TimelineItem, { type: "job" }>;
-  taskKey: string | null;
+  task: JobTaskRef;
   jobs: Map<string, JobSummary>;
 }) {
   const [open, setOpen] = useState(false);
   const job = jobs.get(item.jobId);
-  const role = job ? (ROLE_LABELS[job.role] ?? job.role) : jobRoleLabel(item.events);
-  const agent = jobAgentName(item.events, jobs, item.jobId);
+  const role = jobRoleLabel(job);
+  const agent = jobAgentName(job, item.events);
   const result = jobResult(item.events, jobs, item.jobId);
+  const failure = job?.failure_summary ?? null;
   const duration = job?.duration_ms ?? jobDurationMs(item.events);
   const stages = [...item.events].sort((left, right) => stageTime(left) - stageTime(right));
 
@@ -527,9 +595,23 @@ function JobRow({
           >
             {agent} · {result.text} · {duration === null ? "—" : formatMillis(duration)}
           </button>
+          {task.title ? (
+            <span className="event-job-task" title={task.title}>
+              {task.key ? `${task.key} · ` : ""}
+              {shortText(task.title, 60)}
+            </span>
+          ) : null}
+          {failure ? (
+            <span className="event-failure">
+              <Badge tone="danger" title={failure.message}>
+                {failureSummaryLabel(failure.kind)}
+              </Badge>
+              <span className="event-failure-message">{shortText(failure.message, 100)}</span>
+            </span>
+          ) : null}
         </div>
         <div className="event-meta muted">
-          {taskKey ? <span className="event-task">{taskKey}</span> : null}
+          {task.key ? <span className="event-task">{task.key}</span> : null}
           <span className="event-time">{formatTime(item.anchor.created_at)}</span>
         </div>
       </div>
