@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { SyntheticEvent } from "react";
+import type { ReactNode, SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
 import { JobActivity } from "./JobActivity";
@@ -18,6 +18,9 @@ import {
   shortText,
   toneForStatus,
 } from "../ui";
+
+/// 作业记录默认只列出最近若干条；更早的记录通过“展开全部”显示。
+export const RECENT_JOB_LIMIT = 3;
 
 export function JobDetailView({
   job,
@@ -153,11 +156,68 @@ export function JobDetailView({
             {loading ? <div className="muted">加载作业详情…</div> : null}
             {error ? <div className="error-box">{error}</div> : null}
             {detail ? <JobBlock title="结果" value={detail.result} /> : null}
-            {detail ? <JobBlock title="提示词" value={detail.prompt} /> : null}
+            {detail ? <JobPrompt value={detail.prompt} /> : null}
           </div>
         ) : null}
       </details>
     </div>
+  );
+}
+
+/** 提示词原文默认收起，需要时再展开；内容仍完整渲染。 */
+export function JobPrompt({ value }: { value: string | null }) {
+  if (!value) return null;
+  return (
+    <details className="job-block job-prompt drawer-fold">
+      <summary>提示词（{countLines(value)} 行）</summary>
+      <RichContent content={value} />
+    </details>
+  );
+}
+
+/// 作业记录的可见切片：展开后返回全部，否则只取最近 limit 条（limit <= 0 视为不截断）。
+export function recentJobs(
+  jobs: JobSummary[],
+  limit: number,
+  showAll: boolean,
+): JobSummary[] {
+  if (showAll || limit <= 0) return jobs;
+  return jobs.slice(Math.max(0, jobs.length - limit));
+}
+
+/**
+ * 作业记录列表：默认只渲染最近 limit 条，更早的记录通过“展开全部”显示，
+ * 已展示条数始终可达。
+ */
+export function JobRecordList({
+  jobs,
+  limit = RECENT_JOB_LIMIT,
+  renderJob,
+  emptyText = "还没有作业。",
+}: {
+  jobs: JobSummary[];
+  limit?: number;
+  renderJob: (job: JobSummary) => ReactNode;
+  emptyText?: string;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    setShowAll(false);
+  }, [jobs.length, limit]);
+  if (jobs.length === 0) return <div className="muted">{emptyText}</div>;
+  const visible = recentJobs(jobs, limit, showAll);
+  const hiddenCount = jobs.length - visible.length;
+  return (
+    <>
+      <div className="jobs">{visible.map((job) => renderJob(job))}</div>
+      {hiddenCount > 0 ? (
+        <div className="button-row job-records-more">
+          <button className="secondary" type="button" onClick={() => setShowAll(true)}>
+            展开全部（还有 {hiddenCount} 条）
+          </button>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -169,6 +229,10 @@ function JobBlock({ title, value }: { title: string; value: string | null }) {
       <RichContent content={value} />
     </div>
   );
+}
+
+function countLines(value: string): number {
+  return value.split(/\r?\n/).length;
 }
 
 function formatTokenDetails(job: JobSummary): string {

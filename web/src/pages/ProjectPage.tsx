@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
+  JobActivity,
   JobSummary,
   ProjectArchiveRefs,
   ProjectDetail,
@@ -13,13 +14,18 @@ import type {
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { EventTimeline } from "../components/EventTimeline";
-import { JobDetailView } from "../components/JobDetailView";
+import { JobDetailView, JobRecordList } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
 import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
 import { usagePath } from "../router";
+import {
+  ACTIVITY_WAITING_TEXT,
+  activityDigest,
+  type ActivityDigestItem,
+} from "../presentation/activity";
 import {
   TASK_FILTERS,
   type TaskFilter,
@@ -631,13 +637,10 @@ export function ProjectPage({
             {goalMessages.length === 0 ? (
               <div className="muted">还没有输入项目目标。</div>
             ) : null}
-            {analysisJob ? (
-              <div className="message message-planner live-message">
-                <div className="message-role">规划者（实时输出）</div>
-                <LiveOutput jobId={analysisJob.id} running />
-              </div>
-            ) : null}
           </div>
+          {analysisJob ? (
+            <AnalysisLiveActivity jobId={analysisJob.id} />
+          ) : null}
           {analysisJob ? (
             <div className="goal-running">
               <Badge tone="info">规划者正在分析</Badge>
@@ -1155,16 +1158,17 @@ export function ProjectPage({
       {projectJobs.length > 0 ? (
         <section className="panel">
           <h2>项目分析 / 直接完成 / 总结作业</h2>
-          <div className="jobs">
-            {projectJobs.map((job) => (
+          <JobRecordList
+            jobs={projectJobs}
+            renderJob={(job) => (
               <JobDetailView
                 key={job.id}
                 job={job}
                 retryable={job.id === retryableProjectJobId}
                 onRetry={() => run(() => api.retryJob(job.id))}
               />
-            ))}
-          </div>
+            )}
+          />
         </section>
       ) : null}
 
@@ -1321,6 +1325,193 @@ export function ProjectPage({
 function latestFailedJobId(jobs: JobSummary[]): string | null {
   const last = jobs[jobs.length - 1];
   return last?.status === "failed" ? last.id : null;
+}
+
+/// 实时区默认展示的消息条数；关键状态（失败与进行中的工具）另计。
+export const LIVE_MESSAGE_LIMIT = 4;
+const LIVE_ACTIVITY_REFRESH_MS = 1500;
+
+export interface LiveActivityFeed {
+  /// 最新一条可读活动，用于“正在做什么”的一句话摘要。
+  headline: string | null;
+  /// 最近的消息，最新在后。
+  messages: ActivityDigestItem[];
+  /// 最近的关键状态：失败与进行中的工具，最新在后。
+  keys: ActivityDigestItem[];
+  /// 未展开时被省略的条数；0 表示全部可见。
+  hidden: number;
+  /// 没有任何可读摘要时展示的等待文案。
+  waiting: string | null;
+}
+
+/// 从活动摘要派生实时区内容：消息给读者看，失败与进行中的工具作为关键状态。
+/// 纯派生，不发请求，不改变事件轮询频率。
+export function liveActivityFeed(
+  items: ActivityDigestItem[],
+  expanded = false,
+  limit: number = LIVE_MESSAGE_LIMIT,
+): LiveActivityFeed {
+  const messages = items.filter((entry) => entry.kind === "message");
+  const keys = items.filter((entry) => entry.tone !== "normal");
+  const all = expanded || limit <= 0;
+  const visibleMessages = all
+    ? messages
+    : messages.slice(Math.max(0, messages.length - limit));
+  const visibleKeys = all ? keys : keys.slice(Math.max(0, keys.length - limit));
+  const shown = visibleMessages.length + visibleKeys.length;
+  return {
+    // 优先取最新消息；只有工具活动时退回到最新一条活动，避免误报“等待活动”。
+    headline: messages.at(-1)?.text ?? items.at(-1)?.text ?? null,
+    messages: visibleMessages,
+    keys: visibleKeys,
+    hidden: Math.max(0, items.length - shown),
+    waiting: items.length === 0 ? ACTIVITY_WAITING_TEXT : null,
+  };
+}
+
+/**
+ * 项目分析运行中的实时区：展示 JobActivity 的可读摘要，而不是原始 stdout。
+ * 原始输出收在默认收起的“原始输出”折叠里，展开才加载完整 stdout / stderr。
+ */
+function AnalysisLiveActivity({ jobId }: { jobId: string }) {
+  const [activity, setActivity] = useState<JobActivity | null>(null);
+  const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function tick() {
+      try {
+        const next = await api.getJobActivity(jobId);
+        if (cancelled) return;
+        setActivity(next);
+        setError("");
+      } catch (err) {
+        if (cancelled) return;
+        setError(errorMessage(err));
+      }
+      if (!cancelled) {
+        timer = window.setTimeout(() => void tick(), LIVE_ACTIVITY_REFRESH_MS);
+      }
+    }
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [jobId]);
+
+  const items = useMemo(
+    () => activityDigest(activity, { limit: 0 }).items,
+    [activity],
+  );
+  const feed = useMemo(() => liveActivityFeed(items, expanded), [items, expanded]);
+  const summary = activity?.summary ?? null;
+
+  return (
+    <LiveActivitySummary
+      feed={feed}
+      summary={summary}
+      loading={activity === null && !error}
+      error={error}
+      rawOpen={rawOpen}
+      onRawToggle={(open) => setRawOpen(open)}
+      onExpand={() => setExpanded(true)}
+      jobId={jobId}
+    />
+  );
+}
+
+/**
+ * 实时区的纯展示部分：可读摘要列表 + 默认收起的“原始输出”折叠。
+ * 折叠未展开时不挂载 LiveOutput，DOM 里不会出现 stdout / stderr。
+ */
+export function LiveActivitySummary({
+  feed,
+  summary,
+  loading,
+  error,
+  rawOpen,
+  onRawToggle,
+  onExpand,
+  jobId,
+}: {
+  feed: LiveActivityFeed;
+  summary: JobActivity["summary"] | null;
+  loading: boolean;
+  error: string;
+  rawOpen: boolean;
+  onRawToggle: (open: boolean) => void;
+  onExpand: () => void;
+  jobId: string;
+}) {
+  return (
+    <div className="message message-planner live-message">
+      <div className="message-role">规划者（实时进展）</div>
+      <div className="live-activity">
+        <div className="live-activity-head">
+          {feed.headline ? (
+            <div className="live-activity-headline">{feed.headline}</div>
+          ) : (
+            <div className="muted">{feed.waiting ?? ACTIVITY_WAITING_TEXT}</div>
+          )}
+          <span className="live-activity-meta muted">
+            运行中 · 每 1.5 秒刷新
+            {summary
+              ? ` · 消息 ${summary.messages} · 工具 ${summary.tool_calls} · 失败 ${summary.tool_failures}`
+              : ""}
+          </span>
+        </div>
+        {loading ? <div className="muted">加载活动…</div> : null}
+        {error ? <div className="error-box">读取活动失败：{error}</div> : null}
+        {feed.messages.length > 0 || feed.keys.length > 0 ? (
+          <ul className="live-activity-list">
+            {feed.keys.map((entry) => (
+              <li
+                key={`key-${entry.index}`}
+                className={`live-activity-item live-activity-${entry.tone}`}
+              >
+                <Badge tone={entry.tone === "failure" ? "danger" : "info"}>
+                  {entry.tone === "failure" ? "失败" : "进行中"}
+                </Badge>
+                <span>{entry.text}</span>
+              </li>
+            ))}
+            {feed.messages.map((entry) => (
+              <li key={`msg-${entry.index}`} className="live-activity-item">
+                <span className="live-activity-index">消息</span>
+                <span>{entry.text}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {feed.hidden > 0 ? (
+          <div className="button-row live-activity-more">
+            <button className="ghost" type="button" onClick={onExpand}>
+              展开全部（还有 {feed.hidden} 条）
+            </button>
+          </div>
+        ) : null}
+        <details
+          className="activity-raw live-activity-raw"
+          onToggle={(event) => onRawToggle(event.currentTarget.open)}
+        >
+          <summary>原始输出</summary>
+          <div className="activity-raw-body">
+            {rawOpen ? (
+              <LiveOutput jobId={jobId} running />
+            ) : (
+              <div className="muted">展开后加载完整 stdout / stderr。</div>
+            )}
+          </div>
+        </details>
+      </div>
+    </div>
+  );
 }
 
 /// 任务行的可调整队列控件：展示位置摘要，按钮使用明确文案，首尾按 queueEdge 禁用。
@@ -1650,20 +1841,17 @@ function TaskDrawer({
   const jobsSection = (
     <section>
       <h3>作业（{jobs.length}）</h3>
-      {jobs.length === 0 ? (
-        <div className="muted">还没有作业。</div>
-      ) : (
-        <div className="jobs">
-          {jobs.map((job) => (
-            <JobDetailView
-              key={job.id}
-              job={job}
-              retryable={job.id === retryableJobId}
-              onRetry={() => onRetryJob(job.id)}
-            />
-          ))}
-        </div>
-      )}
+      <JobRecordList
+        jobs={jobs}
+        renderJob={(job) => (
+          <JobDetailView
+            key={job.id}
+            job={job}
+            retryable={job.id === retryableJobId}
+            onRetry={() => onRetryJob(job.id)}
+          />
+        )}
+      />
     </section>
   );
   const acceptanceSection = (
@@ -1864,12 +2052,15 @@ function TaskDrawer({
     </details>
   );
   const agentPoolSection = (
-    <TaskAgentPoolPanel
-      task={task}
-      onRefresh={onRefresh}
-      defaultOpen={!resultFirst}
-      disabled={archived || task.stage === "completed" || task.status === "canceled"}
-    />
+    <details className="drawer-fold task-agent-pool">
+      <summary>任务 Agent 池（按需展开配置）</summary>
+      <TaskAgentPoolPanel
+        task={task}
+        onRefresh={onRefresh}
+        defaultOpen
+        disabled={archived || task.stage === "completed" || task.status === "canceled"}
+      />
+    </details>
   );
   const controlSection = canControl ? (
     <div className="task-control-bar">

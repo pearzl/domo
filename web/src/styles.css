@@ -2220,6 +2220,65 @@ input[aria-invalid="true"] {
   background: #f7faff;
 }
 
+/* 项目分析实时区：可读摘要列表 + 默认收起的原始输出折叠。 */
+.live-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.live-activity-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.live-activity-headline {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.live-activity-meta {
+  font-size: 0.75rem;
+}
+
+.live-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.live-activity-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.live-activity-index {
+  flex: none;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.live-activity-failure {
+  color: var(--danger);
+}
+
+.live-activity-more,
+.activity-more,
+.job-records-more {
+  font-size: 0.8rem;
+}
+
 .job-meta {
   font-size: 0.78rem;
   color: var(--muted);
