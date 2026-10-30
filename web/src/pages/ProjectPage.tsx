@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
   JobSummary,
+  ProjectArchiveRefs,
   ProjectDetail,
   ProjectUsage,
   Task,
@@ -38,6 +39,9 @@ import {
   shortText,
 } from "../ui";
 
+/// Mirrors the backend marker that is written before a worktree is removed.
+const ARTIFACTS_RELEASING = "releasing";
+
 export function ProjectPage({
   id,
   onBack,
@@ -68,6 +72,9 @@ export function ProjectPage({
     tone: "ok" | "error";
     text: string;
   } | null>(null);
+  const [archiveRefs, setArchiveRefs] = useState<ProjectArchiveRefs | null>(
+    null,
+  );
 
   async function refresh(silent = false) {
     try {
@@ -97,11 +104,56 @@ export function ProjectPage({
     [detail, selectedTaskId],
   );
 
+  useEffect(() => {
+    if (detail?.project.status !== "archived") {
+      setArchiveRefs(null);
+      return;
+    }
+    let active = true;
+    void api
+      .getProjectArchiveRefs(id)
+      .then((next) => {
+        if (active) setArchiveRefs(next);
+      })
+      .catch(() => {
+        if (active) setArchiveRefs(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, detail?.project.status]);
+
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
     setError("");
     try {
       await action();
+      await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleArchive() {
+    setBusy(true);
+    setError("");
+    try {
+      const preview = await api.getArchivePreview(id);
+      const dirty = preview.dirty;
+      let prompt = "归档后不会继续推进，也不能恢复。确认归档？";
+      if (dirty.length > 0) {
+        const shown = dirty
+          .slice(0, 5)
+          .map((item) => `${item.label}（${item.path}）`)
+          .join("\n");
+        const more =
+          dirty.length > 5 ? `\n…等 ${dirty.length} 个工作区` : "";
+        prompt = `以下工作区有未提交改动：\n${shown}${more}\n\n归档后会保留这些工作区，项目工作区可能无法完全清理。确认归档？`;
+      }
+      if (!window.confirm(prompt)) return;
+      await api.archiveProject(id, dirty.length > 0);
       await refresh();
     } catch (err) {
       setError(errorMessage(err));
@@ -272,11 +324,7 @@ export function ProjectPage({
               <button
                 className="danger"
                 disabled={busy}
-                onClick={() => {
-                  if (window.confirm("归档后不会继续推进，也不能恢复。确认归档？")) {
-                    void run(() => api.archiveProject(project.id));
-                  }
-                }}
+                onClick={() => void handleArchive()}
               >
                 归档
               </button>
@@ -328,6 +376,19 @@ export function ProjectPage({
                   目标分支 <span className="mono">{project.base_branch}</span> 已包含项目分支{" "}
                   <span className="mono">{project.branch}</span> 的全部提交。
                 </>
+              ) : archived ? (
+                <>
+                  未合入，项目分支 <span className="mono">{project.branch}</span>{" "}
+                  已归档。归档 ref：
+                  <span className="mono">
+                    {`refs/domo-archive/heads/${project.branch}`}
+                  </span>
+                  <br />
+                  恢复命令：
+                  <span className="mono">
+                    {`git branch ${project.branch} refs/domo-archive/heads/${project.branch}`}
+                  </span>
+                </>
               ) : (
                 <>
                   项目已完成。改动位于 <span className="mono">{project.branch}</span>
@@ -335,7 +396,7 @@ export function ProjectPage({
                 </>
               )}
             </div>
-            {!detail.merged_into_base ? (
+            {!detail.merged_into_base && !archived ? (
               <div className="button-row merge-actions">
                 <button
                   className="primary"
@@ -657,6 +718,50 @@ export function ProjectPage({
                 <RichContent content={item.content} className="message-content" />
               </div>
             ))}
+          </div>
+        </details>
+      ) : null}
+
+      {archived && archiveRefs ? (
+        <details className="panel">
+          <summary>归档历史与备份</summary>
+          <p className="muted">
+            任务与项目分支的提交保存在 refs/domo-archive。恢复前先确认同名分支不存在。
+          </p>
+          {archiveRefs.project ? (
+            <>
+              <div className="kv">
+                <span>项目分支</span>
+                <span className="mono">
+                  {archiveRefs.project.reference} @{" "}
+                  {archiveRefs.project.tip.slice(0, 7)}
+                </span>
+              </div>
+              <div className="muted mono">{archiveRefs.project.recovery}</div>
+              <div className="muted mono">{archiveRefs.project.log_command}</div>
+            </>
+          ) : null}
+          {archiveRefs.tasks.length > 0 ? (
+            <div className="derive-list">
+              {archiveRefs.tasks.map((item) => (
+                <div className="derive-child" key={item.task_id}>
+                  <div className="derive-child-head">
+                    <span className="task-key">{item.key}</span>
+                    <span className="derive-child-title">{item.title}</span>
+                    <Badge tone="muted">{item.tip.slice(0, 7)}</Badge>
+                  </div>
+                  <div className="muted mono">{item.reference}</div>
+                  <div className="muted mono">{item.recovery}</div>
+                  <div className="muted mono">{item.log_command}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="muted">没有任务分支归档记录。</div>
+          )}
+          <div className="kv">
+            <span>备份命令</span>
+            <span className="mono">{archiveRefs.backup_command}</span>
           </div>
         </details>
       ) : null}
@@ -1329,6 +1434,15 @@ function TaskDrawer({
   agentName: (id: string | null) => string;
 }) {
   const jobs = detail.jobs.filter((job) => job.task_id === task.id);
+  const artifactsReleasing = task.artifacts_released_at === ARTIFACTS_RELEASING;
+  const artifactsReleased = Boolean(task.artifacts_released_at);
+  const archiveReference = task.branch
+    ? `refs/domo-archive/heads/${task.branch}`
+    : null;
+  const archiveRecovery =
+    task.branch && archiveReference
+      ? `git branch ${task.branch} ${archiveReference}`
+      : null;
   const retryableJobId =
     task.status === "blocked" && task.human_gate !== "milestone"
       ? latestFailedJobId(jobs)
@@ -1542,18 +1656,35 @@ function TaskDrawer({
         <span>工作区</span>
         <span className="badge-row">
           <span className="mono">
-            {task.worktree ?? (task.artifacts_released_at ? "已回收" : "尚未创建")}
+            {task.worktree ??
+              (artifactsReleasing
+                ? "回收中"
+                : artifactsReleased
+                  ? "已回收"
+                  : "尚未创建")}
           </span>
-          {task.worktree && task.artifacts_released_at ? (
+          {task.worktree && artifactsReleased ? (
             <Badge
               tone="muted"
               title="工作区已回收，分支提交保留在 refs/domo-archive"
             >
-              已回收
+              {artifactsReleasing ? "回收中" : "已回收"}
             </Badge>
           ) : null}
         </span>
       </div>
+      {archiveReference && artifactsReleased && !artifactsReleasing ? (
+        <div className="kv">
+          <span>归档 ref</span>
+          <span className="mono">{archiveReference}</span>
+        </div>
+      ) : null}
+      {artifactsReleased && !artifactsReleasing && archiveRecovery ? (
+        <div className="kv">
+          <span>恢复命令</span>
+          <span className="mono">{archiveRecovery}</span>
+        </div>
+      ) : null}
       <div className="kv">
         <span>排队位置</span>
         <span>

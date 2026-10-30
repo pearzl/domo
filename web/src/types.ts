@@ -231,6 +231,39 @@ export interface Task {
   updated_at: string;
 }
 
+export interface DirtyWorktree {
+  task_id: string | null;
+  key: string | null;
+  title: string | null;
+  label: string;
+  path: string;
+}
+
+export interface ArchivePreview {
+  dirty: DirtyWorktree[];
+}
+
+export interface ArchivedRef {
+  branch: string;
+  reference: string;
+  tip: string;
+  recovery: string;
+  log_command: string;
+}
+
+export interface ArchivedTaskRef extends ArchivedRef {
+  task_id: string;
+  key: string;
+  title: string;
+  released_at: string | null;
+}
+
+export interface ProjectArchiveRefs {
+  project: ArchivedRef | null;
+  tasks: ArchivedTaskRef[];
+  backup_command: string;
+}
+
 export interface JobSummary {
   id: string;
   project_id: string;

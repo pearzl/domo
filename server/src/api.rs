@@ -46,6 +46,12 @@ impl ApiError {
             message: message.into(),
         }
     }
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
     fn internal(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -111,7 +117,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}/pause", post(pause_project))
         .route("/api/projects/{id}/resume", post(resume_project))
-        .route("/api/projects/{id}/archive", post(archive_project))
+        .route(
+            "/api/projects/{id}/archive",
+            get(archive_preview).post(archive_project),
+        )
+        .route("/api/projects/{id}/archive-refs", get(project_archive_refs))
         .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/report", post(submit_report))
         .route("/api/projects/{id}/merge", post(merge_project))
@@ -1992,11 +2002,117 @@ async fn resume_project(
     Ok(Json(json!({"ok": true})))
 }
 
-async fn archive_project(
+#[derive(Debug, Default, Deserialize)]
+struct ArchiveQuery {
+    force: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DirtyWorktree {
+    task_id: Option<String>,
+    key: Option<String>,
+    title: Option<String>,
+    label: String,
+    path: String,
+}
+
+/// Worktrees that would survive archiving because they still hold uncommitted
+/// changes. The archive endpoint asks for confirmation before accepting them.
+async fn dirty_worktrees(
+    state: &AppState,
+    project: &ProjectRow,
+) -> Result<Vec<DirtyWorktree>, ApiError> {
+    let _guard = state.git_lock.lock().await;
+    let mut dirty = Vec::new();
+    let project_worktree = paths::project_repo(&PathBuf::from(&project.workspace));
+    if project_worktree.exists() {
+        let project_dirty = match git::status_porcelain(&project_worktree).await {
+            Ok(output) => !output.trim().is_empty(),
+            Err(error) => {
+                tracing::warn!(
+                    path = %project_worktree.display(),
+                    error = %format!("{error:#}"),
+                    "归档检查无法读取项目工作区状态"
+                );
+                true
+            }
+        };
+        if project_dirty {
+            dirty.push(DirtyWorktree {
+                task_id: None,
+                key: None,
+                title: None,
+                label: "项目工作区".to_string(),
+                path: project_worktree.to_string_lossy().to_string(),
+            });
+        }
+    }
+    let tasks =
+        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE project_id = ? ORDER BY seq ASC")
+            .bind(&project.id)
+            .fetch_all(&state.db)
+            .await?;
+    for task in tasks {
+        let Some(path) = task.worktree else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            continue;
+        }
+        let dirty_worktree = match git::status_porcelain(&path).await {
+            Ok(output) => !output.trim().is_empty(),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %format!("{error:#}"),
+                    "归档检查无法读取任务工作区状态"
+                );
+                true
+            }
+        };
+        if dirty_worktree {
+            let label = format!("{} {}", task.key, task.title);
+            dirty.push(DirtyWorktree {
+                task_id: Some(task.id),
+                key: Some(task.key),
+                title: Some(task.title),
+                label,
+                path: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+    Ok(dirty)
+}
+
+async fn archive_preview(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = require_project(&state, &id).await?;
+    let dirty = dirty_worktrees(&state, &project).await?;
+    Ok(Json(json!({ "dirty": dirty })))
+}
+
+async fn archive_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ArchiveQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if !query.force.unwrap_or(false) {
+        let dirty = dirty_worktrees(&state, &project).await?;
+        if !dirty.is_empty() {
+            let labels = dirty
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            return Err(ApiError::conflict(format!(
+                "以下工作区有未提交改动：{labels}。归档会保留这些工作区，项目工作区可能无法完全清理。确认后请携带 force=true 重新归档。"
+            )));
+        }
+    }
     {
         let _guard = state.schedule_lock.lock().await;
         sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
@@ -2034,6 +2150,61 @@ async fn archive_project(
     .await;
     state.notify_scheduler();
     Ok(Json(json!({"ok": true})))
+}
+
+async fn project_archive_refs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    let repo = PathBuf::from(&project.repo_path);
+    let project_reference = git::archive_ref(&project.branch);
+    let project_recovery = format!("git branch {} {}", project.branch, project_reference);
+    let project_log = format!("git log --oneline {project_reference}");
+    let project_view = match git::commit_of(&repo, &project_reference).await {
+        Ok(tip) => json!({
+            "branch": project.branch,
+            "reference": project_reference,
+            "tip": tip,
+            "recovery": project_recovery,
+            "log_command": project_log,
+        }),
+        Err(_) => Value::Null,
+    };
+    let tasks = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks WHERE project_id = ? AND branch IS NOT NULL ORDER BY seq ASC",
+    )
+    .bind(&project.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut archived_tasks = Vec::new();
+    for task in tasks {
+        let Some(branch) = task.branch else {
+            continue;
+        };
+        let reference = git::archive_ref(&branch);
+        let Ok(tip) = git::commit_of(&repo, &reference).await else {
+            continue;
+        };
+        let recovery = format!("git branch {branch} {reference}");
+        let log_command = format!("git log --oneline {reference}");
+        archived_tasks.push(json!({
+            "task_id": task.id,
+            "key": task.key,
+            "title": task.title,
+            "released_at": task.artifacts_released_at,
+            "branch": branch,
+            "reference": reference,
+            "tip": tip,
+            "recovery": recovery,
+            "log_command": log_command,
+        }));
+    }
+    Ok(Json(json!({
+        "project": project_view,
+        "tasks": archived_tasks,
+        "backup_command": "git bundle create domo-archive.bundle --all",
+    })))
 }
 
 async fn submit_report(
@@ -2227,6 +2398,11 @@ async fn merge_project(
     let project = require_project(&state, &id).await?;
     if project.stage != STAGE_COMPLETED {
         return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
+    }
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad(
+            "项目已归档，项目分支在 refs/domo-archive 中，无法直接合入",
+        ));
     }
     let _guard = state.git_lock.lock().await;
     let project = require_project(&state, &id).await?;

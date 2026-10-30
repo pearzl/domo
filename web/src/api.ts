@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentInput,
   ArbitrationContext,
+  ArchivePreview,
   AuditEvent,
   CreateProjectInput,
   CreateTaskInput,
@@ -10,6 +11,7 @@ import type {
   JobActivity,
   JobDetail,
   ProjectAgentPool,
+  ProjectArchiveRefs,
   ProjectDetail,
   ProjectSummary,
   Role,
@@ -133,8 +135,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
-  archiveProject: (id: string) =>
-    request<{ ok: boolean }>(`/api/projects/${id}/archive`, { method: "POST" }),
+  archiveProject: (id: string, force = false) =>
+    request<{ ok: boolean }>(
+      `/api/projects/${id}/archive${force ? "?force=true" : ""}`,
+      { method: "POST" },
+    ),
+  getArchivePreview: (id: string) =>
+    request<ArchivePreview>(`/api/projects/${id}/archive`),
+  getProjectArchiveRefs: (id: string) =>
+    request<ProjectArchiveRefs>(`/api/projects/${id}/archive-refs`),
   pauseTask: (projectId: string, taskId: string, force = false) =>
     request<ProjectDetail>(
       `/api/projects/${projectId}/tasks/${taskId}/pause`,
