@@ -18,6 +18,8 @@
 # 临时数据全部放在 ${TMPDIR:-/tmp}，退出码 0 表示全部通过。
 
 set -euo pipefail
+# Git for Windows defaults to the GBK code page; keep Python on UTF-8.
+export PYTHONUTF8=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/domo-agent-adapters.$$"

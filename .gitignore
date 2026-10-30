@@ -9,6 +9,8 @@
 # ---------- 运行时数据（数据库 / 日志 / 工作区 / 归档 / 冒烟产物）----------
 /server/data/
 /data/
+/.domo/
+/server/.domo/
 *.db
 *.db-wal
 *.db-shm

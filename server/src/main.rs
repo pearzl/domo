@@ -12,6 +12,7 @@ mod git;
 mod models;
 mod opencode;
 mod paths;
+mod platform;
 mod prompts;
 mod replan;
 mod runner;

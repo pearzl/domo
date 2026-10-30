@@ -14,6 +14,8 @@
 # 临时目录全部由脚本清理。
 
 set -euo pipefail
+# Git for Windows defaults to the GBK code page; keep Python on UTF-8.
+export PYTHONUTF8=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/domo-stall.$$"
@@ -145,6 +147,27 @@ from datetime import datetime
 base = f"http://127.0.0.1:{sys.argv[1]}"
 repo = sys.argv[2]
 tmp_root = sys.argv[3]
+
+
+def process_alive(pid):
+    if os.name == "nt":
+        import subprocess
+
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="mbcs",
+            errors="ignore",
+        )
+        return f'"{pid}"' in result.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 _pending_goals = {}
 
@@ -394,7 +417,8 @@ for stalled_job in failed_jobs:
     assert stalled_job["task_id"] == t1["id"], f"只有 T1 应失败：{stalled_job}"
     assert "卡死" in (stalled_job["error"] or ""), stalled_job
     assert stalled_job["failure_kind"] == "transient", stalled_job
-    assert stalled_job["exit_code"] is None, f"卡死进程应被信号终止：{stalled_job}"
+    if os.name != "nt":
+        assert stalled_job["exit_code"] is None, f"卡死进程应被信号终止：{stalled_job}"
 
 t1_jobs = jobs_of(detail, task_id=t1["id"], role="executor")
 t1_jobs.sort(key=lambda job: job["started_at"])
@@ -427,11 +451,7 @@ assert agents[stall_agent["id"]]["transient_failures"] >= 3, agents[stall_agent[
 t1_pid_path = os.path.join(tmp_root, "t1.pid")
 with open(t1_pid_path, encoding="utf-8") as handle:
     t1_pid = int(handle.read().strip())
-try:
-    os.kill(t1_pid, 0)
-    raise AssertionError(f"卡死进程 {t1_pid} 未被清理")
-except ProcessLookupError:
-    pass
+assert not process_alive(t1_pid), f"卡死进程 {t1_pid} 未被清理"
 
 call("POST", f"/api/projects/{isolation_project}/archive", {})
 print("   隔离场景通过：T1 卡死阻塞，槽位立即释放，T2/T3 未受影响")

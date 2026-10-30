@@ -641,6 +641,7 @@ async fn run_agent_job(
     tokio::pin!(stall_watch);
 
     let mut stalled: Option<String> = None;
+    let mut stall_kill_attempted = false;
     let mut timed_out = false;
     let mut run: agents::AgentRun;
     loop {
@@ -672,7 +673,7 @@ async fn run_agent_job(
                 )
                 .await;
                 stalled = Some(reason);
-                agents::kill_job_dir(job_dir);
+                stall_kill_attempted = agents::kill_job_dir(job_dir);
             }
         }
     }
@@ -686,7 +687,10 @@ async fn run_agent_job(
         );
     }
     if let Some(reason) = stalled {
-        if run.exit_code.is_none() {
+        // Windows reports an exit code for a process killed by `taskkill`, so
+        // the signal check alone cannot distinguish a watchdog kill from a
+        // process that exited on its own. A verified kill attempt does.
+        if run.exit_code.is_none() || stall_kill_attempted {
             run.stalled = true;
             if !run.stderr.is_empty() {
                 run.stderr.push('\n');
@@ -987,10 +991,8 @@ async fn prepare_task_worktree(
         }
     }
     let workspace = PathBuf::from(&project.workspace);
+    let repo = paths::project_repo(&workspace);
     let path = paths::task_worktree(&workspace, task.seq);
-    if path.exists() {
-        let _ = tokio::fs::remove_dir_all(&path).await;
-    }
     let branch = format!(
         "domo-task/{}/{}-{}",
         short_id(&project.id),
@@ -1010,13 +1012,16 @@ async fn prepare_task_worktree(
     };
     {
         let _guard = state.git_lock.lock().await;
-        git::create_task_worktree(
-            &paths::project_repo(&workspace),
-            &base_branch,
-            &path,
-            &branch,
-        )
-        .await?;
+        if path.exists() {
+            let _ = git::remove_worktree(&repo, &path).await;
+            if path.exists() {
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+        }
+        // A crash can leave the worktree registered while its directory is
+        // gone. Prune that metadata before adding the path again.
+        git::prune_worktrees(&repo).await?;
+        git::create_task_worktree(&repo, &base_branch, &path, &branch).await?;
     }
     sqlx::query(
         "UPDATE tasks SET worktree = ?, branch = ?, artifacts_released_at = NULL, updated_at = ? \
@@ -1043,17 +1048,18 @@ async fn prepare_verify_worktree(
         .clone()
         .ok_or_else(|| anyhow!("任务没有执行分支，无法验收"))?;
     let workspace = PathBuf::from(&project.workspace);
+    let repo = paths::project_repo(&workspace);
     let path = paths::verify_worktree(&workspace, task.seq, job_id);
-    if path.exists() {
-        let _guard = state.git_lock.lock().await;
-        let _ = git::remove_worktree(&paths::project_repo(&workspace), &path).await;
-        if path.exists() {
-            let _ = tokio::fs::remove_dir_all(&path).await;
-        }
-    }
     {
         let _guard = state.git_lock.lock().await;
-        git::create_verify_worktree(&paths::project_repo(&workspace), &branch, &path).await?;
+        if path.exists() {
+            let _ = git::remove_worktree(&repo, &path).await;
+            if path.exists() {
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+        }
+        git::prune_worktrees(&repo).await?;
+        git::create_verify_worktree(&repo, &branch, &path).await?;
     }
     Ok(path)
 }

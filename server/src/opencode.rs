@@ -182,9 +182,10 @@ async fn api_children(session_id: &str) -> Result<Vec<String>> {
 }
 
 async fn command_output(bin: &str, args: &[&str]) -> Option<std::process::Output> {
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
     let output = tokio::time::timeout(
         COMMAND_TIMEOUT,
-        tokio::process::Command::new(bin).args(args).output(),
+        crate::platform::command(bin, &args).output(),
     )
     .await
     .ok()?

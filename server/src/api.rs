@@ -637,12 +637,7 @@ async fn create_project(
     if name.is_empty() {
         return Err(ApiError::bad("项目名称不能为空"));
     }
-    let raw_repo = request.repo_path.trim();
-    let repo_input = if let Some(rest) = raw_repo.strip_prefix("~/") {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest)
-    } else {
-        PathBuf::from(raw_repo)
-    };
+    let repo_input = crate::platform::expand_tilde(request.repo_path.trim());
     if !repo_input.is_dir() {
         return Err(ApiError::bad("仓库路径不存在"));
     }

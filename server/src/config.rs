@@ -7,6 +7,8 @@ use std::time::Duration;
 /// Port used when `DOMO_SERVER_PORT` is unset.
 pub const DEFAULT_PORT: u16 = 8787;
 
+use crate::platform;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub data_root: PathBuf,
@@ -26,10 +28,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-        let data_root = path_from_env("DOMO_DATA_ROOT", &home, ".domo/data");
-        let workspace_root = path_from_env("DOMO_WORKSPACE_ROOT", &home, ".domo/workspace");
-        let log_root = path_from_env("DOMO_LOG_ROOT", &home, ".domo/log");
+        let home = platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data_root = path_from_env("DOMO_DATA_ROOT", &home, &[".domo", "data"]);
+        let workspace_root = path_from_env("DOMO_WORKSPACE_ROOT", &home, &[".domo", "workspace"]);
+        let log_root = path_from_env("DOMO_LOG_ROOT", &home, &[".domo", "log"]);
         let (port, port_explicit) = match env::var("DOMO_SERVER_PORT") {
             Ok(value) => (value.parse().unwrap_or(DEFAULT_PORT), true),
             Err(_) => (DEFAULT_PORT, false),
@@ -67,20 +69,31 @@ impl Config {
     }
 }
 
-fn path_from_env(key: &str, home: &str, fallback: &str) -> PathBuf {
-    env::var(key)
+fn path_from_env(key: &str, home: &Path, fallback: &[&str]) -> PathBuf {
+    let path = env::var_os(key)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(home).join(fallback))
-        .components()
-        .collect()
+        .map(platform::expand_tilde_path)
+        .unwrap_or_else(|| {
+            fallback
+                .iter()
+                .fold(home.to_path_buf(), |path, part| path.join(part))
+        });
+    path.components().collect()
 }
 
 fn discover_web_dist() -> PathBuf {
-    let candidates = [PathBuf::from("../web/dist"), PathBuf::from("web/dist")];
-    for candidate in candidates {
-        if candidate.join("index.html").is_file() {
-            return candidate;
+    let mut candidates = vec![
+        PathBuf::from("../web/dist"),
+        PathBuf::from("web/dist"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"),
+    ];
+    if let Ok(executable) = env::current_exe() {
+        if let Some(dir) = executable.parent() {
+            candidates.push(dir.join("../../../web/dist"));
         }
     }
-    PathBuf::from("../web/dist")
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("index.html").is_file())
+        .unwrap_or_else(|| PathBuf::from("../web/dist"))
 }

@@ -9,6 +9,8 @@
 # 不依赖固定的模型名，不访问除模型服务外的外部资源。
 
 set -euo pipefail
+# Git for Windows defaults to the GBK code page; keep Python on UTF-8.
+export PYTHONUTF8=1
 
 if [[ -z "${DOMO_RT_MODEL:-}" ]]; then
   echo "跳过：未设置 DOMO_RT_MODEL（真实模型用例）"

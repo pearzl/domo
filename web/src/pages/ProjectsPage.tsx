@@ -127,7 +127,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
               <input
                 value={repoPath}
                 onChange={(event) => setRepoPath(event.target.value)}
-                placeholder="/path/to/repository"
+                placeholder="C:\repos\demo 或 ~/repos/demo"
                 required
               />
             </label>

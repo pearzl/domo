@@ -18,6 +18,8 @@
 # 执行者不提交产物，脚本以执行工作树中的产物或执行日志作为完成依据。
 
 set -euo pipefail
+# Git for Windows defaults to the GBK code page; keep Python on UTF-8.
+export PYTHONUTF8=1
 
 if [[ -z "${DOMO_RT_CODEX_MODEL:-}" && -z "${DOMO_RT_WORKBUDDY_MODEL:-}" ]]; then
   echo "跳过：未设置 DOMO_RT_CODEX_MODEL 或 DOMO_RT_WORKBUDDY_MODEL（真实 CLI 用例）"

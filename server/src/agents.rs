@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
 
 use crate::models::{
     AgentRow, AGENT_CLI, AGENT_CODEX, AGENT_MOCK, AGENT_OPENCODE, AGENT_WORKBUDDY, CONFIRM_AUTO,
@@ -1107,9 +1106,8 @@ async fn run_process(
     timeout: Duration,
     stdin: Option<Vec<u8>>,
 ) -> Result<AgentRun> {
-    let mut command = Command::new(program);
+    let mut command = crate::platform::command(program, args);
     command
-        .args(args)
         .current_dir(&spec.cwd)
         // CLIs may resolve their workspace from PWD; keep it aligned with cwd.
         .env("PWD", &spec.cwd)
@@ -1134,8 +1132,11 @@ async fn run_process(
         .with_context(|| format!("启动 Agent 进程失败: {program}"))?;
     let pid = child.id();
     if let Some(pid) = pid {
-        let start = process_start_time(pid).unwrap_or_default();
-        let _ = std::fs::write(spec.job_dir.join("pid"), format!("{pid}:{start}"));
+        // Only record a pid that can be checked later. Without a start time a
+        // recycled pid could make recovery kill an unrelated process.
+        if let Some(start) = process_start_time(pid) {
+            let _ = std::fs::write(spec.job_dir.join("pid"), format!("{pid}:{start}"));
+        }
     }
     if let Some(input) = stdin {
         if let Some(mut pipe) = child.stdin.take() {
@@ -1225,38 +1226,57 @@ async fn read_capped<R: AsyncRead + Unpin>(
     String::from_utf8_lossy(&output).to_string()
 }
 
-pub fn kill_process_group(pid: u32) {
+pub fn kill_process_group(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-        libc::kill(pid as i32, libc::SIGKILL);
+        if libc::kill(-(pid as i32), libc::SIGKILL) == 0 {
+            return true;
+        }
+        libc::kill(pid as i32, libc::SIGKILL) == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // `child.kill()` only terminates the direct child. Agent CLIs spawn
+        // their own tools, so the whole process tree has to be removed.
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
+        false
     }
 }
 
-pub fn kill_job_dir(job_dir: &Path) {
+/// Kills the process recorded for a job. Returns true only when the pid file
+/// matched and the process was actually terminated, which lets the runner tell
+/// a watchdog kill from a process that had already exited on its own.
+pub fn kill_job_dir(job_dir: &Path) -> bool {
     let path = job_dir.join("pid");
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return;
+        return false;
     };
     let (pid_text, recorded_start) = match raw.trim().split_once(':') {
         Some((pid, start)) => (pid, Some(start)),
         None => (raw.trim(), None),
     };
     let Ok(pid) = pid_text.parse::<u32>() else {
-        return;
+        return false;
     };
     if let Some(recorded) = recorded_start {
         if !recorded.is_empty() && process_start_time(pid).as_deref() != Some(recorded) {
-            return;
+            return false;
         }
     }
-    kill_process_group(pid);
+    kill_process_group(pid)
 }
 
+#[cfg(not(windows))]
 fn process_start_time(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The executable name may contain spaces; fields after the closing parenthesis
@@ -1266,9 +1286,80 @@ fn process_start_time(pid: u32) -> Option<String> {
     fields.get(19).map(|value| value.to_string())
 }
 
+#[cfg(windows)]
+fn process_start_time(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        Some(ticks.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_start_time_is_available() {
+        let pid = std::process::id();
+        assert!(process_start_time(pid).is_some());
+    }
+
+    #[test]
+    fn kill_job_dir_ignores_a_reused_pid() {
+        let dir = std::env::temp_dir().join(format!("domo-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pid"),
+            format!("{}:not-the-recorded-start-time", std::process::id()),
+        )
+        .unwrap();
+        assert!(!kill_job_dir(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kill_job_dir_kills_a_verified_process() {
+        let dir = std::env::temp_dir().join(format!("domo-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start = process_start_time(pid).expect("child start time");
+        std::fs::write(dir.join("pid"), format!("{pid}:{start}")).unwrap();
+
+        assert!(kill_job_dir(&dir));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn progress_starts_idle_at_zero_and_grows() {
