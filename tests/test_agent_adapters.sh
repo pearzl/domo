@@ -262,8 +262,6 @@ mock = call(
         "max_concurrency": 4,
     },
 )
-for role in ("planner", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 reports = {}
 for key, case in CASES.items():
@@ -291,7 +289,7 @@ for key, case in CASES.items():
     project_id = project["id"]
 
     # 项目池在项目创建时从默认团队快照；这里把被测 Agent 设为唯一可用的执行者。
-    pool = call("POST", f"/api/projects/{project_id}/agents", {"role": "executor", "agent_id": agent["id"]})
+    pool = call("GET", f"/api/projects/{project_id}/agents")
     for entry in next(group for group in pool["roles"] if group["role"] == "executor")["entries"]:
         if entry["agent_id"] != agent["id"] and entry["enabled"]:
             call(

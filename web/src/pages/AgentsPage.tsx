@@ -274,8 +274,9 @@ export function AgentsPage() {
       {team ? (
         <AgentPoolPanel
           title="默认团队"
-          subtitle="系统级团队模板：每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
+          subtitle="系统级团队模板：全部已注册 Agent 按角色出现在默认团队中，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
           roles={team.roles}
+          defaultOpen
           onReorder={(role, agentId, position) =>
             api.updateDefaultTeamAgent(role, agentId, { position })
           }
@@ -285,12 +286,7 @@ export function AgentsPage() {
           onToggle={(role, agentId, enabled) =>
             api.updateDefaultTeamAgent(role, agentId, { enabled })
           }
-          onRemove={(role, agentId) => api.deleteDefaultTeamAgent(role, agentId)}
-          onAdd={(role, agentId) => api.addDefaultTeamAgent(role, agentId)}
           onRefresh={() => refresh()}
-          addCandidates={(role) =>
-            agents.filter((agent) => agent.roles.includes(role))
-          }
         />
       ) : null}
 
@@ -527,7 +523,7 @@ export function AgentsPage() {
         {!loading && agents.length === 0 ? (
           <Empty
             title="还没有 Agent"
-            hint="点击右上角「添加 Agent」创建第一个 Agent，之后可在默认团队与项目 Agent 池中按角色配置它。"
+            hint="点击右上角「添加 Agent」创建第一个 Agent，之后可在默认团队中调整顺序与启停，新建项目会自动继承。"
           />
         ) : (
           agents.map((agent) => (

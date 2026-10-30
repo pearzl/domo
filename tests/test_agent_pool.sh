@@ -263,10 +263,7 @@ low = call(
         "max_concurrency": 2,
     },
 )
-# 新建项目的项目池继承默认团队，把测试 Agent 按原优先级顺序加入默认团队。
-for role in ("planner", "executor", "verifier"):
-    for agent in (high, low):
-        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
+# 新建项目的项目池继承默认团队。
 
 # 1. 默认顺序：三个角色都使用各自角色下优先级最高的 Agent。
 basic_id = create_project("PoolBasic", "项目池按角色选择最高优先级 Agent")
@@ -604,9 +601,6 @@ doomed_b = call(
         "max_concurrency": 1,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    for agent in (doomed_a, doomed_b):
-        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 missing_id = create_project("PoolMissing", "全局 Agent 删除后应明确阻塞")
 missing_pool = pool_role(missing_id, "planner")["entries"]
 assert any(

@@ -220,9 +220,7 @@ mock = call(
         "max_concurrency": 2,
     },
 )
-# 新建项目的项目池继承默认团队，把测试 Agent 加入默认团队供继承。
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
+# 新建项目的项目池继承默认团队。
 
 # 1. 人工指导写入 prompt 和审计。
 guidance_project = new_project("Guidance", "生成两个有依赖的 mock 文件")

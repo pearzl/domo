@@ -197,9 +197,7 @@ mock = call(
         "max_concurrency": 2,
     },
 )
-# 新建项目的项目池继承默认团队，把测试 Agent 加入默认团队供继承。
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
+# 新建项目的项目池继承默认团队。
 
 # 1. 合法派生：子任务进入 DAG，父任务等待。
 project_id = new_project("Derive", "[derive] 将复杂任务派生为两个并行子任务")

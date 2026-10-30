@@ -57,11 +57,6 @@ export const api = {
   getProjectAgents: (id: string) =>
     request<ProjectAgentPool>(`/api/projects/${id}/agents`),
   getDefaultTeam: () => request<DefaultTeamPool>("/api/team/default"),
-  addDefaultTeamAgent: (role: Role, agentId: string) =>
-    request<DefaultTeamPool>("/api/team/default", {
-      method: "POST",
-      body: JSON.stringify({ role, agent_id: agentId }),
-    }),
   updateDefaultTeamAgent: (
     role: Role,
     agentId: string,
@@ -70,15 +65,6 @@ export const api = {
     request<DefaultTeamPool>(`/api/team/default/${role}/${agentId}`, {
       method: "PATCH",
       body: JSON.stringify(input),
-    }),
-  deleteDefaultTeamAgent: (role: Role, agentId: string) =>
-    request<DefaultTeamPool>(`/api/team/default/${role}/${agentId}`, {
-      method: "DELETE",
-    }),
-  addProjectAgent: (id: string, role: Role, agentId: string) =>
-    request<ProjectAgentPool>(`/api/projects/${id}/agents`, {
-      method: "POST",
-      body: JSON.stringify({ role, agent_id: agentId }),
     }),
   updateProjectAgent: (
     id: string,
@@ -92,11 +78,6 @@ export const api = {
     }),
   getTaskAgentPool: (projectId: string, taskId: string) =>
     request<TaskAgentPool>(`/api/projects/${projectId}/tasks/${taskId}/agents`),
-  addTaskAgent: (projectId: string, taskId: string, role: Role, agentId: string) =>
-    request<TaskAgentPool>(`/api/projects/${projectId}/tasks/${taskId}/agents`, {
-      method: "POST",
-      body: JSON.stringify({ role, agent_id: agentId }),
-    }),
   updateTaskAgent: (
     projectId: string,
     taskId: string,
@@ -109,13 +90,6 @@ export const api = {
       {
         method: "PATCH",
         body: JSON.stringify(input),
-      },
-    ),
-  removeTaskAgent: (projectId: string, taskId: string, role: Role, agentId: string) =>
-    request<TaskAgentPool>(
-      `/api/projects/${projectId}/tasks/${taskId}/agents/${role}/${agentId}`,
-      {
-        method: "DELETE",
       },
     ),
   postAnalysisMessage: (

@@ -219,21 +219,16 @@ steady = call(
         "max_concurrency": 2,
     },
 )["id"]
-call("POST", "/api/team/default", {"role": "planner", "agent_id": steady})
-call("POST", "/api/team/default", {"role": "planner", "agent_id": flaky})
-call("POST", "/api/team/default", {"role": "planner", "agent_id": backup})
-for role in ("executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": worker})
 
 # 场景一：项目分析被限流，自动切换到下一优先级的规划 Agent。
 project_id = create_project("Planner Limit", "写入 domo_mock 产物")
 call("PATCH", f"/api/projects/{project_id}/agents/planner/{steady}", {"enabled": False})
 entries = [
-    (entry["agent_id"], entry["priority"])
+    entry["agent_id"]
     for entry in planner_entries(project_id)
     if entry["enabled"]
 ]
-assert entries == [(flaky, 2), (backup, 3)], entries
+assert entries == [flaky, backup], entries
 
 submit(project_id, "写入 domo_mock 产物")
 detail = wait_for(
@@ -278,7 +273,7 @@ wait_for(
 )
 
 # 场景二：项目池里唯一的规划 Agent 被限流，项目阻塞并等待人工处理。
-call("DELETE", f"/api/team/default/planner/{backup}")
+call("PATCH", f"/api/team/default/planner/{backup}", {"enabled": False})
 project_id = create_project("Only Planner", "写入 domo_mock 产物")
 # 项目池只剩 Flaky Planner 可用，它在下一次项目作业时被限流。
 call("PATCH", f"/api/projects/{project_id}/agents/planner/{steady}", {"enabled": False})

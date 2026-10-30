@@ -277,10 +277,6 @@ low = call(
         "max_concurrency": 1,
     },
 )
-for role in ("planner", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": low["id"]})
-for agent in (high, flaky, low):
-    call("POST", "/api/team/default", {"role": "executor", "agent_id": agent["id"]})
 
 # 1. 高优先级可用但并发已满：任务排队等待，低优先级不接单。
 busy_id = create_project("PriorityBusy", "并发占满时严格等待高优先级 [parallel]")

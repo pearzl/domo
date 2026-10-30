@@ -239,7 +239,10 @@ def create_project(name, goal):
 
 
 def configure_pool(project_id, assignments):
-    """先关闭继承来的默认池，再按角色加入指定 Agent。"""
+    """关闭继承来的默认池，只启用在 assignments 中指定的 Agent。"""
+    by_role = {}
+    for role, agent_id in assignments:
+        by_role.setdefault(role, []).append(agent_id)
     pool = call("GET", f"/api/projects/{project_id}/agents")
     for group in pool["roles"]:
         for entry in group["entries"]:
@@ -249,12 +252,12 @@ def configure_pool(project_id, assignments):
                     f"/api/projects/{project_id}/agents/{group['role']}/{entry['agent_id']}",
                     {"enabled": False},
                 )
-    for role, agent_id in assignments:
-        call(
-            "POST",
-            f"/api/projects/{project_id}/agents",
-            {"role": role, "agent_id": agent_id},
-        )
+        for position, agent_id in enumerate(by_role.get(group["role"], [])):
+            call(
+                "PATCH",
+                f"/api/projects/{project_id}/agents/{group['role']}/{agent_id}",
+                {"enabled": True, "position": position},
+            )
 
 
 def wait_for(project_id, predicate, label, timeout=120, observe=None):

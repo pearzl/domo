@@ -160,8 +160,6 @@ mock = call(
         "max_concurrency": 2,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 # 1. 创建后没有目标，也没有作业。
 empty = create_project("Empty")

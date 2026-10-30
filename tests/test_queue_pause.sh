@@ -340,7 +340,7 @@ cli_executor = call(
     },
 )
 
-# 新建项目的项目池继承默认团队；按角色把测试 Agent 按原优先级顺序加入默认团队。
+# 新建项目的项目池继承默认团队；按场景需要调整默认团队的角色顺序。
 team_order = {
     "planner": [
         rate_limited,
@@ -372,8 +372,12 @@ team_order = {
     ],
 }
 for role, agents in team_order.items():
-    for agent in agents:
-        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
+    for position, agent in enumerate(agents):
+        call(
+            "PATCH",
+            f"/api/team/default/{role}/{agent['id']}",
+            {"position": position},
+        )
 
 # 1. 排队位置、调序与暂停排队任务。
 queue_id = create_project("Queue", "[parallel] 队列调序与暂停排队任务")
@@ -733,12 +737,6 @@ exhausted_agent_global = call(
         "max_concurrency": 1,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    call(
-        "POST",
-        "/api/team/default",
-        {"role": role, "agent_id": exhausted_agent_global["id"]},
-    )
 exhausted_id = create_project("Exhausted", "[ratelimit] 池耗尽进入人工裁决")
 pool = call("GET", f"/api/projects/{exhausted_id}/agents")
 for group in pool["roles"]:

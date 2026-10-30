@@ -220,8 +220,6 @@ mock = call_raw(
         "max_concurrency": 3,
     },
 )
-for role in mock["roles"]:
-    call_raw("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 # ---- 未完成项目拒绝 ----------------------------------------------------------
 print("--> 未完成项目拒绝")

@@ -715,7 +715,7 @@ async fn choose_agent(
     };
     if rows.is_empty() {
         let hint = if scope == "任务 Agent 池" {
-            "请在任务抽屉的任务 Agent 池中加入该角色 Agent"
+            "任务池在创建时从项目池快照，请检查项目池该角色配置；调整项目池后需新建任务"
         } else {
             "请在项目页配置"
         };

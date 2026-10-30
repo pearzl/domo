@@ -241,7 +241,7 @@ pub struct TaskAgentPool {
     pub roles: Vec<ProjectRolePool>,
 }
 
-/// 默认团队是系统级模板：新建项目的项目 Agent 池按它快照初始化。
+/// 默认团队是系统级模板：覆盖全部已注册 Agent，新建项目的项目 Agent 池按它快照初始化。
 /// 视图复用 ProjectAgentPool 的形态（project_id 固定为 "default"）。
 #[derive(Debug, Clone, sqlx::FromRow)]
 #[allow(dead_code)]
@@ -826,12 +826,6 @@ pub struct TaskQueueRequest {
     pub direction: Option<String>,
     #[serde(default)]
     pub position: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddProjectAgentRequest {
-    pub role: String,
-    pub agent_id: String,
 }
 
 #[derive(Debug, Deserialize)]

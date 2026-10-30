@@ -2,7 +2,7 @@
 # DOMO 任务专用 Agent 池测试。
 #
 # 覆盖范围：
-#   1. 新建任务从项目池对应角色快照初始化；修改任务池只影响该任务，
+#   1. 新建任务从项目池对应角色快照全部条目；修改任务池排序或启停只影响该任务，
 #      项目池与其他任务保持不变；
 #   2. 项目池在任务创建后变化不改写已有任务池，新任务按当时项目池快照初始化；
 #   3. 任务池某角色只保留一个启用 Agent 时等价于指定该 Agent；该 Agent 全局
@@ -240,14 +240,9 @@ def wait_t1_executor_running(project_id, label):
 
 
 def clear_team():
-    # 把存量 Agent 按默认团队和全局启停都清理掉，项目池从空基线快照。
+    # 停用存量 Agent；项目池快照只保留测试 Agent 为可用。
     for agent in call("GET", "/api/agents"):
         call("PATCH", f"/api/agents/{agent['id']}", {"enabled": False})
-        for role in ("planner", "executor", "verifier"):
-            try:
-                call("DELETE", f"/api/team/default/{role}/{agent['id']}")
-            except RuntimeError:
-                pass
 
 
 clear_team()
@@ -272,9 +267,6 @@ low = call(
         "max_concurrency": 1,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    for agent in (high, low):
-        call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 
 state = {}
 state["high"] = high["id"]
@@ -302,7 +294,7 @@ code = expect_error(
 )
 assert code == 400, code
 
-# 修改 T2 任务池：排序、启停、移除、加入。
+# 修改 T2 任务池：排序与启停。
 call("PATCH", f"/api/projects/{snap_id}/tasks/{t2['id']}/agents/executor/{low['id']}", {"position": 0})
 code = expect_error(
     "PATCH",
@@ -311,15 +303,6 @@ code = expect_error(
 )
 assert code == 400, code
 call("PATCH", f"/api/projects/{snap_id}/tasks/{t2['id']}/agents/executor/{low['id']}", {"enabled": False})
-call("DELETE", f"/api/projects/{snap_id}/tasks/{t2['id']}/agents/verifier/{low['id']}")
-call("POST", f"/api/projects/{snap_id}/tasks/{t2['id']}/agents", {"role": "verifier", "agent_id": low["id"]})
-# 任务池中已有的 Agent 不能重复加入
-code = expect_error(
-    "POST",
-    f"/api/projects/{snap_id}/tasks/{t2['id']}/agents",
-    {"role": "executor", "agent_id": high["id"]},
-)
-assert code == 400, code
 
 # 项目池与其他任务不受影响
 assert summarize(pool_role(snap_id, "executor")) == initial_exec, summarize(
@@ -328,13 +311,18 @@ assert summarize(pool_role(snap_id, "executor")) == initial_exec, summarize(
 assert summarize(task_pool_role(snap_id, t1["id"], "executor")) == initial_exec, (
     summarize(task_pool_role(snap_id, t1["id"], "executor"))
 )
-exec_ids = [e["agent_id"] for e in task_pool_role(snap_id, t2["id"], "executor")["entries"]]
+exec_ids = [
+    e["agent_id"]
+    for e in task_pool_role(snap_id, t2["id"], "executor")["entries"]
+    if e["agent_id"] in (high["id"], low["id"])
+]
 assert exec_ids == [low["id"], high["id"]], exec_ids
 verifier_sum = [
     (e["agent_id"], e["priority"])
     for e in task_pool_role(snap_id, t2["id"], "verifier")["entries"]
+    if e["agent_id"] in (high["id"], low["id"])
 ]
-assert verifier_sum == [(high["id"], 0), (low["id"], 1)], verifier_sum
+assert verifier_sum == [(high["id"], 1), (low["id"], 2)], verifier_sum
 state["initial_executor"] = initial_exec
 state["t1_executor"] = summarize(task_pool_role(snap_id, t1["id"], "executor"))
 state["t2_executor"] = summarize(task_pool_role(snap_id, t2["id"], "executor"))
@@ -342,16 +330,18 @@ state["t2_verifier"] = summarize(task_pool_role(snap_id, t2["id"], "verifier"))
 
 # ---------- 2. 项目池变化不改写既有任务池 ----------
 call("PATCH", f"/api/projects/{snap_id}/agents/executor/{low['id']}", {"position": 0})
-assert [e["agent_id"] for e in task_pool_role(snap_id, t2["id"], "executor")["entries"]] == [
-    low["id"],
-    high["id"],
-], task_pool_role(snap_id, t2["id"], "executor")
+assert [
+    e["agent_id"]
+    for e in task_pool_role(snap_id, t2["id"], "executor")["entries"]
+    if e["agent_id"] in (high["id"], low["id"])
+] == [low["id"], high["id"]], task_pool_role(snap_id, t2["id"], "executor")
 new_task = add_task(snap_id, "T3", deps=["T2"])
 snapshot_t3 = [
-    (e["agent_id"], e["priority"])
+    e["agent_id"]
     for e in task_pool_role(snap_id, new_task["id"], "executor")["entries"]
+    if e["agent_id"] in (high["id"], low["id"])
 ]
-assert snapshot_t3 == [(low["id"], 0), (high["id"], 1)], snapshot_t3
+assert snapshot_t3 == [low["id"], high["id"]], snapshot_t3
 project_executor = pool_role(snap_id, "executor")
 state["project_executor"] = summarize(project_executor)
 
@@ -371,9 +361,9 @@ wait_for(
     ),
     "TaskUnique T1 验收作业",
 )
-# u2 的任务池执行者与验收者都只剩 high
-call("DELETE", f"/api/projects/{uniq_id}/tasks/{u2['id']}/agents/executor/{low['id']}")
-call("DELETE", f"/api/projects/{uniq_id}/tasks/{u2['id']}/agents/verifier/{low['id']}")
+# u2 的任务池执行者与验收者都只剩 high 启用
+call("PATCH", f"/api/projects/{uniq_id}/tasks/{u2['id']}/agents/executor/{low['id']}", {"enabled": False})
+call("PATCH", f"/api/projects/{uniq_id}/tasks/{u2['id']}/agents/verifier/{low['id']}", {"enabled": False})
 # 把 high 全局禁用：u2 只能等待，不能静默回退到 low
 call("PATCH", f"/api/agents/{high['id']}", {"enabled": False})
 detail = wait_for(
@@ -425,9 +415,9 @@ cleared = call(
 )
 assert cleared["executor_agent_id"] is None, cleared
 legacy_pool = task_pool_role(legacy_id, lt2["id"], "executor")
-assert [e["agent_id"] for e in legacy_pool["entries"]] == [high["id"], low["id"]], (
-    legacy_pool
-)
+assert [
+    e["agent_id"] for e in legacy_pool["entries"] if e["enabled"]
+] == [high["id"], low["id"]], legacy_pool
 # 调度依据任务池：T2 的作业交给池内最高优先级 high
 detail = wait_for(
     legacy_id,

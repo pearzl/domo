@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { DragEvent } from "react";
-import type { Agent, ProjectRolePool, Role } from "../types";
+import type { ProjectRolePool, Role } from "../types";
 import {
   Badge,
   ErrorBox,
@@ -25,14 +25,9 @@ export interface AgentPoolPanelProps {
   onReorder?: (role: Role, agentId: string, position: number) => Promise<unknown>;
   /** 切换条目启停。 */
   onToggle: (role: Role, agentId: string, enabled: boolean) => Promise<unknown>;
-  /** 提供时展示移除按钮。 */
-  onRemove?: (role: Role, agentId: string) => Promise<unknown>;
-  /** 提供时展示加入控件；候选列表为该角色可加入的全局 Agent。 */
-  onAdd?: (role: Role, agentId: string) => Promise<unknown>;
   /** 任一操作成功后刷新数据。 */
   onRefresh?: () => Promise<unknown>;
-  addCandidates?: (role: Role) => Agent[];
-  /** 初始展开状态；省略时沿用按是否提供加入控件决定。 */
+  /** 初始展开状态。 */
   defaultOpen?: boolean;
 }
 
@@ -73,18 +68,14 @@ export function AgentPoolPanel({
   onMove,
   onReorder,
   onToggle,
-  onRemove,
-  onAdd,
   onRefresh,
-  addCandidates,
   defaultOpen,
 }: AgentPoolPanelProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [adding, setAdding] = useState<Partial<Record<Role, string>>>({});
   const [drag, setDrag] = useState<DragItem | null>(null);
   const [drop, setDrop] = useState<DropTarget | null>(null);
-  const initialOpen = defaultOpen ?? typeof onAdd === "function";
+  const initialOpen = defaultOpen ?? false;
   const [open, setOpen] = useState(initialOpen);
   useEffect(() => {
     setOpen(initialOpen);
@@ -125,10 +116,6 @@ export function AgentPoolPanel({
       <summary>{title}</summary>
       <p className="subtitle">{subtitle}</p>
       {roles.map((group) => {
-        const candidates = (addCandidates?.(group.role) ?? []).filter(
-          (agent) =>
-            !group.entries.some((entry) => entry.agent_id === agent.id),
-        );
         return (
           <div
             className="agent-pool-role"
@@ -287,18 +274,6 @@ export function AgentPoolPanel({
                       >
                         {entry.enabled ? "停用" : "启用"}
                       </button>
-                      {onRemove ? (
-                        <button
-                          className="ghost danger-text"
-                          disabled={disabled || busy}
-                          title="从团队中移除"
-                          onClick={() =>
-                            act(() => onRemove(group.role, entry.agent_id))
-                          }
-                        >
-                          移除
-                        </button>
-                      ) : null}
                     </span>
                     {entry.unavailable_reason ? (
                       <span className="agent-pool-reason muted">
@@ -315,48 +290,6 @@ export function AgentPoolPanel({
                 })}
               </div>
             )}
-            {onAdd ? (
-              <div className="agent-pool-add">
-                <select
-                  value={adding[group.role] ?? ""}
-                  disabled={disabled || busy || candidates.length === 0}
-                  onChange={(event) =>
-                    setAdding((current) => ({
-                      ...current,
-                      [group.role]: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">
-                    {candidates.length === 0
-                      ? "该角色下没有可加入的 Agent"
-                      : "选择要加入的 Agent…"}
-                  </option>
-                  {candidates.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="ghost"
-                  disabled={
-                    disabled ||
-                    busy ||
-                    !(adding[group.role] ?? "") ||
-                    candidates.length === 0
-                  }
-                  onClick={() => {
-                    const agentId = adding[group.role] ?? "";
-                    if (!agentId) return;
-                    setAdding((current) => ({ ...current, [group.role]: "" }));
-                    act(() => onAdd(group.role, agentId));
-                  }}
-                >
-                  加入
-                </button>
-              </div>
-            ) : null}
           </div>
         );
       })}

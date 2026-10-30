@@ -84,21 +84,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}", patch(update_agent).delete(delete_agent))
         .route("/api/agents/{id}/usage/reset", post(reset_agent_usage))
-        .route(
-            "/api/team/default",
-            get(get_default_team).post(add_default_team_agent),
-        )
+        .route("/api/team/default", get(get_default_team))
         .route(
             "/api/team/default/{role}/{agent_id}",
-            patch(update_default_team_agent).delete(delete_default_team_agent),
+            patch(update_default_team_agent),
         )
         .route("/api/usage", get(usage_report))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project))
-        .route(
-            "/api/projects/{id}/agents",
-            get(get_project_agents).post(add_project_agent),
-        )
+        .route("/api/projects/{id}/agents", get(get_project_agents))
         .route(
             "/api/projects/{id}/agents/{role}/{agent_id}",
             patch(update_project_agent),
@@ -129,13 +123,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/projects/{id}/tasks/{task_id}/agents",
-            get(get_task_agent_pool)
-                .post(add_task_agent)
-                .patch(set_task_agents),
+            get(get_task_agent_pool).patch(set_task_agents),
         )
         .route(
             "/api/projects/{id}/tasks/{task_id}/agents/{role}/{agent_id}",
-            patch(update_task_agent).delete(delete_task_agent),
+            patch(update_task_agent),
         )
         .route("/api/projects/{id}/tasks/{task_id}/pause", post(pause_task))
         .route(
@@ -277,6 +269,7 @@ async fn create_agent(
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
+    crate::db::ensure_default_team(&state.db).await?;
     let row = crate::db::load_agent(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;
@@ -369,6 +362,7 @@ async fn update_agent(
     .bind(&id)
     .execute(&state.db)
     .await?;
+    crate::db::ensure_default_team(&state.db).await?;
     state.notify_scheduler();
     let row = crate::db::load_agent(&state.db, &id)
         .await?
@@ -379,64 +373,6 @@ async fn update_agent(
 async fn get_default_team(
     State(state): State<AppState>,
 ) -> Result<Json<ProjectAgentPool>, ApiError> {
-    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
-}
-
-async fn add_default_team_agent(
-    State(state): State<AppState>,
-    Json(request): Json<AddProjectAgentRequest>,
-) -> Result<Json<ProjectAgentPool>, ApiError> {
-    let role = validate_role(request.role.trim())?;
-    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
-        return Err(ApiError::not_found("Agent 不存在"));
-    };
-    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
-        return Err(ApiError::bad(format!(
-            "Agent {} 不能承担{}角色",
-            agent.name,
-            role_label(&role)
-        )));
-    }
-    let exists: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM default_team WHERE role = ? AND agent_id = ?")
-            .bind(&role)
-            .bind(&agent.id)
-            .fetch_one(&state.db)
-            .await?;
-    if exists > 0 {
-        return Err(ApiError::bad("Agent 已在默认团队中"));
-    }
-    let priority: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(priority), -1) + 1 FROM default_team WHERE role = ?",
-    )
-    .bind(&role)
-    .fetch_one(&state.db)
-    .await?;
-    let timestamp = now();
-    sqlx::query(
-        "INSERT INTO default_team \
-         (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&role)
-    .bind(&agent.id)
-    .bind(&agent.name)
-    .bind(priority)
-    .bind(agent.enabled)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
-    emit(
-        &state.db,
-        &state.bus,
-        None,
-        None,
-        "default_team_updated",
-        format!("默认团队加入{} Agent {}", role_label(&role), agent.name),
-    )
-    .await;
-    state.notify_scheduler();
     Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
 }
 
@@ -540,58 +476,6 @@ async fn update_default_team_agent(
     Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
 }
 
-async fn delete_default_team_agent(
-    State(state): State<AppState>,
-    Path((role, agent_id)): Path<(String, String)>,
-) -> Result<Json<ProjectAgentPool>, ApiError> {
-    let role = validate_role(role.trim())?;
-    let result = sqlx::query("DELETE FROM default_team WHERE role = ? AND agent_id = ?")
-        .bind(&role)
-        .bind(&agent_id)
-        .execute(&state.db)
-        .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("默认团队中没有该 Agent"));
-    }
-    renumber_default_team_role(&state, &role).await?;
-    emit(
-        &state.db,
-        &state.bus,
-        None,
-        None,
-        "default_team_updated",
-        format!("默认团队移除{} Agent {}", role_label(&role), agent_id),
-    )
-    .await;
-    state.notify_scheduler();
-    Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
-}
-
-/// 移除条目后把该角色的优先级重排为 0..n-1，保持编号连续。
-async fn renumber_default_team_role(state: &AppState, role: &str) -> Result<(), ApiError> {
-    let members: Vec<(String,)> = sqlx::query_as(
-        "SELECT agent_id FROM default_team WHERE role = ? ORDER BY priority ASC, agent_id ASC",
-    )
-    .bind(role)
-    .fetch_all(&state.db)
-    .await?;
-    let timestamp = now();
-    let mut tx = state.db.begin().await?;
-    for (priority, (agent_id,)) in members.iter().enumerate() {
-        sqlx::query(
-            "UPDATE default_team SET priority = ?, updated_at = ? WHERE role = ? AND agent_id = ?",
-        )
-        .bind(priority as i64)
-        .bind(&timestamp)
-        .bind(role)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
 /// 把角色内指定 Agent 移动到 0 基目标位置，并在事务内把该角色优先级重排为 0..n-1。
 /// 其余角色的条目不参与本次重排。
 async fn move_default_team_agent_to(
@@ -679,22 +563,11 @@ async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let affected_roles: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT role FROM default_team WHERE agent_id = ?")
-            .bind(&id)
-            .fetch_all(&state.db)
-            .await?;
     sqlx::query("DELETE FROM agents WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
         .await?;
-    sqlx::query("DELETE FROM default_team WHERE agent_id = ?")
-        .bind(&id)
-        .execute(&state.db)
-        .await?;
-    for role in affected_roles {
-        renumber_default_team_role(&state, &role).await?;
-    }
+    crate::db::ensure_default_team(&state.db).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -840,79 +713,6 @@ async fn get_project_agents(
     Path(id): Path<String>,
 ) -> Result<Json<ProjectAgentPool>, ApiError> {
     require_project(&state, &id).await?;
-    let pool = crate::db::load_project_agent_pool(&state.db, &id).await?;
-    Ok(Json(pool))
-}
-
-async fn add_project_agent(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<AddProjectAgentRequest>,
-) -> Result<Json<ProjectAgentPool>, ApiError> {
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    let role = validate_role(request.role.trim())?;
-    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
-        return Err(ApiError::not_found("Agent 不存在"));
-    };
-    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
-        return Err(ApiError::bad(format!(
-            "Agent {} 不能承担{}角色",
-            agent.name,
-            role_label(&role)
-        )));
-    }
-    crate::db::ensure_project_agents(&state.db, &id).await?;
-    let exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
-    )
-    .bind(&id)
-    .bind(&role)
-    .bind(&agent.id)
-    .fetch_one(&state.db)
-    .await?;
-    if exists > 0 {
-        return Err(ApiError::bad("Agent 已在项目池中"));
-    }
-    let priority: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(priority), -1) + 1 FROM project_agents WHERE project_id = ? AND role = ?",
-    )
-    .bind(&id)
-    .bind(&role)
-    .fetch_one(&state.db)
-    .await?;
-    let timestamp = now();
-    sqlx::query(
-        "INSERT INTO project_agents \
-         (project_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&role)
-    .bind(&agent.id)
-    .bind(&agent.name)
-    .bind(priority)
-    .bind(agent.enabled)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&id),
-        None,
-        "project_agents_updated",
-        format!(
-            "项目 Agent 池加入{} Agent {}",
-            role_label(&role),
-            agent.name
-        ),
-    )
-    .await;
-    state.notify_scheduler();
     let pool = crate::db::load_project_agent_pool(&state.db, &id).await?;
     Ok(Json(pool))
 }
@@ -1096,94 +896,6 @@ async fn get_task_agent_pool(
     Ok(Json(pool))
 }
 
-async fn add_task_agent(
-    State(state): State<AppState>,
-    Path((project_id, task_id)): Path<(String, String)>,
-    Json(request): Json<AddProjectAgentRequest>,
-) -> Result<Json<TaskAgentPool>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档，任务 Agent 池只读"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    ensure_task_pool_mutable(&task)?;
-    let role = validate_task_pool_role(request.role.trim())?;
-    let Some(agent) = crate::db::load_agent(&state.db, request.agent_id.trim()).await? else {
-        return Err(ApiError::not_found("Agent 不存在"));
-    };
-    if !parse_list(&agent.roles).iter().any(|item| item == &role) {
-        return Err(ApiError::bad(format!(
-            "Agent {} 不能承担{}角色",
-            agent.name,
-            role_label(&role)
-        )));
-    }
-    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
-    // 加入候选只允许项目池中具备该角色且尚未在任务池中的 Agent。
-    let in_project: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM project_agents WHERE project_id = ? AND role = ? AND agent_id = ?",
-    )
-    .bind(&project_id)
-    .bind(&role)
-    .bind(&agent.id)
-    .fetch_one(&state.db)
-    .await?;
-    if in_project == 0 {
-        return Err(ApiError::bad("Agent 不在项目 Agent 池的该角色中"));
-    }
-    let exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?",
-    )
-    .bind(&task.id)
-    .bind(&role)
-    .bind(&agent.id)
-    .fetch_one(&state.db)
-    .await?;
-    if exists > 0 {
-        return Err(ApiError::bad("Agent 已在任务池中"));
-    }
-    let priority: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(priority), -1) + 1 FROM task_agents WHERE task_id = ? AND role = ?",
-    )
-    .bind(&task.id)
-    .bind(&role)
-    .fetch_one(&state.db)
-    .await?;
-    let timestamp = now();
-    sqlx::query(
-        "INSERT INTO task_agents \
-         (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-    )
-    .bind(&task.id)
-    .bind(&role)
-    .bind(&agent.id)
-    .bind(&agent.name)
-    .bind(priority)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&project_id),
-        Some(&task.id),
-        "task_agents_updated",
-        format!(
-            "任务 {} 加入{} Agent {}",
-            task.key,
-            role_label(&role),
-            agent.name
-        ),
-    )
-    .await;
-    state.notify_scheduler();
-    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
-    Ok(Json(pool))
-}
-
 async fn update_task_agent(
     State(state): State<AppState>,
     Path((project_id, task_id, role, agent_id)): Path<(String, String, String, String)>,
@@ -1302,49 +1014,6 @@ async fn update_task_agent(
     Ok(Json(pool))
 }
 
-async fn delete_task_agent(
-    State(state): State<AppState>,
-    Path((project_id, task_id, role, agent_id)): Path<(String, String, String, String)>,
-) -> Result<Json<TaskAgentPool>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档，任务 Agent 池只读"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    ensure_task_pool_mutable(&task)?;
-    let role = validate_task_pool_role(role.trim())?;
-    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
-    let result =
-        sqlx::query("DELETE FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?")
-            .bind(&task.id)
-            .bind(&role)
-            .bind(&agent_id)
-            .execute(&state.db)
-            .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("任务 Agent 池中没有该 Agent"));
-    }
-    renumber_task_agent_role(&state, &task.id, &role).await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&project_id),
-        Some(&task.id),
-        "task_agents_updated",
-        format!(
-            "任务 {} 移除{} Agent {}",
-            task.key,
-            role_label(&role),
-            agent_id
-        ),
-    )
-    .await;
-    state.notify_scheduler();
-    let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
-    Ok(Json(pool))
-}
-
 /// 把任务池角色内指定 Agent 移动到 0 基目标位置，并在事务内把该角色优先级
 /// 重排为 0..n-1，其他角色不受影响。
 async fn move_task_agent_to(
@@ -1375,39 +1044,6 @@ async fn move_task_agent_to(
         .bind(task_id)
         .bind(role)
         .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 删除任务池条目后把该角色的优先级重排为 0..n-1，保持编号连续。
-async fn renumber_task_agent_role(
-    state: &AppState,
-    task_id: &str,
-    role: &str,
-) -> Result<(), ApiError> {
-    let members: Vec<(String,)> = sqlx::query_as(
-        "SELECT agent_id FROM task_agents WHERE task_id = ? AND role = ? \
-         ORDER BY priority ASC, agent_id ASC",
-    )
-    .bind(task_id)
-    .bind(role)
-    .fetch_all(&state.db)
-    .await?;
-    let timestamp = now();
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    for (priority, (agent_id,)) in members.iter().enumerate() {
-        sqlx::query(
-            "UPDATE task_agents SET priority = ?, updated_at = ? \
-             WHERE task_id = ? AND role = ? AND agent_id = ?",
-        )
-        .bind(priority as i64)
-        .bind(&timestamp)
-        .bind(task_id)
-        .bind(role)
-        .bind(agent_id)
         .execute(&mut *tx)
         .await?;
     }

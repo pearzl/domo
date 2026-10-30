@@ -140,8 +140,6 @@ mock = call(
         "max_concurrency": 4,
     },
 )
-for role in ("planner", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 reports = []
 for case in CASES:

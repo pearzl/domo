@@ -207,8 +207,6 @@ mock = call(
         "max_concurrency": 2,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
 
 # ---- 项目 A：总结中添加任务 -> 回到执行 -> 报告作废 -> 重写 --------------------------------
 project = call(

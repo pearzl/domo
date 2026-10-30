@@ -429,6 +429,6 @@ export interface AgentInput {
   usage_limit?: AgentUsageLimit | null;
 }
 
-/// 默认团队是系统级 Agent 模板，新建项目的项目 Agent 池按它快照初始化；
+/// 默认团队是系统级 Agent 模板，覆盖全部已注册 Agent；新建项目的项目 Agent 池按它快照初始化。
 /// 视图复用项目池形态（project_id 固定为 "default"）。
 export type DefaultTeamPool = ProjectAgentPool;

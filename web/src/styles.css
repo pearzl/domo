@@ -436,10 +436,6 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.danger-text {
-  color: var(--danger);
-}
-
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -1455,17 +1451,6 @@ small {
 .agent-pool-actions button {
   min-width: 0;
   padding: 4px 8px;
-}
-
-.agent-pool-add {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-top: 10px;
-}
-
-.agent-pool-add select {
-  max-width: 320px;
 }
 
 .agent-pool-reason {

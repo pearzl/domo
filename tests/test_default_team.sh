@@ -3,12 +3,13 @@
 #
 # 覆盖范围：
 #   1. 空库启动时默认团队按种子 Agent 初始化，三个角色都有条目；
-#   2. GET/POST/PATCH/DELETE /api/team/default 的加入、上下游移（相邻交换、
-#      编号连续）、启停与移除行为，以及角色/重复/未知条目的校验；
-#   3. 全局 Agent 创建/更新不接收优先级字段，视图不再输出优先级；
-#   4. 新建项目后项目池与默认团队快照一致（角色、顺序、启停）；
-#   5. 调整默认团队后再次新建项目反映新配置，旧项目池保持不变；
-#   6. 删除全局 Agent 时默认团队同步移除并重新编号。
+#   2. 注册 Agent 按其角色自动进入默认团队，条目追加到角色末尾且编号连续；
+#   3. 修改 Agent 角色后默认团队条目与角色保持一致，删除全局 Agent 后同步清理并重编号；
+#   4. PATCH 上下游移（相邻交换、编号连续）与启停行为；
+#   5. 默认团队只提供排序与启停接口，角色池成员由全局 Agent 角色决定；
+#   6. 全局 Agent 创建/更新不接收优先级字段，视图不输出优先级；
+#   7. 新建项目后项目池与默认团队快照一致（角色、顺序、启停）；
+#   8. 调整默认团队后再次新建项目反映新配置，旧项目池保持不变。
 #
 # 使用内置 mock Agent，不访问外网；临时数据全部放在 ${TMPDIR:-/tmp}。
 # 项目停留在项目分析阶段，不派发任何作业。退出码 0 表示全部通过。
@@ -189,7 +190,7 @@ assert (
     == team_roles["verifier"][0]["agent_id"]
 ), team_roles
 
-# 2. 默认团队加入：新条目排在末尾，编号连续。
+# 2. 注册 Agent 自动进入默认团队：按角色追加到末尾，编号连续。
 alpha = call(
     "POST",
     "/api/agents",
@@ -202,8 +203,6 @@ alpha = call(
 )
 assert "__status__" not in alpha, alpha
 assert "priority" not in alpha, "全局 Agent 不应再暴露优先级"
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": alpha["id"]})
 
 beta = call(
     "POST",
@@ -215,35 +214,49 @@ beta = call(
         "max_concurrency": 2,
     },
 )
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": beta["id"]})
 
-team = call("GET", "/api/team/default")
-team_roles = roles_of("team", team)
-for role, entries in team_roles.items():
-    assert ids(entries) == [default_agent_id, alpha["id"], beta["id"]], entries
-    assert priorities(entries) == [0, 1, 2], entries
-    assert all(entry["enabled"] for entry in entries), entries
-
-# 加入校验：重复加入、Agent 不具备角色、未知角色都被拒绝。
-expect_status("POST", "/api/team/default", {"role": "planner", "agent_id": alpha["id"]}, 400)
 solo = call(
     "POST",
     "/api/agents",
     {"name": "Solo Executor", "kind": "mock", "roles": ["executor"]},
 )
-expect_status("POST", "/api/team/default", {"role": "planner", "agent_id": solo["id"]}, 400)
+
+team = call("GET", "/api/team/default")
+team_roles = roles_of("team", team)
+for role in ("planner", "verifier"):
+    assert ids(team_roles[role]) == [default_agent_id, alpha["id"], beta["id"]], (
+        role,
+        team_roles[role],
+    )
+    assert priorities(team_roles[role]) == [0, 1, 2], team_roles[role]
+    assert all(entry["enabled"] for entry in team_roles[role]), team_roles[role]
+assert ids(team_roles["executor"]) == [
+    default_agent_id,
+    alpha["id"],
+    beta["id"],
+    solo["id"],
+], team_roles["executor"]
+assert priorities(team_roles["executor"]) == [0, 1, 2, 3], team_roles["executor"]
+assert all(entry["enabled"] for entry in team_roles["executor"]), team_roles["executor"]
+assert ids(team_roles["planner"]) == [default_agent_id, alpha["id"], beta["id"]], (
+    team_roles["planner"]
+)
+assert ids(team_roles["verifier"]) == [default_agent_id, alpha["id"], beta["id"]], (
+    team_roles["verifier"]
+)
+
+# 默认团队只提供排序与启停接口。
 expect_status(
-    "POST", "/api/team/default", {"role": "watcher", "agent_id": alpha["id"]}, 400
+    "POST", "/api/team/default", {"role": "planner", "agent_id": alpha["id"]}, 405
+)
+expect_status(
+    "DELETE", f"/api/team/default/planner/{alpha['id']}", None, 405
 )
 expect_status(
     "PATCH",
     f"/api/team/default/planner/{alpha['id']}",
     {"direction": "sideways"},
     400,
-)
-expect_status(
-    "DELETE", f"/api/team/default/planner/agt_missing", None, 404
 )
 
 # 3. 上下移调整：相邻交换，编号保持连续。
@@ -259,21 +272,17 @@ planner_entries = roles_of("team", team)["planner"]
 assert ids(planner_entries) == [beta["id"], default_agent_id, alpha["id"]], planner_entries
 assert priorities(planner_entries) == [0, 1, 2], planner_entries
 
-# 4. 全局禁用默认 Agent，默认团队视图与项目池继承的默认条目同步停用。
+# 4. 全局禁用默认 Agent，默认团队视图同步显示停用。
 call("PATCH", f"/api/agents/{default_agent_id}", {"enabled": False})
 team = call("GET", "/api/team/default")
 team_roles = roles_of("team", team)
-planner_entries = team_roles["planner"]
-assert planner_entries[1]["agent_id"] == default_agent_id, planner_entries
-assert planner_entries[1]["enabled"] is False, planner_entries
-assert (
-    next(
+for role in ("planner", "executor", "verifier"):
+    default_entry = next(
         entry
-        for entry in team_roles["executor"]
+        for entry in team_roles[role]
         if entry["agent_id"] == default_agent_id
-    )["enabled"]
-    is False
-), team_roles["executor"]
+    )
+    assert default_entry["enabled"] is False, (role, default_entry)
 
 # 5. 新建项目的项目池继承默认团队（角色、顺序、启停）。
 project = call(
@@ -330,31 +339,66 @@ assert (
     is True
 ), "旧项目池不应跟随默认团队变化"
 
-# 6. 移除条目后重新编号，再新建项目的池同步收缩。
-call("DELETE", f"/api/team/default/planner/{alpha['id']}")
+# 6. 修改 Agent 角色后默认团队同步：角色集合决定条目，新角色条目排在末尾。
+call("PATCH", f"/api/agents/{alpha['id']}", {"roles": ["executor"]})
 team = call("GET", "/api/team/default")
-planner_entries = roles_of("team", team)["planner"]
-assert ids(planner_entries) == [beta["id"], default_agent_id], planner_entries
-assert priorities(planner_entries) == [0, 1], planner_entries
+team_roles = roles_of("team", team)
+assert ids(team_roles["planner"]) == [beta["id"], default_agent_id], team_roles["planner"]
+assert priorities(team_roles["planner"]) == [0, 1], team_roles["planner"]
+assert ids(team_roles["verifier"]) == [default_agent_id, beta["id"]], team_roles["verifier"]
+assert priorities(team_roles["verifier"]) == [0, 1], team_roles["verifier"]
+assert ids(team_roles["executor"]) == [
+    default_agent_id,
+    alpha["id"],
+    beta["id"],
+    solo["id"],
+], team_roles["executor"]
 
 project3 = call(
     "POST",
     "/api/projects",
-    {"name": "Inherit3", "goal": "移除后再次继承", "repo_path": repo, "base_branch": "main"},
+    {"name": "Inherit3", "goal": "角色调整后再次继承", "repo_path": repo, "base_branch": "main"},
 )["project"]
+pool3 = call("GET", f"/api/projects/{project3['id']}/agents")
+assert ids(roles_of("pool", pool3)["planner"]) == [beta["id"], default_agent_id], pool3
+
+call(
+    "PATCH",
+    f"/api/agents/{alpha['id']}",
+    {"roles": ["planner", "executor", "verifier"]},
+)
+team = call("GET", "/api/team/default")
+team_roles = roles_of("team", team)
+assert ids(team_roles["planner"]) == [beta["id"], default_agent_id, alpha["id"]], (
+    team_roles["planner"]
+)
+assert ids(team_roles["verifier"]) == [default_agent_id, beta["id"], alpha["id"]], (
+    team_roles["verifier"]
+)
+assert ids(team_roles["executor"]) == [
+    default_agent_id,
+    alpha["id"],
+    beta["id"],
+    solo["id"],
+], team_roles["executor"]
+
+# 角色恢复只影响默认团队，不改写已创建的项目池。
 pool3 = call("GET", f"/api/projects/{project3['id']}/agents")
 assert ids(roles_of("pool", pool3)["planner"]) == [beta["id"], default_agent_id], pool3
 
 # 7. 删除全局 Agent 时默认团队同步移除并重新编号。
 call("DELETE", f"/api/agents/{beta['id']}")
 team = call("GET", "/api/team/default")
-planner_entries = roles_of("team", team)["planner"]
-assert ids(planner_entries) == [default_agent_id], planner_entries
-assert priorities(planner_entries) == [0], planner_entries
-assert ids(roles_of("team", team)["executor"]) == [
+team_roles = roles_of("team", team)
+assert ids(team_roles["planner"]) == [default_agent_id, alpha["id"]], team_roles["planner"]
+assert priorities(team_roles["planner"]) == [0, 1], team_roles["planner"]
+assert ids(team_roles["executor"]) == [
     default_agent_id,
     alpha["id"],
-], team
+    solo["id"],
+], team_roles["executor"]
+assert priorities(team_roles["executor"]) == [0, 1, 2], team_roles["executor"]
+assert ids(team_roles["verifier"]) == [default_agent_id, alpha["id"]], team_roles["verifier"]
 
 # 旧项目的池保持快照语义，被删除的全局 Agent 条目标记为不可用。
 pool = call("GET", f"/api/projects/{project3['id']}/agents")
@@ -369,7 +413,10 @@ assert "删除" in (beta_entry["unavailable_reason"] or ""), beta_entry
 json.dump(
     {
         "default_agent_id": default_agent_id,
+        "alpha_id": alpha["id"],
         "project3_id": project3["id"],
+        "expected_planner": ids(team_roles["planner"]),
+        "project3_planner": ids(roles_of("pool", pool3)["planner"]),
     },
     open(state_path, "w", encoding="utf-8"),
     ensure_ascii=False,
@@ -402,13 +449,14 @@ planner = next(group for group in team["roles"] if group["role"] == "planner")
 assert [entry["priority"] for entry in planner["entries"]] == list(
     range(len(planner["entries"]))
 ), planner
-assert all(entry["agent_id"] == state["default_agent_id"] for entry in planner["entries"]), planner
+assert [entry["agent_id"] for entry in planner["entries"]] == state["expected_planner"], planner
 
 pool = call(f"/api/projects/{state['project3_id']}/agents")
 planner_pool = next(group for group in pool["roles"] if group["role"] == "planner")
 assert [entry["priority"] for entry in planner_pool["entries"]] == list(
     range(len(planner_pool["entries"]))
 ), planner_pool
+assert [entry["agent_id"] for entry in planner_pool["entries"]] == state["project3_planner"], planner_pool
 
 print("默认团队配置重启后保持")
 PY

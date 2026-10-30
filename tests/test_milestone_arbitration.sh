@@ -258,10 +258,7 @@ forced_agent = call(
         "enabled": False,
     },
 )
-# 新建项目的项目池继承默认团队，把测试 Agent 按原优先级顺序加入默认团队。
-for role in ("planner", "executor", "verifier"):
-    call("POST", "/api/team/default", {"role": role, "agent_id": default_agent["id"]})
-call("POST", "/api/team/default", {"role": "executor", "agent_id": forced_agent["id"]})
+# 新建项目的项目池继承默认团队。
 
 # 1. 里程碑任务：验收通过后阻塞等待人工验收，产物不进入交付分支。
 milestone_id = new_project("Milestone", "里程碑任务需要人工验收")

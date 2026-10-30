@@ -186,9 +186,7 @@ mock = call(
     },
 )
 assert mock["enabled"], mock
-# 默认团队随时快照，新项目从此继承；把 mock 配置成默认团队三个角色。
-for role in ["planner", "executor", "verifier"]:
-    call("POST", "/api/team/default", {"role": role, "agent_id": mock["id"]})
+# 默认团队随时快照，新项目从此继承。
 
 
 def make_project(name, goal):

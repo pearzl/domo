@@ -2,11 +2,9 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
-  Agent,
   JobSummary,
   ProjectDetail,
   ProjectUsage,
-  Role,
   Task,
   TaskAgentPool,
   UsageGroup,
@@ -365,7 +363,7 @@ export function ProjectPage({
 
       <AgentPoolPanel
         title="项目 Agent 池"
-        subtitle="每个角色按顺序选择已启用的 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
+        subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
         roles={detail.agent_pool.roles}
         disabled={archived}
         onReorder={(role, agentId, position) =>
@@ -1636,7 +1634,6 @@ function TaskDrawer({
   const agentPoolSection = (
     <TaskAgentPoolPanel
       task={task}
-      detail={detail}
       onRefresh={onRefresh}
       defaultOpen={!resultFirst}
       disabled={archived || task.stage === "completed" || task.status === "canceled"}
@@ -1828,13 +1825,11 @@ function TaskDrawer({
 /** 任务 Agent 池：从项目池对应角色派生，复用项目池的 AgentPoolPanel 交互。 */
 function TaskAgentPoolPanel({
   task,
-  detail,
   onRefresh,
   defaultOpen,
   disabled,
 }: {
   task: Task;
-  detail: ProjectDetail;
   onRefresh: () => Promise<void>;
   defaultOpen: boolean;
   disabled: boolean;
@@ -1858,32 +1853,6 @@ function TaskAgentPoolPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, task.project_id]);
 
-  // 加入候选只来自项目池中具备该角色、全局仍存在且尚未出现在任务池里的 Agent。
-  const candidates = (role: Role): Agent[] =>
-    (detail.agent_pool.roles.find((group) => group.role === role)?.entries ?? [])
-      .filter((entry) => entry.kind !== "missing")
-      .map((entry) => ({
-        id: entry.agent_id,
-        name: entry.name,
-        kind: entry.kind === "missing" ? "mock" : entry.kind,
-        model: entry.model,
-        roles: [role],
-        max_concurrency: entry.max_concurrency,
-        enabled: entry.enabled,
-        command: [],
-        model_args: [],
-        cooldown_until: entry.cooldown_until,
-        last_error: entry.last_error,
-        failure_kind: entry.failure_kind,
-        failure_summary: entry.failure_summary,
-        transient_failures: entry.transient_failures,
-        availability: entry.availability,
-        usage_limit: entry.usage_limit,
-        usage_window: entry.usage_window,
-        created_at: "",
-        updated_at: "",
-      }));
-
   if (!pool) {
     if (!loadError) return null;
     return <div className="error-box">{loadError}</div>;
@@ -1896,7 +1865,6 @@ function TaskAgentPoolPanel({
       roles={pool.roles}
       defaultOpen={defaultOpen}
       disabled={disabled}
-      addCandidates={candidates}
       onReorder={(role, agentId, position) =>
         api.updateTaskAgent(task.project_id, task.id, role, agentId, { position })
       }
@@ -1905,10 +1873,6 @@ function TaskAgentPoolPanel({
       }
       onToggle={(role, agentId, enabled) =>
         api.updateTaskAgent(task.project_id, task.id, role, agentId, { enabled })
-      }
-      onAdd={(role, agentId) => api.addTaskAgent(task.project_id, task.id, role, agentId)}
-      onRemove={(role, agentId) =>
-        api.removeTaskAgent(task.project_id, task.id, role, agentId)
       }
       onRefresh={async () => {
         await refreshPool();

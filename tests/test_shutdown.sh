@@ -157,8 +157,6 @@ executor = call("POST", "/api/agents", {
     "roles": ["executor"], "max_concurrency": 1,
     "command": ["sleep", "300"],
 })
-for role, agent in (("planner", planner), ("executor", executor), ("verifier", verifier)):
-    call("POST", "/api/team/default", {"role": role, "agent_id": agent["id"]})
 
 project = call("POST", "/api/projects", {
     "name": "Shutdown", "goal": "验证关闭流程",

@@ -476,7 +476,6 @@ async fn seed_defaults(pool: &SqlitePool) -> anyhow::Result<()> {
     let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
         .fetch_one(pool)
         .await?;
-    let mut fresh_agent_id: Option<String> = None;
     if agent_count == 0 {
         let now = crate::domain::now();
         let id = format!("agt_{}", Uuid::new_v4().simple());
@@ -500,76 +499,94 @@ async fn seed_defaults(pool: &SqlitePool) -> anyhow::Result<()> {
         .bind(&now)
         .execute(pool)
         .await?;
-        fresh_agent_id = Some(id);
     }
-    seed_default_team(pool, fresh_agent_id).await
+    ensure_default_team(pool).await
 }
 
-/// 默认团队为空时初始化：空库沿用 OpenCode 默认团队 Agent；存量库把全局
-/// Agent 配置按既有优先级顺序快照进来，保持继承顺序不变。
-async fn seed_default_team(
-    pool: &SqlitePool,
-    fresh_agent_id: Option<String>,
-) -> anyhow::Result<()> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM default_team")
-        .fetch_one(pool)
-        .await?;
-    if count > 0 {
-        return Ok(());
-    }
-    let timestamp = crate::domain::now();
-    if let Some(agent_id) = fresh_agent_id {
-        let mut tx = pool.begin().await?;
-        for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
-            sqlx::query(
-                "INSERT OR IGNORE INTO default_team \
-                 (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-                 VALUES (?, ?, ?, 0, 1, ?, ?)",
-            )
-            .bind(role)
-            .bind(&agent_id)
-            .bind("OpenCode 默认团队")
-            .bind(&timestamp)
-            .bind(&timestamp)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        return Ok(());
-    }
+/// 默认团队始终覆盖全部已注册 Agent：按 Agent 的 roles 展开到各角色，
+/// 已存在的条目保留优先级与启停，缺失的条目追加到角色末尾。全局 Agent
+/// 被删除或角色集合变化时，对应条目随之清理并重排优先级。
+pub async fn ensure_default_team(pool: &SqlitePool) -> anyhow::Result<()> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let agents = sqlx::query_as::<_, AgentRow>(
         "SELECT * FROM agents ORDER BY priority ASC, created_at ASC, id ASC",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    if agents.is_empty() {
-        return Ok(());
-    }
-    let mut tx = pool.begin().await?;
+    let existing = sqlx::query_as::<_, DefaultTeamRow>("SELECT * FROM default_team")
+        .fetch_all(&mut *tx)
+        .await?;
+    let timestamp = crate::domain::now();
     for role in [ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER] {
-        let mut priority = 0;
+        let mut ordered: Vec<&DefaultTeamRow> =
+            existing.iter().filter(|row| row.role == role).collect();
+        ordered.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        let mut desired: Vec<&AgentRow> = Vec::new();
+        for row in ordered {
+            if let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) {
+                if parse_string_list(&agent.roles)
+                    .iter()
+                    .any(|item| item == role)
+                {
+                    desired.push(agent);
+                }
+            }
+        }
         for agent in &agents {
-            if !parse_string_list(&agent.roles)
+            if parse_string_list(&agent.roles)
                 .iter()
                 .any(|item| item == role)
+                && !desired.iter().any(|existing| existing.id == agent.id)
             {
-                continue;
+                desired.push(agent);
             }
-            sqlx::query(
-                "INSERT OR IGNORE INTO default_team \
-                 (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(role)
-            .bind(&agent.id)
-            .bind(&agent.name)
-            .bind(priority)
-            .bind(agent.enabled)
-            .bind(&timestamp)
-            .bind(&timestamp)
-            .execute(&mut *tx)
-            .await?;
-            priority += 1;
+        }
+        let desired_ids: Vec<&str> = desired.iter().map(|agent| agent.id.as_str()).collect();
+        for row in existing.iter().filter(|row| row.role == role) {
+            if !desired_ids.contains(&row.agent_id.as_str()) {
+                sqlx::query("DELETE FROM default_team WHERE role = ? AND agent_id = ?")
+                    .bind(role)
+                    .bind(&row.agent_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for (priority, agent) in desired.iter().enumerate() {
+            let exists = existing
+                .iter()
+                .any(|row| row.role == role && row.agent_id == agent.id);
+            if exists {
+                sqlx::query(
+                    "UPDATE default_team SET priority = ?, agent_name = ?, updated_at = ? \
+                     WHERE role = ? AND agent_id = ?",
+                )
+                .bind(priority as i64)
+                .bind(&agent.name)
+                .bind(&timestamp)
+                .bind(role)
+                .bind(&agent.id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO default_team \
+                     (role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(role)
+                .bind(&agent.id)
+                .bind(&agent.name)
+                .bind(priority as i64)
+                .bind(agent.enabled)
+                .bind(&timestamp)
+                .bind(&timestamp)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
     }
     tx.commit().await?;
