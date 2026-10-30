@@ -59,6 +59,7 @@ function task(overrides: Partial<Task> = {}): Task {
     last_agent_id: null,
     worktree: null,
     branch: null,
+    artifacts_released_at: null,
     attempts: 0,
     rejections: 0,
     last_error: null,
