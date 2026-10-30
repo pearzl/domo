@@ -876,6 +876,31 @@ small {
   gap: 14px;
 }
 
+/* 项目设置收在页面末尾：元信息与 Agent 池都按需展开，不抢占任务主区。 */
+.project-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-settings > summary {
+  font-weight: 600;
+}
+
+.project-settings .agent-pool {
+  background: #f8fafc;
+  box-shadow: none;
+}
+
+.project-meta > summary {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.project-meta .meta-grid {
+  margin-top: 10px;
+}
+
 .project-heading {
   display: flex;
   justify-content: space-between;

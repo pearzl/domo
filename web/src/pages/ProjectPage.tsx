@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
@@ -45,15 +45,13 @@ import {
   rawErrorEntry,
   type DrawerTailSection,
 } from "../presentation/taskDrawer";
+import { projectBlockOrder } from "../presentation/projectLayout";
 import {
   Badge,
   EmptySteps,
   ErrorBox,
   FAILURE_KIND_LABELS,
-  Progress,
   ROLE_LABELS,
-  StageBadge,
-  StatusBadge,
   TaskStateBadge,
   formatCost,
   formatMillis as formatUsageDuration,
@@ -219,7 +217,6 @@ export function ProjectPage({
 
   const { project, tasks, jobs, messages, events, agents, proposal } = detail;
   const activeTasks = tasks.filter((task) => task.status !== "canceled");
-  const completed = activeTasks.filter((task) => task.stage === "completed").length;
   const archived = project.status === "archived";
   const paused = project.status === "paused" || project.status === "pausing";
   const goalMessages = messages.filter((item) => item.role !== "review");
@@ -335,6 +332,624 @@ export function ProjectPage({
     setTaskFilter("all");
   }
 
+  const analysisBlock = project.stage === "analysis" ? (
+    <section className="panel">
+      <h2>项目分析</h2>
+      <p className="subtitle">
+        规划者会理解目标与现状，必要时澄清，给出可确认的方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
+      </p>
+      <label className="goal-policy">
+        <input
+          type="checkbox"
+          checked={project.confirm_mode === "auto"}
+          disabled={busy || archived || paused || !!analysisJob}
+          onChange={(event) =>
+            run(() =>
+              api.updateAnalysisPolicy(
+                project.id,
+                event.target.checked ? "auto" : "manual",
+              ),
+            )
+          }
+        />
+        <span>
+          自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行；关闭后每个方案都需要你点击确认。
+        </span>
+      </label>
+      <div className="messages">
+        {goalMessages.map((item) => (
+          <div key={item.id} className={`message message-${item.role}`}>
+            <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
+            <RichContent content={item.content} className="message-content" />
+          </div>
+        ))}
+        {goalMessages.length === 0 ? (
+          <div className="muted">还没有输入项目目标。</div>
+        ) : null}
+      </div>
+      {analysisJob ? (
+        <AnalysisLiveActivity jobId={analysisJob.id} />
+      ) : null}
+      {analysisJob ? (
+        <div className="goal-running">
+          <Badge tone="info">规划者正在分析</Badge>
+          <span className="muted">
+            {analysisJob.agent_name ?? "规划 Agent"} ·{" "}
+            {formatTime(analysisJob.started_at)}
+          </span>
+        </div>
+      ) : null}
+      {proposal ? (
+        <div className="goal-proposal">
+          <div className="goal-proposal-head">
+            <Badge tone={proposal.kind === "direct" ? "warn" : "success"}>
+              {proposal.kind === "direct" ? "建议直接完成" : "项目方案"}
+            </Badge>
+            <div className="goal-proposal-summary">
+              <RichContent content={proposal.summary} />
+            </div>
+          </div>
+          {proposal.goal ? (
+            <div>
+              <strong>确认后的目标：</strong>
+              <RichContent content={proposal.goal} />
+            </div>
+          ) : null}
+          {proposal.assumptions.length ? (
+            <div>
+              <strong>关键假设</strong>
+              <ul>
+                {proposal.assumptions.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {proposal.acceptance.length ? (
+            <div>
+              <strong>验收口径</strong>
+              <ul>
+                {proposal.acceptance.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {proposal.tasks.length ? (
+            <div>
+              <strong>任务方案</strong>
+              <ul>
+                {proposal.tasks.map((task) => (
+                  <li key={task.key}>
+                    <div>
+                      <strong>
+                        {task.key} {task.title}
+                      </strong>
+                      {task.deps.length ? (
+                        <span className="muted">
+                          （依赖 {task.deps.join("、")}）
+                        </span>
+                      ) : null}
+                    </div>
+                    <RichContent content={task.description} />
+                    {task.acceptance.length ? (
+                      <ul>
+                        {task.acceptance.map((item) => (
+                          <li key={item}>验收：{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {proposal.plan.length ? (
+            <div>
+              <strong>执行步骤</strong>
+              <ul>
+                {proposal.plan.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {proposal.verification.length ? (
+            <div>
+              <strong>自检方式</strong>
+              <ul>
+                {proposal.verification.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {!analysisJob ? (
+        <div className="confirm-row">
+          <textarea
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            disabled={busy || paused || archived}
+            rows={3}
+            placeholder={
+              goalMessages.length === 0
+                ? "描述项目目标、边界和验收预期。"
+                : "补充信息、回答规划者的问题，或对方案提出修改意见。"
+            }
+          />
+          <div className="button-row">
+            <button
+              className="secondary"
+              disabled={busy || paused || archived || !message.trim()}
+              onClick={() =>
+                run(async () => {
+                  await api.postAnalysisMessage(
+                    project.id,
+                    message,
+                    project.confirm_mode,
+                  );
+                  setMessage("");
+                })
+              }
+            >
+              {goalMessages.length === 0 ? "开始分析" : "发送"}
+            </button>
+            {proposal ? (
+              <button
+                className="primary"
+                disabled={
+                  busy ||
+                  paused ||
+                  archived ||
+                  !!message.trim() ||
+                  (proposal.kind === "direct" && activeTasks.length > 0)
+                }
+                title={
+                  message.trim()
+                    ? "请先发送修改意见或清空输入后再确认"
+                    : proposal.kind === "direct" && activeTasks.length > 0
+                      ? "项目已有任务，不能直接完成"
+                      : undefined
+                }
+                onClick={() =>
+                  run(async () => {
+                    await api.confirmAnalysis(project.id);
+                    setMessage("");
+                  })
+                }
+              >
+                {proposal.kind === "direct"
+                  ? "确认并直接完成"
+                  : "确认方案，开始执行"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  ) : goalMessages.length > 1 ? (
+    <details className="panel">
+      <summary>项目分析记录</summary>
+      <div className="messages compact">
+        {goalMessages.map((item) => (
+          <div key={item.id} className={`message message-${item.role}`}>
+            <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
+            <RichContent content={item.content} className="message-content" />
+          </div>
+        ))}
+      </div>
+    </details>
+  ) : null;
+
+  const tasksBlock = (
+    <section className="panel">
+      <div className="panel-head">
+        <h2>{directMode ? "直接完成" : "任务"}</h2>
+        <div className="task-panel-actions">
+          {!directMode ? (
+            <div className="view-toggle" role="group" aria-label="任务视图">
+              <button
+                type="button"
+                className={taskView === "list" ? "active" : undefined}
+                aria-pressed={taskView === "list"}
+                onClick={() => setTaskView("list")}
+              >
+                列表
+              </button>
+              <button
+                type="button"
+                className={taskView === "dag" ? "active" : undefined}
+                aria-pressed={taskView === "dag"}
+                onClick={() => setTaskView("dag")}
+              >
+                DAG
+              </button>
+            </div>
+          ) : null}
+          {!archived && !directMode && proposal?.kind !== "direct" ? (
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={toggleAddTaskForm}
+            >
+              {addTaskOpen ? "取消添加" : "添加任务"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {directMode ? (
+        <div className="direct-mode">
+          <p className="subtitle">
+            本项目采用直接完成模式，不拆分任务。规划者会一次性完成实现、自检和总结，报告仍需人工验收。
+          </p>
+          {directJob ? (
+            <div className="goal-running">
+              <Badge tone="info">直接完成中</Badge>
+              <span className="muted">
+                {directJob.agent_name ?? "规划 Agent"} ·{" "}
+                {formatTime(directJob.started_at)}
+              </span>
+            </div>
+          ) : project.stage === "executing" ? (
+            <div className="muted">等待直接完成作业派发。</div>
+          ) : (
+            <div className="muted">
+              直接完成已结束，请查看下方项目报告。
+            </div>
+          )}
+        </div>
+      ) : null}
+      {!directMode && tasks.length > 0 ? (
+        <div className="task-toolbar">
+          <input
+            className="task-search"
+            type="search"
+            value={taskQuery}
+            onChange={(event) => setTaskQuery(event.target.value)}
+            placeholder="按 key 或标题筛选"
+            aria-label="按 key 或标题筛选任务"
+          />
+          <div className="task-filters" role="group" aria-label="任务筛选">
+            {TASK_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                className={taskFilter === filter.id ? "active" : undefined}
+                aria-pressed={taskFilter === filter.id}
+                onClick={() => setTaskFilter(filter.id)}
+              >
+                {filter.label}
+                <span className="filter-count">{taskCounts[filter.id]}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {addTaskOpen && !archived && !directMode && proposal?.kind !== "direct" ? (
+        <form className="form add-task-form" onSubmit={handleAddTask}>
+          <div className="form-grid">
+            <label>
+              <span>任务 key</span>
+              <input
+                value={taskKey}
+                onChange={(event) => setTaskKey(event.target.value)}
+                placeholder="例如：T3"
+                aria-invalid={draftCheck.errors.key ? true : undefined}
+                required
+              />
+              {draftCheck.errors.key ? (
+                <small className="field-error">{draftCheck.errors.key}</small>
+              ) : null}
+            </label>
+            <label>
+              <span>标题</span>
+              <input
+                value={taskTitle}
+                onChange={(event) => setTaskTitle(event.target.value)}
+                placeholder="一句话说明这个任务做什么"
+                required
+              />
+            </label>
+          </div>
+          <label>
+            <span>描述</span>
+            <textarea
+              value={taskDescription}
+              onChange={(event) => setTaskDescription(event.target.value)}
+              rows={3}
+              placeholder="任务目标、边界和实现要点。"
+              required
+            />
+          </label>
+          <label>
+            <span>验收标准（每行一条，留空使用默认标准）</span>
+            <textarea
+              value={taskAcceptance}
+              onChange={(event) => setTaskAcceptance(event.target.value)}
+              rows={3}
+              placeholder={"例如：\ndomo_mock/T3.txt 存在且包含 T3"}
+            />
+          </label>
+          <div className="field">
+            <span className="field-label">前置任务（依赖）</span>
+            <small className="muted">
+              只引用当前活动任务；已完成、执行中的任务都能作为依赖，已取消任务不在此列出。
+            </small>
+            {depOptions.length === 0 ? (
+              <span className="muted">项目还没有可依赖的任务。</span>
+            ) : (
+              <div className="checkbox-row">
+                {depOptions.map((option) => (
+                  <label className="checkbox-label" key={option.key}>
+                    <input
+                      type="checkbox"
+                      checked={taskDeps.includes(option.key)}
+                      onChange={(event) => {
+                        setTaskDeps((current) =>
+                          event.target.checked
+                            ? [...current, option.key]
+                            : current.filter((dep) => dep !== option.key),
+                        );
+                      }}
+                    />
+                    <span>
+                      {option.key} {option.title}
+                      <span className="dep-stage muted"> · {option.stageLabel}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+            {draftCheck.errors.deps ? (
+              <small className="field-error">{draftCheck.errors.deps}</small>
+            ) : null}
+          </div>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={taskMilestone}
+              onChange={(event) => setTaskMilestone(event.target.checked)}
+            />
+            <span>标记为里程碑（验收通过后需人工确认）</span>
+          </label>
+          <div className="form-actions">
+            <button
+              className="primary"
+              type="submit"
+              disabled={busy || !draftCheck.valid}
+              title={draftCheck.valid ? undefined : "请先修正表单中的提示"}
+            >
+              {busy ? "提交中…" : "添加任务"}
+            </button>
+            <span className="muted">
+              项目在总结或完成阶段时会回到执行阶段，原报告作废待重写。
+            </span>
+          </div>
+        </form>
+      ) : null}
+      {directMode ? null : tasks.length === 0 ? (
+        <EmptySteps
+          title="还没有任务"
+          hint="规划者确认方案后会按方案创建任务，任务从这里开始推进："
+          steps={[
+            "在“项目分析”里描述目标、边界和验收预期并发送。",
+            "查看规划者给出的方案，确认方案后任务自动创建。",
+            "任务按依赖自动派发；想提前插入工作时可用右上角“添加任务”。",
+          ]}
+        />
+      ) : taskView === "dag" ? (
+        <TaskDag
+          tasks={tasks}
+          selectedTaskId={selectedTaskId}
+          onSelect={setSelectedTaskId}
+        />
+      ) : (
+        <>
+          {visibleTasks.length === 0 ? (
+            <div className="empty">
+              <div className="empty-title">没有匹配的任务</div>
+              <div className="empty-hint">
+                {taskQuery.trim()
+                  ? `没有匹配搜索“${taskQuery.trim()}”的任务`
+                  : `“${TASK_FILTERS.find((item) => item.id === taskFilter)?.label ?? "当前筛选"}”下没有任务`}
+                ，可清除搜索或切换筛选条件。
+              </div>
+              {searchActive ? (
+                <div className="empty-actions">
+                  <button className="secondary" onClick={resetTaskFilter}>
+                    清除搜索与筛选
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+        <div className="task-list">
+          {visibleTasks.map((task) => {
+            const children = activeTasks.filter(
+              (item) => item.parent_id === task.id,
+            );
+            const childCompleted = children.filter(
+              (item) => item.stage === "completed",
+            ).length;
+            const waitingChildren =
+              children.length > 0 &&
+              task.stage === "pending" &&
+              childCompleted < children.length;
+            return (
+              <div
+                key={task.id}
+                className={`task-row ${task.id === selectedTaskId ? "selected" : ""}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedTaskId(task.id)}
+                onKeyDown={(event) => {
+                  if (event.key === " " || event.key === "Enter") {
+                    // Space 默认会滚动页面，打开抽屉时阻止滚动。
+                    event.preventDefault();
+                    setSelectedTaskId(task.id);
+                  }
+                }}
+              >
+                <span className="task-key">{task.key}</span>
+                <span className="task-title">{task.title}</span>
+                <span className="task-state">
+                  <TaskStateBadge stage={task.stage} status={task.status} />
+                  {task.queue_position !== null ? (
+                    <Badge tone="info">队列 #{task.queue_position}</Badge>
+                  ) : null}
+                  {task.milestone ? <Badge tone="warn">里程碑</Badge> : null}
+                </span>
+                <span className="task-deps muted" title={task.waiting_reason ?? ""}>
+                  {task.deps.length ? `依赖 ${task.deps.join(", ")}` : "无依赖"}
+                  {task.parent_id ? " · 派生任务" : ""}
+                  {children.length
+                    ? ` · 子任务 ${childCompleted}/${children.length}`
+                    : ""}
+                  {waitingChildren ? " · 等待子任务" : ""}
+                  {task.waiting_reason ? ` · ${task.waiting_reason}` : ""}
+                </span>
+                <span className="task-agent muted">{agentName(task.agent_id)}</span>
+                <span className="task-counts muted">
+                  {task.attempts ? `执行 ${task.attempts}` : ""}
+                  {task.rejections ? ` 拒绝 ${task.rejections}` : ""}
+                  {isReordableQueueTask(task, archived) ? (
+                    <QueueControls
+                      task={task}
+                      summary={queueSummary(queueIds, task.id)}
+                      busy={busy}
+                      onReorder={(direction) =>
+                        run(() =>
+                          api.reorderTaskQueue(project.id, task.id, direction),
+                        )
+                      }
+                    />
+                  ) : null}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+          )}
+        </>
+      )}
+      {!directMode && tasks.length > 0 && taskView === "list" ? (
+        <div className="legend muted">
+          阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。“作业”指一次 Agent 调用，每次执行或验收作业都有独立的输入、输出与用量。上移/下移只调整同一可调整队列内的派发顺序，不改变依赖关系。
+        </div>
+      ) : null}
+    </section>
+  );
+
+  const reportBlock = project.stage === "summarizing" || project.report ? (
+    <section className="panel">
+      <h2>项目报告{reviewMessages.length > 0 ? `（${reviewMessages.length} 条评议）` : ""}</h2>
+      {reviewMessages.length > 0 ? (
+        <details className="report-review-log" open={!!project.report}>
+          <summary>评议记录（{reviewMessages.length}）</summary>
+          <div className="messages compact">
+            {reviewMessages.map((item) => (
+              <div key={item.id} className="message message-user">
+                <div className="message-role">你的意见</div>
+                <RichContent content={item.content} className="message-content" />
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {project.report ? (
+        <RichContent content={project.report} className="report" />
+      ) : project.stage === "summarizing" ? (
+        project.blocked_reason ? (
+          <p className="muted">报告生成失败，可在上方失败作业上重试。</p>
+        ) : (
+          <p className="muted">规划者正在依据评议意见重写报告…</p>
+        )
+      ) : null}
+      {project.stage === "summarizing" ? (
+        <div className="report-actions">
+          <textarea
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+            rows={3}
+            placeholder="对报告的意见（提交意见可供多轮讨论；要求重写或重新规划时必须填写）。"
+          />
+          <div className="button-row">
+            <button
+              className="primary"
+              disabled={busy || !project.report}
+              onClick={() => run(() => api.submitReport(project.id, "accept"))}
+            >
+              通过并完成
+            </button>
+            <button
+              className="secondary"
+              disabled={busy || !feedback.trim()}
+              onClick={() =>
+                run(async () => {
+                  await api.submitReport(project.id, "comment", feedback);
+                  setFeedback("");
+                })
+              }
+            >
+              提交意见
+            </button>
+            <button
+              className="secondary"
+              disabled={busy || !project.report || !feedback.trim()}
+              onClick={() =>
+                run(async () => {
+                  await api.submitReport(project.id, "reject", feedback);
+                  setFeedback("");
+                })
+              }
+              title={
+                project.completion_mode === "direct"
+                  ? "记录意见并重新执行直接完成"
+                  : "记录意见并要求规划者重新撰写报告"
+              }
+            >
+              {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
+            </button>
+            <button
+              className="secondary"
+              disabled={busy || !project.report || !feedback.trim()}
+              onClick={() =>
+                run(async () => {
+                  await api.submitReport(project.id, "replan", feedback);
+                  setFeedback("");
+                })
+              }
+              title="记录意见并要求重新规划，项目回到项目分析阶段"
+            >
+              要求重新规划
+            </button>
+            {project.completion_mode !== "direct" ? (
+              <button
+                className="secondary"
+                disabled={busy || archived}
+                onClick={openAddTaskForm}
+                title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
+              >
+                增加新任务
+              </button>
+            ) : null}
+          </div>
+          {project.completion_mode !== "direct" ? (
+            <p className="muted">
+              “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
+            </p>
+          ) : (
+            <p className="muted">
+              直接完成模式下，“重做并重新总结”会重新执行并生成新报告。
+            </p>
+          )}
+        </div>
+      ) : null}
+    </section>
+  ) : null;
+
   return (
     <div className="page">
       <div className="back-row">
@@ -347,11 +962,6 @@ export function ProjectPage({
         <div className="project-heading">
           <div>
             <h1>{project.name}</h1>
-            <div className="badge-row">
-              <StageBadge stage={project.stage} />
-              <StatusBadge status={project.status} />
-              {project.status === "blocked" ? <Badge tone="danger">需要处理</Badge> : null}
-            </div>
           </div>
           <div className="header-actions">
             {!archived && project.stage !== "completed" ? (
@@ -411,26 +1021,6 @@ export function ProjectPage({
           </div>
         </div>
         <ProjectGoal goal={project.goal} />
-        <div className="meta-grid">
-          <div>
-            <span className="meta-label">仓库</span>
-            <span className="mono">{project.repo_path}</span>
-          </div>
-          <div>
-            <span className="meta-label">交付分支</span>
-            <span className="mono">
-              {project.base_branch} → {project.branch}
-            </span>
-          </div>
-          <div>
-            <span className="meta-label">工作区</span>
-            <span className="mono">{project.workspace}</span>
-          </div>
-          <div>
-            <span className="meta-label">进度</span>
-            <Progress total={activeTasks.length} completed={completed} />
-          </div>
-        </div>
         {project.blocked_reason ? (
           <div className="blocked-banner">
             <strong>{project.status === "blocked" ? "阻塞原因" : "提示"}</strong>
@@ -501,25 +1091,6 @@ export function ProjectPage({
 
       <ProjectOverview detail={detail} />
 
-      <AgentPoolPanel
-        title="项目 Agent 池"
-        subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
-        roles={detail.agent_pool.roles}
-        disabled={archived}
-        onReorder={(role, agentId, position) =>
-          api.updateProjectAgent(project.id, role, agentId, { position })
-        }
-        onMove={(role, agentId, direction) =>
-          api.updateProjectAgent(project.id, role, agentId, { direction })
-        }
-        onToggle={(role, agentId, enabled) =>
-          api.updateProjectAgent(project.id, role, agentId, { enabled })
-        }
-        onRefresh={() => refresh()}
-      />
-
-      <UsagePanel projectId={project.id} usage={detail.usage} />
-
       {error ? <ErrorBox message={error} /> : null}
 
       {replanOpen && canReplan ? (
@@ -586,6 +1157,12 @@ export function ProjectPage({
         </section>
       ) : null}
 
+      {projectBlockOrder(project.stage).map((block) => (
+        <Fragment key={block}>
+          {block === "analysis" ? analysisBlock : block === "tasks" ? tasksBlock : block === "report" ? reportBlock : null}
+        </Fragment>
+      ))}
+
       {project.replan_reason || replanEvents.length > 0 ? (
         <section className="panel">
           <h2>重规划记录</h2>
@@ -609,215 +1186,23 @@ export function ProjectPage({
         </section>
       ) : null}
 
-      {project.stage === "analysis" ? (
+      <UsagePanel projectId={project.id} usage={detail.usage} />
+
+      {projectJobs.length > 0 ? (
         <section className="panel">
-          <h2>项目分析</h2>
-          <p className="subtitle">
-            规划者会理解目标与现状，必要时澄清，给出可确认的方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
-          </p>
-          <label className="goal-policy">
-            <input
-              type="checkbox"
-              checked={project.confirm_mode === "auto"}
-              disabled={busy || archived || paused || !!analysisJob}
-              onChange={(event) =>
-                run(() =>
-                  api.updateAnalysisPolicy(
-                    project.id,
-                    event.target.checked ? "auto" : "manual",
-                  ),
-                )
-              }
-            />
-            <span>
-              自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行；关闭后每个方案都需要你点击确认。
-            </span>
-          </label>
-          <div className="messages">
-            {goalMessages.map((item) => (
-              <div key={item.id} className={`message message-${item.role}`}>
-                <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
-                <RichContent content={item.content} className="message-content" />
-              </div>
-            ))}
-            {goalMessages.length === 0 ? (
-              <div className="muted">还没有输入项目目标。</div>
-            ) : null}
-          </div>
-          {analysisJob ? (
-            <AnalysisLiveActivity jobId={analysisJob.id} />
-          ) : null}
-          {analysisJob ? (
-            <div className="goal-running">
-              <Badge tone="info">规划者正在分析</Badge>
-              <span className="muted">
-                {analysisJob.agent_name ?? "规划 Agent"} ·{" "}
-                {formatTime(analysisJob.started_at)}
-              </span>
-            </div>
-          ) : null}
-          {proposal ? (
-            <div className="goal-proposal">
-              <div className="goal-proposal-head">
-                <Badge tone={proposal.kind === "direct" ? "warn" : "success"}>
-                  {proposal.kind === "direct" ? "建议直接完成" : "项目方案"}
-                </Badge>
-                <div className="goal-proposal-summary">
-                  <RichContent content={proposal.summary} />
-                </div>
-              </div>
-              {proposal.goal ? (
-                <div>
-                  <strong>确认后的目标：</strong>
-                  <RichContent content={proposal.goal} />
-                </div>
-              ) : null}
-              {proposal.assumptions.length ? (
-                <div>
-                  <strong>关键假设</strong>
-                  <ul>
-                    {proposal.assumptions.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {proposal.acceptance.length ? (
-                <div>
-                  <strong>验收口径</strong>
-                  <ul>
-                    {proposal.acceptance.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {proposal.tasks.length ? (
-                <div>
-                  <strong>任务方案</strong>
-                  <ul>
-                    {proposal.tasks.map((task) => (
-                      <li key={task.key}>
-                        <div>
-                          <strong>
-                            {task.key} {task.title}
-                          </strong>
-                          {task.deps.length ? (
-                            <span className="muted">
-                              （依赖 {task.deps.join("、")}）
-                            </span>
-                          ) : null}
-                        </div>
-                        <RichContent content={task.description} />
-                        {task.acceptance.length ? (
-                          <ul>
-                            {task.acceptance.map((item) => (
-                              <li key={item}>验收：{item}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {proposal.plan.length ? (
-                <div>
-                  <strong>执行步骤</strong>
-                  <ul>
-                    {proposal.plan.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {proposal.verification.length ? (
-                <div>
-                  <strong>自检方式</strong>
-                  <ul>
-                    {proposal.verification.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {!analysisJob ? (
-            <div className="confirm-row">
-              <textarea
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                disabled={busy || paused || archived}
-                rows={3}
-                placeholder={
-                  goalMessages.length === 0
-                    ? "描述项目目标、边界和验收预期。"
-                    : "补充信息、回答规划者的问题，或对方案提出修改意见。"
-                }
+          <h2>项目分析 / 直接完成 / 总结作业</h2>
+          <JobRecordList
+            jobs={projectJobs}
+            renderJob={(job) => (
+              <JobDetailView
+                key={job.id}
+                job={job}
+                retryable={job.id === retryableProjectJobId}
+                onRetry={() => run(() => api.retryJob(job.id))}
               />
-              <div className="button-row">
-                <button
-                  className="secondary"
-                  disabled={busy || paused || archived || !message.trim()}
-                  onClick={() =>
-                    run(async () => {
-                      await api.postAnalysisMessage(
-                        project.id,
-                        message,
-                        project.confirm_mode,
-                      );
-                      setMessage("");
-                    })
-                  }
-                >
-                  {goalMessages.length === 0 ? "开始分析" : "发送"}
-                </button>
-                {proposal ? (
-                  <button
-                    className="primary"
-                    disabled={
-                      busy ||
-                      paused ||
-                      archived ||
-                      !!message.trim() ||
-                      (proposal.kind === "direct" && activeTasks.length > 0)
-                    }
-                    title={
-                      message.trim()
-                        ? "请先发送修改意见或清空输入后再确认"
-                        : proposal.kind === "direct" && activeTasks.length > 0
-                          ? "项目已有任务，不能直接完成"
-                          : undefined
-                    }
-                    onClick={() =>
-                      run(async () => {
-                        await api.confirmAnalysis(project.id);
-                        setMessage("");
-                      })
-                    }
-                  >
-                    {proposal.kind === "direct"
-                      ? "确认并直接完成"
-                      : "确认方案，开始执行"}
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
+            )}
+          />
         </section>
-      ) : goalMessages.length > 1 ? (
-        <details className="panel">
-          <summary>项目分析记录</summary>
-          <div className="messages compact">
-            {goalMessages.map((item) => (
-              <div key={item.id} className={`message message-${item.role}`}>
-                <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
-                <RichContent content={item.content} className="message-content" />
-              </div>
-            ))}
-          </div>
-        </details>
       ) : null}
 
       {archived && archiveRefs ? (
@@ -865,433 +1250,50 @@ export function ProjectPage({
       ) : null}
 
       <section className="panel">
-        <div className="panel-head">
-          <h2>{directMode ? "直接完成" : "任务"}</h2>
-          <div className="task-panel-actions">
-            {!directMode ? (
-              <div className="view-toggle" role="group" aria-label="任务视图">
-                <button
-                  type="button"
-                  className={taskView === "list" ? "active" : undefined}
-                  aria-pressed={taskView === "list"}
-                  onClick={() => setTaskView("list")}
-                >
-                  列表
-                </button>
-                <button
-                  type="button"
-                  className={taskView === "dag" ? "active" : undefined}
-                  aria-pressed={taskView === "dag"}
-                  onClick={() => setTaskView("dag")}
-                >
-                  DAG
-                </button>
-              </div>
-            ) : null}
-            {!archived && !directMode && proposal?.kind !== "direct" ? (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={toggleAddTaskForm}
-              >
-                {addTaskOpen ? "取消添加" : "添加任务"}
-              </button>
-            ) : null}
-          </div>
-        </div>
-        {directMode ? (
-          <div className="direct-mode">
-            <p className="subtitle">
-              本项目采用直接完成模式，不拆分任务。规划者会一次性完成实现、自检和总结，报告仍需人工验收。
-            </p>
-            {directJob ? (
-              <div className="goal-running">
-                <Badge tone="info">直接完成中</Badge>
-                <span className="muted">
-                  {directJob.agent_name ?? "规划 Agent"} ·{" "}
-                  {formatTime(directJob.started_at)}
-                </span>
-              </div>
-            ) : project.stage === "executing" ? (
-              <div className="muted">等待直接完成作业派发。</div>
-            ) : (
-              <div className="muted">
-                直接完成已结束，请查看下方项目报告。
-              </div>
-            )}
-          </div>
-        ) : null}
-        {!directMode && tasks.length > 0 ? (
-          <div className="task-toolbar">
-            <input
-              className="task-search"
-              type="search"
-              value={taskQuery}
-              onChange={(event) => setTaskQuery(event.target.value)}
-              placeholder="按 key 或标题筛选"
-              aria-label="按 key 或标题筛选任务"
-            />
-            <div className="task-filters" role="group" aria-label="任务筛选">
-              {TASK_FILTERS.map((filter) => (
-                <button
-                  key={filter.id}
-                  type="button"
-                  className={taskFilter === filter.id ? "active" : undefined}
-                  aria-pressed={taskFilter === filter.id}
-                  onClick={() => setTaskFilter(filter.id)}
-                >
-                  {filter.label}
-                  <span className="filter-count">{taskCounts[filter.id]}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
-        {addTaskOpen && !archived && !directMode && proposal?.kind !== "direct" ? (
-          <form className="form add-task-form" onSubmit={handleAddTask}>
-            <div className="form-grid">
-              <label>
-                <span>任务 key</span>
-                <input
-                  value={taskKey}
-                  onChange={(event) => setTaskKey(event.target.value)}
-                  placeholder="例如：T3"
-                  aria-invalid={draftCheck.errors.key ? true : undefined}
-                  required
-                />
-                {draftCheck.errors.key ? (
-                  <small className="field-error">{draftCheck.errors.key}</small>
-                ) : null}
-              </label>
-              <label>
-                <span>标题</span>
-                <input
-                  value={taskTitle}
-                  onChange={(event) => setTaskTitle(event.target.value)}
-                  placeholder="一句话说明这个任务做什么"
-                  required
-                />
-              </label>
-            </div>
-            <label>
-              <span>描述</span>
-              <textarea
-                value={taskDescription}
-                onChange={(event) => setTaskDescription(event.target.value)}
-                rows={3}
-                placeholder="任务目标、边界和实现要点。"
-                required
-              />
-            </label>
-            <label>
-              <span>验收标准（每行一条，留空使用默认标准）</span>
-              <textarea
-                value={taskAcceptance}
-                onChange={(event) => setTaskAcceptance(event.target.value)}
-                rows={3}
-                placeholder={"例如：\ndomo_mock/T3.txt 存在且包含 T3"}
-              />
-            </label>
-            <div className="field">
-              <span className="field-label">前置任务（依赖）</span>
-              <small className="muted">
-                只引用当前活动任务；已完成、执行中的任务都能作为依赖，已取消任务不在此列出。
-              </small>
-              {depOptions.length === 0 ? (
-                <span className="muted">项目还没有可依赖的任务。</span>
-              ) : (
-                <div className="checkbox-row">
-                  {depOptions.map((option) => (
-                    <label className="checkbox-label" key={option.key}>
-                      <input
-                        type="checkbox"
-                        checked={taskDeps.includes(option.key)}
-                        onChange={(event) => {
-                          setTaskDeps((current) =>
-                            event.target.checked
-                              ? [...current, option.key]
-                              : current.filter((dep) => dep !== option.key),
-                          );
-                        }}
-                      />
-                      <span>
-                        {option.key} {option.title}
-                        <span className="dep-stage muted"> · {option.stageLabel}</span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {draftCheck.errors.deps ? (
-                <small className="field-error">{draftCheck.errors.deps}</small>
-              ) : null}
-            </div>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={taskMilestone}
-                onChange={(event) => setTaskMilestone(event.target.checked)}
-              />
-              <span>标记为里程碑（验收通过后需人工确认）</span>
-            </label>
-            <div className="form-actions">
-              <button
-                className="primary"
-                type="submit"
-                disabled={busy || !draftCheck.valid}
-                title={draftCheck.valid ? undefined : "请先修正表单中的提示"}
-              >
-                {busy ? "提交中…" : "添加任务"}
-              </button>
-              <span className="muted">
-                项目在总结或完成阶段时会回到执行阶段，原报告作废待重写。
-              </span>
-            </div>
-          </form>
-        ) : null}
-        {directMode ? null : tasks.length === 0 ? (
-          <EmptySteps
-            title="还没有任务"
-            hint="规划者确认方案后会按方案创建任务，任务从这里开始推进："
-            steps={[
-              "在“项目分析”里描述目标、边界和验收预期并发送。",
-              "查看规划者给出的方案，确认方案后任务自动创建。",
-              "任务按依赖自动派发；想提前插入工作时可用右上角“添加任务”。",
-            ]}
-          />
-        ) : taskView === "dag" ? (
-          <TaskDag
-            tasks={tasks}
-            selectedTaskId={selectedTaskId}
-            onSelect={setSelectedTaskId}
-          />
-        ) : (
-          <>
-            {visibleTasks.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">没有匹配的任务</div>
-                <div className="empty-hint">
-                  {taskQuery.trim()
-                    ? `没有匹配搜索“${taskQuery.trim()}”的任务`
-                    : `“${TASK_FILTERS.find((item) => item.id === taskFilter)?.label ?? "当前筛选"}”下没有任务`}
-                  ，可清除搜索或切换筛选条件。
-                </div>
-                {searchActive ? (
-                  <div className="empty-actions">
-                    <button className="secondary" onClick={resetTaskFilter}>
-                      清除搜索与筛选
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-          <div className="task-list">
-            {visibleTasks.map((task) => {
-              const children = activeTasks.filter(
-                (item) => item.parent_id === task.id,
-              );
-              const childCompleted = children.filter(
-                (item) => item.stage === "completed",
-              ).length;
-              const waitingChildren =
-                children.length > 0 &&
-                task.stage === "pending" &&
-                childCompleted < children.length;
-              return (
-                <div
-                  key={task.id}
-                  className={`task-row ${task.id === selectedTaskId ? "selected" : ""}`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setSelectedTaskId(task.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === " " || event.key === "Enter") {
-                      // Space 默认会滚动页面，打开抽屉时阻止滚动。
-                      event.preventDefault();
-                      setSelectedTaskId(task.id);
-                    }
-                  }}
-                >
-                  <span className="task-key">{task.key}</span>
-                  <span className="task-title">{task.title}</span>
-                  <span className="task-state">
-                    <TaskStateBadge stage={task.stage} status={task.status} />
-                    {task.queue_position !== null ? (
-                      <Badge tone="info">队列 #{task.queue_position}</Badge>
-                    ) : null}
-                    {task.milestone ? <Badge tone="warn">里程碑</Badge> : null}
-                  </span>
-                  <span className="task-deps muted" title={task.waiting_reason ?? ""}>
-                    {task.deps.length ? `依赖 ${task.deps.join(", ")}` : "无依赖"}
-                    {task.parent_id ? " · 派生任务" : ""}
-                    {children.length
-                      ? ` · 子任务 ${childCompleted}/${children.length}`
-                      : ""}
-                    {waitingChildren ? " · 等待子任务" : ""}
-                    {task.waiting_reason ? ` · ${task.waiting_reason}` : ""}
-                  </span>
-                  <span className="task-agent muted">{agentName(task.agent_id)}</span>
-                  <span className="task-counts muted">
-                    {task.attempts ? `执行 ${task.attempts}` : ""}
-                    {task.rejections ? ` 拒绝 ${task.rejections}` : ""}
-                    {isReordableQueueTask(task, archived) ? (
-                      <QueueControls
-                        task={task}
-                        summary={queueSummary(queueIds, task.id)}
-                        busy={busy}
-                        onReorder={(direction) =>
-                          run(() =>
-                            api.reorderTaskQueue(project.id, task.id, direction),
-                          )
-                        }
-                      />
-                    ) : null}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-            )}
-          </>
-        )}
-        {!directMode && tasks.length > 0 && taskView === "list" ? (
-          <div className="legend muted">
-            阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。“作业”指一次 Agent 调用，每次执行或验收作业都有独立的输入、输出与用量。上移/下移只调整同一可调整队列内的派发顺序，不改变依赖关系。
-          </div>
-        ) : null}
-      </section>
-
-      {projectJobs.length > 0 ? (
-        <section className="panel">
-          <h2>项目分析 / 直接完成 / 总结作业</h2>
-          <JobRecordList
-            jobs={projectJobs}
-            renderJob={(job) => (
-              <JobDetailView
-                key={job.id}
-                job={job}
-                retryable={job.id === retryableProjectJobId}
-                onRetry={() => run(() => api.retryJob(job.id))}
-              />
-            )}
-          />
-        </section>
-      ) : null}
-
-      {project.stage === "summarizing" || project.report ? (
-        <section className="panel">
-          <h2>项目报告{reviewMessages.length > 0 ? `（${reviewMessages.length} 条评议）` : ""}</h2>
-          {reviewMessages.length > 0 ? (
-            <details className="report-review-log" open={!!project.report}>
-              <summary>评议记录（{reviewMessages.length}）</summary>
-              <div className="messages compact">
-                {reviewMessages.map((item) => (
-                  <div key={item.id} className="message message-user">
-                    <div className="message-role">你的意见</div>
-                    <RichContent content={item.content} className="message-content" />
-                  </div>
-                ))}
-              </div>
-            </details>
-          ) : null}
-          {project.report ? (
-            <RichContent content={project.report} className="report" />
-          ) : project.stage === "summarizing" ? (
-            project.blocked_reason ? (
-              <p className="muted">报告生成失败，可在上方失败作业上重试。</p>
-            ) : (
-              <p className="muted">规划者正在依据评议意见重写报告…</p>
-            )
-          ) : null}
-          {project.stage === "summarizing" ? (
-            <div className="report-actions">
-              <textarea
-                value={feedback}
-                onChange={(event) => setFeedback(event.target.value)}
-                rows={3}
-                placeholder="对报告的意见（提交意见可供多轮讨论；要求重写或重新规划时必须填写）。"
-              />
-              <div className="button-row">
-                <button
-                  className="primary"
-                  disabled={busy || !project.report}
-                  onClick={() => run(() => api.submitReport(project.id, "accept"))}
-                >
-                  通过并完成
-                </button>
-                <button
-                  className="secondary"
-                  disabled={busy || !feedback.trim()}
-                  onClick={() =>
-                    run(async () => {
-                      await api.submitReport(project.id, "comment", feedback);
-                      setFeedback("");
-                    })
-                  }
-                >
-                  提交意见
-                </button>
-                <button
-                  className="secondary"
-                  disabled={busy || !project.report || !feedback.trim()}
-                  onClick={() =>
-                    run(async () => {
-                      await api.submitReport(project.id, "reject", feedback);
-                      setFeedback("");
-                    })
-                  }
-                  title={
-                    project.completion_mode === "direct"
-                      ? "记录意见并重新执行直接完成"
-                      : "记录意见并要求规划者重新撰写报告"
-                  }
-                >
-                  {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
-                </button>
-                <button
-                  className="secondary"
-                  disabled={busy || !project.report || !feedback.trim()}
-                  onClick={() =>
-                    run(async () => {
-                      await api.submitReport(project.id, "replan", feedback);
-                      setFeedback("");
-                    })
-                  }
-                  title="记录意见并要求重新规划，项目回到项目分析阶段"
-                >
-                  要求重新规划
-                </button>
-                {project.completion_mode !== "direct" ? (
-                  <button
-                    className="secondary"
-                    disabled={busy || archived}
-                    onClick={openAddTaskForm}
-                    title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
-                  >
-                    增加新任务
-                  </button>
-                ) : null}
-              </div>
-              {project.completion_mode !== "direct" ? (
-                <p className="muted">
-                  “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
-                </p>
-              ) : (
-                <p className="muted">
-                  直接完成模式下，“重做并重新总结”会重新执行并生成新报告。
-                </p>
-              )}
-            </div>
-          ) : null}
-        </section>
-      ) : null}
-
-      <section className="panel">
         <details>
           <summary>活动与审计（{events.length}）</summary>
           <EventTimeline events={events} tasks={tasks} jobs={jobs} />
         </details>
       </section>
+
+      <details className="panel project-settings">
+        <summary>项目设置</summary>
+        <details className="project-meta">
+          <summary>项目元信息</summary>
+          <div className="meta-grid">
+            <div>
+              <span className="meta-label">仓库</span>
+              <span className="mono">{project.repo_path}</span>
+            </div>
+            <div>
+              <span className="meta-label">交付分支</span>
+              <span className="mono">
+                {project.base_branch} → {project.branch}
+              </span>
+            </div>
+            <div>
+              <span className="meta-label">工作区</span>
+              <span className="mono">{project.workspace}</span>
+            </div>
+          </div>
+        </details>
+        <AgentPoolPanel
+          title="项目 Agent 池"
+          subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
+          roles={detail.agent_pool.roles}
+          disabled={archived}
+          onReorder={(role, agentId, position) =>
+            api.updateProjectAgent(project.id, role, agentId, { position })
+          }
+          onMove={(role, agentId, direction) =>
+            api.updateProjectAgent(project.id, role, agentId, { direction })
+          }
+          onToggle={(role, agentId, enabled) =>
+            api.updateProjectAgent(project.id, role, agentId, { enabled })
+          }
+          onRefresh={() => refresh()}
+        />
+      </details>
 
       {selectedTask ? (
         <TaskDrawer

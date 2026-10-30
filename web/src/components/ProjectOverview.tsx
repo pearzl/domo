@@ -80,7 +80,7 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
         <div>
           <h2>项目概览</h2>
           <p className="subtitle">
-            当前状态、下一步与需要你处理的事项。任务指项目内可验收的工作单元；作业指任务每次调用 Agent 产生的一次执行记录。
+            当前状态、下一步与需要你处理的事项。
           </p>
         </div>
       </div>
@@ -111,12 +111,6 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
             label="项目用时"
             value={formatElapsed(status.stats.elapsedMs)}
             note="自项目创建起"
-            tone="muted"
-          />
-          <Stat
-            label="术语说明"
-            value="任务 / 作业"
-            note="任务 = 项目内可验收单元；作业 = 一次 Agent 调用"
             tone="muted"
           />
         </div>
