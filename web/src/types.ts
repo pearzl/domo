@@ -218,6 +218,7 @@ export interface Task {
   last_agent_id: string | null;
   worktree: string | null;
   branch: string | null;
+  artifacts_released_at: string | null;
   attempts: number;
   rejections: number;
   last_error: string | null;

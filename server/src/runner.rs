@@ -1018,13 +1018,16 @@ async fn prepare_task_worktree(
         )
         .await?;
     }
-    sqlx::query("UPDATE tasks SET worktree = ?, branch = ?, updated_at = ? WHERE id = ?")
-        .bind(path.to_string_lossy().to_string())
-        .bind(&branch)
-        .bind(now())
-        .bind(&task.id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE tasks SET worktree = ?, branch = ?, artifacts_released_at = NULL, updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(path.to_string_lossy().to_string())
+    .bind(&branch)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
     Ok(path)
 }
 

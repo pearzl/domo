@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_role TEXT,
     worktree TEXT,
     branch TEXT,
+    artifacts_released_at TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     rejections INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
@@ -279,6 +280,16 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "tasks", "avoid_agent_role", "TEXT").await?;
     ensure_column(pool, "tasks", "retry_agent_id", "TEXT").await?;
     ensure_column(pool, "tasks", "retry_role", "TEXT").await?;
+    ensure_column(pool, "tasks", "artifacts_released_at", "TEXT").await?;
+    // Completed tasks without a recorded worktree predate artifact release
+    // tracking. Their branches remain in the archive namespace, so the row is
+    // marked as released to keep the audit view accurate.
+    sqlx::raw_sql(
+        "UPDATE tasks SET artifacts_released_at = updated_at \
+         WHERE stage = 'completed' AND worktree IS NULL AND artifacts_released_at IS NULL",
+    )
+    .execute(pool)
+    .await?;
     ensure_column(pool, "agents", "failure_kind", "TEXT").await?;
     ensure_column(
         pool,
@@ -365,6 +376,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              retry_role TEXT,
              worktree TEXT,
              branch TEXT,
+             artifacts_released_at TEXT,
              attempts INTEGER NOT NULL DEFAULT 0,
              rejections INTEGER NOT NULL DEFAULT 0,
              last_error TEXT,
@@ -381,7 +393,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
              agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
-             worktree, branch,
+             worktree, branch, artifacts_released_at,
              attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at
@@ -391,7 +403,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
              milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
              verifier_agent_id, stage, status,
              agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
-             worktree, branch,
+             worktree, branch, artifacts_released_at,
              attempts, rejections, last_error,
              last_failure_kind, waiting_reason,
              result_summary, verifier_issues, guidance, created_at, updated_at

@@ -34,6 +34,7 @@ pub async fn cleanup_task(
     let branch = task.branch.as_deref().filter(|value| !value.is_empty());
     let worktree = task.worktree.as_deref().map(PathBuf::from);
     let mut clean = true;
+    let mut released = false;
 
     let guard = state.git_lock.lock().await;
     if let Some(path) = worktree.as_deref() {
@@ -46,6 +47,7 @@ pub async fn cleanup_task(
                 clean = false;
             } else {
                 git::remove_worktree(&repo, path).await?;
+                released = true;
             }
         }
     }
@@ -68,24 +70,31 @@ pub async fn cleanup_task(
                 if clean {
                     let expected = git::commit_of(&repo, branch).await?;
                     git::archive_branch(&repo, branch, &expected).await?;
+                    released = true;
                 }
             }
         }
     }
     drop(guard);
 
-    if clean && worktree.is_some() {
-        sqlx::query("UPDATE tasks SET worktree = NULL, updated_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(&task.id)
-            .execute(&state.db)
-            .await?;
+    if clean && released {
+        let timestamp = now();
+        sqlx::query(
+            "UPDATE tasks SET artifacts_released_at = COALESCE(artifacts_released_at, ?), \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .bind(&task.id)
+        .execute(&state.db)
+        .await?;
     }
     Ok(clean)
 }
 
-/// Releases every task artifact and the project worktree, branch, and workspace
-/// of an archived project. Commits are preserved under `refs/domo-archive/`.
+/// Releases every task artifact together with the project checkout and branch.
+/// Job directories remain because they back the audit view of archived projects.
+/// Commits are preserved under `refs/domo-archive/`.
 pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool) -> Result<bool> {
     let workspace = PathBuf::from(&project.workspace);
     if !managed_child(&state.cfg.workspace_root, &workspace) {
@@ -100,6 +109,9 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
 
     let mut clean = true;
     for task in &tasks {
+        if task.artifacts_released_at.is_some() {
+            continue;
+        }
         if !cleanup_task(state, project, task, force).await? {
             clean = false;
         }
@@ -150,13 +162,16 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
     drop(guard);
 
     if clean {
-        if workspace.exists() {
-            tokio::fs::remove_dir_all(&workspace).await?;
-        }
-        sqlx::query("UPDATE tasks SET worktree = NULL WHERE project_id = ?")
-            .bind(&project.id)
-            .execute(&state.db)
-            .await?;
+        remove_project_layout(&workspace).await?;
+        let timestamp = now();
+        sqlx::query(
+            "UPDATE tasks SET artifacts_released_at = COALESCE(artifacts_released_at, ?) \
+             WHERE project_id = ? AND (worktree IS NOT NULL OR branch IS NOT NULL)",
+        )
+        .bind(&timestamp)
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
     }
     Ok(clean)
 }
@@ -165,7 +180,8 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
 /// and during startup recovery.
 pub async fn cleanup_completed_tasks(state: &AppState, project: &ProjectRow) -> Result<()> {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        "SELECT * FROM tasks WHERE project_id = ? AND stage = ? AND worktree IS NOT NULL",
+        "SELECT * FROM tasks WHERE project_id = ? AND stage = ? AND artifacts_released_at IS NULL \
+         AND (worktree IS NOT NULL OR branch IS NOT NULL)",
     )
     .bind(&project.id)
     .bind(TASK_STAGE_COMPLETED)
@@ -187,7 +203,8 @@ pub async fn cleanup_completed_tasks(state: &AppState, project: &ProjectRow) -> 
 /// filesystem cleanup.
 pub async fn recover(state: &AppState) {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        "SELECT * FROM tasks WHERE stage = ? AND worktree IS NOT NULL",
+        "SELECT * FROM tasks WHERE stage = ? AND artifacts_released_at IS NULL \
+         AND (worktree IS NOT NULL OR branch IS NOT NULL)",
     )
     .bind(TASK_STAGE_COMPLETED)
     .fetch_all(&state.db)
@@ -248,6 +265,19 @@ async fn has_unfinished_children(pool: &SqlitePool, task_id: &str) -> Result<boo
     Ok(count > 0)
 }
 
+/// Releases the checkout directories of an archived project. Job directories
+/// stay in place because they hold the prompt, result, and transcript context
+/// that backs later audit views.
+async fn remove_project_layout(workspace: &Path) -> Result<()> {
+    for name in ["repo", "tasks", "verify"] {
+        let path = workspace.join(name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path).await?;
+        }
+    }
+    Ok(())
+}
+
 /// True when `path` is a descendant of `root`, not the root itself. The check is
 /// lexical so a deleted directory can still be recognized before cleanup.
 fn managed_child(root: &Path, path: &Path) -> bool {
@@ -268,5 +298,26 @@ mod tests {
             root,
             Path::new("/home/domo/workspace/prj_2")
         ));
+    }
+
+    #[tokio::test]
+    async fn project_layout_cleanup_keeps_job_directories() {
+        let workspace =
+            std::env::temp_dir().join(format!("domo-artifacts-{}", uuid::Uuid::new_v4()));
+        for name in ["repo", "tasks/1", "verify/1-job", "jobs/job_1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        std::fs::write(workspace.join("jobs/job_1/stdout.log"), "output").unwrap();
+
+        remove_project_layout(&workspace).await.unwrap();
+
+        assert!(!workspace.join("repo").exists());
+        assert!(!workspace.join("tasks").exists());
+        assert!(!workspace.join("verify").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("jobs/job_1/stdout.log")).unwrap(),
+            "output"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

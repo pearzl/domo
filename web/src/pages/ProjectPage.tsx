@@ -1542,7 +1542,19 @@ function TaskDrawer({
       </div>
       <div className="kv">
         <span>工作区</span>
-        <span className="mono">{task.worktree ?? "尚未创建"}</span>
+        <span className="badge-row">
+          <span className="mono">
+            {task.worktree ?? (task.artifacts_released_at ? "已回收" : "尚未创建")}
+          </span>
+          {task.worktree && task.artifacts_released_at ? (
+            <Badge
+              tone="muted"
+              title="工作区已回收，分支提交保留在 refs/domo-archive"
+            >
+              已回收
+            </Badge>
+          ) : null}
+        </span>
       </div>
       <div className="kv">
         <span>排队位置</span>

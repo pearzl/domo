@@ -76,7 +76,7 @@ pub async fn request(
     let mut tx = state.db.begin().await?;
     if !unfinished.is_empty() {
         sqlx::query(
-            "UPDATE tasks SET status = ?, agent_id = NULL, worktree = NULL, updated_at = ? \
+            "UPDATE tasks SET status = ?, agent_id = NULL, updated_at = ? \
              WHERE project_id = ? AND stage != ? AND COALESCE(status, '') != ?",
         )
         .bind(STATUS_CANCELED)
