@@ -4,6 +4,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Port used when `DOMO_SERVER_PORT` is unset.
+pub const DEFAULT_PORT: u16 = 8787;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub data_root: PathBuf,
@@ -12,6 +15,9 @@ pub struct Config {
     pub web_dist: PathBuf,
     pub bind: String,
     pub port: u16,
+    /// Whether `port` came from `DOMO_SERVER_PORT`. An explicit port is never
+    /// replaced; a conflict fails startup instead of silently moving elsewhere.
+    pub port_explicit: bool,
     pub job_timeout: Duration,
     /// A running job with no output growth for this long is considered stalled.
     /// Zero disables stall detection.
@@ -24,10 +30,10 @@ impl Config {
         let data_root = path_from_env("DOMO_DATA_ROOT", &home, ".domo/data");
         let workspace_root = path_from_env("DOMO_WORKSPACE_ROOT", &home, ".domo/workspace");
         let log_root = path_from_env("DOMO_LOG_ROOT", &home, ".domo/log");
-        let port = env::var("DOMO_SERVER_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8787);
+        let (port, port_explicit) = match env::var("DOMO_SERVER_PORT") {
+            Ok(value) => (value.parse().unwrap_or(DEFAULT_PORT), true),
+            Err(_) => (DEFAULT_PORT, false),
+        };
         let bind = env::var("DOMO_BIND").unwrap_or_else(|_| "127.0.0.1".into());
         let job_timeout = env::var("DOMO_JOB_TIMEOUT_SECS")
             .ok()
@@ -50,6 +56,7 @@ impl Config {
             web_dist,
             bind,
             port,
+            port_explicit,
             job_timeout,
             stall_timeout,
         })

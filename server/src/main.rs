@@ -90,8 +90,8 @@ async fn main() -> anyhow::Result<()> {
     let index = web_dist.join("index.html");
     let app = api::router(state.clone())
         .fallback_service(ServeDir::new(&web_dist).fallback(ServeFile::new(index)));
-    let address = format!("{}:{}", cfg.bind, cfg.port);
-    let listener = tokio::net::TcpListener::bind(&address).await?;
+    let (listener, port) = bind_listener(&cfg.bind, cfg.port, !cfg.port_explicit).await?;
+    let address = format!("{}:{}", cfg.bind, port);
     tracing::info!(
         address = %address,
         data = %cfg.data_root.display(),
@@ -127,6 +127,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How many ports above the default are tried before the OS assigns one.
+const PORT_FALLBACK_WINDOW: u16 = 32;
+
+/// Binds the requested port. When `fallback` is set and the port is taken, a
+/// nearby free port is used instead so a stale instance cannot block startup.
+async fn bind_listener(
+    bind: &str,
+    port: u16,
+    fallback: bool,
+) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    match tokio::net::TcpListener::bind((bind, port)).await {
+        Ok(listener) => Ok((listener, port)),
+        Err(err) if fallback && err.kind() == std::io::ErrorKind::AddrInUse => {
+            let (listener, actual) = bind_free_port(bind, port).await?;
+            tracing::warn!(requested = port, actual, "默认端口已被占用，改用空闲端口");
+            Ok((listener, actual))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn bind_free_port(bind: &str, port: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    let start = port.saturating_add(1);
+    let end = start.saturating_add(PORT_FALLBACK_WINDOW);
+    for candidate in start..=end {
+        if let Ok(listener) = tokio::net::TcpListener::bind((bind, candidate)).await {
+            return Ok((listener, candidate));
+        }
+    }
+    let listener = tokio::net::TcpListener::bind((bind, 0)).await?;
+    let actual = listener.local_addr()?.port();
+    Ok((listener, actual))
+}
+
 async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -144,5 +178,39 @@ async fn wait_for_shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn occupied_port() -> (tokio::net::TcpListener, u16) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn binds_requested_port_when_free() {
+        let (occupied, port) = occupied_port().await;
+        drop(occupied);
+        let (_listener, actual) = bind_listener("127.0.0.1", port, false).await.unwrap();
+        assert_eq!(actual, port);
+    }
+
+    #[tokio::test]
+    async fn uses_free_port_when_default_is_taken() {
+        let (_occupied, port) = occupied_port().await;
+        let (_listener, actual) = bind_listener("127.0.0.1", port, true).await.unwrap();
+        assert_ne!(actual, port);
+    }
+
+    #[tokio::test]
+    async fn fails_when_explicit_port_is_taken() {
+        let (_occupied, port) = occupied_port().await;
+        assert!(bind_listener("127.0.0.1", port, false).await.is_err());
     }
 }

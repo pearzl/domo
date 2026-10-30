@@ -478,6 +478,7 @@ mod tests {
             web_dist: root.join("web"),
             bind: "127.0.0.1".to_string(),
             port: 0,
+            port_explicit: false,
             job_timeout: std::time::Duration::ZERO,
             stall_timeout: std::time::Duration::ZERO,
         };

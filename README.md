@@ -16,7 +16,8 @@ cd web && npm install && npm run build && cd ..
 
 # 2. 构建并启动后端（同时托管前端静态资源）
 cd server && cargo run --release
-# 打开 http://127.0.0.1:8787
+# 打开启动日志中打印的地址，默认 http://127.0.0.1:8787
+# 默认端口被占用时自动改用相邻空闲端口；显式设置 DOMO_SERVER_PORT 时端口冲突会直接报错
 ```
 
 
