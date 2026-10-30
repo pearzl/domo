@@ -1351,6 +1351,132 @@ small {
   font-size: 0.8rem;
 }
 
+/* 任务工具栏：搜索框与筛选标签，计数随标签展示。 */
+.task-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.task-search {
+  max-width: 340px;
+}
+
+.task-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: white;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.task-filters button:hover:not(.active) {
+  background: #f2f5fa;
+  color: var(--text);
+}
+
+.task-filters button.active {
+  border-color: #c5d8f7;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #526173;
+  font-size: 0.72rem;
+}
+
+.task-filters button.active .filter-count {
+  background: white;
+  color: var(--accent);
+}
+
+.queue-position {
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.queue-controls button {
+  border: 1px solid var(--line);
+  background: white;
+  color: #33415c;
+  font-size: 0.75rem;
+}
+
+.queue-controls button:disabled {
+  opacity: 0.45;
+}
+
+/* 添加任务表单的行内校验提示。 */
+.field-error {
+  color: var(--danger);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.field-error + input,
+input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.dep-stage {
+  margin-left: 2px;
+  font-size: 0.75rem;
+}
+
+/* 重规划预览：将取消与保留的任务清单。 */
+.replan-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.replan-preview-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fbfcfe;
+  font-size: 0.82rem;
+}
+
+.replan-keys {
+  color: #475467;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .task-search {
+    max-width: none;
+  }
+}
+
 .task-panel-actions {
   display: flex;
   flex-wrap: wrap;

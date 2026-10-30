@@ -19,7 +19,20 @@ import { LiveOutput } from "../components/LiveOutput";
 import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
-import { isReordableQueueTask, queueEdge, reordableQueueIds } from "../taskQueue";
+import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
+import {
+  TASK_FILTERS,
+  type TaskFilter,
+  dependencyOptions,
+  filterTasks,
+  hasActiveQuery,
+  nextTaskKey,
+  queueSummary,
+  replanSummary,
+  taskFilterCounts,
+  type QueuePositionSummary,
+  validateTaskDraft,
+} from "../presentation/taskList";
 import {
   Badge,
   Empty,
@@ -67,6 +80,9 @@ export function ProjectPage({
   const [taskMilestone, setTaskMilestone] = useState(false);
   /// 任务面板视图只在页面内保持，不写入任务数据。
   const [taskView, setTaskView] = useState<"list" | "dag">("list");
+  /// 任务搜索与筛选同样只存在于页面状态，不改变任务数据。
+  const [taskQuery, setTaskQuery] = useState("");
+  const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
   const [merging, setMerging] = useState(false);
   const [mergeNotice, setMergeNotice] = useState<{
     tone: "ok" | "error";
@@ -103,6 +119,20 @@ export function ProjectPage({
     () => detail?.tasks.find((task) => task.id === selectedTaskId) ?? null,
     [detail, selectedTaskId],
   );
+  const visibleTasks = useMemo(
+    () => filterTasks(detail?.tasks ?? [], taskQuery, taskFilter),
+    [detail, taskQuery, taskFilter],
+  );
+  // 选中的任务被搜索或筛选隐藏时关闭抽屉，避免抽屉与列表状态不一致。
+  useEffect(() => {
+    if (
+      selectedTaskId !== null &&
+      detail !== null &&
+      !visibleTasks.some((task) => task.id === selectedTaskId)
+    ) {
+      setSelectedTaskId(null);
+    }
+  }, [detail, selectedTaskId, visibleTasks]);
 
   useEffect(() => {
     if (detail?.project.status !== "archived") {
@@ -211,6 +241,35 @@ export function ProjectPage({
   // 队列位置由可调整任务的 (queue_order, seq) 顺序推导，与服务端重排口径一致。
   const queueIds = reordableQueueIds(tasks, archived);
 
+  const taskCounts = taskFilterCounts(tasks);
+  const searchActive = hasActiveQuery(taskQuery, taskFilter);
+  // 添加任务草稿的行内校验；活动任务复用 activeTasks，与依赖候选、服务端口径一致。
+  const draftCheck = validateTaskDraft(
+    {
+      key: taskKey,
+      title: taskTitle,
+      description: taskDescription,
+      deps: taskDeps,
+    },
+    activeTasks,
+  );
+  const depOptions = dependencyOptions(activeTasks);
+  const replanPreview = replanSummary(tasks);
+
+  // 打开添加任务表单：key 为空时自动填入下一个可用的 T 编号。
+  function openAddTaskForm() {
+    setAddTaskOpen(true);
+    setTaskKey((current) => current.trim() || nextTaskKey(tasks));
+  }
+
+  function toggleAddTaskForm() {
+    if (addTaskOpen) {
+      setAddTaskOpen(false);
+      return;
+    }
+    openAddTaskForm();
+  }
+
   async function handleMerge() {
     if (
       !window.confirm(
@@ -234,9 +293,11 @@ export function ProjectPage({
 
   async function handleAddTask(event: FormEvent) {
     event.preventDefault();
+    if (!draftCheck.valid) return;
+    const key = taskKey.trim();
     await run(async () => {
       await api.createTask(project.id, {
-        key: taskKey.trim(),
+        key,
         title: taskTitle.trim(),
         description: taskDescription.trim(),
         acceptance: taskAcceptance
@@ -254,6 +315,11 @@ export function ProjectPage({
       setTaskMilestone(false);
       setAddTaskOpen(false);
     });
+  }
+
+  function resetTaskFilter() {
+    setTaskQuery("");
+    setTaskFilter("all");
   }
 
   return (
@@ -449,6 +515,28 @@ export function ProjectPage({
           <p className="subtitle">
             已完成任务会保留；未完成任务会退出当前 DAG 并停止派发。请说明需要重新规划的原因。
           </p>
+          <div className="replan-preview">
+            <div className="replan-preview-group">
+              <strong>将取消 {replanPreview.cancelCount} 个未完成任务</strong>
+              {replanPreview.cancelKeys.length ? (
+                <span className="mono replan-keys">
+                  {replanPreview.cancelKeys.join("、")}
+                </span>
+              ) : (
+                <span className="muted">没有未完成任务</span>
+              )}
+            </div>
+            <div className="replan-preview-group">
+              <strong>保留 {replanPreview.keepCount} 个已完成任务</strong>
+              {replanPreview.keepKeys.length ? (
+                <span className="mono replan-keys">
+                  {replanPreview.keepKeys.join("、")}
+                </span>
+              ) : (
+                <span className="muted">没有已完成任务</span>
+              )}
+            </div>
+          </div>
           <div className="confirm-row">
             <textarea
               value={replanReason}
@@ -794,7 +882,7 @@ export function ProjectPage({
               <button
                 className="secondary"
                 disabled={busy}
-                onClick={() => setAddTaskOpen((value) => !value)}
+                onClick={toggleAddTaskForm}
               >
                 {addTaskOpen ? "取消添加" : "添加任务"}
               </button>
@@ -823,6 +911,32 @@ export function ProjectPage({
             )}
           </div>
         ) : null}
+        {!directMode && tasks.length > 0 ? (
+          <div className="task-toolbar">
+            <input
+              className="task-search"
+              type="search"
+              value={taskQuery}
+              onChange={(event) => setTaskQuery(event.target.value)}
+              placeholder="按 key 或标题筛选"
+              aria-label="按 key 或标题筛选任务"
+            />
+            <div className="task-filters" role="group" aria-label="任务筛选">
+              {TASK_FILTERS.map((filter) => (
+                <button
+                  key={filter.id}
+                  type="button"
+                  className={taskFilter === filter.id ? "active" : undefined}
+                  aria-pressed={taskFilter === filter.id}
+                  onClick={() => setTaskFilter(filter.id)}
+                >
+                  {filter.label}
+                  <span className="filter-count">{taskCounts[filter.id]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
         {addTaskOpen && !archived && !directMode && proposal?.kind !== "direct" ? (
           <form className="form add-task-form" onSubmit={handleAddTask}>
             <div className="form-grid">
@@ -832,8 +946,12 @@ export function ProjectPage({
                   value={taskKey}
                   onChange={(event) => setTaskKey(event.target.value)}
                   placeholder="例如：T3"
+                  aria-invalid={draftCheck.errors.key ? true : undefined}
                   required
                 />
+                {draftCheck.errors.key ? (
+                  <small className="field-error">{draftCheck.errors.key}</small>
+                ) : null}
               </label>
               <label>
                 <span>标题</span>
@@ -866,30 +984,37 @@ export function ProjectPage({
             </label>
             <div className="field">
               <span className="field-label">前置任务（依赖）</span>
-              {activeTasks.length === 0 ? (
+              <small className="muted">
+                只引用当前活动任务；已完成、执行中的任务都能作为依赖，已取消任务不在此列出。
+              </small>
+              {depOptions.length === 0 ? (
                 <span className="muted">项目还没有可依赖的任务。</span>
               ) : (
                 <div className="checkbox-row">
-                  {activeTasks.map((task) => (
-                    <label className="checkbox-label" key={task.id}>
+                  {depOptions.map((option) => (
+                    <label className="checkbox-label" key={option.key}>
                       <input
                         type="checkbox"
-                        checked={taskDeps.includes(task.key)}
+                        checked={taskDeps.includes(option.key)}
                         onChange={(event) => {
                           setTaskDeps((current) =>
                             event.target.checked
-                              ? [...current, task.key]
-                              : current.filter((dep) => dep !== task.key),
+                              ? [...current, option.key]
+                              : current.filter((dep) => dep !== option.key),
                           );
                         }}
                       />
                       <span>
-                        {task.key} {task.title}
+                        {option.key} {option.title}
+                        <span className="dep-stage muted"> · {option.stageLabel}</span>
                       </span>
                     </label>
                   ))}
                 </div>
               )}
+              {draftCheck.errors.deps ? (
+                <small className="field-error">{draftCheck.errors.deps}</small>
+              ) : null}
             </div>
             <label className="checkbox-label">
               <input
@@ -903,12 +1028,8 @@ export function ProjectPage({
               <button
                 className="primary"
                 type="submit"
-                disabled={
-                  busy ||
-                  !taskKey.trim() ||
-                  !taskTitle.trim() ||
-                  !taskDescription.trim()
-                }
+                disabled={busy || !draftCheck.valid}
+                title={draftCheck.valid ? undefined : "请先修正表单中的提示"}
               >
                 {busy ? "提交中…" : "添加任务"}
               </button>
@@ -927,8 +1048,27 @@ export function ProjectPage({
             onSelect={setSelectedTaskId}
           />
         ) : (
+          <>
+            {visibleTasks.length === 0 ? (
+              <div className="empty">
+                <div className="empty-title">没有匹配的任务</div>
+                <div className="empty-hint">
+                  {taskQuery.trim()
+                    ? `没有匹配搜索“${taskQuery.trim()}”的任务`
+                    : `“${TASK_FILTERS.find((item) => item.id === taskFilter)?.label ?? "当前筛选"}”下没有任务`}
+                  ，可清除搜索或切换筛选条件。
+                </div>
+                {searchActive ? (
+                  <div className="empty-actions">
+                    <button className="secondary" onClick={resetTaskFilter}>
+                      清除搜索与筛选
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
           <div className="task-list">
-            {tasks.map((task) => {
+            {visibleTasks.map((task) => {
               const children = activeTasks.filter(
                 (item) => item.parent_id === task.id,
               );
@@ -977,42 +1117,24 @@ export function ProjectPage({
                     {task.attempts ? `执行 ${task.attempts}` : ""}
                     {task.rejections ? ` 拒绝 ${task.rejections}` : ""}
                     {isReordableQueueTask(task, archived) ? (
-                      <span className="queue-controls">
-                        <button
-                          className="ghost"
-                          title="排队上移"
-                          aria-label={`${task.key} 排队上移`}
-                          disabled={busy || !queueEdge(queueIds, task.id).canMoveUp}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void run(() =>
-                              api.reorderTaskQueue(project.id, task.id, "up"),
-                            );
-                          }}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          className="ghost"
-                          title="排队下移"
-                          aria-label={`${task.key} 排队下移`}
-                          disabled={busy || !queueEdge(queueIds, task.id).canMoveDown}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void run(() =>
-                              api.reorderTaskQueue(project.id, task.id, "down"),
-                            );
-                          }}
-                        >
-                          ↓
-                        </button>
-                      </span>
+                      <QueueControls
+                        task={task}
+                        summary={queueSummary(queueIds, task.id)}
+                        busy={busy}
+                        onReorder={(direction) =>
+                          run(() =>
+                            api.reorderTaskQueue(project.id, task.id, direction),
+                          )
+                        }
+                      />
                     ) : null}
                   </span>
                 </div>
               );
             })}
           </div>
+            )}
+          </>
         )}
         {!directMode && tasks.length > 0 && taskView === "list" ? (
           <div className="legend muted">
@@ -1124,7 +1246,7 @@ export function ProjectPage({
                   <button
                     className="secondary"
                     disabled={busy || archived}
-                    onClick={() => setAddTaskOpen(true)}
+                    onClick={openAddTaskForm}
                     title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
                   >
                     增加新任务
@@ -1190,6 +1312,53 @@ export function ProjectPage({
 function latestFailedJobId(jobs: JobSummary[]): string | null {
   const last = jobs[jobs.length - 1];
   return last?.status === "failed" ? last.id : null;
+}
+
+/// 任务行的可调整队列控件：展示位置摘要，按钮使用明确文案，首尾按 queueEdge 禁用。
+function QueueControls({
+  task,
+  summary,
+  busy,
+  onReorder,
+}: {
+  task: Task;
+  summary: QueuePositionSummary;
+  busy: boolean;
+  onReorder: (direction: "up" | "down") => void;
+}) {
+  return (
+    <span className="queue-controls" title={`可调整队列共 ${summary.total} 个任务`}>
+      <span className="queue-position">{summary.label}</span>
+      <button
+        className="ghost"
+        type="button"
+        title={summary.canMoveUp ? "上移一位" : "已经在可调整队列首位"}
+        aria-label={`${task.key} 排队上移`}
+        aria-disabled={!summary.canMoveUp}
+        disabled={busy || !summary.canMoveUp}
+        onClick={(event) => {
+          event.stopPropagation();
+          onReorder("up");
+        }}
+      >
+        上移
+      </button>
+      <button
+        className="ghost"
+        type="button"
+        title={summary.canMoveDown ? "下移一位" : "已经在可调整队列末位"}
+        aria-label={`${task.key} 排队下移`}
+        aria-disabled={!summary.canMoveDown}
+        disabled={busy || !summary.canMoveDown}
+        onClick={(event) => {
+          event.stopPropagation();
+          onReorder("down");
+        }}
+      >
+        下移
+      </button>
+    </span>
+  );
 }
 
 function usageAllUnknown(totals: UsageTotals): boolean {
@@ -1473,7 +1642,7 @@ function TaskDrawer({
   const canControl =
     !archived && task.stage !== "completed" && task.status !== "canceled";
   const canReorder = isReordableQueueTask(task, archived);
-  const edge = queueEdge(reordableQueueIds(detail.tasks, archived), task.id);
+  const edge = queueSummary(reordableQueueIds(detail.tasks, archived), task.id);
   const titleId = useId();
   const drawerRef = useRef<HTMLElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -1689,7 +1858,7 @@ function TaskDrawer({
         <span>排队位置</span>
         <span>
           {edge.position > 0
-            ? `可调整队列第 ${edge.position}/${edge.size} 位`
+            ? `可调整队列第 ${edge.position}/${edge.total} 位`
             : task.queue_position !== null
               ? `派发队列第 ${task.queue_position} 位`
               : "未在队列中"}
@@ -1807,22 +1976,24 @@ function TaskDrawer({
           <button
             className="ghost"
             disabled={controlBusy || !edge.canMoveUp}
-            title={edge.canMoveUp ? "排队上移" : "已经在可调整队列首位"}
+            aria-label={`${task.key} 排队上移`}
+            title={edge.canMoveUp ? "上移一位" : "已经在可调整队列首位"}
             onClick={() =>
               void control(() => api.reorderTaskQueue(task.project_id, task.id, "up"))
             }
           >
-            排队上移
+            上移
           </button>
           <button
             className="ghost"
             disabled={controlBusy || !edge.canMoveDown}
-            title={edge.canMoveDown ? "排队下移" : "已经在可调整队列末位"}
+            aria-label={`${task.key} 排队下移`}
+            title={edge.canMoveDown ? "下移一位" : "已经在可调整队列末位"}
             onClick={() =>
               void control(() => api.reorderTaskQueue(task.project_id, task.id, "down"))
             }
           >
-            排队下移
+            下移
           </button>
         </>
       ) : null}
