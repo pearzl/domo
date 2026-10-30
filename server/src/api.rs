@@ -2379,6 +2379,13 @@ async fn archive_project(
             kill_job_dir(&dir);
         }
     }
+    if let Err(error) = crate::artifacts::cleanup_project(&state, &project, true).await {
+        tracing::warn!(
+            project = %id,
+            error = %format!("{error:#}"),
+            "清理归档项目工作区失败"
+        );
+    }
     emit(
         &state.db,
         &state.bus,
@@ -2811,6 +2818,19 @@ async fn finish_project_merge(
         )
         .await;
     }
+    let cleanup_state = state.clone();
+    let cleanup_project = project.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            crate::artifacts::cleanup_completed_tasks(&cleanup_state, &cleanup_project).await
+        {
+            tracing::warn!(
+                project = %cleanup_project.id,
+                error = %format!("{error:#}"),
+                "清理已合入项目的任务工作区失败"
+            );
+        }
+    });
     Ok(Json(json!({
         "status": status,
         "message": message,

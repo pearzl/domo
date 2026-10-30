@@ -134,6 +134,43 @@ pub async fn remove_worktree(project_ws: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn prune_worktrees(repo: &Path) -> Result<()> {
+    run_git(repo, &["worktree", "prune"]).await?;
+    Ok(())
+}
+
+/// Moves a branch tip into the archive namespace and removes its visible
+/// `refs/heads` entry only when the tip still matches `expected`.
+pub async fn archive_branch(repo: &Path, branch: &str, expected: &str) -> Result<()> {
+    let archive = archive_ref(branch);
+    run_git(
+        repo,
+        &[
+            "update-ref",
+            "-m",
+            "domo: archive merged work",
+            &archive,
+            expected,
+        ],
+    )
+    .await?;
+    run_git(
+        repo,
+        &[
+            "update-ref",
+            "-d",
+            &format!("refs/heads/{branch}"),
+            expected,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub fn archive_ref(branch: &str) -> String {
+    format!("refs/domo-archive/heads/{branch}")
+}
+
 pub async fn status_porcelain(dir: &Path) -> Result<String> {
     run_git(dir, &["status", "--porcelain"]).await
 }
@@ -402,5 +439,47 @@ detached
         let message = rebase_failure_message("", &detail);
         assert!(message.chars().count() < 900, "{}", message.chars().count());
         assert!(message.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn archive_branch_moves_the_ref_and_keeps_the_commit() {
+        let repo = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        std::fs::write(repo.join("file.txt"), "value").unwrap();
+        run_git(&repo, &["add", "."]).await.unwrap();
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=DOMO",
+                "-c",
+                "user.email=domo@localhost",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .await
+        .unwrap();
+        run_git(&repo, &["branch", "domo-task/demo"]).await.unwrap();
+        let expected = commit_of(&repo, "domo-task/demo").await.unwrap();
+
+        archive_branch(&repo, "domo-task/demo", &expected)
+            .await
+            .unwrap();
+
+        assert!(!has_branch(&repo, "domo-task/demo").await);
+        assert_eq!(
+            commit_of(&repo, "refs/domo-archive/heads/domo-task/demo")
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            archive_ref("domo-task/demo"),
+            "refs/domo-archive/heads/domo-task/demo"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

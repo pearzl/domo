@@ -1772,7 +1772,7 @@ async fn handle_derived_task_success(
     };
     match merge {
         Ok(_) => {
-            let _guard = state.schedule_lock.lock().await;
+            let guard = state.schedule_lock.lock().await;
             if let Some(current) = load_task(&state.db, &task.id).await? {
                 if current.status.as_deref() == Some(STATUS_CANCELED)
                     || current.stage == TASK_STAGE_COMPLETED
@@ -1803,6 +1803,8 @@ async fn handle_derived_task_success(
                 ),
             )
             .await;
+            drop(guard);
+            cleanup_task_artifacts(state, project, task).await;
         }
         Err(error) => {
             let reason = format!("合入父任务分支失败：{error:#}");
@@ -1810,6 +1812,33 @@ async fn handle_derived_task_success(
         }
     }
     Ok(())
+}
+
+async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRow, task: &TaskRow) {
+    if let Err(error) = crate::artifacts::cleanup_task(state, project, task, false).await {
+        tracing::warn!(
+            task = %task.id,
+            error = %format!("{error:#}"),
+            "清理任务工作区失败"
+        );
+    }
+    let Some(parent_id) = task.parent_id.as_deref() else {
+        return;
+    };
+    let parent = match load_task(&state.db, parent_id).await {
+        Ok(Some(parent)) => parent,
+        _ => return,
+    };
+    if parent.stage != TASK_STAGE_COMPLETED {
+        return;
+    }
+    if let Err(error) = crate::artifacts::cleanup_task(state, project, &parent, false).await {
+        tracing::warn!(
+            task = %parent.id,
+            error = %format!("{error:#}"),
+            "清理父任务工作区失败"
+        );
+    }
 }
 
 async fn handle_executor_failure(
@@ -1978,7 +2007,7 @@ async fn handle_verdict(
         };
         match merge {
             Ok(_) => {
-                let _guard = state.schedule_lock.lock().await;
+                let guard = state.schedule_lock.lock().await;
                 sqlx::query(
                     "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
                      human_gate = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
@@ -1999,6 +2028,8 @@ async fn handle_verdict(
                     format!("任务 {} 验收通过并合并到项目分支", task.key),
                 )
                 .await;
+                drop(guard);
+                cleanup_task_artifacts(state, project, task).await;
             }
             Err(error) => {
                 let reason = format!("验收通过但合并失败：{error:#}");

@@ -10,7 +10,6 @@ use sqlx::SqlitePool;
 use crate::agents::kill_job_dir;
 use crate::domain::now;
 use crate::events::emit;
-use crate::git;
 use crate::models::*;
 use crate::state::AppState;
 
@@ -55,10 +54,6 @@ pub async fn request(
         .filter(|task| task.stage == TASK_STAGE_COMPLETED)
         .count();
     let unfinished_ids: HashSet<String> = unfinished.iter().map(|task| task.id.clone()).collect();
-    let worktrees: Vec<PathBuf> = unfinished
-        .iter()
-        .filter_map(|task| task.worktree.as_ref().map(PathBuf::from))
-        .collect();
 
     let running_jobs = sqlx::query_as::<_, JobRow>(
         "SELECT * FROM jobs WHERE project_id = ? AND status = 'running'",
@@ -125,14 +120,13 @@ pub async fn request(
     for job in &canceled_jobs {
         kill_job_dir(&workspace.join("jobs").join(&job.id));
     }
-    if !worktrees.is_empty() {
-        let _git_guard = state.git_lock.lock().await;
-        let repo = workspace.join("repo");
-        for path in worktrees {
-            let _ = git::remove_worktree(&repo, &path).await;
-            if path.exists() {
-                let _ = tokio::fs::remove_dir_all(&path).await;
-            }
+    for task in &unfinished {
+        if let Err(error) = crate::artifacts::cleanup_task(state, &project, task, true).await {
+            tracing::warn!(
+                task = %task.id,
+                error = %format!("{error:#}"),
+                "清理重规划任务工作区失败"
+            );
         }
     }
 

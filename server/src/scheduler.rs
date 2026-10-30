@@ -246,6 +246,7 @@ async fn recover(state: &AppState) -> Result<()> {
             }
         }
     }
+    crate::artifacts::recover(state).await;
     Ok(())
 }
 
