@@ -1286,6 +1286,19 @@ small {
     flex-direction: column;
     gap: 2px;
   }
+
+  .agent-pool-tabs {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
+
+  button.agent-pool-tab {
+    width: 100%;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
 }
 
 .meta-label {
@@ -1792,8 +1805,51 @@ input[aria-invalid="true"] {
   border-top-style: dashed;
 }
 
+.agent-pool-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+button.agent-pool-tab {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fcfdff;
+  color: var(--muted);
+  text-align: left;
+}
+
+button.agent-pool-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.agent-pool-tab-label {
+  font-weight: 700;
+}
+
+.agent-pool-tab-counts {
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+button.agent-pool-tab.active .agent-pool-tab-counts {
+  color: rgba(255, 255, 255, 0.85);
+}
+
 .agent-pool-role {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .agent-pool-list {

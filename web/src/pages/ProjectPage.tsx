@@ -2288,6 +2288,7 @@ function TaskAgentPoolPanel({
       title="任务 Agent 池"
       subtitle="从项目 Agent 池对应角色快照初始化，只作用于本任务。顺序越靠前优先级越高，按严格优先级派发，池不可用时不回退项目池。"
       roles={pool.roles}
+      activeRole="executor"
       defaultOpen={defaultOpen}
       disabled={disabled}
       onReorder={(role, agentId, position) =>

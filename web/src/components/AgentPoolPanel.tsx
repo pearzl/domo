@@ -1,16 +1,20 @@
-import { useEffect, useState } from "react";
-import type { DragEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { DragEvent, KeyboardEvent } from "react";
 import type { ProjectRolePool, Role } from "../types";
 import {
   Badge,
   ErrorBox,
   FAILURE_KIND_LABELS,
-  ROLE_LABELS,
   failureSummaryLabel,
   formatTime,
   formatUsageAmount,
   shortText,
 } from "../ui";
+import {
+  nextRoleTab,
+  resolveActiveRole,
+  roleTabs,
+} from "../presentation/agentPool";
 
 export interface AgentPoolPanelProps {
   /** 面板标题，例如"项目 Agent 池"或"默认团队"。 */
@@ -29,6 +33,8 @@ export interface AgentPoolPanelProps {
   onRefresh?: () => Promise<unknown>;
   /** 初始展开状态。 */
   defaultOpen?: boolean;
+  /** 期望默认选中的角色；缺省或不存在时回落到第一个有 Agent 的角色。 */
+  activeRole?: Role;
 }
 
 interface DragItem {
@@ -70,6 +76,7 @@ export function AgentPoolPanel({
   onToggle,
   onRefresh,
   defaultOpen,
+  activeRole,
 }: AgentPoolPanelProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -80,6 +87,38 @@ export function AgentPoolPanel({
   useEffect(() => {
     setOpen(initialOpen);
   }, [initialOpen]);
+
+  // 角色选项卡只承载选择状态；角色数据仍完整保存在 roles 中，非当前角色只是不渲染。
+  const tabs = useMemo(() => roleTabs(roles), [roles]);
+  const defaultRole = useMemo(
+    () => resolveActiveRole(tabs, activeRole),
+    [tabs, activeRole],
+  );
+  const [selectedRole, setSelectedRole] = useState<Role | null>(defaultRole);
+  useEffect(() => {
+    setSelectedRole(defaultRole);
+  }, [defaultRole]);
+
+  const currentRole = resolveActiveRole(tabs, selectedRole ?? activeRole);
+  const currentGroup = roles.find((group) => group.role === currentRole) ?? null;
+
+  function selectRole(role: Role | null) {
+    if (!role || role === currentRole) {
+      return;
+    }
+    endDrag();
+    setSelectedRole(role);
+  }
+
+  function onTabListKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    // 方向键在 tablist 内只切换角色：阻止默认行为，避免页面横向滚动或触发提交。
+    event.preventDefault();
+    const direction = event.key === "ArrowRight" ? "next" : "previous";
+    selectRole(nextRoleTab(tabs, currentRole, direction));
+  }
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
@@ -115,34 +154,61 @@ export function AgentPoolPanel({
     >
       <summary>{title}</summary>
       <p className="subtitle">{subtitle}</p>
-      {roles.map((group) => {
-        return (
-          <div
-            className="agent-pool-role"
-            key={group.role}
-            onDragLeave={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                setDrop(null);
-              }
-            }}
-          >
-            <h3>{ROLE_LABELS[group.role] ?? group.role}</h3>
-            {group.entries.length === 0 ? (
-              <div className="muted">这个角色还没有 Agent。</div>
-            ) : (
-              <div className="agent-pool-list">
-                {group.entries.map((entry, index) => {
-                  const isDragSource =
-                    dragEnabled &&
-                    drag?.role === group.role &&
-                    drag.agentId === entry.agent_id;
-                  const dropMark =
-                    dragEnabled &&
-                    drop?.role === group.role &&
-                    drop.index === index
-                      ? drop.edge
-                      : null;
-                  return (
+      <div
+        className="agent-pool-tabs"
+        role="tablist"
+        aria-label={`${title}角色`}
+        onKeyDown={onTabListKeyDown}
+      >
+        {tabs.map((tab) => {
+          const selected = tab.role === currentRole;
+          return (
+            <button
+              key={tab.role}
+              type="button"
+              role="tab"
+              id={`agent-pool-tab-${tab.role}`}
+              aria-selected={selected}
+              aria-controls={`agent-pool-panel-${tab.role}`}
+              tabIndex={selected ? 0 : -1}
+              className={`agent-pool-tab${selected ? " active" : ""}`}
+              onClick={() => selectRole(tab.role)}
+            >
+              <span className="agent-pool-tab-label">{tab.label}</span>
+              <span className="agent-pool-tab-counts muted">
+                {tab.count} 个
+                {tab.unavailableCount > 0 ? ` · ${tab.unavailableCount} 不可用` : ""}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {currentGroup ? (
+        <div
+          className="agent-pool-role"
+          role="tabpanel"
+          id={`agent-pool-panel-${currentGroup.role}`}
+          aria-labelledby={`agent-pool-tab-${currentGroup.role}`}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setDrop(null);
+            }
+          }}
+        >
+          {currentGroup.entries.length === 0 ? (
+            <div className="muted">这个角色还没有 Agent。</div>
+          ) : (
+            <div className="agent-pool-list">
+              {currentGroup.entries.map((entry, index) => {
+                const isDragSource =
+                  dragEnabled &&
+                  drag?.role === currentGroup.role &&
+                  drag.agentId === entry.agent_id;
+                const dropMark =
+                  dragEnabled && drop?.role === currentGroup.role && drop.index === index
+                    ? drop.edge
+                    : null;
+                return (
                   <div
                     className={`agent-pool-row${entry.available ? "" : " unavailable"}${
                       isDragSource ? " dragging" : ""
@@ -154,7 +220,7 @@ export function AgentPoolPanel({
                     title={dragEnabled ? "拖动调整顺序，或使用上移/下移按钮" : undefined}
                     onDragStart={(event: DragEvent<HTMLDivElement>) => {
                       const item: DragItem = {
-                        role: group.role,
+                        role: currentGroup.role,
                         agentId: entry.agent_id,
                       };
                       setDrag(item);
@@ -163,7 +229,7 @@ export function AgentPoolPanel({
                     }}
                     onDragEnd={endDrag}
                     onDragOver={(event: DragEvent<HTMLDivElement>) => {
-                      if (!drag || !onReorder || drag.role !== group.role) {
+                      if (!drag || !onReorder || drag.role !== currentGroup.role) {
                         return;
                       }
                       event.preventDefault();
@@ -173,7 +239,7 @@ export function AgentPoolPanel({
                         event.clientY < rect.top + rect.height / 2
                           ? "before"
                           : "after";
-                      setDrop({ role: group.role, index, edge });
+                      setDrop({ role: currentGroup.role, index, edge });
                     }}
                     onDrop={(event: DragEvent<HTMLDivElement>) => {
                       event.preventDefault();
@@ -183,14 +249,14 @@ export function AgentPoolPanel({
                       if (!item || !target || !onReorder) {
                         return;
                       }
-                      const from = group.entries.findIndex(
+                      const from = currentGroup.entries.findIndex(
                         (it) => it.agent_id === item.agentId,
                       );
                       const position = resolveDropPosition(from, target);
                       if (position === null) {
                         return;
                       }
-                      void act(() => onReorder(group.role, item.agentId, position));
+                      void act(() => onReorder(currentGroup.role, item.agentId, position));
                     }}
                   >
                     <span className="agent-pool-rank">{index + 1}</span>
@@ -246,30 +312,33 @@ export function AgentPoolPanel({
                     </span>
                     <span className="agent-pool-actions">
                       <button
+                        type="button"
                         className="ghost"
                         disabled={disabled || busy || index === 0}
                         title="上移"
                         onClick={() =>
-                          act(() => onMove(group.role, entry.agent_id, "up"))
+                          act(() => onMove(currentGroup.role, entry.agent_id, "up"))
                         }
                       >
                         ↑
                       </button>
                       <button
+                        type="button"
                         className="ghost"
-                        disabled={disabled || busy || index === group.entries.length - 1}
+                        disabled={disabled || busy || index === currentGroup.entries.length - 1}
                         title="下移"
                         onClick={() =>
-                          act(() => onMove(group.role, entry.agent_id, "down"))
+                          act(() => onMove(currentGroup.role, entry.agent_id, "down"))
                         }
                       >
                         ↓
                       </button>
                       <button
+                        type="button"
                         className={entry.enabled ? "secondary" : "ghost"}
                         disabled={disabled || busy || !entry.available}
                         onClick={() =>
-                          act(() => onToggle(group.role, entry.agent_id, !entry.enabled))
+                          act(() => onToggle(currentGroup.role, entry.agent_id, !entry.enabled))
                         }
                       >
                         {entry.enabled ? "停用" : "启用"}
@@ -286,13 +355,12 @@ export function AgentPoolPanel({
                       </span>
                     ) : null}
                   </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : null}
       {error ? <ErrorBox message={error} /> : null}
     </details>
   );
