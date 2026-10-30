@@ -21,6 +21,7 @@ use crate::domain::{self, deps_complete, now, short_id};
 use crate::events::emit;
 use crate::git;
 use crate::models::*;
+use crate::paths;
 use crate::replan;
 use crate::state::AppState;
 use crate::usage;
@@ -779,8 +780,8 @@ async fn create_project(
     if git::has_branch(&repo, &branch).await {
         return Err(ApiError::bad(format!("分支 {branch} 已存在")));
     }
-    let workspace = state.cfg.workspace_root.join(&project_id);
-    let repo_worktree = workspace.join("repo");
+    let workspace = paths::project_workspace(&state.cfg.workspace_root, &project_id);
+    let repo_worktree = paths::project_repo(&workspace);
     {
         let _guard = state.git_lock.lock().await;
         git::create_project_worktree(&repo, &base, &repo_worktree, &branch)
@@ -1697,7 +1698,7 @@ async fn pause_task(
             .fetch_all(&state.db)
             .await?;
             for job in &running {
-                crate::agents::kill_job_dir(&workspace.join("jobs").join(&job.id));
+                crate::agents::kill_job_dir(&paths::job_dir(&workspace, &job.id));
                 let finished_at = now();
                 let duration_ms = job
                     .started_at
@@ -2217,7 +2218,7 @@ async fn pause_project(
             .fetch_all(&state.db)
             .await?;
             for job in &running {
-                crate::agents::kill_job_dir(&workspace.join("jobs").join(&job.id));
+                crate::agents::kill_job_dir(&paths::job_dir(&workspace, &job.id));
                 let finished_at = now();
                 let duration_ms = job
                     .started_at
@@ -2375,7 +2376,7 @@ async fn archive_project(
         .fetch_all(&state.db)
         .await?;
         for job in running {
-            let dir = PathBuf::from(&project.workspace).join("jobs").join(&job.id);
+            let dir = paths::job_dir(&PathBuf::from(&project.workspace), &job.id);
             kill_job_dir(&dir);
         }
     }
@@ -2597,7 +2598,7 @@ async fn merge_project(
         return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
     }
     let repo = PathBuf::from(&project.repo_path);
-    let worktree = PathBuf::from(&project.workspace).join("repo");
+    let worktree = paths::project_repo(&PathBuf::from(&project.workspace));
     let base_branch = project.base_branch.clone();
     let project_branch = project.branch.clone();
 
@@ -3215,7 +3216,7 @@ async fn accept_milestone(
     let message = format!("domo(task-{}): {}", task.key, task.title);
     let merge = {
         let _guard = state.git_lock.lock().await;
-        git::squash_merge(&workspace.join("repo"), &branch, &message).await
+        git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
     };
     if let Err(error) = merge {
         let reason = format!("人工验收通过但合并失败：{error:#}");
@@ -3926,10 +3927,7 @@ async fn job_pid_file(state: &AppState, job: &JobRow) -> Option<i64> {
         .await
         .ok()
         .flatten()?;
-    let path = PathBuf::from(project.workspace)
-        .join("jobs")
-        .join(&job.id)
-        .join("pid");
+    let path = paths::job_dir(&PathBuf::from(project.workspace), &job.id).join("pid");
     let raw = tokio::fs::read_to_string(path).await.ok()?;
     raw.trim().split(':').next()?.parse::<i64>().ok()
 }
@@ -3956,7 +3954,7 @@ async fn get_job_activity(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::not_found("项目不存在"))?;
-    let dir = PathBuf::from(project.workspace).join("jobs").join(&job.id);
+    let dir = paths::job_dir(&PathBuf::from(project.workspace), &job.id);
     let raw = match tokio::fs::read(dir.join("stdout.log")).await {
         Ok(bytes) => bytes,
         Err(_) => job.stdout.clone().unwrap_or_default().into_bytes(),
@@ -3978,7 +3976,7 @@ async fn get_job_output(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::not_found("项目不存在"))?;
-    let dir = PathBuf::from(project.workspace).join("jobs").join(&job.id);
+    let dir = paths::job_dir(&PathBuf::from(project.workspace), &job.id);
     let stdout = match tokio::fs::read_to_string(dir.join("stdout.log")).await {
         Ok(text) => text,
         Err(_) => job.stdout.clone().unwrap_or_default(),

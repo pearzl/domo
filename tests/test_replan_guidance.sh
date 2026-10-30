@@ -316,6 +316,9 @@ assert tasks_by_id[old_t2["id"]]["status"] == "canceled", tasks_by_id[old_t2["id
 assert all(task["status"] == "canceled" for task in tasks_by_id.values() if task["stage"] != "completed")
 new_tasks = [task for task in detail["tasks"] if task["id"] not in old_ids]
 assert new_tasks, detail["tasks"]
+assert min(task["seq"] for task in new_tasks) > max(
+    task["seq"] for task in old_tasks.values()
+), detail["tasks"]
 assert all(task["stage"] == "completed" and task["status"] is None for task in new_tasks), new_tasks
 assert any(task["key"] == "T2" for task in new_tasks), "新规划未能复用被取消任务的 key"
 assert all(task["stage"] == "completed" for task in active_tasks(detail)), active_tasks(detail)

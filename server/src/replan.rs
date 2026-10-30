@@ -11,6 +11,7 @@ use crate::agents::kill_job_dir;
 use crate::domain::now;
 use crate::events::emit;
 use crate::models::*;
+use crate::paths;
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
@@ -118,7 +119,7 @@ pub async fn request(
 
     let workspace = PathBuf::from(&project.workspace);
     for job in &canceled_jobs {
-        kill_job_dir(&workspace.join("jobs").join(&job.id));
+        kill_job_dir(&paths::job_dir(&workspace, &job.id));
     }
     for task in &unfinished {
         if let Err(error) = crate::artifacts::cleanup_task(state, &project, task, true).await {

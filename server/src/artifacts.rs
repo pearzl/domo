@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use crate::domain::now;
 use crate::git;
 use crate::models::*;
+use crate::paths;
 use crate::state::AppState;
 
 /// Releases the worktree and branch of one task after its changes have been
@@ -104,7 +105,7 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
         }
     }
 
-    let project_worktree = workspace.join("repo");
+    let project_worktree = paths::project_repo(&workspace);
     let guard = state.git_lock.lock().await;
     if project_worktree.exists() {
         if !managed_child(&workspace, &project_worktree) {

@@ -14,6 +14,7 @@ use crate::agents::kill_job_dir;
 use crate::domain::{self, deps_complete, now, short_id};
 use crate::events::{emit, emit_job};
 use crate::models::*;
+use crate::paths;
 use crate::runner;
 use crate::state::AppState;
 use crate::usage;
@@ -264,7 +265,7 @@ async fn cleanup_orphans(state: &AppState) {
         else {
             continue;
         };
-        kill_job_dir(&PathBuf::from(&project.workspace).join("jobs").join(&job.id));
+        kill_job_dir(&paths::job_dir(&PathBuf::from(&project.workspace), &job.id));
     }
 }
 

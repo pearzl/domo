@@ -14,6 +14,7 @@ use crate::domain::{self, now, parse_result, short_id, slug, FailureKind, Parsed
 use crate::events::{emit, emit_job};
 use crate::git;
 use crate::models::*;
+use crate::paths;
 use crate::prompts::{
     self, DependencyInfo, DerivedTaskInfo, PromptData, SummaryTaskInfo, TaskInfo,
 };
@@ -56,7 +57,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         return Err(anyhow!("作业没有关联可用 Agent"));
     };
 
-    let job_dir = PathBuf::from(&project.workspace).join("jobs").join(&job.id);
+    let job_dir = paths::job_dir(&PathBuf::from(&project.workspace), &job.id);
     fs::create_dir_all(&job_dir).await?;
     state.register_job(job_dir.clone());
     let result_path = job_dir.join("result.json");
@@ -64,7 +65,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
 
     let workspace = PathBuf::from(&project.workspace);
     let cwd = match job.role.as_str() {
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => workspace.join("repo"),
+        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => paths::project_repo(&workspace),
         JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
         JOB_ROLE_VERIFIER => {
             prepare_verify_worktree(state, &project, task.as_ref(), &job.id).await?
@@ -157,11 +158,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if job.role == JOB_ROLE_VERIFIER {
         // The verifier workspace is disposable and must not leak into later work.
         let _guard = state.git_lock.lock().await;
-        let _ = git::remove_worktree(&workspace.join("repo"), &cwd).await;
+        let _ = git::remove_worktree(&paths::project_repo(&workspace), &cwd).await;
     }
     if matches!(job.role.as_str(), JOB_ROLE_ANALYSIS | JOB_ROLE_SUMMARY) {
         let _guard = state.git_lock.lock().await;
-        let _ = git::reset_hard(&workspace.join("repo")).await;
+        let _ = git::reset_hard(&paths::project_repo(&workspace)).await;
     }
 
     let fresh_project = load_project(&state.db, &project.id)
@@ -835,15 +836,19 @@ async fn build_prompt_data(
         JOB_ROLE_VERIFIER => {
             let branch = task.and_then(|task| task.branch.clone());
             if let Some(branch) = branch {
-                git::diff_between(&workspace.join("repo"), &project.base_branch, &branch)
-                    .await
-                    .unwrap_or_default()
+                git::diff_between(
+                    &paths::project_repo(&workspace),
+                    &project.base_branch,
+                    &branch,
+                )
+                .await
+                .unwrap_or_default()
             } else {
                 String::new()
             }
         }
         JOB_ROLE_SUMMARY => git::diff_between(
-            &workspace.join("repo"),
+            &paths::project_repo(&workspace),
             &project.base_branch,
             &project.branch,
         )
@@ -851,7 +856,7 @@ async fn build_prompt_data(
         .unwrap_or_default(),
         _ => String::new(),
     };
-    let job_dir = workspace.join("jobs").join(&job.id);
+    let job_dir = paths::job_dir(&workspace, &job.id);
     Ok(PromptData {
         role: job.role.clone(),
         project_id: project.id.clone(),
@@ -982,7 +987,7 @@ async fn prepare_task_worktree(
         }
     }
     let workspace = PathBuf::from(&project.workspace);
-    let path = workspace.join("tasks").join(&task.id);
+    let path = paths::task_worktree(&workspace, task.seq);
     if path.exists() {
         let _ = tokio::fs::remove_dir_all(&path).await;
     }
@@ -1005,7 +1010,13 @@ async fn prepare_task_worktree(
     };
     {
         let _guard = state.git_lock.lock().await;
-        git::create_task_worktree(&workspace.join("repo"), &base_branch, &path, &branch).await?;
+        git::create_task_worktree(
+            &paths::project_repo(&workspace),
+            &base_branch,
+            &path,
+            &branch,
+        )
+        .await?;
     }
     sqlx::query("UPDATE tasks SET worktree = ?, branch = ?, updated_at = ? WHERE id = ?")
         .bind(path.to_string_lossy().to_string())
@@ -1029,19 +1040,17 @@ async fn prepare_verify_worktree(
         .clone()
         .ok_or_else(|| anyhow!("任务没有执行分支，无法验收"))?;
     let workspace = PathBuf::from(&project.workspace);
-    let path = workspace
-        .join("verify")
-        .join(format!("{}-{}", task.id, short_id(job_id)));
+    let path = paths::verify_worktree(&workspace, task.seq, job_id);
     if path.exists() {
         let _guard = state.git_lock.lock().await;
-        let _ = git::remove_worktree(&workspace.join("repo"), &path).await;
+        let _ = git::remove_worktree(&paths::project_repo(&workspace), &path).await;
         if path.exists() {
             let _ = tokio::fs::remove_dir_all(&path).await;
         }
     }
     {
         let _guard = state.git_lock.lock().await;
-        git::create_verify_worktree(&workspace.join("repo"), &branch, &path).await?;
+        git::create_verify_worktree(&paths::project_repo(&workspace), &branch, &path).await?;
     }
     Ok(path)
 }
@@ -1472,7 +1481,7 @@ async fn handle_direct_failure(
 ) -> Result<()> {
     {
         let _guard = state.git_lock.lock().await;
-        let _ = git::reset_hard(&PathBuf::from(&project.workspace).join("repo")).await;
+        let _ = git::reset_hard(&paths::project_repo(&PathBuf::from(&project.workspace))).await;
     }
     let failure = plan_project_failure(
         state,
@@ -2003,7 +2012,7 @@ async fn handle_verdict(
         let message = format!("domo(task-{}): {}", task.key, task.title);
         let merge = {
             let _guard = state.git_lock.lock().await;
-            git::squash_merge(&workspace.join("repo"), &branch, &message).await
+            git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
         };
         match merge {
             Ok(_) => {

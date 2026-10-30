@@ -11,6 +11,7 @@ mod failure;
 mod git;
 mod models;
 mod opencode;
+mod paths;
 mod prompts;
 mod replan;
 mod runner;
