@@ -77,9 +77,9 @@ cargo test
 npm run build    # tsc + vite，类型错误即失败
 ```
 
-- 冒烟脚本放 `tests/test_*.sh`（Windows 原生冒烟脚本放 `tests/test_*.ps1`），**默认使用 mock agent**，不依赖真实模型与外网；真实模型用例通过环境变量传模型（如 `DOMO_RT_MODEL`），**不把模型名写死在脚本里**。
-- 临时目录统一用 `${TMPDIR:-/tmp}`（PowerShell 用系统临时目录）；端口通过 `DOMO_*_PORT` 覆盖；脚本退出码 `0` = 全部通过，结束必须清理自己启动的进程与临时文件。
-- Windows 改动必须额外运行 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_windows.ps1`；`.sh` 用例可在 Git Bash 中运行，依赖 `python3` 与 `curl`。依赖 Unix 信号或 shebang 脚本的用例（如 `test_shutdown.sh`、`test_agent_adapters.sh`）仍需在 Linux/WSL 中运行。
+- 冒烟脚本放 `tests/test_*.sh`；跨平台冒烟脚本放 `tests/test_*.mjs`，只使用 Node.js 内置模块，不引入 npm 依赖。**默认使用 mock agent**，不依赖真实模型与外网；真实模型用例通过环境变量传模型（如 `DOMO_RT_MODEL`），**不把模型名写死在脚本里**。
+- 临时目录统一用 `${TMPDIR:-/tmp}`（Node.js 用系统临时目录）；端口通过 `DOMO_*_PORT` 覆盖；脚本退出码 `0` = 全部通过，结束必须清理自己启动的进程与临时文件。
+- Windows 改动必须额外运行 `node tests/test_smoke.mjs`；`.sh` 用例可在 Git Bash 中运行，依赖 `python3` 与 `curl`。依赖 Unix 信号或 shebang 脚本的用例（如 `test_shutdown.sh`、`test_agent_adapters.sh`）仍需在 Linux/WSL 中运行。
 - **修缺陷必须带回归用例**：Rust 单测（纯逻辑 / 解析 / 数据）或冒烟断言（流程 / 接口 / 事件），至少其一。
 - 涉及并发、锁、调度、恢复的改动，必须验证错误路径：进程被杀、Agent 超时、限流熔断、数据库锁竞争。
 - 验收以“能实际使用”为准：改完后服务要能启动、视图要能刷出数据，不以“编译通过”作为完成标准。
