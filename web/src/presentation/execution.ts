@@ -1,4 +1,6 @@
 import type { AuditEvent, JobSummary, Project, Task } from "../types";
+/// 任务阶段文案统一取自 ui.tsx，执行现场与任务列表不会出现两套措辞。
+import { taskStageLabel } from "../ui";
 
 /// 执行现场只读取项目详情里已有的 tasks / jobs / events，不发起任何请求。
 /// 页面是否刷新由外层已有的取数决定，这里只做纯派生。
@@ -13,13 +15,6 @@ const ROLE_TEXT: Record<string, string> = {
   executor: "执行",
   verifier: "验收",
   summary: "总结",
-};
-
-const TASK_STAGE_TEXT: Record<string, string> = {
-  pending: "待启动",
-  executing: "执行",
-  verifying: "验收",
-  completed: "完成",
 };
 
 /// 配置类事件在执行现场属于噪音，只在事件时间线的“配置”视图展示。
@@ -200,7 +195,7 @@ export function queuedTasks(tasks: Task[]): ExecutionQueueItem[] {
     key: task.key,
     title: task.title,
     stage: task.stage,
-    stageLabel: TASK_STAGE_TEXT[task.stage] ?? task.stage,
+    stageLabel: taskStageLabel(task.stage),
     position: task.queue_position,
     positionLabel:
       task.queue_position === null ? "未入队" : `队列第 ${task.queue_position} 位`,

@@ -35,21 +35,22 @@ import {
 } from "../presentation/taskList";
 import {
   Badge,
-  Empty,
+  EmptySteps,
   ErrorBox,
   FAILURE_KIND_LABELS,
   Progress,
   ROLE_LABELS,
   StageBadge,
   StatusBadge,
-  TASK_STAGE_LABELS,
   TaskStateBadge,
   formatCost,
   formatMillis as formatUsageDuration,
   formatTime,
   formatTokens as formatUsageAmount,
   failureSummaryLabel,
+  jobStatusLabel,
   shortText,
+  taskStateLabel,
 } from "../ui";
 
 /// Mirrors the backend marker that is written before a worktree is removed.
@@ -365,7 +366,7 @@ export function ProjectPage({
                     onClick={() => {
                       if (
                         window.confirm(
-                          "强制暂停会立即终止所有在途作业，任务进入已暂停。确认继续？",
+                          "强制暂停会立即终止所有在途作业，任务进入已暂停；之后点“恢复”继续推进。确认继续？",
                         )
                       ) {
                         void run(() => api.pauseProject(project.id, true));
@@ -513,7 +514,7 @@ export function ProjectPage({
         <section className="panel">
           <h2>重新规划</h2>
           <p className="subtitle">
-            已完成任务会保留；未完成任务会退出当前 DAG 并停止派发。请说明需要重新规划的原因。
+            已完成任务会保留；未完成任务会退出当前 DAG 并停止派发。提交后规划者重新给出方案，确认方案后才继续执行。请说明需要重新规划的原因。
           </p>
           <div className="replan-preview">
             <div className="replan-preview-group">
@@ -600,7 +601,7 @@ export function ProjectPage({
         <section className="panel">
           <h2>项目分析</h2>
           <p className="subtitle">
-            规划者会阅读仓库、澄清目标并给出完整方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
+            规划者会理解目标与现状，必要时澄清，给出可确认的方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
           </p>
           <label className="goal-policy">
             <input
@@ -617,7 +618,7 @@ export function ProjectPage({
               }
             />
             <span>
-              自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行
+              自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行；关闭后每个方案都需要你点击确认。
             </span>
           </label>
           <div className="messages">
@@ -1040,7 +1041,15 @@ export function ProjectPage({
           </form>
         ) : null}
         {directMode ? null : tasks.length === 0 ? (
-          <Empty title="还没有任务" hint="确认目标后，规划者会输出带依赖关系的任务列表。" />
+          <EmptySteps
+            title="还没有任务"
+            hint="规划者确认方案后会按方案创建任务，任务从这里开始推进："
+            steps={[
+              "在“项目分析”里描述目标、边界和验收预期并发送。",
+              "查看规划者给出的方案，确认方案后任务自动创建。",
+              "任务按依赖自动派发；想提前插入工作时可用右上角“添加任务”。",
+            ]}
+          />
         ) : taskView === "dag" ? (
           <TaskDag
             tasks={tasks}
@@ -1138,7 +1147,7 @@ export function ProjectPage({
         )}
         {!directMode && tasks.length > 0 && taskView === "list" ? (
           <div className="legend muted">
-            阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。
+            阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。“作业”指一次 Agent 调用，每次执行或验收作业都有独立的输入、输出与用量。上移/下移只调整同一可调整队列内的派发顺序，不改变依赖关系。
           </div>
         ) : null}
       </section>
@@ -1327,7 +1336,10 @@ function QueueControls({
   onReorder: (direction: "up" | "down") => void;
 }) {
   return (
-    <span className="queue-controls" title={`可调整队列共 ${summary.total} 个任务`}>
+    <span
+      className="queue-controls"
+      title={`可调整队列共 ${summary.total} 个任务；上移/下移只改变派发顺序，不改变依赖关系`}
+    >
       <span className="queue-position">{summary.label}</span>
       <button
         className="ghost"
@@ -1898,7 +1910,7 @@ function TaskDrawer({
         onChange={(event) => setGuidance(event.target.value)}
         rows={4}
         disabled={guidanceLocked || busy}
-        placeholder="指导会在该任务下一次执行作业时生效。"
+        placeholder="指导会在该任务下一次执行作业时生效；保存后，执行者会带着这段说明开始下一次作业。"
       />
       <div className="button-row guidance-actions">
         <button
@@ -1962,7 +1974,7 @@ function TaskDrawer({
             className="danger"
             disabled={controlBusy}
             onClick={() => {
-              if (window.confirm("强制暂停会终止当前作业，确认继续？")) {
+              if (window.confirm("强制暂停会终止当前作业；之后点“继续”重新派发。确认继续？")) {
                 void control(() => api.pauseTask(task.project_id, task.id, true));
               }
             }}
@@ -2354,8 +2366,7 @@ function ArbitrationPanel({
           <div className="kv">
             <span>阶段</span>
             <span>
-              {TASK_STAGE_LABELS[context.task.stage] ?? context.task.stage}
-              {context.task.status ? ` · ${context.task.status}` : ""}
+              {taskStateLabel(context.task.stage, context.task.status)}
             </span>
           </div>
           <div className="kv">
@@ -2399,7 +2410,7 @@ function ArbitrationPanel({
                 <div className="arbitration-job" key={job.id}>
                   <div className="muted">
                     {ROLE_LABELS[job.role] ?? job.role} · {job.agent_name ?? "—"} ·{" "}
-                    {job.status}
+                    {jobStatusLabel(job.status)}
                     {job.failure_summary
                       ? ` · ${failureSummaryLabel(job.failure_summary.kind)} · ${shortText(
                           job.failure_summary.message,
@@ -2459,7 +2470,7 @@ function ArbitrationPanel({
             onChange={(event) => setGuidance(event.target.value)}
             rows={3}
             disabled={disabled || busy}
-            placeholder="补充指导：说明下一步应如何处理。"
+            placeholder="补充指导：说明下一步应如何处理；提交后任务重新排队，等待派发新作业。"
           />
           <button
             className="secondary"

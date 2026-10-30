@@ -9,7 +9,9 @@ import {
   failureSummaryLabel,
   formatMillis,
   formatTime,
+  jobStatusLabel,
   shortText,
+  toneForStatus,
 } from "../ui";
 
 export type EventFilter = "key" | "all" | "jobs" | "config";
@@ -337,7 +339,7 @@ function stageTime(event: AuditEvent): number {
 
 function jobRoleLabel(job: JobSummary | undefined): string {
   if (job) return ROLE_LABELS[job.role] ?? job.role;
-  return "执行";
+  return ROLE_LABELS.executor;
 }
 
 function jobAgentName(job: JobSummary | undefined, events: AuditEvent[]): string {
@@ -358,29 +360,22 @@ function jobResult(
 ): { text: string; tone: string } {
   const job = jobs.get(jobId);
   if (job) {
-    switch (job.status) {
-      case "succeeded":
-        return { text: "完成", tone: "success" };
-      case "failed":
-        return { text: "失败", tone: "danger" };
-      case "canceled":
-        return { text: "已取消", tone: "muted" };
-      case "running":
-        return { text: "运行中", tone: "info" };
-      default:
-        return { text: JOB_STATUS_LABELS[job.status] ?? job.status, tone: "info" };
-    }
+    return { text: jobStatusLabel(job.status), tone: toneForStatus(job.status) };
   }
   const kinds = new Set(events.map((event) => event.kind));
-  if (kinds.has("job_failed") || kinds.has("job_stalled")) return { text: "失败", tone: "danger" };
+  if (kinds.has("job_failed") || kinds.has("job_stalled")) {
+    return { text: JOB_STATUS_LABELS.failed, tone: "danger" };
+  }
   const finished = events.find((event) => event.kind === "job_finished");
   if (finished) {
     return finished.message.includes("失败")
-      ? { text: "失败", tone: "danger" }
-      : { text: "完成", tone: "success" };
+      ? { text: JOB_STATUS_LABELS.failed, tone: "danger" }
+      : { text: JOB_STATUS_LABELS.succeeded, tone: "success" };
   }
-  if (kinds.has("job_started")) return { text: "运行中", tone: "info" };
-  return { text: "排队中", tone: "warn" };
+  if (kinds.has("job_started")) {
+    return { text: JOB_STATUS_LABELS.running, tone: "info" };
+  }
+  return { text: "排队", tone: "warn" };
 }
 
 function jobDurationMs(events: AuditEvent[]): number | null {
@@ -390,7 +385,8 @@ function jobDurationMs(events: AuditEvent[]): number | null {
   return elapsed > 0 ? elapsed : null;
 }
 
-const STAGE_LABELS: Record<string, string> = {
+/// 作业阶段（一次 Agent 调用内部的事件）用短词，与作业状态文案区分开。
+const JOB_STAGE_LABELS: Record<string, string> = {
   job_queued: "排队",
   job_started: "开始",
   job_finished: "结束",
@@ -619,7 +615,7 @@ function JobRow({
         <div className="event-expanded event-stages">
           {stages.map((stage) => (
             <div className="event-stage" key={stage.id}>
-              <span className="event-stage-name">{STAGE_LABELS[stage.kind] ?? kindLabel(stage.kind)}</span>
+              <span className="event-stage-name">{JOB_STAGE_LABELS[stage.kind] ?? kindLabel(stage.kind)}</span>
               <span className="event-stage-time muted">{formatTime(stage.created_at)}</span>
               <span className="event-stage-message">
                 <EventMessage event={stage} />

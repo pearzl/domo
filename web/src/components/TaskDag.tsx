@@ -3,8 +3,8 @@ import type { Task } from "../types";
 import {
   Badge,
   Empty,
-  TASK_STAGE_LABELS,
   TaskStateBadge,
+  taskStageLabel,
 } from "../ui";
 import {
   DAG_NODE_HEIGHT,
@@ -159,9 +159,7 @@ export function TaskDag({
                   {task.title}
                 </div>
                 <div className="dag-node-meta">
-                  <Badge tone="muted">
-                    {TASK_STAGE_LABELS[task.stage] ?? task.stage}
-                  </Badge>
+                  <Badge tone="muted">{taskStageLabel(task.stage)}</Badge>
                   <TaskStateBadge stage={task.stage} status={task.status} />
                 </div>
                 <div className="dag-node-deps" title={meta}>

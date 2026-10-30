@@ -4,14 +4,14 @@ import type { ProjectSummary } from "../types";
 import { api, errorMessage } from "../api";
 import {
   Badge,
-  Empty,
+  EmptySteps,
   ErrorBox,
   Progress,
   StageBadge,
   StatusBadge,
   formatTime,
-  STAGE_LABELS,
-  STATUS_LABELS,
+  projectStatusLabel,
+  stageLabel,
 } from "../ui";
 import {
   EMPTY_PROJECT_FILTERS,
@@ -87,7 +87,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       <header className="page-header">
         <div>
           <h1>项目</h1>
-          <p className="subtitle">每个项目在一个独立的 Git worktree 中推进，交付分支不会直接改动 base。</p>
+          <p className="subtitle">每个项目在一个独立的 Git worktree 中推进，交付分支不会直接改动 base。项目内的任务是在该仓库里可验收的工作单元；“作业”指任务每次调用 Agent 产生的一次执行记录。</p>
         </div>
         <button className="primary" onClick={() => setShowForm((value) => !value)}>
           {showForm ? "取消" : "新建项目"}
@@ -151,7 +151,16 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       {loading ? (
         <div className="muted">加载中…</div>
       ) : projects.length === 0 ? (
-        <Empty title="还没有项目" hint="新建项目并进入项目后，输入目标与规划者确认。" />
+        <EmptySteps
+          title="还没有项目"
+          hint="按三步开始第一个项目。"
+          steps={[
+            "新建项目：填写项目名称与 Git 仓库路径。",
+            "输入目标并确认方案：在项目分析里描述目标、边界和验收预期，确认规划者给出的方案。",
+            "跟踪执行与验收：任务按依赖自动推进，可在概览、任务与事件时间线查看进展，报告生成后验收并合入。",
+          ]}
+          action={{ label: "新建项目", onClick: () => setShowForm(true) }}
+        />
       ) : visibleProjects.length === 0 ? (
         <div className="empty">
           <div className="empty-title">没有符合筛选条件的项目</div>
@@ -237,7 +246,7 @@ function FilterBar({ projects, filters, onToggleStage, onToggleStatus, onReset }
         {PROJECT_STAGES.map((stage) => (
           <FilterTag
             key={stage}
-            label={STAGE_LABELS[stage] ?? stage}
+            label={stageLabel(stage)}
             count={countProjectStage(projects, stage)}
             active={filters.stages.includes(stage)}
             onClick={() => onToggleStage(stage)}
@@ -249,7 +258,7 @@ function FilterBar({ projects, filters, onToggleStage, onToggleStatus, onReset }
         {PROJECT_STATUSES.map((status) => (
           <FilterTag
             key={status}
-            label={STATUS_LABELS[status] ?? status}
+            label={projectStatusLabel(status) ?? status}
             count={countProjectStatus(projects, status)}
             active={filters.statuses.includes(status)}
             onClick={() => onToggleStatus(status)}

@@ -1,5 +1,6 @@
 import type { Task } from "../types";
 import { queueEdge } from "../taskQueue";
+import { taskStageLabel } from "../ui";
 
 /// 任务列表的筛选、编号、草稿校验与队列位置摘要都是纯派生：
 /// 只读取页面已有的任务数据，不取值也不发请求。判定口径与服务端保持一致，
@@ -211,19 +212,12 @@ export interface DependencyOption {
   stageLabel: string;
 }
 
-const STAGE_LABELS: Record<string, string> = {
-  pending: "待启动",
-  executing: "执行",
-  verifying: "验收",
-  completed: "完成",
-};
-
 export function dependencyOptions(tasks: Task[]): DependencyOption[] {
   return tasks.map((task) => ({
     key: task.key,
     title: task.title,
     stage: task.stage,
-    stageLabel: STAGE_LABELS[task.stage] ?? task.stage,
+    stageLabel: taskStageLabel(task.stage),
   }));
 }
 

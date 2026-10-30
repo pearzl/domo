@@ -16,12 +16,55 @@ export const STATUS_LABELS: Record<string, string> = {
   archived: "已归档",
 };
 
+/// 项目阶段、项目状态、任务阶段、任务状态与作业状态的唯一文案来源；
+/// 表现层与组件都从这里取中文标签，保证同一状态在概览、列表、抽屉和时间线里用同一个词。
+/// 任务阶段描述任务在项目内的位置，作业状态描述一次 Agent 调用的结果，两者不混用。
 export const TASK_STAGE_LABELS: Record<string, string> = {
   pending: "待启动",
   executing: "执行",
   verifying: "验收",
   completed: "完成",
 };
+
+export const TASK_STAGE_ORDER: readonly string[] = [
+  "pending",
+  "executing",
+  "verifying",
+  "completed",
+];
+
+/// 任务状态叠加在阶段之上：取消、阻塞、运行、暂停与排队优先于阶段展示。
+export const TASK_STATUS_LABELS: Record<string, string> = {
+  running: "运行中",
+  blocked: "阻塞",
+  queued: "队列中",
+  paused: "已暂停",
+  pausing: "暂停中",
+  canceled: "已取消",
+};
+
+export const PROJECT_STAGE_ORDER: readonly string[] = [
+  "analysis",
+  "executing",
+  "summarizing",
+  "completed",
+];
+
+export const PROJECT_STATUS_ORDER: readonly string[] = [
+  "running",
+  "blocked",
+  "queued",
+  "pausing",
+  "paused",
+  "archived",
+];
+
+export const JOB_STATUS_ORDER: readonly string[] = [
+  "running",
+  "succeeded",
+  "failed",
+  "canceled",
+];
 
 export const ROLE_LABELS: Record<string, string> = {
   analysis: "项目分析",
@@ -38,6 +81,42 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
   failed: "失败",
   canceled: "已取消",
 };
+
+export function stageLabel(stage: string | null | undefined): string {
+  if (!stage) return "—";
+  return STAGE_LABELS[stage] ?? stage;
+}
+
+export function projectStatusLabel(status: string | null | undefined): string | null {
+  if (!status) return null;
+  return STATUS_LABELS[status] ?? status;
+}
+
+export function taskStageLabel(stage: string | null | undefined): string {
+  if (!stage) return "—";
+  return TASK_STAGE_LABELS[stage] ?? stage;
+}
+
+export function taskStatusLabel(status: string | null | undefined): string | null {
+  if (!status) return null;
+  return TASK_STATUS_LABELS[status] ?? status;
+}
+
+export function jobStatusLabel(status: string | null | undefined): string {
+  if (!status) return "—";
+  return JOB_STATUS_LABELS[status] ?? status;
+}
+
+/// 任务状态文案：取消、阻塞、运行与暂停优先于阶段，其余按阶段展示。
+export function taskStateLabel(stage: string, status?: string | null): string {
+  if (status === "canceled") return TASK_STATUS_LABELS.canceled;
+  if (status === "blocked") return TASK_STATUS_LABELS.blocked;
+  if (status === "running") return TASK_STATUS_LABELS.running;
+  if (stage === "completed") return TASK_STAGE_LABELS.completed;
+  if (status === "paused") return TASK_STATUS_LABELS.paused;
+  if (status === "queued") return TASK_STATUS_LABELS.queued;
+  return taskStageLabel(stage);
+}
 
 export const FAILURE_KIND_LABELS: Record<string, string> = {
   rate_limit: "限流",
@@ -166,22 +245,22 @@ export function StageBadge({ stage }: { stage: string }) {
         : stage === "analysis"
           ? "warn"
           : "muted";
-  return <Badge tone={tone}>{STAGE_LABELS[stage] ?? stage}</Badge>;
+  return <Badge tone={tone}>{stageLabel(stage)}</Badge>;
 }
 
 export function StatusBadge({ status }: { status?: string | null }) {
   if (!status) return null;
-  return <Badge tone={toneForStatus(status)}>{STATUS_LABELS[status] ?? status}</Badge>;
+  return <Badge tone={toneForStatus(status)}>{projectStatusLabel(status)}</Badge>;
 }
 
 export function TaskStateBadge({ stage, status }: { stage: string; status?: string | null }) {
-  if (status === "canceled") return <Badge tone="muted">已取消</Badge>;
-  if (status === "blocked") return <Badge tone="danger">阻塞</Badge>;
-  if (status === "running") return <Badge tone="info">运行中</Badge>;
-  if (stage === "completed") return <Badge tone="success">完成</Badge>;
-  if (status === "paused") return <Badge tone="warn">已暂停</Badge>;
-  if (status === "queued") return <Badge tone="warn">队列中</Badge>;
-  return <Badge>{TASK_STAGE_LABELS[stage] ?? stage}</Badge>;
+  let tone = "muted";
+  if (status === "canceled") tone = "muted";
+  else if (status === "blocked") tone = "danger";
+  else if (status === "running") tone = "info";
+  else if (stage === "completed") tone = "success";
+  else if (status === "paused" || status === "pausing" || status === "queued") tone = "warn";
+  return <Badge tone={tone}>{taskStateLabel(stage, status)}</Badge>;
 }
 
 export function Progress({ total, completed }: { total: number; completed: number }) {
@@ -203,6 +282,38 @@ export function Empty({ title, hint }: { title: string; hint?: string }) {
     <div className="empty">
       <div className="empty-title">{title}</div>
       {hint ? <div className="empty-hint">{hint}</div> : null}
+    </div>
+  );
+}
+
+/// 空状态引导：给出可执行的下一步步骤与首选操作，而不是只说明“暂无”。
+export function EmptySteps({
+  title,
+  hint,
+  steps,
+  action,
+}: {
+  title: string;
+  hint?: string;
+  steps: string[];
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className="empty">
+      <div className="empty-title">{title}</div>
+      {hint ? <div className="empty-hint">{hint}</div> : null}
+      <ol className="empty-steps">
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      {action ? (
+        <div className="empty-actions">
+          <button className="primary" onClick={action.onClick}>
+            {action.label}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

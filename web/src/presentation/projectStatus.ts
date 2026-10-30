@@ -5,6 +5,8 @@ import type {
   Project,
   Task,
 } from "../types";
+/// 任务阶段文案统一取自 ui.tsx，概览与任务列表不会出现两套措辞。
+import { taskStageLabel } from "../ui";
 
 /// 概览只读取项目详情中已有的数据，不触发额外请求。
 export interface ProjectStatusInput {
@@ -56,13 +58,6 @@ export interface ProjectStatus {
   stats: ProjectStats;
   guidance: ProjectGuidance;
 }
-
-const TASK_STAGE_TEXT: Record<string, string> = {
-  pending: "待启动",
-  executing: "执行",
-  verifying: "验收",
-  completed: "完成",
-};
 
 /// 已取消任务不计入任务总数与完成数。
 export function projectStats(input: ProjectStatusInput): ProjectStats {
@@ -368,7 +363,7 @@ function taskItem(task: Task): ExecutionTaskItem {
   return {
     key: task.key,
     stage: task.stage,
-    stageLabel: TASK_STAGE_TEXT[task.stage] ?? task.stage,
+    stageLabel: taskStageLabel(task.stage),
   };
 }
 

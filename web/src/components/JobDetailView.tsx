@@ -7,7 +7,6 @@ import { RichContent } from "./RichContent";
 import {
   Badge,
   FAILURE_KIND_LABELS,
-  JOB_STATUS_LABELS,
   ROLE_LABELS,
   formatCost,
   formatDuration,
@@ -15,6 +14,7 @@ import {
   formatTime,
   formatTokens,
   failureSummaryLabel,
+  jobStatusLabel,
   shortText,
   toneForStatus,
 } from "../ui";
@@ -69,7 +69,7 @@ export function JobDetailView({
         <summary className="job-summary">
           <span className="job-role">{ROLE_LABELS[job.role] ?? job.role}</span>
           <Badge tone={toneForStatus(job.status)}>
-            {JOB_STATUS_LABELS[job.status] ?? job.status}
+            {jobStatusLabel(job.status)}
           </Badge>
           <span className="muted">{job.agent_name ?? "无 Agent"}</span>
           <span className="muted">第 {job.attempt} 次</span>
