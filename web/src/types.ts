@@ -1,4 +1,4 @@
-export type AgentKind = "mock" | "opencode" | "cli";
+export type AgentKind = "mock" | "opencode" | "cli" | "codex" | "workbuddy";
 export type Role = "planner" | "executor" | "verifier";
 export type UsageMetric = "tokens" | "input_tokens" | "output_tokens" | "cost";
 export type UsageWindowKind = "day" | "month";

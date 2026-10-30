@@ -232,9 +232,7 @@ async fn create_agent(
         ]
     }))?;
     let command = request.command.unwrap_or_default();
-    if kind == AGENT_CLI && command.is_empty() {
-        return Err(ApiError::bad("CLI Agent 必须配置命令模板"));
-    }
+    require_command_if_needed(&kind, &command)?;
     let availability = match request.availability {
         Some(config) => {
             usage::validate_availability(&config).map_err(ApiError::bad)?;
@@ -309,13 +307,13 @@ async fn update_agent(
         }
         None => existing.roles.clone(),
     };
-    let command = request
-        .command
-        .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "[]".into()))
-        .unwrap_or_else(|| existing.command_json.clone().unwrap_or_else(|| "[]".into()));
-    if kind == AGENT_CLI && command == "[]" {
-        return Err(ApiError::bad("CLI Agent 必须配置命令模板"));
-    }
+    let command = request.command;
+    let command_json = match &command {
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "[]".into()),
+        None => existing.command_json.clone().unwrap_or_else(|| "[]".into()),
+    };
+    let resolved_command: Vec<String> = serde_json::from_str(&command_json).unwrap_or_default();
+    require_command_if_needed(&kind, &resolved_command)?;
     let model_args = request
         .model_args
         .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "[]".into()))
@@ -362,7 +360,7 @@ async fn update_agent(
     .bind(&roles)
     .bind(max_concurrency)
     .bind(enabled)
-    .bind(&command)
+    .bind(&command_json)
     .bind(&model_args)
     .bind(&availability_json)
     .bind(&usage_limit_json)
@@ -4303,9 +4301,17 @@ fn validate_kind(kind: &str) -> Result<String, ApiError> {
             Ok(kind.to_string())
         }
         _ => Err(ApiError::bad(
-            "Agent 类型必须是 mock、opencode、cli、codex 或 workbuddy",
+            "Agent 类型必须是 mock、opencode、codex、workbuddy 或 cli",
         )),
     }
+}
+
+/// 只有自定义 CLI 需要显式命令模板；内置 CLI 类型自带默认命令。
+fn require_command_if_needed(kind: &str, command: &[String]) -> Result<(), ApiError> {
+    if kind == AGENT_CLI && command.is_empty() {
+        return Err(ApiError::bad("CLI Agent 必须配置命令模板"));
+    }
+    Ok(())
 }
 
 fn validate_role(role: &str) -> Result<String, ApiError> {
@@ -4332,4 +4338,56 @@ fn validate_roles(roles: Vec<String>) -> Result<Vec<String>, ApiError> {
         return Err(ApiError::bad("Agent 至少需要一个角色"));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bad_message(kind: &str) -> String {
+        validate_kind(kind).expect_err("未知类型应被拒绝").message
+    }
+
+    #[test]
+    fn validate_kind_accepts_builtin_cli_types() {
+        for kind in [
+            AGENT_MOCK,
+            AGENT_OPENCODE,
+            AGENT_CODEX,
+            AGENT_WORKBUDDY,
+            AGENT_CLI,
+        ] {
+            assert_eq!(validate_kind(kind).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn validate_kind_rejects_unknown_type_and_lists_options() {
+        let message = bad_message("unknown");
+        for kind in [
+            AGENT_MOCK,
+            AGENT_OPENCODE,
+            AGENT_CODEX,
+            AGENT_WORKBUDDY,
+            AGENT_CLI,
+        ] {
+            assert!(message.contains(kind), "错误信息缺少 {kind}: {message}");
+        }
+    }
+
+    #[test]
+    fn builtin_cli_types_do_not_require_command_template() {
+        let empty: [String; 0] = [];
+        for kind in [AGENT_MOCK, AGENT_OPENCODE, AGENT_CODEX, AGENT_WORKBUDDY] {
+            assert!(require_command_if_needed(kind, &empty).is_ok());
+        }
+        let error = require_command_if_needed(AGENT_CLI, &empty).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn custom_cli_accepts_non_empty_command_template() {
+        let command = vec!["codex".to_string(), "exec".to_string()];
+        assert!(require_command_if_needed(AGENT_CLI, &command).is_ok());
+    }
 }

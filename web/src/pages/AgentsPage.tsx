@@ -314,6 +314,8 @@ export function AgentsPage() {
                 }
               >
                 <option value="opencode">opencode CLI</option>
+                <option value="codex">Codex CLI</option>
+                <option value="workbuddy">WorkBuddy CLI</option>
                 <option value="mock">mock（测试）</option>
                 <option value="cli">自定义 CLI</option>
               </select>
@@ -323,7 +325,7 @@ export function AgentsPage() {
               <input
                 value={form.model}
                 onChange={(event) => setForm({ ...form, model: event.target.value })}
-                placeholder="例如 opencode-go/deepseek-v4-pro"
+                placeholder="例如 gpt-5-codex、deepseek-v4-pro；留空使用 CLI 默认"
               />
             </label>
             <label>
