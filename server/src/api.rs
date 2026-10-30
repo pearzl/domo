@@ -4299,8 +4299,12 @@ async fn require_project(state: &AppState, id: &str) -> Result<ProjectRow, ApiEr
 
 fn validate_kind(kind: &str) -> Result<String, ApiError> {
     match kind {
-        AGENT_MOCK | AGENT_OPENCODE | AGENT_CLI => Ok(kind.to_string()),
-        _ => Err(ApiError::bad("Agent 类型必须是 mock、opencode 或 cli")),
+        AGENT_MOCK | AGENT_OPENCODE | AGENT_CLI | AGENT_CODEX | AGENT_WORKBUDDY => {
+            Ok(kind.to_string())
+        }
+        _ => Err(ApiError::bad(
+            "Agent 类型必须是 mock、opencode、cli、codex 或 workbuddy",
+        )),
     }
 }
 

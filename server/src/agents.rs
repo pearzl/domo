@@ -12,8 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::models::{
-    AgentRow, AGENT_CLI, AGENT_MOCK, AGENT_OPENCODE, CONFIRM_AUTO, JOB_ROLE_ANALYSIS,
-    JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    AgentRow, AGENT_CLI, AGENT_CODEX, AGENT_MOCK, AGENT_OPENCODE, AGENT_WORKBUDDY, CONFIRM_AUTO,
+    JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
 use crate::usage::UsageRecord;
 
@@ -125,6 +125,8 @@ pub async fn execute(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> R
         AGENT_MOCK => run_mock(spec).await,
         AGENT_OPENCODE => run_opencode(agent, spec, timeout).await,
         AGENT_CLI => run_cli(agent, spec, timeout).await,
+        AGENT_CODEX => run_codex(agent, spec, timeout).await,
+        AGENT_WORKBUDDY => run_workbuddy(agent, spec, timeout).await,
         other => Err(anyhow!("未知 Agent 类型: {other}")),
     }
 }
@@ -924,6 +926,180 @@ async fn run_cli(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Resul
     run_process(&command[0], &args, spec, timeout, stdin).await
 }
 
+fn configured_command(agent: &AgentRow) -> Option<Vec<String>> {
+    let command: Vec<String> = agent
+        .command_json
+        .as_deref()
+        .map(|raw| serde_json::from_str::<Vec<String>>(raw).unwrap_or_default())
+        .unwrap_or_default();
+    (!command.is_empty()).then_some(command)
+}
+
+async fn run_codex(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
+    if configured_command(agent).is_some() {
+        return run_cli(agent, spec, timeout).await;
+    }
+    let args = codex_args(&agent.model, &spec.job_dir);
+    let mut run = run_process(
+        &codex_bin(),
+        &args,
+        spec,
+        timeout,
+        Some(spec.prompt.as_bytes().to_vec()),
+    )
+    .await?;
+    run.usage = parse_codex_usage(&run.stdout);
+    Ok(run)
+}
+
+async fn run_workbuddy(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
+    if configured_command(agent).is_some() {
+        return run_cli(agent, spec, timeout).await;
+    }
+    let args = workbuddy_args(&agent.model, &spec.job_dir);
+    let mut run = run_process(
+        &workbuddy_bin(),
+        &args,
+        spec,
+        timeout,
+        Some(spec.prompt.as_bytes().to_vec()),
+    )
+    .await?;
+    run.usage = parse_workbuddy_usage(&run.stdout);
+    Ok(run)
+}
+
+fn codex_bin() -> String {
+    bin_override("DOMO_CODEX_BIN", "codex")
+}
+
+fn workbuddy_bin() -> String {
+    bin_override("DOMO_WORKBUDDY_BIN", "codebuddy")
+}
+
+fn bin_override(key: &str, fallback: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn codex_args(model: &str, job_dir: &Path) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--sandbox".to_string(),
+        "workspace-write".to_string(),
+        "--add-dir".to_string(),
+        job_dir.to_string_lossy().to_string(),
+    ];
+    let model = model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args.push("-".to_string());
+    args
+}
+
+fn workbuddy_args(model: &str, job_dir: &Path) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--add-dir".to_string(),
+        job_dir.to_string_lossy().to_string(),
+    ];
+    let model = model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args
+}
+
+fn codex_usage_record(usage: &serde_json::Map<String, serde_json::Value>) -> UsageRecord {
+    UsageRecord {
+        input_tokens: json_i64(usage.get("input_tokens")),
+        output_tokens: json_i64(usage.get("output_tokens")),
+        cache_read_tokens: json_i64(usage.get("cached_input_tokens")),
+        cache_write_tokens: json_i64(usage.get("cache_write_input_tokens")),
+        reasoning_tokens: json_i64(usage.get("reasoning_output_tokens")),
+        cost: None,
+        duration_ms: None,
+    }
+}
+
+/// Codex reports one `turn.completed` per turn; its usage covers the whole turn.
+/// Lines that are not JSON or carry no usage are ignored.
+fn parse_codex_usage(stdout: &str) -> Option<UsageRecord> {
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(|item| item.as_str()) != Some("turn.completed") {
+            continue;
+        }
+        let Some(usage) = value.get("usage").and_then(|item| item.as_object()) else {
+            continue;
+        };
+        let record = codex_usage_record(usage);
+        if record.known() {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// WorkBuddy reports the session total in the `result` event. When that event
+/// lacks usage, the last assistant message carries the per-request counts.
+fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
+    let mut result_usage = None;
+    let mut result_cost = None;
+    let mut last_assistant_usage = None;
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        match value.get("type").and_then(|item| item.as_str()) {
+            Some("result") => {
+                if let Some(usage) = value.get("usage").and_then(|item| item.as_object()) {
+                    result_usage = Some(usage.clone());
+                }
+                result_cost = value.get("total_cost_usd").and_then(|item| item.as_f64());
+            }
+            Some("assistant") => {
+                if let Some(usage) = value
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+                    .and_then(|item| item.as_object())
+                {
+                    last_assistant_usage = Some(usage.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let usage = result_usage.or(last_assistant_usage)?;
+    let record = UsageRecord {
+        input_tokens: json_i64(usage.get("input_tokens")),
+        output_tokens: json_i64(usage.get("output_tokens")),
+        cache_read_tokens: json_i64(usage.get("cache_read_input_tokens")),
+        cache_write_tokens: json_i64(usage.get("cache_creation_input_tokens")),
+        reasoning_tokens: None,
+        cost: result_cost,
+        duration_ms: None,
+    };
+    record.known().then_some(record)
+}
+
+fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|item| item.as_i64())
+}
+
 async fn run_process(
     program: &str,
     args: &[String],
@@ -1141,6 +1317,125 @@ mod tests {
         assert_eq!(lines.next(), Some(expected.as_ref()));
         assert_eq!(lines.next(), Some(expected.as_ref()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn args_contain_pair(args: &[String], first: &str, second: &str) -> bool {
+        args.windows(2)
+            .any(|window| window[0] == first && window[1] == second)
+    }
+
+    #[test]
+    fn codex_args_omit_model_flag_when_model_is_empty() {
+        let args = codex_args("", Path::new("/tmp/job"));
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args_contain_pair(&args, "--sandbox", "workspace-write"));
+        assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
+        assert!(!args.contains(&"--model".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn codex_args_include_model_when_present() {
+        let args = codex_args(" gpt-5-codex ", Path::new("/tmp/job"));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args_contain_pair(&args, "--sandbox", "workspace-write"));
+        assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
+        assert!(args_contain_pair(&args, "--model", "gpt-5-codex"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn workbuddy_args_cover_stream_protocol_flags() {
+        let args = workbuddy_args("", Path::new("/tmp/job"));
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args_contain_pair(&args, "--output-format", "stream-json"));
+        assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
+        assert!(!args.contains(&"--model".to_string()));
+
+        let with_model = workbuddy_args("hy3", Path::new("/tmp/job"));
+        assert!(args_contain_pair(&with_model, "--model", "hy3"));
+    }
+
+    #[test]
+    fn codex_usage_maps_turn_totals_and_details() {
+        let stdout = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":21349,",
+            "\"cached_input_tokens\":13952,\"cache_write_input_tokens\":7,",
+            "\"output_tokens\":130,\"reasoning_output_tokens\":11}}\n"
+        );
+        let usage = parse_codex_usage(stdout).expect("usage");
+        assert_eq!(usage.input_tokens, Some(21349));
+        assert_eq!(usage.output_tokens, Some(130));
+        assert_eq!(usage.cache_read_tokens, Some(13952));
+        assert_eq!(usage.cache_write_tokens, Some(7));
+        assert_eq!(usage.reasoning_tokens, Some(11));
+        assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn workbuddy_usage_maps_result_totals_and_cost() {
+        let stdout = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":10,",
+            "\"output_tokens\":2}},\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,",
+            "\"total_cost_usd\":0.0125,\"usage\":{\"input_tokens\":73243,",
+            "\"output_tokens\":274,\"cache_creation_input_tokens\":3,",
+            "\"cache_read_input_tokens\":49088}}\n"
+        );
+        let usage = parse_workbuddy_usage(stdout).expect("usage");
+        assert_eq!(usage.input_tokens, Some(73243));
+        assert_eq!(usage.output_tokens, Some(274));
+        assert_eq!(usage.cache_read_tokens, Some(49088));
+        assert_eq!(usage.cache_write_tokens, Some(3));
+        assert_eq!(usage.reasoning_tokens, None);
+        assert_eq!(usage.cost, Some(0.0125));
+    }
+
+    #[test]
+    fn workbuddy_usage_falls_back_to_last_assistant_message() {
+        let stdout = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":10,",
+            "\"output_tokens\":2}},\"session_id\":\"s\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":40,",
+            "\"output_tokens\":5,\"cache_read_input_tokens\":12}},\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n"
+        );
+        let usage = parse_workbuddy_usage(stdout).expect("usage");
+        assert_eq!(usage.input_tokens, Some(40));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.cache_read_tokens, Some(12));
+        assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn usage_is_unknown_without_reporting_events() {
+        let stdout = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n",
+            "not json\n"
+        );
+        assert_eq!(parse_codex_usage(stdout), None);
+        assert_eq!(parse_workbuddy_usage(stdout), None);
+    }
+
+    #[test]
+    fn bin_overrides_follow_environment() {
+        std::env::remove_var("DOMO_CODEX_BIN");
+        std::env::remove_var("DOMO_WORKBUDDY_BIN");
+        assert_eq!(codex_bin(), "codex");
+        assert_eq!(workbuddy_bin(), "codebuddy");
+
+        std::env::set_var("DOMO_CODEX_BIN", "/opt/codex-cli");
+        std::env::set_var("DOMO_WORKBUDDY_BIN", "/opt/codebuddy-cli");
+        assert_eq!(codex_bin(), "/opt/codex-cli");
+        assert_eq!(workbuddy_bin(), "/opt/codebuddy-cli");
+
+        std::env::remove_var("DOMO_CODEX_BIN");
+        std::env::remove_var("DOMO_WORKBUDDY_BIN");
     }
 
     #[test]

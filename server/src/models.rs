@@ -13,6 +13,8 @@ pub const ROLE_VERIFIER: &str = "verifier";
 pub const AGENT_MOCK: &str = "mock";
 pub const AGENT_OPENCODE: &str = "opencode";
 pub const AGENT_CLI: &str = "cli";
+pub const AGENT_CODEX: &str = "codex";
+pub const AGENT_WORKBUDDY: &str = "workbuddy";
 
 pub const STAGE_ANALYSIS: &str = "analysis";
 pub const STAGE_EXECUTING: &str = "executing";
