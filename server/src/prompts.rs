@@ -1,6 +1,7 @@
 //! Prompt contracts for jobs. Every job receives an absolute result path and must
 //! write JSON there; stdout is captured for audit but is not the protocol channel.
 
+use crate::domain::{MAX_DERIVED_TASKS, MAX_PLAN_TASKS};
 use crate::models::{
     MessageRow, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY,
     JOB_ROLE_VERIFIER, REPORT_MESSAGE_ROLE,
@@ -149,6 +150,8 @@ fn analysis_prompt(data: &PromptData) -> String {
          - 必须说明可交付物、范围边界（明确不做什么）、关键假设、验收口径和主要风险；\n\
          - 验收口径要可观察或可执行，例如具体命令、文件内容或接口行为；\n\
          - 需要拆分任务时，每个任务写清要实现的目标、边界和验收方式；\n\
+         - 单个方案最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段规划，先拆出能拿到关键进展的这一批；\n\
+         - 关键进展完成后仍有大量工作未覆盖时，通过重规划派发下一批任务继续推进项目；不要试图用一次方案覆盖大型项目的全部工作；\n\
          - 任务必须可以独立执行、独立验收；任务之间用 deps 表示前置依赖，必须是无环 DAG；\n\
          - 任务产物由执行者在独立任务 worktree 中完成，验收通过后由 DOMO 自动合并到项目交付分支；\n\
          - 验收标准不要要求执行者直接提交、合并或推送到项目交付分支，也不要要求执行者执行 git commit；\n\
@@ -276,6 +279,7 @@ fn replan_section(data: &PromptData) -> String {
          \n已取消任务（已退出活动 DAG，不要把它们作为前置依赖）：\n{canceled}\n\
          \n## 重规划约束\n\
          - 新计划只包含仍需完成的工作，不要重复已完成任务；\n\
+         - 新计划最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段推进，本次只规划距离关键进展最近的一批，后续再通过重规划派发新任务；\n\
          - deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n\
          - 可以复用已取消任务的 key；\n\
          - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正。\n"
@@ -362,9 +366,11 @@ fn executor_prompt(data: &PromptData) -> String {
         format!("\n## 派生子任务\n{items}\n")
     };
     let derive_rule = if data.derived_from.is_some() {
-        "禁止派生子任务；派生任务只能完成自身工作或请求重新规划。"
+        "禁止派生子任务；派生任务只能完成自身工作或请求重新规划。".to_string()
     } else {
-        "如果任务仍然过于复杂，可以派生子任务：单次 1 到 8 个、deps 必须为空、key 在项目活动任务中唯一，且每个子任务必须写清描述和验收标准。"
+        format!(
+            "如果任务仍然过于复杂，可以派生子任务：单次 1 到 {MAX_DERIVED_TASKS} 个、deps 必须为空、key 在项目活动任务中唯一，且每个子任务必须写清描述和验收标准。"
+        )
     };
     let schema = if data.derived_from.is_some() {
         "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
@@ -392,6 +398,7 @@ fn executor_prompt(data: &PromptData) -> String {
          - 不要执行 git commit、git checkout、git reset、git merge、git rebase 等改变历史或分支的命令；DOMO 会负责提交和合并；\n\
          - 如果无法完成，写清失败原因，不要伪造成功；\n\
          - 如果原计划存在事实错误，导致当前任务无法按描述完成，输出 replan 请求并说明原因；\n\
+         - 大型项目按阶段推进：当前计划内的关键进展完成后，如果仍有大量工作没有纳入计划，输出 replan 请求，由规划者派发下一批任务；本批还有任务可以继续执行时不要请求重规划；\n\
          - {}；\n\
          - 结果文件路径固定，不要写到其他位置。\n\
          {}",
@@ -673,7 +680,11 @@ mod tests {
                 "分析提示词不应限定固定上下文: {forbidden}"
             );
         }
-        assert!(!prompt.contains("1 到 8"), "分析提示词不应限定任务数量");
+        assert!(
+            prompt.contains(&format!("最多包含 {MAX_PLAN_TASKS} 个任务")),
+            "缺少方案任务数量上限"
+        );
+        assert!(prompt.contains("重规划"), "缺少大型项目分阶段推进说明");
         assert!(prompt.contains("\"kind\":\"plan\""), "缺少 plan schema");
         assert!(prompt.contains("\"kind\":\"direct\""), "缺少 direct schema");
         assert!(
@@ -695,6 +706,10 @@ mod tests {
         assert!(prompt.contains("已完成任务"), "缺少已完成任务标题");
         assert!(prompt.contains("已取消任务"), "缺少已取消任务标题");
         assert!(prompt.contains("原计划与仓库现状冲突"), "缺少重规划原因");
+        assert!(
+            prompt.contains(&format!("新计划最多包含 {MAX_PLAN_TASKS} 个任务")),
+            "缺少重规划任务数量上限"
+        );
 
         let mut child = sample_data(JOB_ROLE_EXECUTOR);
         child.derived_from = Some(DependencyInfo {
@@ -724,6 +739,10 @@ mod tests {
             "缺少派生子任务标题"
         );
         assert!(parent_prompt.contains("T1.1"), "缺少子任务标识");
+        assert!(
+            parent_prompt.contains(&format!("1 到 {MAX_DERIVED_TASKS} 个")),
+            "缺少派生子任务数量上限"
+        );
     }
 
     #[test]

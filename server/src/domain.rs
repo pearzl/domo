@@ -68,7 +68,8 @@ pub struct NormalizedTask {
     pub deps: Vec<String>,
 }
 
-pub const MAX_DERIVED_TASKS: usize = 8;
+pub const MAX_PLAN_TASKS: usize = 50;
+pub const MAX_DERIVED_TASKS: usize = 25;
 
 #[derive(Debug, Clone)]
 pub enum ParsedResult {
@@ -388,8 +389,8 @@ pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, St
     if raw_tasks.is_empty() {
         return Err("规划结果没有任何任务".into());
     }
-    if raw_tasks.len() > 20 {
-        return Err("单个项目最多支持 20 个任务".into());
+    if raw_tasks.len() > MAX_PLAN_TASKS {
+        return Err(format!("单个计划最多支持 {MAX_PLAN_TASKS} 个任务"));
     }
     let mut tasks = Vec::new();
     let mut used_keys = HashSet::new();
@@ -855,6 +856,22 @@ mod tests {
     fn rejects_missing_dependency() {
         let result = validate_plan(vec![task("A", &["Z"])]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_plan_at_task_limit() {
+        let tasks: Vec<PlanTask> = (1..=MAX_PLAN_TASKS)
+            .map(|index| task(&format!("T{index}"), &[]))
+            .collect();
+        assert_eq!(validate_plan(tasks).unwrap().len(), MAX_PLAN_TASKS);
+    }
+
+    #[test]
+    fn rejects_plan_over_task_limit() {
+        let tasks: Vec<PlanTask> = (1..=MAX_PLAN_TASKS + 1)
+            .map(|index| task(&format!("T{index}"), &[]))
+            .collect();
+        assert!(validate_plan(tasks).is_err());
     }
 
     #[test]
