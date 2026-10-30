@@ -26,6 +26,7 @@ import {
   activityDigest,
   type ActivityDigestItem,
 } from "../presentation/activity";
+import { analysisThread } from "../presentation/analysisThread";
 import {
   TASK_FILTERS,
   type TaskFilter,
@@ -221,6 +222,7 @@ export function ProjectPage({
   const paused = project.status === "paused" || project.status === "pausing";
   const goalMessages = messages.filter((item) => item.role !== "review");
   const reviewMessages = messages.filter((item) => item.role === "review");
+  const analysisConversation = analysisThread(goalMessages);
   const canReplan =
     !archived &&
     project.stage !== "completed" &&
@@ -357,12 +359,46 @@ export function ProjectPage({
         </span>
       </label>
       <div className="messages">
-        {goalMessages.map((item) => (
-          <div key={item.id} className={`message message-${item.role}`}>
-            <div className="message-role">{item.role === "user" ? "你" : "规划者"}</div>
-            <RichContent content={item.content} className="message-content" />
+        {analysisConversation.messages.map((item) =>
+          item.folded ? (
+            <details
+              key={item.message.id}
+              className="message message-planner message-folded"
+            >
+              <summary>
+                <span className="message-role">规划者</span>
+                <span className="muted">上一条分析结果 · 已折叠，点击展开</span>
+              </summary>
+              <RichContent
+                content={item.message.content}
+                className="message-content"
+              />
+            </details>
+          ) : (
+            <div
+              key={item.message.id}
+              className={`message message-${item.message.role}`}
+            >
+              <div className="message-role">
+                {item.message.role === "user" ? "你" : "规划者"}
+              </div>
+              <RichContent
+                content={item.message.content}
+                className="message-content"
+              />
+            </div>
+          ),
+        )}
+        {analysisConversation.waiting && project.status !== "blocked" ? (
+          <div className="message-waiting" role="status">
+            <span className="message-role">规划者</span>
+            <span className="muted">
+              {analysisConversation.waiting === "start"
+                ? "等待规划者开始分析…"
+                : "已收到你的反馈，等待规划者给出下一次分析结果…"}
+            </span>
           </div>
-        ))}
+        ) : null}
         {goalMessages.length === 0 ? (
           <div className="muted">还没有输入项目目标。</div>
         ) : null}
