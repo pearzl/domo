@@ -8,7 +8,6 @@ import type {
   ProjectUsage,
   Task,
   TaskAgentPool,
-  UsageGroup,
   UsageTotals,
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
@@ -20,6 +19,7 @@ import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
+import { usagePath } from "../router";
 import {
   TASK_FILTERS,
   type TaskFilter,
@@ -506,7 +506,7 @@ export function ProjectPage({
         onRefresh={() => refresh()}
       />
 
-      <UsagePanel usage={detail.usage} agents={agents} />
+      <UsagePanel projectId={project.id} usage={detail.usage} />
 
       {error ? <ErrorBox message={error} /> : null}
 
@@ -1427,24 +1427,14 @@ function UsageAmount({
   );
 }
 
+/// 项目用量只保留汇总卡片与覆盖率；分组明细统一由用量页按项目过滤查看。
 function UsagePanel({
+  projectId,
   usage,
-  agents,
 }: {
+  projectId: string;
   usage: ProjectUsage;
-  agents: ProjectDetail["agents"];
 }) {
-  const groupName = (group: UsageGroup) => {
-    if (group.agent_id) {
-      return (
-        group.agent_name ??
-        agents.find((agent) => agent.id === group.agent_id)?.name ??
-        group.agent_id
-      );
-    }
-    if (group.role) return ROLE_LABELS[group.role] ?? group.role;
-    return "未记录";
-  };
   return (
     <details className="panel usage-panel">
       <summary>
@@ -1507,85 +1497,15 @@ function UsagePanel({
           {usage.totals.unknown_jobs} 个作业未提供 token 或费用，已单独计数，不参与限额扣减。作业数与时长仍包含未知作业。
         </div>
       ) : null}
-      <div className="usage-tables">
-        <UsageTable title="按 Agent" groups={usage.by_agent} nameOf={groupName} />
-        <UsageTable title="按角色" groups={usage.by_role} nameOf={groupName} />
+      <div className="button-row usage-panel-actions">
+        <a className="button-link" href={usagePath(projectId)}>
+          查看用量明细
+        </a>
+        <span className="muted">
+          明细按 Agent 与角色分组，只统计本项目，可按维度切换。
+        </span>
       </div>
     </details>
-  );
-}
-
-function UsageTable({
-  title,
-  groups,
-  nameOf,
-}: {
-  title: string;
-  groups: UsageGroup[];
-  nameOf: (group: UsageGroup) => string;
-}) {
-  return (
-    <div>
-      <h3>{title}</h3>
-      {groups.length === 0 ? (
-        <div className="muted">还没有用量记录。</div>
-      ) : (
-        <div className="usage-table-wrap">
-          <table className="usage-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>作业</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>缓存读</th>
-                <th>缓存写</th>
-                <th>推理</th>
-                <th>费用</th>
-                <th>时长</th>
-                <th>未知</th>
-              </tr>
-            </thead>
-            <tbody>
-              {groups.map((group) => (
-                <tr key={group.key}>
-                  <td>
-                    {nameOf(group)}
-                    {group.jobs > 0 && group.known_jobs < group.jobs ? (
-                      <>
-                        {" "}
-                        <UsageCoverageBadge totals={group} />
-                      </>
-                    ) : null}
-                  </td>
-                  <td>{group.jobs}</td>
-                  <td>
-                    <UsageAmount value={group.input_tokens} totals={group} />
-                  </td>
-                  <td>
-                    <UsageAmount value={group.output_tokens} totals={group} />
-                  </td>
-                  <td>
-                    <UsageAmount value={group.cache_read_tokens} totals={group} />
-                  </td>
-                  <td>
-                    <UsageAmount value={group.cache_write_tokens} totals={group} />
-                  </td>
-                  <td>
-                    <UsageAmount value={group.reasoning_tokens} totals={group} />
-                  </td>
-                  <td>
-                    <UsageAmount value={group.cost} totals={group} cost />
-                  </td>
-                  <td>{formatUsageDuration(group.duration_ms)}</td>
-                  <td>{group.unknown_jobs}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
   );
 }
 

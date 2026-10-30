@@ -2746,12 +2746,6 @@ summary {
   background: #fcfdff;
 }
 
-.usage-tables {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 18px;
-}
-
 .usage-table-wrap {
   overflow-x: auto;
 }
@@ -2795,6 +2789,63 @@ summary {
 
 .usage-filter-warning {
   margin-top: 10px;
+}
+
+/* 维度切换：一次只展示一个维度，选中项高亮。 */
+.usage-dimensions {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  overflow: hidden;
+  background: white;
+  margin-bottom: 4px;
+}
+
+.usage-dimensions .segmented-item {
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  background: white;
+  color: var(--muted);
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.usage-dimensions .segmented-item:last-child {
+  border-right: 0;
+}
+
+.usage-dimensions .segmented-item:hover:not(.active) {
+  background: #f2f5fa;
+  color: var(--text);
+}
+
+.usage-dimensions .segmented-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 项目页用量入口：链接按按钮样式呈现。 */
+.usage-panel-actions {
+  margin-top: 12px;
+  align-items: center;
+}
+
+.usage-panel-actions .button-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: white;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.usage-panel-actions .button-link:hover {
+  background: var(--accent-soft);
 }
 
 /* 窄屏布局：侧栏改为顶部横向导航，内容区取消左边距并让出导航高度。 */

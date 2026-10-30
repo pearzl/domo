@@ -1,9 +1,13 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, mergeConfig } from "vitest/config";
+import viteConfig from "./vite.config";
 
-/// 表现层测试只覆盖纯函数，运行在 Node 环境，不加载 DOM。
-export default defineConfig({
-  test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
-  },
-});
+/// 测试运行在 Node 环境，不加载 DOM；tsx 用例用 react-dom/server 渲染成静态标记。
+export default mergeConfig(
+  viteConfig,
+  defineConfig({
+    test: {
+      environment: "node",
+      include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    },
+  }),
+);
