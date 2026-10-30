@@ -61,10 +61,15 @@ export function TaskDag({
           已忽略指向不存在或已取消任务的依赖：{missing.join("、")}
         </div>
       ) : null}
+      <div className="dag-scroll-hint" id="dag-scroll-hint">
+        <span className="dag-scroll-hint-icon" aria-hidden="true">↔</span>
+        依赖图内容较宽，可在图内横向或纵向滚动；聚焦图表后可用方向键滚动。
+      </div>
       <div
         className="dag-scroll"
         role="region"
         aria-label="任务依赖图"
+        aria-describedby="dag-scroll-hint"
         tabIndex={0}
       >
         <div

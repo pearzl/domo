@@ -114,6 +114,14 @@ pre {
   margin-left: var(--sidebar-width);
   min-height: 100vh;
   min-width: 0;
+  overflow-x: hidden;
+}
+
+/* clip 不建立滚动容器，避免影响内容区内的 sticky 定位。 */
+@supports (overflow: clip) {
+  .content {
+    overflow-x: clip;
+  }
 }
 
 .sidebar {
@@ -151,6 +159,14 @@ pre {
   border-top: 1px solid var(--line);
 }
 
+/* 版本与提交成组呈现，窄屏可整体压缩或收起，连接状态单独保留。 */
+.sidebar-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 .sidebar-meta-row {
   display: flex;
   align-items: baseline;
@@ -163,6 +179,24 @@ pre {
 .sidebar-meta-row .mono {
   font-size: 0.76rem;
   color: var(--text);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 焦点可见样式统一覆盖导航、筛选、任务行与队列控件。 */
+.nav-link:focus-visible,
+.filter-tag:focus-visible,
+.filter-reset:focus-visible,
+button.event-filter:focus-visible,
+.task-filters button:focus-visible,
+.queue-controls button:focus-visible,
+.view-toggle button:focus-visible,
+.overview-task:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .connection {
@@ -719,6 +753,10 @@ small {
   min-width: 0;
 }
 
+.project-card-side {
+  min-width: 0;
+}
+
 .project-card-title {
   display: flex;
   align-items: center;
@@ -803,6 +841,13 @@ small {
   justify-content: space-between;
   gap: 20px;
   align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+/* 标题块在窄屏可收缩，长项目名不挤出操作按钮。 */
+.project-heading > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .header-actions {
@@ -810,6 +855,7 @@ small {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  max-width: 100%;
 }
 
 .meta-grid {
@@ -1527,6 +1573,28 @@ input[aria-invalid="true"] {
 
 .dag-note {
   font-size: 0.8rem;
+}
+
+/* 依赖图沿用既有滚动容器；仅提示可横向滚动并强化键盘焦点，不新增缩放/拖拽。 */
+.dag-scroll-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.dag-scroll-hint-icon {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: white;
+  font-size: 0.72rem;
+  color: #475467;
 }
 
 .dag-scroll {
@@ -2689,9 +2757,10 @@ summary {
   margin-top: 10px;
 }
 
+/* 窄屏布局：侧栏改为顶部横向导航，内容区取消左边距并让出导航高度。 */
 @media (max-width: 840px) {
   :root {
-    --sidebar-width: 176px;
+    --sidebar-height: 58px;
   }
 
   .page {
@@ -2699,30 +2768,249 @@ summary {
     padding-top: 18px;
   }
 
+  .content {
+    margin-left: 0;
+  }
+
   .sidebar {
-    padding: 14px 10px;
+    position: sticky;
+    top: 0;
+    bottom: auto;
+    left: auto;
+    z-index: 30;
+    width: 100%;
+    height: var(--sidebar-height);
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 10px;
+    padding: 0 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .brand {
+    flex: 0 0 auto;
+    gap: 8px;
+    font-size: 0.88rem;
+  }
+
+  /* 导航占满剩余宽度并允许自身横向滚动，不把页面撑出横向滚动条。 */
+  .sidebar-nav {
+    flex: 1 1 auto;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    margin-top: 0;
+    min-width: 0;
+    gap: 2px;
+    padding: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sidebar-nav .nav-link {
+    width: auto;
+    flex: 0 0 auto;
+    text-align: center;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+
+  .sidebar-footer {
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  /* 版本与提交在窄屏压缩为单行，不占用导航空间。 */
+  .sidebar-meta {
+    flex-direction: column;
+    gap: 0;
+    max-width: 112px;
+    font-size: 0.68rem;
+  }
+
+  .sidebar-meta-row {
+    gap: 4px;
+    font-size: 0.68rem;
+    line-height: 1.3;
+  }
+
+  .sidebar-meta-row .mono {
+    font-size: 0.68rem;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .connection {
+    margin-top: 0;
+    padding: 4px 8px;
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
 
   .project-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
+    padding: 14px 16px;
   }
 
+  .project-card-side {
+    width: 100%;
+  }
+
+  .meta-line {
+    gap: 4px 14px;
+  }
+
+  .meta-line > span {
+    overflow-wrap: anywhere;
+  }
+
+  /* 任务列表在窄屏改为多行卡片：key 与状态一行，标题独占一行，明细按需换行。 */
   .task-row {
-    grid-template-columns: 48px 1fr auto;
+    grid-template-columns: minmax(48px, auto) minmax(0, 1fr);
+    gap: 4px 10px;
+    align-items: start;
+    padding: 10px 12px;
+  }
+
+  .task-row .task-key {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+  }
+
+  .task-row .task-state {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .task-row .task-title {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+
+  .task-row .task-deps {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .task-row .task-agent {
+    grid-column: 1 / -1;
+    grid-row: 4;
+  }
+
+  .task-row .task-counts {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    justify-self: stretch;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px 6px;
   }
 
   .task-deps,
   .task-agent,
   .task-counts {
-    display: none;
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+  }
+
+  .task-deps {
+    font-size: 0.78rem;
+  }
+
+  .task-agent::before {
+    content: "Agent：";
+    color: #8491a3;
+  }
+
+  .task-agent {
+    font-size: 0.78rem;
+  }
+
+  .queue-position {
+    font-size: 0.7rem;
+  }
+
+  .task-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+
+  .task-filters button {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .project-heading {
     flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
   }
 
   .header-actions {
     justify-content: flex-start;
+  }
+
+  .header-actions button {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .meta-grid .mono {
+    overflow-wrap: anywhere;
+  }
+
+  /* 事件筛选条在窄屏横向滚动，不挤压事件列表。 */
+  .event-toolbar {
+    align-items: flex-start;
+  }
+
+  .event-filters {
+    flex-wrap: nowrap;
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+
+  .event-filters button {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .event {
@@ -2750,6 +3038,100 @@ summary {
 
   .drawer {
     width: 100%;
+  }
+}
+
+/* 更窄的屏幕（320px 起）：收紧面板与抽屉内边距，任务行改为单列卡片。 */
+@media (max-width: 560px) {
+  .page {
+    width: calc(100% - 20px);
+    padding-top: 14px;
+    gap: 14px;
+  }
+
+  .panel {
+    padding: 14px;
+    border-radius: 12px;
+  }
+
+  .project-card {
+    padding: 12px;
+  }
+
+  .project-card-title h2 {
+    font-size: 1rem;
+    overflow-wrap: anywhere;
+  }
+
+  .brand-text {
+    display: none;
+  }
+
+  .sidebar {
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  /* 极窄屏收起版本与提交文本，仅保留连接状态，为导航让出宽度。 */
+  .sidebar-meta {
+    display: none;
+  }
+
+  .connection {
+    padding: 4px 6px;
+    font-size: 0.68rem;
+  }
+
+  /* 单列任务卡片：key、状态、标题、依赖、Agent、计数依次换行，320px 下不溢出。 */
+  .task-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 9px 10px;
+  }
+
+  .task-row .task-key,
+  .task-row .task-state,
+  .task-row .task-title,
+  .task-row .task-deps,
+  .task-row .task-agent,
+  .task-row .task-counts {
+    grid-column: 1;
+    grid-row: auto;
+    min-width: 0;
+    justify-self: stretch;
+  }
+
+  .task-row .task-state,
+  .task-row .task-counts {
+    justify-content: flex-start;
+  }
+
+  .task-row .task-title {
+    margin-top: 1px;
+    font-size: 0.92rem;
+  }
+
+  .queue-controls {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .drawer {
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .drawer-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .task-toolbar {
+    gap: 6px;
+  }
+
+  .dag-scroll-hint {
+    font-size: 0.75rem;
   }
 }
 

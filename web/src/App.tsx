@@ -80,12 +80,13 @@ export default function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <button className="brand" onClick={() => navigate("/")}>
-          <span className="brand-mark">D</span>
-          <span>DOMO</span>
+        <button className="brand" onClick={() => navigate("/")} aria-label="DOMO 首页">
+          <span className="brand-mark" aria-hidden="true">D</span>
+          <span className="brand-text">DOMO</span>
         </button>
 
-        <nav className="nav-links sidebar-nav">
+        {/* 窄屏下同一组导航按钮改为顶部横向排布，DOM 结构保持不变。 */}
+        <nav className="nav-links sidebar-nav" aria-label="主导航">
           <button
             className={isProjects ? "nav-link active" : "nav-link"}
             onClick={() => navigate("/")}
@@ -107,13 +108,17 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div className="sidebar-meta-row">
-            <span>版本</span>
-            <span className="mono">{health ? `v${health.version}` : "—"}</span>
-          </div>
-          <div className="sidebar-meta-row">
-            <span>提交</span>
-            <span className="mono">{health ? health.git_hash : "—"}</span>
+          <div className="sidebar-meta" aria-label="版本与提交信息">
+            <div className="sidebar-meta-row">
+              <span>版本</span>
+              <span className="mono">{health ? `v${health.version}` : "—"}</span>
+            </div>
+            <div className="sidebar-meta-row">
+              <span>提交</span>
+              <span className="mono" title={health ? health.git_hash : "提交信息暂不可用"}>
+                {health ? health.git_hash : "—"}
+              </span>
+            </div>
           </div>
           <div
             className={online ? "connection connection-online" : "connection connection-offline"}
