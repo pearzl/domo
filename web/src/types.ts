@@ -283,7 +283,7 @@ export interface JobActivitySummary {
 }
 
 export interface JobActivity {
-  format: "opencode" | "text";
+  format: "opencode" | "codex" | "workbuddy" | "text";
   bytes: number;
   items: JobActivityItem[];
   summary: JobActivitySummary;

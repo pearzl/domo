@@ -66,9 +66,9 @@ export function JobActivity({ jobId, running }: { jobId: string; running: boolea
         {running ? <span className="activity-live">运行中 · 每 1.5 秒刷新</span> : null}
         {activity ? (
           <span className="muted">
-            {activity.format === "opencode"
-              ? `消息 ${summary?.messages ?? 0} · 工具 ${summary?.tool_calls ?? 0} · 失败 ${summary?.tool_failures ?? 0} · 步骤 ${summary?.steps ?? 0}`
-              : `纯文本日志 ${activity.items.length} 行`}
+            {activity.format === "text"
+              ? `纯文本日志 ${activity.items.length} 行`
+              : `${formatLabel(activity.format)} · 消息 ${summary?.messages ?? 0} · 工具 ${summary?.tool_calls ?? 0} · 失败 ${summary?.tool_failures ?? 0} · 步骤 ${summary?.steps ?? 0}`}
             {" · "}
             {formatBytes(activity.bytes)}
           </span>
@@ -177,7 +177,7 @@ function isFailure(status: string | null): boolean {
 function toolTone(status: string): string {
   if (isFailure(status)) return "danger";
   if (status === "completed") return "success";
-  if (status === "running") return "info";
+  if (status === "running" || status === "in_progress") return "info";
   return "muted";
 }
 
@@ -186,6 +186,7 @@ function toolStatusLabel(status: string): string {
     case "completed":
       return "完成";
     case "running":
+    case "in_progress":
       return "运行中";
     case "error":
     case "failed":
@@ -196,6 +197,19 @@ function toolStatusLabel(status: string): string {
       return "等待";
     default:
       return status;
+  }
+}
+
+function formatLabel(format: JobActivity["format"]): string {
+  switch (format) {
+    case "codex":
+      return "Codex";
+    case "workbuddy":
+      return "WorkBuddy";
+    case "opencode":
+      return "OpenCode";
+    default:
+      return "文本";
   }
 }
 
