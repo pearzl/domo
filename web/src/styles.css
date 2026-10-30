@@ -2627,6 +2627,29 @@ button.event-job-title:hover:not(:disabled) {
   color: var(--success);
 }
 
+/* 首区块与末尾配置区单独成组，避免与普通信息区块混排。 */
+.drawer-lead {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.drawer-lead .task-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drawer .task-control h3,
+.drawer .drawer-config h3 {
+  margin: 0 0 8px;
+}
+
+.drawer .task-acceptance h4 {
+  margin: 12px 0 6px;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
 .drawer-fold {
   border-top: 1px solid var(--line);
   padding-top: 14px;

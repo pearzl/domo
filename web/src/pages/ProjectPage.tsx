@@ -40,6 +40,12 @@ import {
   validateTaskDraft,
 } from "../presentation/taskList";
 import {
+  DRAWER_LEAD_TITLES,
+  drawerLayout,
+  rawErrorEntry,
+  type DrawerTailSection,
+} from "../presentation/taskDrawer";
+import {
   Badge,
   EmptySteps,
   ErrorBox,
@@ -1700,7 +1706,7 @@ function UsagePanel({
   );
 }
 
-function TaskDrawer({
+export function TaskDrawer({
   task,
   detail,
   onClose,
@@ -1758,10 +1764,9 @@ function TaskDrawer({
   }, [task.id, task.guidance]);
   const guidanceLocked = archived || task.stage === "completed" || task.status === "canceled";
   const taskPaused = task.status === "paused" || task.status === "pausing";
-  // 已完成或已取消的任务先回答结果；等待人工验收的里程碑任务仍保留验收操作。
-  const resultFirst =
-    task.status === "canceled" ||
-    (task.stage === "completed" && task.human_gate !== "milestone");
+  // 首区块按状态决定：blocked 与里程碑人工验收先裁决，已完成/已取消先给结果，其余进行中先给控制条。
+  const layout = drawerLayout({ ...task, archived });
+  const resultFirst = layout.lead === "result";
   const canControl =
     !archived && task.stage !== "completed" && task.status !== "canceled";
   const canReorder = isReordableQueueTask(task, archived);
@@ -1832,9 +1837,9 @@ function TaskDrawer({
       setControlBusy(false);
     }
   }
-  const summarySection = (
+  const resultSection = (
     <section className="task-result">
-      <h3>执行摘要</h3>
+      <h3>结果摘要</h3>
       <RichContent content={task.result_summary} emptyText="没有记录执行摘要。" />
     </section>
   );
@@ -1855,28 +1860,28 @@ function TaskDrawer({
     </section>
   );
   const acceptanceSection = (
-    <section>
-      <h3>验收标准</h3>
+    <section className="task-acceptance">
+      <h3>验收</h3>
+      <h4>验收标准</h4>
       <ul>
         {task.acceptance.map((item) => (
           <li key={item}>{item}</li>
         ))}
       </ul>
+      {task.verifier_issues.length > 0 ? (
+        <>
+          <h4>验收反馈</h4>
+          <ul>
+            {task.verifier_issues.map((issue) => (
+              <li key={issue}>
+                <RichContent content={issue} />
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
     </section>
   );
-  const verifierSection =
-    task.verifier_issues.length > 0 ? (
-      <section>
-        <h3>验收反馈</h3>
-        <ul>
-          {task.verifier_issues.map((issue) => (
-            <li key={issue}>
-              <RichContent content={issue} />
-            </li>
-          ))}
-        </ul>
-      </section>
-    ) : null;
   const descriptionSection = (
     <section>
       <h3>任务描述</h3>
@@ -2000,16 +2005,17 @@ function TaskDrawer({
         <span>Agent</span>
         <span>{agentName(task.agent_id)}</span>
       </div>
-      {resultFirst && task.last_error ? (
-        <details className="raw-error">
-          <summary>查看原始错误</summary>
-          <div className="error-box">
-            <RichContent content={task.last_error} />
-          </div>
-        </details>
-      ) : null}
     </section>
   );
+  const rawErrorSection =
+    rawErrorEntry(layout) === "collapsed" && task.last_error ? (
+      <details className="raw-error drawer-fold" key="rawError">
+        <summary>查看原始错误</summary>
+        <div className="error-box">
+          <RichContent content={task.last_error} />
+        </div>
+      </details>
+    ) : null;
   const guidanceEditor = (
     <section>
       <h3>人工指导</h3>
@@ -2052,15 +2058,11 @@ function TaskDrawer({
     </details>
   );
   const agentPoolSection = (
-    <details className="drawer-fold task-agent-pool">
-      <summary>任务 Agent 池（按需展开配置）</summary>
-      <TaskAgentPoolPanel
-        task={task}
-        onRefresh={onRefresh}
-        defaultOpen
-        disabled={archived || task.stage === "completed" || task.status === "canceled"}
-      />
-    </details>
+    <TaskAgentPoolPanel
+      task={task}
+      onRefresh={onRefresh}
+      disabled={archived || task.stage === "completed" || task.status === "canceled"}
+    />
   );
   const controlSection = canControl ? (
     <div className="task-control-bar">
@@ -2161,6 +2163,46 @@ function TaskDrawer({
         onLegacyRetry={onRetry}
       />
     ) : null;
+  // 首区块：gate 由裁决/人工验收面板承载，result 由结果摘要承载，control 由控制条承载。
+  const controlBlock = (
+    <section className="task-control" aria-label={DRAWER_LEAD_TITLES.control}>
+      <h3>控制</h3>
+      {controlSection ?? <p className="muted">该任务当前没有可用的控制操作。</p>}
+      {controlError ? <div className="error-box">{controlError}</div> : null}
+    </section>
+  );
+  const guidanceSection = guidanceLocked ? guidanceReadonly : guidanceEditor;
+  const tailBlock = (key: DrawerTailSection) => {
+    switch (key) {
+      case "control":
+        return <div key={key}>{controlBlock}</div>;
+      case "milestone":
+        return <div key={key}>{milestoneSection}</div>;
+      case "result":
+        return <div key={key}>{resultSection}</div>;
+      case "acceptance":
+        return <div key={key}>{acceptanceSection}</div>;
+      case "description":
+        return <div key={key}>{descriptionSection}</div>;
+      case "derive":
+        return deriveSection ? <div key={key}>{deriveSection}</div> : null;
+      case "deps":
+        return <div key={key}>{depsSection}</div>;
+      case "rawError":
+        return rawErrorSection;
+      case "guidance":
+        return <div key={key}>{guidanceSection}</div>;
+      case "jobs":
+        return <div key={key}>{jobsSection}</div>;
+      case "agentPool":
+        return (
+          <section className="drawer-config" key={key}>
+            <h3>配置</h3>
+            {agentPoolSection}
+          </section>
+        );
+    }
+  };
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <aside
@@ -2168,6 +2210,7 @@ function TaskDrawer({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        data-drawer-lead={layout.lead}
         ref={drawerRef}
         onKeyDown={handleDrawerKeyDown}
         onClick={(event) => event.stopPropagation()}
@@ -2182,65 +2225,37 @@ function TaskDrawer({
           </button>
         </div>
         <div className="drawer-body">
-        <div className="badge-row">
-          <TaskStateBadge stage={task.stage} status={task.status} />
-          {task.attempts ? <Badge tone="warn">执行 {task.attempts} 次</Badge> : null}
-          {task.rejections ? <Badge tone="warn">拒绝 {task.rejections} 次</Badge> : null}
-          {!resultFirst && task.last_failure_kind ? (
-            <Badge tone="danger">
-              失败分类 ·{" "}
-              {FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind}
-            </Badge>
-          ) : null}
-          {!resultFirst && task.parent_id ? (
-            <Badge tone="info">派生任务 · 跳过验收</Badge>
-          ) : null}
-          {!resultFirst && task.milestone ? (
-            <Badge tone="warn">里程碑 · 需人工验收</Badge>
-          ) : null}
-          {!resultFirst && task.human_gate === "milestone" ? (
-            <Badge tone="danger">等待人工验收</Badge>
-          ) : null}
-          {!resultFirst && waitingChildren ? (
-            <Badge tone="warn">
-              等待子任务 {childCompleted}/{children.length}
-            </Badge>
-          ) : null}
-        </div>
-        {resultFirst ? (
-          <>
-            {summarySection}
-            {jobsSection}
-            {acceptanceSection}
-            {verifierSection}
-            {descriptionSection}
-            {deriveSection}
-            {depsSection}
-            {guidanceReadonly}
-            {agentPoolSection}
-          </>
-        ) : (
-          <>
-            {controlSection}
-            {controlError ? <div className="error-box">{controlError}</div> : null}
-            {milestoneSection}
-            {agentPoolSection}
-            {gateSection}
-            {task.last_error && task.human_gate !== "milestone" ? (
-              <div className="error-box">
-                <RichContent content={task.last_error} />
-              </div>
+          <div className="badge-row">
+            <TaskStateBadge stage={task.stage} status={task.status} />
+            {task.attempts ? <Badge tone="warn">执行 {task.attempts} 次</Badge> : null}
+            {task.rejections ? <Badge tone="warn">拒绝 {task.rejections} 次</Badge> : null}
+            {!resultFirst && task.last_failure_kind ? (
+              <Badge tone="danger">
+                失败分类 ·{" "}
+                {FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind}
+              </Badge>
             ) : null}
-            {descriptionSection}
-            {deriveSection}
-            {guidanceEditor}
-            {acceptanceSection}
-            {depsSection}
-            {verifierSection}
-            {task.result_summary ? summarySection : null}
-            {jobsSection}
-          </>
-        )}
+            {!resultFirst && task.parent_id ? (
+              <Badge tone="info">派生任务 · 跳过验收</Badge>
+            ) : null}
+            {!resultFirst && task.milestone ? (
+              <Badge tone="warn">里程碑 · 需人工验收</Badge>
+            ) : null}
+            {!resultFirst && layout.gateCarriesError ? (
+              <Badge tone="danger">等待人工验收</Badge>
+            ) : null}
+            {!resultFirst && waitingChildren ? (
+              <Badge tone="warn">
+                等待子任务 {childCompleted}/{children.length}
+              </Badge>
+            ) : null}
+          </div>
+          <div className="drawer-lead" data-lead={layout.lead}>
+            {layout.lead === "gate" ? gateSection : null}
+            {layout.lead === "result" ? resultSection : null}
+            {layout.lead === "control" ? controlBlock : null}
+          </div>
+          {layout.tail.map((key) => tailBlock(key))}
         </div>
       </aside>
     </div>
@@ -2251,12 +2266,10 @@ function TaskDrawer({
 function TaskAgentPoolPanel({
   task,
   onRefresh,
-  defaultOpen,
   disabled,
 }: {
   task: Task;
   onRefresh: () => Promise<void>;
-  defaultOpen: boolean;
   disabled: boolean;
 }) {
   const [pool, setPool] = useState<TaskAgentPool | null>(null);
@@ -2289,7 +2302,6 @@ function TaskAgentPoolPanel({
       subtitle="从项目 Agent 池对应角色快照初始化，只作用于本任务。顺序越靠前优先级越高，按严格优先级派发，池不可用时不回退项目池。"
       roles={pool.roles}
       activeRole="executor"
-      defaultOpen={defaultOpen}
       disabled={disabled}
       onReorder={(role, agentId, position) =>
         api.updateTaskAgent(task.project_id, task.id, role, agentId, { position })
