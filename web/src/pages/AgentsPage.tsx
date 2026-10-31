@@ -55,6 +55,7 @@ interface FormState {
   model: string;
   roles: Role[];
   maxConcurrency: string;
+  allowPriorityFallback: boolean;
   enabled: boolean;
   command: string;
   modelArgs: string;
@@ -81,6 +82,7 @@ function emptyForm(): FormState {
     model: "",
     roles: [...ALL_ROLES],
     maxConcurrency: "2",
+    allowPriorityFallback: false,
     enabled: true,
     command: "",
     modelArgs: "",
@@ -148,6 +150,7 @@ export function AgentsPage() {
       model: agent.model,
       roles: agent.roles,
       maxConcurrency: String(agent.max_concurrency),
+      allowPriorityFallback: Boolean(agent.allow_priority_fallback),
       enabled: agent.enabled,
       command: agent.command.length ? JSON.stringify(agent.command) : "",
       modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
@@ -174,6 +177,7 @@ export function AgentsPage() {
         model: form.model.trim(),
         roles: form.roles,
         max_concurrency: Number(form.maxConcurrency) || 1,
+        allow_priority_fallback: form.allowPriorityFallback,
         enabled: form.enabled,
         command: parseJsonArray(form.command),
         model_args: parseJsonArray(form.modelArgs),
@@ -344,6 +348,22 @@ export function AgentsPage() {
                 onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
               />
             </label>
+          </div>
+
+          <div className="field">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.allowPriorityFallback}
+                onChange={(event) =>
+                  setForm({ ...form, allowPriorityFallback: event.target.checked })
+                }
+              />
+              <span>并发已满时让位</span>
+            </label>
+            <small className="muted">
+              开启后该 Agent 达到最大并发时，新作业交给同角色下一优先级 Agent；默认关闭，关闭时排队等待该 Agent 释放。
+            </small>
           </div>
 
           <div className="field">
@@ -538,6 +558,14 @@ export function AgentsPage() {
                     {agent.enabled ? "全局已启用" : "全局已停用"}
                   </Badge>
                   <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
+                  {agent.allow_priority_fallback ? (
+                    <Badge
+                      tone="info"
+                      title="该 Agent 并发已满时，新作业交给同角色下一优先级 Agent"
+                    >
+                      可让位
+                    </Badge>
+                  ) : null}
                   {agent.usage_window?.exceeded ? (
                     <Badge tone="danger">用量限额已触发</Badge>
                   ) : null}

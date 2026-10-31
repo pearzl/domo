@@ -93,6 +93,8 @@ export interface Agent {
   model: string;
   roles: Role[];
   max_concurrency: number;
+  /// 并发已满时允许同角色下一优先级 Agent 接手；接口缺失该字段时按 false 处理。
+  allow_priority_fallback: boolean;
   enabled: boolean;
   command: string[];
   model_args: string[];
@@ -121,6 +123,8 @@ export interface ProjectAgentEntry {
   available: boolean;
   unavailable_reason: string | null;
   max_concurrency: number;
+  /// 并发已满时允许同角色下一优先级 Agent 接手；接口缺失该字段时按 false 处理。
+  allow_priority_fallback: boolean;
   cooldown_until: string | null;
   last_error: string | null;
   failure_kind: string | null;
@@ -457,6 +461,7 @@ export interface AgentInput {
   model?: string;
   roles?: Role[];
   max_concurrency?: number;
+  allow_priority_fallback?: boolean;
   enabled?: boolean;
   command?: string[];
   model_args?: string[];

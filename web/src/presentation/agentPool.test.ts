@@ -18,6 +18,7 @@ function entry(overrides: Partial<ProjectAgentEntry> = {}): ProjectAgentEntry {
     available: true,
     unavailable_reason: null,
     max_concurrency: 1,
+    allow_priority_fallback: false,
     cooldown_until: null,
     last_error: null,
     failure_kind: null,
@@ -184,8 +185,7 @@ describe("AgentPoolPanel 选项卡渲染", () => {
     expect(html).toMatch(/aria-selected="true"[^>]*>[^<]*<span[^>]*>执行/);
   });
 
-  it("渲染顺序与服务端角色顺序一致", () => {
-    const html = render({
+  it("渲染顺序与服务端角色顺序一致", () => {    const html = render({
       roles: [pool("verifier", ["Verifier A"]), pool("planner", ["Planner A"])],
     });
     const labels = Array.from(html.matchAll(/agent-pool-tab-label">([^<]+)</g)).map(
@@ -212,3 +212,37 @@ describe("AgentPoolPanel 选项卡渲染", () => {
   });
 });
 
+describe("AgentPoolPanel 让位标识", () => {
+  it("开启 allow_priority_fallback 的条目渲染可让位徽标", () => {
+    const html = render({
+      roles: [
+        {
+          role: "planner",
+          entries: [
+            // 接口缺少该字段时按关闭处理。
+            entry({
+              agent_id: "p-missing",
+              name: "Planner Missing",
+              allow_priority_fallback: undefined as unknown as boolean,
+            }),
+            entry({ agent_id: "p-open", name: "Planner Open", allow_priority_fallback: true }),
+          ],
+        },
+      ],
+    });
+    expect(countMatches(html, /可让位/g)).toBe(1);
+    expect(html).toMatch(/title="[^"]*并发已满[^"]*"[^>]*>可让位/);
+  });
+
+  it("关闭 allow_priority_fallback 的条目不渲染可让位徽标", () => {
+    const html = render({
+      roles: [
+        {
+          role: "planner",
+          entries: [entry({ agent_id: "p-closed", name: "Planner Closed" })],
+        },
+      ],
+    });
+    expect(html).not.toContain("可让位");
+  });
+});

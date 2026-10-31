@@ -293,6 +293,14 @@ export function AgentPoolPanel({
                       {entry.enabled ? (
                         <Badge tone="success">已启用</Badge>
                       ) : null}
+                      {entry.allow_priority_fallback ? (
+                        <Badge
+                          tone="info"
+                          title="该 Agent 并发已满时，新作业交给同角色下一优先级 Agent"
+                        >
+                          可让位
+                        </Badge>
+                      ) : null}
                       {entry.cooldown_until &&
                       new Date(entry.cooldown_until).getTime() > Date.now() ? (
                         <Badge
