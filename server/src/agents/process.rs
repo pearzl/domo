@@ -222,3 +222,85 @@ pub(super) fn process_start_time(pid: u32) -> Option<String> {
         Some(ticks.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::JOB_ROLE_EXECUTOR;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_start_time_is_available() {
+        let pid = std::process::id();
+        assert!(process_start_time(pid).is_some());
+    }
+
+    #[test]
+    fn kill_job_dir_ignores_a_reused_pid() {
+        let dir = std::env::temp_dir().join(format!("domo-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pid"),
+            format!("{}:not-the-recorded-start-time", std::process::id()),
+        )
+        .unwrap();
+        assert!(!kill_job_dir(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kill_job_dir_kills_a_verified_process() {
+        let dir = std::env::temp_dir().join(format!("domo-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start = process_start_time(pid).expect("child start time");
+        std::fs::write(dir.join("pid"), format!("{pid}:{start}")).unwrap();
+
+        assert!(kill_job_dir(&dir));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawns_with_cwd_and_pwd_aligned() {
+        let dir = std::env::temp_dir().join(format!("domo-pwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = std::fs::canonicalize(&dir).unwrap();
+        let spec = AgentSpec {
+            job_id: "job_test".into(),
+            role: JOB_ROLE_EXECUTOR.into(),
+            cwd: cwd.clone(),
+            job_dir: cwd.clone(),
+            prompt: String::new(),
+            original_prompt: String::new(),
+            session_id: Some(crate::opencode::session_id("job_test")),
+            continuation: false,
+            progress: JobProgress::new(),
+        };
+        let args = vec![
+            "-c".to_string(),
+            "printf '%s\\n%s\\n' \"$PWD\" \"$(pwd)\"".to_string(),
+        ];
+        let run = run_process("sh", &args, &spec, Duration::from_secs(10), None)
+            .await
+            .unwrap();
+        let expected = cwd.to_string_lossy();
+        let mut lines = run.stdout.lines();
+        assert_eq!(lines.next(), Some(expected.as_ref()));
+        assert_eq!(lines.next(), Some(expected.as_ref()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

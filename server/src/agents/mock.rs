@@ -811,6 +811,8 @@ fn mock_summary(context: &serde_json::Value) -> serde_json::Value {
 pub struct MockAdapter;
 
 impl AgentAdapter for MockAdapter {
+    const KIND: &'static str = crate::models::AGENT_MOCK;
+
     fn requires_command_template(_config: &AgentConfig) -> bool {
         false
     }

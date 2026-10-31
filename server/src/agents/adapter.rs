@@ -141,6 +141,26 @@ fn parse_arg_list(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Executable for a CLI-backed adapter, overridable per kind through the
+/// environment so tests and alternate installations can point at their own bin.
+pub(super) fn bin_override(key: &str, fallback: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub(super) fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|item| item.as_i64())
+}
+
+#[cfg(test)]
+pub(super) fn args_contain_pair(args: &[String], first: &str, second: &str) -> bool {
+    args.windows(2)
+        .any(|window| window[0] == first && window[1] == second)
+}
+
 /// Usage an adapter attributes to one job. `PerTurn` keeps whatever the run
 /// reported; `Authoritative` replaces it with the adapter's own record.
 #[allow(dead_code)]
@@ -170,6 +190,9 @@ pub struct FinishContext<'a> {
 /// One agent kind, distinguished only by business capabilities.
 #[allow(dead_code)]
 pub trait AgentAdapter: Default + Send + Sync + 'static {
+    /// Registry key for this agent kind.
+    const KIND: &'static str;
+
     /// Whether a run needs a configured command template.
     fn requires_command_template(config: &AgentConfig) -> bool;
 
