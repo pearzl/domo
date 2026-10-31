@@ -5,6 +5,8 @@
 mod adapter;
 mod cli;
 mod codex;
+#[cfg(test)]
+mod contract;
 mod mock;
 mod opencode;
 mod process;
@@ -15,6 +17,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 
 use crate::models::AgentRow;
+use crate::usage::UsageRecord;
 
 pub use adapter::{
     AgentAdapter, AgentConfig, AgentRun, AgentSpec, FinishContext, JobProgress, JobUsage,
@@ -154,6 +157,16 @@ pub async fn finish_job(context: FinishContext<'_>) -> JobUsage {
         return WorkbuddyAdapter.finish_job(context).await;
     }
     JobUsage::PerTurn
+}
+
+/// Applies the adapter's settlement to the usage merged from the turns.
+/// `PerTurn` keeps the merged record; `Authoritative` replaces it, including
+/// when the adapter has no record.
+pub fn apply_usage(merged: Option<UsageRecord>, settlement: JobUsage) -> Option<UsageRecord> {
+    match settlement {
+        JobUsage::PerTurn => merged,
+        JobUsage::Authoritative(value) => value,
+    }
 }
 
 /// Runs one adapter statically. The adapter validates its settings and executes

@@ -102,6 +102,35 @@ pub struct AgentRow {
     pub updated_at: String,
 }
 
+#[cfg(test)]
+impl AgentRow {
+    /// Row carrying only the settings adapter tests inspect.
+    pub fn test_fixture(kind: &str) -> Self {
+        Self {
+            id: format!("agent_{kind}"),
+            name: format!("{kind} fixture"),
+            kind: kind.to_string(),
+            model: String::new(),
+            roles: ROLE_EXECUTOR.to_string(),
+            priority: 0,
+            max_concurrency: 1,
+            allow_priority_fallback: 0,
+            enabled: 1,
+            command_json: None,
+            model_args_json: None,
+            cooldown_until: None,
+            last_error: None,
+            failure_kind: None,
+            transient_failures: 0,
+            availability_json: None,
+            usage_limit_json: None,
+            usage_reset_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentView {
     pub id: String,

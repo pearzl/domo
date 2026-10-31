@@ -234,9 +234,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         shutting_down: state.is_shutting_down(),
     })
     .await;
-    if let agents::JobUsage::Authoritative(value) = usage {
-        run.usage = value;
-    }
+    run.usage = agents::apply_usage(run.usage, usage);
     state.unregister_job(&job_dir);
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
