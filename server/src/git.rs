@@ -219,6 +219,56 @@ pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -
     commit_all(project_ws, message).await
 }
 
+/// Starts merging `branch` into the worktree's current branch without creating
+/// a commit. When the merge conflicts, the conflict markers and unmerged index
+/// entries stay in the worktree so an executor can resolve them. A clean merge
+/// or an unrelated failure is aborted so the worktree stays unchanged.
+pub async fn merge_conflict_files(worktree: &Path, branch: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge", "--no-commit", "--no-ff", branch])
+        .output()
+        .await
+        .with_context(|| format!("执行 git merge {branch} 失败"))?;
+    if output.status.success() {
+        abort_merge(worktree).await;
+        return Ok(Vec::new());
+    }
+    let conflicts = run_git(worktree, &["diff", "--name-only", "--diff-filter=U"])
+        .await
+        .unwrap_or_default();
+    let files: Vec<String> = conflicts
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if files.is_empty() {
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        abort_merge(worktree).await;
+        return Err(anyhow!(
+            "合并 {} 失败且没有文件冲突: {}",
+            branch,
+            detail.trim()
+        ));
+    }
+    Ok(files)
+}
+
+async fn abort_merge(dir: &Path) {
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["merge", "--abort"])
+        .output()
+        .await;
+}
+
 pub async fn has_branch(repo: &Path, branch: &str) -> bool {
     run_git(repo, &["rev-parse", "--verify", branch])
         .await
@@ -480,6 +530,78 @@ detached
             archive_ref("domo-task/demo"),
             "refs/domo-archive/heads/domo-task/demo"
         );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn merge_conflict_files_leave_conflicts_in_the_worktree() {
+        let repo = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        std::fs::write(repo.join("shared.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "."]).await.unwrap();
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=DOMO",
+                "-c",
+                "user.email=domo@localhost",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .await
+        .unwrap();
+        run_git(&repo, &["branch", "domo-task/demo"]).await.unwrap();
+
+        std::fs::write(repo.join("shared.txt"), "main\n").unwrap();
+        run_git(&repo, &["add", "."]).await.unwrap();
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=DOMO",
+                "-c",
+                "user.email=domo@localhost",
+                "commit",
+                "-m",
+                "main change",
+            ],
+        )
+        .await
+        .unwrap();
+
+        run_git(&repo, &["checkout", "domo-task/demo"])
+            .await
+            .unwrap();
+        std::fs::write(repo.join("shared.txt"), "task\n").unwrap();
+        run_git(&repo, &["add", "."]).await.unwrap();
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=DOMO",
+                "-c",
+                "user.email=domo@localhost",
+                "commit",
+                "-m",
+                "task change",
+            ],
+        )
+        .await
+        .unwrap();
+
+        let conflicts = merge_conflict_files(&repo, "main").await.unwrap();
+        assert_eq!(conflicts, vec!["shared.txt".to_string()]);
+        let unmerged = run_git(&repo, &["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap();
+        assert_eq!(unmerged.trim(), "shared.txt");
+        let content = std::fs::read_to_string(repo.join("shared.txt")).unwrap();
+        assert!(content.contains("<<<<<<<"), "{content}");
+
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

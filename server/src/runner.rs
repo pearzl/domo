@@ -2050,27 +2050,7 @@ async fn handle_verdict(
                 cleanup_task_artifacts(state, project, task).await;
             }
             Err(error) => {
-                let reason = format!("验收通过但合并失败：{error:#}");
-                let _guard = state.schedule_lock.lock().await;
-                sqlx::query(
-                    "UPDATE tasks SET stage = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(TASK_STAGE_VERIFYING)
-                .bind(STATUS_BLOCKED)
-                .bind(&reason)
-                .bind(now())
-                .bind(&task.id)
-                .execute(&state.db)
-                .await?;
-                emit(
-                    &state.db,
-                    &state.bus,
-                    Some(&project.id),
-                    Some(&task.id),
-                    "merge_conflict",
-                    format!("任务 {} 合并冲突：{reason}", task.key),
-                )
-                .await;
+                handoff_merge_conflict(state, project, task, &error, agent).await?;
             }
         }
     } else {
@@ -2116,6 +2096,121 @@ async fn handle_verdict(
         )
         .await;
     }
+    Ok(())
+}
+
+/// A rejected verdict returns the task to the executor with verifier issues and
+/// counts against the rejection limit. A merge conflict uses the same handoff
+/// path but keeps the rejection count intact: the executor only resolves the
+/// conflict, then the verifier checks the task again.
+async fn handoff_merge_conflict(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    merge_error: &anyhow::Error,
+    agent: &AgentRow,
+) -> Result<()> {
+    let reason = format!("验收通过但合并失败：{merge_error:#}");
+    let worktree = match prepare_task_worktree(state, project, Some(task)).await {
+        Ok(path) => path,
+        Err(error) => {
+            return block_task_after_merge_failure(
+                state,
+                project,
+                task,
+                &format!("{reason}；准备冲突处理工作区失败：{error:#}"),
+            )
+            .await;
+        }
+    };
+    let conflicts = {
+        let _guard = state.git_lock.lock().await;
+        git::merge_conflict_files(&worktree, &project.branch).await
+    };
+    let conflicts = match conflicts {
+        Ok(files) if !files.is_empty() => files,
+        Ok(_) => {
+            return block_task_after_merge_failure(
+                state,
+                project,
+                task,
+                &format!("{reason}；任务分支与项目交付分支没有文件冲突"),
+            )
+            .await;
+        }
+        Err(error) => {
+            return block_task_after_merge_failure(
+                state,
+                project,
+                task,
+                &format!("{reason}；在任务工作区复现冲突失败：{error:#}"),
+            )
+            .await;
+        }
+    };
+    let issue = format!(
+        "验收通过后合并到项目交付分支时发生合并冲突，冲突文件：{}。工作区已处于合并冲突状态，\
+         请直接编辑冲突文件消除冲突标记，保留任务需要的改动；DOMO 会负责提交并在解决后重新验收。",
+        conflicts.join("、")
+    );
+    let _guard = state.schedule_lock.lock().await;
+    let pause = task_pause_intent(state, &task.id).await?;
+    let issues = merge_issues(&task.verifier_issues, std::slice::from_ref(&issue));
+    sqlx::query(
+        "UPDATE tasks SET stage = ?, status = ?, verifier_issues = ?, last_error = ?, agent_id = ?, \
+         waiting_reason = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(TASK_STAGE_EXECUTING)
+    .bind(pause.unwrap_or(STATUS_QUEUED))
+    .bind(&issues)
+    .bind(&issue)
+    .bind(&agent.id)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        "merge_conflict",
+        format!(
+            "任务 {} 合并冲突：合入项目分支失败，已退回执行者解决，之后重新验收：{}",
+            task.key,
+            conflicts.join("、")
+        ),
+    )
+    .await;
+    Ok(())
+}
+
+async fn block_task_after_merge_failure(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    reason: &str,
+) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    sqlx::query(
+        "UPDATE tasks SET stage = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(TASK_STAGE_VERIFYING)
+    .bind(STATUS_BLOCKED)
+    .bind(reason)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        "merge_conflict",
+        format!("任务 {} 合并冲突：{reason}", task.key),
+    )
+    .await;
     Ok(())
 }
 
