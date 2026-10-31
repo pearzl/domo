@@ -354,7 +354,8 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     continue;
                 };
                 if let Some(job_id) =
-                    spawn_project_job(state, &project, &agent, JOB_ROLE_ANALYSIS).await?
+                    spawn_project_job(state, &project, &agent, JOB_ROLE_ANALYSIS, &choice.yielded)
+                        .await?
                 {
                     spawns.push(job_id);
                 }
@@ -378,7 +379,8 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         continue;
                     };
                     if let Some(job_id) =
-                        spawn_project_job(state, &project, &agent, JOB_ROLE_DIRECT).await?
+                        spawn_project_job(state, &project, &agent, JOB_ROLE_DIRECT, &choice.yielded)
+                            .await?
                     {
                         spawns.push(job_id);
                     }
@@ -444,12 +446,16 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         "全部任务完成，开始撰写项目报告",
                     )
                     .await;
-                    if let Some(agent) = choose_agent(state, &project, ROLE_PLANNER, None)
+                    let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
+                    if let Some(agent) = choice.agent {
+                        if let Some(job_id) = spawn_project_job(
+                            state,
+                            &project,
+                            &agent,
+                            JOB_ROLE_SUMMARY,
+                            &choice.yielded,
+                        )
                         .await?
-                        .agent
-                    {
-                        if let Some(job_id) =
-                            spawn_project_job(state, &project, &agent, JOB_ROLE_SUMMARY).await?
                         {
                             spawns.push(job_id);
                         }
@@ -509,7 +515,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         continue;
                     };
                     if let Some(job_id) =
-                        spawn_task_job(state, &project, task, &agent, role).await?
+                        spawn_task_job(state, &project, task, &agent, role, &choice.yielded).await?
                     {
                         spawns.push(job_id);
                     }
@@ -531,7 +537,8 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     continue;
                 };
                 if let Some(job_id) =
-                    spawn_project_job(state, &project, &agent, JOB_ROLE_SUMMARY).await?
+                    spawn_project_job(state, &project, &agent, JOB_ROLE_SUMMARY, &choice.yielded)
+                        .await?
                 {
                     spawns.push(job_id);
                 }
@@ -658,13 +665,16 @@ async fn choose_agent(
                             "人工指定的{} Agent 已被删除，请重新裁决或调整项目 Agent 池",
                             role_label(role)
                         )),
+                        yielded: Vec::new(),
                     });
                 };
+                // 人工指定的 Agent 只等待自身释放，不读取让位配置。
                 let running = running_jobs(state, &agent.id).await?;
                 if running < agent.max_concurrency.max(1) {
                     return Ok(AgentChoice {
                         agent: Some(agent),
                         reason: None,
+                        yielded: Vec::new(),
                     });
                 }
                 return Ok(AgentChoice {
@@ -675,6 +685,7 @@ async fn choose_agent(
                         agent.name,
                         agent.max_concurrency.max(1)
                     )),
+                    yielded: Vec::new(),
                 });
             }
         }
@@ -690,6 +701,7 @@ async fn choose_agent(
                     "{}角色只提供给任务使用，缺少任务上下文",
                     role_label(role)
                 )),
+                yielded: Vec::new(),
             });
         };
         crate::db::ensure_task_agents(&state.db, &project.id, &task.id).await?;
@@ -728,6 +740,7 @@ async fn choose_agent(
         return Ok(AgentChoice {
             agent: None,
             reason: Some(format!("{scope}没有{}角色 Agent，{hint}", role_label(role))),
+            yielded: Vec::new(),
         });
     }
     // 任务池是项目池的快照，但项目池的停用状态是更高层约束：
@@ -780,6 +793,9 @@ async fn choose_agent(
         None => None,
     };
     let mut unavailable = Vec::new();
+    // 并发已满但开启让位配置的 Agent：名称与并发占用。它们把本次派发让给
+    // 后续优先级的 Agent，派发成功时用于事件说明，全部满额时用于等待原因。
+    let mut yielded: Vec<(String, i64, i64)> = Vec::new();
     for row in &rows {
         let Some(agent) = agents.iter().find(|agent| agent.id == row.agent_id) else {
             let name = if row.agent_name.trim().is_empty() {
@@ -834,21 +850,43 @@ async fn choose_agent(
         }
         // Strict priority: the first usable agent owns this dispatch. When it
         // is at capacity the task waits instead of falling through to a lower
-        // priority agent.
+        // priority agent, unless that agent lets lower priorities take over.
         let running = counts.get(&agent.id).copied().unwrap_or(0);
         let limit = agent.max_concurrency.max(1);
         if running < limit {
+            // Hand the dispatch over to this agent and report the higher
+            // priority agents that yielded to it for the event message.
             return Ok(AgentChoice {
                 agent: Some(agent.clone()),
                 reason: None,
+                yielded: yielded.into_iter().map(|(name, _, _)| name).collect(),
             });
         }
+        if agent.allow_priority_fallback == 0 {
+            return Ok(AgentChoice {
+                agent: None,
+                reason: Some(format!(
+                    "等待 Agent {} 释放（并发 {running}/{limit}）",
+                    agent.name
+                )),
+                yielded: Vec::new(),
+            });
+        }
+        yielded.push((agent.name.clone(), running, limit));
+    }
+    if !yielded.is_empty() {
+        let detail = yielded
+            .iter()
+            .map(|(name, running, limit)| format!("{name}（并发 {running}/{limit}）"))
+            .collect::<Vec<_>>()
+            .join("、");
         return Ok(AgentChoice {
             agent: None,
             reason: Some(format!(
-                "等待 Agent {} 释放（并发 {running}/{limit}）",
-                agent.name
+                "{scope}中{} Agent 并发已满且允许让位，暂无后续优先级可接手：{detail}",
+                role_label(role)
             )),
+            yielded: Vec::new(),
         });
     }
     Ok(AgentChoice {
@@ -858,12 +896,16 @@ async fn choose_agent(
             role_label(role),
             unavailable.join("、")
         )),
+        yielded: Vec::new(),
     })
 }
 
 struct AgentChoice {
     agent: Option<AgentRow>,
     reason: Option<String>,
+    /// 并发已满、开启让位配置并把本次派发让给该 Agent 的名称列表（按优先级
+    /// 顺序）。派发事件据此说明“按让位配置调度”。
+    yielded: Vec<String>,
 }
 
 async fn agent_gate(state: &AppState, agent: &AgentRow) -> Result<Option<usage::AgentGate>> {
@@ -893,6 +935,7 @@ async fn spawn_task_job(
     task: &TaskRow,
     agent: &AgentRow,
     role: &str,
+    yielded: &[String],
 ) -> Result<Option<String>> {
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Ok(None);
@@ -957,11 +1000,12 @@ async fn spawn_task_job(
         Some(&job_id),
         "job_queued",
         format!(
-            "{} 作业已派发给 {}（任务 {}）{}",
+            "{} 作业已派发给 {}（任务 {}）{}{}",
             role_label(role),
             agent.name,
             task.key,
-            if forced { "，由人工指定" } else { "" }
+            if forced { "，由人工指定" } else { "" },
+            yield_note(yielded)
         ),
     )
     .await;
@@ -973,6 +1017,7 @@ async fn spawn_project_job(
     project: &ProjectRow,
     agent: &AgentRow,
     role: &str,
+    yielded: &[String],
 ) -> Result<Option<String>> {
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Ok(None);
@@ -1017,10 +1062,24 @@ async fn spawn_project_job(
         None,
         Some(&job_id),
         "job_queued",
-        format!("{} 作业已派发给 {}", role_label(role), agent.name),
+        format!(
+            "{} 作业已派发给 {}{}",
+            role_label(role),
+            agent.name,
+            yield_note(yielded)
+        ),
     )
     .await;
     Ok(Some(job_id))
+}
+
+/// 派发事件末尾的让位说明，列出被跳过的并发已满 Agent；无让位时为空。
+fn yield_note(yielded: &[String]) -> String {
+    if yielded.is_empty() {
+        String::new()
+    } else {
+        format!("（{} 并发已满，按让位配置调度）", yielded.join("、"))
+    }
 }
 
 async fn has_task_job(pool: &SqlitePool, task_id: &str, role: &str) -> Result<bool> {
