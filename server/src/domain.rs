@@ -641,12 +641,14 @@ pub fn deps_complete(deps: &[String], completed: &HashSet<String>) -> bool {
 
 /// Failure categories drive agent selection: rate limits and exhausted
 /// transient retries cool an agent down, permanent errors move to the next
-/// agent immediately, and task-level failures use the task retry budget.
+/// agent immediately, protocol failures block after the continuation budget,
+/// and task-level failures use the task retry budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     RateLimit,
     Transient,
     Permanent,
+    Protocol,
     Task,
 }
 
@@ -656,6 +658,7 @@ impl FailureKind {
             FailureKind::RateLimit => crate::models::FAILURE_RATE_LIMIT,
             FailureKind::Transient => crate::models::FAILURE_TRANSIENT,
             FailureKind::Permanent => crate::models::FAILURE_PERMANENT,
+            FailureKind::Protocol => crate::models::FAILURE_PROTOCOL,
             FailureKind::Task => crate::models::FAILURE_TASK,
         }
     }
@@ -701,6 +704,14 @@ pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
         )
     {
         return FailureKind::Permanent;
+    }
+    if !process_failure
+        && contains_any(
+            &lowered,
+            &["没有写 result.json", "结果协议不合法", "result protocol"],
+        )
+    {
+        return FailureKind::Protocol;
     }
     if process_failure
         || contains_status_code(&lowered, "502")
@@ -1209,6 +1220,14 @@ mod tests {
         assert_eq!(
             classify_failure("永久错误：Agent 配置无效", false),
             FailureKind::Permanent
+        );
+        assert_eq!(
+            classify_failure("Agent 没有写 result.json", false),
+            FailureKind::Protocol
+        );
+        assert_eq!(
+            classify_failure("结果协议不合法: 缺少 done", false),
+            FailureKind::Protocol
         );
         assert_eq!(
             classify_failure("mock 首次执行失败", false),

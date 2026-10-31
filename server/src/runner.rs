@@ -3,11 +3,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
 use sqlx::SqlitePool;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 use crate::agents::{self, AgentSpec};
 use crate::domain::{self, now, parse_result, short_id, slug, FailureKind, ParsedResult};
@@ -20,6 +22,10 @@ use crate::prompts::{
 };
 use crate::replan;
 use crate::state::AppState;
+
+/// A clean run without a result file gets up to five continuation rounds in the
+/// same job before the protocol failure is settled.
+const MAX_CONTINUATIONS: usize = 5;
 
 pub async fn execute_job(state: AppState, job_id: String) {
     if let Err(error) = run_job(&state, &job_id).await {
@@ -62,6 +68,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     state.register_job(job_dir.clone());
     let result_path = job_dir.join("result.json");
     let _ = fs::remove_file(&result_path).await;
+    let _ = fs::write(job_dir.join("stdout.log"), b"").await;
+    let _ = fs::write(job_dir.join("stderr.log"), b"").await;
 
     let workspace = PathBuf::from(&project.workspace);
     let cwd = match job.role.as_str() {
@@ -134,23 +142,97 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let progress = agents::JobProgress::new();
-    let spec = AgentSpec {
+    let job_deadline = Instant::now() + state.cfg.job_timeout;
+    let mut spec = AgentSpec {
         job_id: job.id.clone(),
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
         prompt: prompt.clone(),
-        opencode_session_id: crate::opencode::session_id(&job.id),
+        original_prompt: prompt.clone(),
+        session_id: Some(initial_session_id(&agent.kind, &job.id)),
+        continuation: false,
         progress: progress.clone(),
     };
-    let mut run = run_agent_job(state, &job, &job_dir, &agent, &spec, &progress).await?;
+    let mut run = run_agent_job(
+        state,
+        &job,
+        &job_dir,
+        &agent,
+        &spec,
+        &progress,
+        state.cfg.job_timeout,
+    )
+    .await?;
+    spec.session_id = run.session_id.clone();
+    let mut combined_stdout = run.stdout.clone();
+    let mut combined_stderr = run.stderr.clone();
+    let mut continuations = 0;
+    loop {
+        let process_ok = run.exit_code == Some(0) && !run.timed_out && !run.stalled;
+        let missing_result = fs::read_to_string(&result_path).await.ok().is_none();
+        if !process_ok
+            || !missing_result
+            || continuations >= MAX_CONTINUATIONS
+            || !continuation_allowed(state, &job, &project, task.as_ref()).await?
+        {
+            break;
+        }
+        let remaining = job_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let follow_up = prompts::continuation(&prompt_data);
+        fs::write(
+            job_dir.join(format!("continuation-{}.md", continuations + 1)),
+            &follow_up,
+        )
+        .await?;
+        append_log_separator(&job_dir).await?;
+        // The previous run may have ended after a long silent stretch; the
+        // continuation starts a fresh stall window.
+        progress.touch();
+        spec.prompt = follow_up;
+        spec.continuation = true;
+        emit_job(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            job.task_id.as_deref(),
+            Some(&job.id),
+            "job_continued",
+            format!(
+                "{}作业正常结束但没有写结果文件，已追加第 {} 轮继续提示",
+                role_label(&job.role),
+                continuations + 1
+            ),
+        )
+        .await;
+        let next =
+            run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, remaining).await?;
+        combined_stdout.push_str("\n--- 继续执行 ---\n");
+        combined_stdout.push_str(&next.stdout);
+        combined_stderr.push_str("\n--- 继续执行 ---\n");
+        combined_stderr.push_str(&next.stderr);
+        let usage = merge_usage(run.usage.clone(), next.usage.clone());
+        run = next;
+        run.usage = usage;
+        spec.session_id = run.session_id.clone();
+        continuations += 1;
+    }
+    run.stdout = combined_stdout;
+    run.stderr = combined_stderr;
     if agent.kind == AGENT_OPENCODE && !state.is_shutting_down() {
+        let session_id = spec
+            .session_id
+            .clone()
+            .unwrap_or_else(|| crate::opencode::session_id(&job.id));
         if run.process_failure() {
             // The server-side session can outlive the killed CLI process. Stop it
             // before taking the settlement snapshot so no further usage accrues.
-            crate::opencode::settle(&spec.opencode_session_id).await;
+            crate::opencode::settle(&session_id).await;
         }
-        run.usage = crate::opencode::fetch_usage(&spec.opencode_session_id).await;
+        run.usage = crate::opencode::fetch_usage(&session_id).await;
     }
     state.unregister_job(&job_dir);
 
@@ -216,9 +298,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Err(parse_error) => (
                 JOB_STATUS_FAILED,
                 Some(raw.clone()),
-                Some(match job.role.as_str() {
-                    JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => parse_error,
-                    _ => format!("结果协议不合法: {parse_error}"),
+                Some(if result_is_failure(&job.role, raw) {
+                    parse_error
+                } else {
+                    format!("结果协议不合法: {parse_error}")
                 }),
             ),
         }
@@ -621,8 +704,115 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs one agent process under two watchdogs. The job deadline bounds the whole
-/// run; the stall watchdog ends a run whose stdout/stderr stopped growing for
+/// OpenCode uses its own deterministic session id. Other agents receive a
+/// UUID-shaped id for CLI templates that require one.
+fn initial_session_id(agent_kind: &str, job_id: &str) -> String {
+    if agent_kind == AGENT_OPENCODE {
+        return crate::opencode::session_id(job_id);
+    }
+    let suffix = job_id.strip_prefix("job_").unwrap_or(job_id);
+    let hex: String = suffix.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
+    if hex.len() >= 32 {
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        )
+    } else {
+        format!("ses_domo{suffix}")
+    }
+}
+
+/// A continuation is allowed only while the job is still running and neither
+/// the project nor the task has been paused or archived.
+async fn continuation_allowed(
+    state: &AppState,
+    job: &JobRow,
+    project: &ProjectRow,
+    task: Option<&TaskRow>,
+) -> Result<bool> {
+    if state.is_shutting_down() {
+        return Ok(false);
+    }
+    let Some(current_job) = load_job(&state.db, &job.id).await? else {
+        return Ok(false);
+    };
+    if current_job.status != JOB_STATUS_RUNNING {
+        return Ok(false);
+    }
+    let Some(current_project) = load_project(&state.db, &project.id).await? else {
+        return Ok(false);
+    };
+    if matches!(
+        current_project.status.as_deref(),
+        Some(STATUS_PAUSING | STATUS_PAUSED | STATUS_ARCHIVED)
+    ) {
+        return Ok(false);
+    }
+    if let Some(task) = task {
+        if let Some(current_task) = load_task(&state.db, &task.id).await? {
+            if matches!(
+                current_task.status.as_deref(),
+                Some(STATUS_PAUSING | STATUS_PAUSED | STATUS_CANCELED)
+            ) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Sums usage from the first run and the continuation for agents whose usage
+/// comes from process output. OpenCode replaces this with the session ledger.
+fn merge_usage(
+    mut base: Option<crate::usage::UsageRecord>,
+    extra: Option<crate::usage::UsageRecord>,
+) -> Option<crate::usage::UsageRecord> {
+    let Some(extra) = extra else {
+        return base;
+    };
+    let Some(base) = base.as_mut() else {
+        return Some(extra);
+    };
+    fn add(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }
+    }
+    base.input_tokens = add(base.input_tokens, extra.input_tokens);
+    base.output_tokens = add(base.output_tokens, extra.output_tokens);
+    base.cache_read_tokens = add(base.cache_read_tokens, extra.cache_read_tokens);
+    base.cache_write_tokens = add(base.cache_write_tokens, extra.cache_write_tokens);
+    base.reasoning_tokens = add(base.reasoning_tokens, extra.reasoning_tokens);
+    base.cost = match (base.cost, extra.cost) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    base.duration_ms = add(base.duration_ms, extra.duration_ms);
+    Some(base.clone())
+}
+
+async fn append_log_separator(job_dir: &Path) -> Result<()> {
+    for name in ["stdout.log", "stderr.log"] {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(job_dir.join(name))
+            .await?;
+        file.write_all("\n--- 继续执行 ---\n".as_bytes()).await?;
+        file.flush().await?;
+    }
+    Ok(())
+}
+
+/// Runs one agent process under two watchdogs. `timeout` bounds this run; the
+/// stall watchdog ends a run whose stdout/stderr stopped growing for
 /// `stall_timeout`. Both kill only the recorded process group, leaving other
 /// jobs of the same agent untouched, and let the normal failure path apply.
 async fn run_agent_job(
@@ -632,10 +822,11 @@ async fn run_agent_job(
     agent: &AgentRow,
     spec: &AgentSpec,
     progress: &agents::JobProgress,
+    timeout: Duration,
 ) -> Result<agents::AgentRun> {
-    let execution = agents::execute(agent, spec, state.cfg.job_timeout);
+    let execution = agents::execute(agent, spec, timeout);
     tokio::pin!(execution);
-    let deadline = tokio::time::sleep(state.cfg.job_timeout);
+    let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let stall_watch = wait_for_stall(progress, state.cfg.stall_timeout);
     tokio::pin!(stall_watch);
@@ -681,10 +872,7 @@ async fn run_agent_job(
     if timed_out {
         run.timed_out = true;
         run.stdout.clear();
-        run.stderr = format!(
-            "作业超时（{} 秒），进程已终止",
-            state.cfg.job_timeout.as_secs()
-        );
+        run.stderr = format!("作业超时（{} 秒），进程已终止", timeout.as_secs());
     }
     if let Some(reason) = stalled {
         // Windows reports an exit code for a process killed by `taskkill`, so
@@ -1872,7 +2060,7 @@ async fn handle_executor_failure(
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = task.attempts + 1;
-    let mut blocked = !kind.is_agent_failure() && attempts >= 3;
+    let mut blocked = kind == FailureKind::Protocol || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && !has_usable_agent(state, &project.id, ROLE_EXECUTOR, Some(&agent.id)).await?
@@ -1925,10 +2113,14 @@ async fn handle_executor_failure(
             Some(&project.id),
             Some(&task.id),
             "task_blocked",
-            format!(
-                "任务 {} 连续失败或没有可用 Agent，已阻塞（{}）：{reason}",
-                task.key, kind_label
-            ),
+            if kind == FailureKind::Protocol {
+                format!("任务 {} 协议失败，已阻塞：{reason}", task.key)
+            } else {
+                format!(
+                    "任务 {} 连续失败或没有可用 Agent，已阻塞（{}）：{reason}",
+                    task.key, kind_label
+                )
+            },
         )
         .await;
     } else {
@@ -2227,7 +2419,7 @@ async fn handle_verifier_failure(
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = task.attempts + 1;
-    let mut blocked = !kind.is_agent_failure() && attempts >= 3;
+    let mut blocked = kind == FailureKind::Protocol || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && !has_usable_agent(state, &project.id, ROLE_VERIFIER, Some(&agent.id)).await?
@@ -2657,6 +2849,9 @@ async fn apply_agent_failure(
             transient_failures = 0;
             switch = true;
         }
+        FailureKind::Protocol => {
+            transient_failures = 0;
+        }
         FailureKind::Task => {}
     }
     sqlx::query(
@@ -2695,7 +2890,9 @@ impl ProjectFailure {
 
     fn label(&self) -> String {
         let kind = failure_kind_label(self.kind);
-        if self.blocked {
+        if self.blocked && self.kind == FailureKind::Protocol {
+            format!("失败（{kind}），等待人工处理")
+        } else if self.blocked {
             format!("失败（{kind}，没有其他可用 Agent），等待人工处理")
         } else if self.switch {
             format!("失败（{kind}），已切换 Agent 重试")
@@ -2737,9 +2934,10 @@ async fn plan_project_failure(
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
     // Project jobs (analysis, direct, summary) all dispatch from the planner
     // group of the project pool.
-    let blocked = kind.is_agent_failure()
-        && effect.switch
-        && !has_usable_agent(state, &project.id, ROLE_PLANNER, Some(&agent.id)).await?;
+    let blocked = kind == FailureKind::Protocol
+        || (kind.is_agent_failure()
+            && effect.switch
+            && !has_usable_agent(state, &project.id, ROLE_PLANNER, Some(&agent.id)).await?);
     Ok(ProjectFailure {
         kind,
         switch: effect.switch,
@@ -2822,11 +3020,28 @@ async fn task_pause_intent(state: &AppState, task_id: &str) -> Result<Option<&'s
     })
 }
 
+/// A project-level failure result is a valid protocol message carrying a
+/// provider or task reason. It must not be relabeled as a schema violation.
+fn result_is_failure(role: &str, raw: &str) -> bool {
+    if !matches!(role, JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY) {
+        return false;
+    }
+    domain::extract_json(raw)
+        .and_then(|value| {
+            value
+                .get("reason")
+                .and_then(|reason| reason.as_str())
+                .map(|reason| !reason.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
 fn failure_kind_label(kind: FailureKind) -> &'static str {
     match kind {
         FailureKind::RateLimit => "限流",
         FailureKind::Transient => "供应商波动",
         FailureKind::Permanent => "永久错误",
+        FailureKind::Protocol => "协议失败",
         FailureKind::Task => "任务失败",
     }
 }

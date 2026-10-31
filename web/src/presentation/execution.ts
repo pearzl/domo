@@ -39,6 +39,7 @@ const KEY_JOB_KINDS = new Set([
 const JOB_KINDS = new Set([
   "job_queued",
   "job_started",
+  "job_continued",
   "job_finished",
   "job_failed",
   "job_stalled",

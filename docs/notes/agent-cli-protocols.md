@@ -53,6 +53,8 @@ DOMO 的 CLI Agent 模板：
 
 `{job_dir}` 作为额外可写目录时，Agent 才能把 `result.json` 写到作业目录。若作业目录已经在 `{cwd}` 内，可省略该参数。
 
+命令模板支持 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}` 和 `{session_id}`。模板包含 `{session_id}` 时，DOMO 认为该 CLI 支持会话复用，继续轮次会把同一 ID 传给模板。
+
 ### 1.2 参数语义
 
 以下语义与 `codex exec --help`（0.160.0）一致：
@@ -178,6 +180,8 @@ DOMO 的活动字段是 `kind`、`text`、`tool`、`target`、`status`、`error`
 - 真实运行里，模型通过 `exec_command` 写入 `{"kind":"done","summary":"probe"}`，证明“提示词要求 + 可写作业目录”可以产出协议文件。
 - `result.json` 可携带 `usage` 对象；DOMO 既从 `AgentRun.usage` 取用量，也从结果 JSON 的 `usage` 取用量。字段名与 `UsageRecord` 一致：`input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cost`、`duration_ms`。
 - DOMO 的结果解析允许 JSON 前后有说明文字或 `json` 代码围栏，但内容必须是合法 JSON 对象。
+- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 5 轮继续提示，并提示执行者可以派生子任务；OpenCode 复用同一会话，其他支持会话的 Agent 优先复用会话。5 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
+- Codex 从首次运行的 `thread.started.thread_id` 取会话标识，继续轮次使用 `codex exec resume <thread_id>`。
 
 执行者角色的最小结果：
 
@@ -193,8 +197,8 @@ DOMO 的活动字段是 `kind`、`text`、`tool`、`target`、`status`、`error`
 | 出现 `turn.failed` | 作业失败，原因取 `error.message`；即使退出码缺失也按失败处理。 |
 | 退出码为 0 但没有 `turn.completed` | 视为协议不完整，按失败处理。 |
 | `item.type=command_execution` 且 `exit_code != 0` | 只记工具失败，不直接使作业失败；是否失败由后续 `result.json` 或最终 turn 决定。 |
-| 退出码为 0、`turn.completed` 正常，但没有 `result.json` | 作业失败，原因为缺少结果文件。 |
-| `result.json` 不是合法 JSON 或不符合角色协议 | 作业失败，归入结果协议错误。 |
+| 退出码为 0、`turn.completed` 正常，但没有 `result.json` | 在同一作业内最多追加 5 轮继续提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
+| `result.json` 不是合法 JSON 或不符合角色协议 | 归入协议失败。 |
 | 错误文本含 `429`、`rate limit`、`quota` 等 | 归入限流，按重试信息设置冷却。 |
 | 错误文本含 `401`、`403`、`invalid api key`、`invalid_request` 等 | 归入永久错误，不重试。 |
 | 进程失败、超时或错误文本含 `502`、`503`、`504`、`timeout` 等 | 归入供应商波动，按重试次数处理。 |
@@ -356,6 +360,8 @@ DOMO 的 CLI Agent 模板：
 - 若作业目录不在 `{cwd}` 内，命令模板必须带 `--add-dir "{job_dir}"`，否则 `Write` 可能被权限拒绝。
 - 结果协议与 Codex 共用同一套 DOMO 解析：执行者读 `kind`/`summary`/`reason`，验收者读 `pass`/`reason`/`issues`。
 - `result.json` 可带 `usage` 对象，字段与 `UsageRecord` 一致。CLI runner 不解析事件流；缺少该对象时用量记为未知，解析层读取事件流后可把汇总值填入 `AgentRun.usage`。
+- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 5 轮继续提示，并提示执行者可以派生子任务；5 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
+- WorkBuddy 从首次运行的 `system/init.session_id` 取会话标识，继续轮次使用 `--resume <session_id>`。
 
 ### 2.9 失败判定规则
 
@@ -364,8 +370,8 @@ DOMO 的 CLI Agent 模板：
 | `result.is_error=true` | 作业失败，原因取 `errors[0]` 首行；即使退出码为 0 也按失败处理。 |
 | `result.subtype` 不是 `success` | 作业失败，`error_during_execution` 表示执行期错误。 |
 | 进程退出码非 0 | 进程失败，进入 DOMO 的失败分类。 |
-| 退出码为 0 且 `result.is_error=false`，但没有 `result.json` | 作业失败，原因为缺少结果文件。 |
-| `result.json` 不是合法 JSON 或不符合角色协议 | 作业失败，归入结果协议错误。 |
+| 退出码为 0 且 `result.is_error=false`，但没有 `result.json` | 在同一作业内最多追加 5 轮继续提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
+| `result.json` 不是合法 JSON 或不符合角色协议 | 归入协议失败。 |
 | `tool_result` 的 `_meta.rawResponse.is_error=true` 或 `exitCode != 0` | 只记工具失败，不直接使会话失败。 |
 | `permission_denials` 非空 | 工具调用被拒绝；会话可能仍为成功，需在作业事件中提示权限不足。 |
 | 错误文本含 `429`、`rate limit`、`quota` 等 | 归入限流，按重试信息设置冷却。 |

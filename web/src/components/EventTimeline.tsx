@@ -28,6 +28,7 @@ const PREVIEW_CHARS = 400;
 const JOB_KINDS = new Set([
   "job_queued",
   "job_started",
+  "job_continued",
   "job_finished",
   "job_failed",
   "job_stalled",
@@ -126,6 +127,7 @@ const KIND_LABELS: Record<string, string> = {
   merge_conflict: "合并冲突",
   job_queued: "作业排队",
   job_started: "作业开始",
+  job_continued: "作业继续",
   job_finished: "作业结束",
   job_failed: "作业失败",
   job_stalled: "作业卡死",
@@ -196,6 +198,7 @@ const KIND_TONES: Record<string, string> = {
   merge_conflict: "danger",
   job_queued: "info",
   job_started: "info",
+  job_continued: "info",
   job_finished: "success",
   job_failed: "danger",
   job_stalled: "danger",

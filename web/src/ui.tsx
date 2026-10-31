@@ -122,6 +122,7 @@ export const FAILURE_KIND_LABELS: Record<string, string> = {
   rate_limit: "限流",
   transient: "供应商波动",
   permanent: "永久错误",
+  protocol: "协议失败",
   task: "任务失败",
 };
 

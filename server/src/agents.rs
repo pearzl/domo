@@ -97,6 +97,7 @@ pub struct AgentRun {
     pub exit_code: Option<i64>,
     pub timed_out: bool,
     pub stalled: bool,
+    pub session_id: Option<String>,
     pub usage: Option<UsageRecord>,
 }
 
@@ -115,7 +116,9 @@ pub struct AgentSpec {
     pub cwd: PathBuf,
     pub job_dir: PathBuf,
     pub prompt: String,
-    pub opencode_session_id: String,
+    pub original_prompt: String,
+    pub session_id: Option<String>,
+    pub continuation: bool,
     pub progress: JobProgress,
 }
 
@@ -173,6 +176,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         exit_code: Some(0),
         timed_out: false,
         stalled: false,
+        session_id: None,
         usage: None,
     })
 }
@@ -849,13 +853,17 @@ fn mock_summary(context: &serde_json::Value) -> serde_json::Value {
 
 async fn run_opencode(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
     let bin = crate::opencode::bin();
+    let session_id = spec
+        .session_id
+        .clone()
+        .unwrap_or_else(|| crate::opencode::session_id(&spec.job_id));
     let mut args = vec![
         "run".to_string(),
         "--auto".into(),
         "--format".into(),
         "json".into(),
         "--session".into(),
-        spec.opencode_session_id.clone(),
+        session_id.clone(),
         // An explicit title skips the separate title-generation model call, so
         // the session ledger contains only this job's work.
         "--title".into(),
@@ -866,7 +874,19 @@ async fn run_opencode(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> 
         args.push(agent.model.trim().to_string());
     }
     args.push(spec.prompt.clone());
-    run_process(&bin, &args, spec, timeout, None).await
+    let mut run = run_process(&bin, &args, spec, timeout, None).await?;
+    run.session_id = Some(session_id);
+    Ok(run)
+}
+
+/// Continuation prompts are sent as-is when the agent can resume the original
+/// session. A fresh process receives the original prompt first.
+fn prompt_for_run(spec: &AgentSpec, can_resume: bool) -> String {
+    if spec.continuation && !can_resume {
+        format!("{}\n\n{}", spec.original_prompt, spec.prompt)
+    } else {
+        spec.prompt.clone()
+    }
 }
 
 async fn run_cli(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
@@ -884,21 +904,36 @@ async fn run_cli(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Resul
         .map(|raw| serde_json::from_str::<Vec<String>>(raw).unwrap_or_default())
         .unwrap_or_default();
     let model = agent.model.trim();
+    let session_id = spec.session_id.clone().unwrap_or_default();
+    let resume_aware = command
+        .iter()
+        .chain(model_args.iter())
+        .any(|arg| arg.contains("{session_id}"));
     let mut expanded_model_args = Vec::new();
     if !model.is_empty() {
         expanded_model_args = model_args
             .iter()
-            .map(|arg| arg.replace("{model}", model))
+            .map(|arg| {
+                arg.replace("{model}", model)
+                    .replace("{session_id}", &session_id)
+            })
+            .collect();
+    } else if model_args.iter().any(|arg| arg.contains("{session_id}")) {
+        expanded_model_args = model_args
+            .iter()
+            .map(|arg| arg.replace("{session_id}", &session_id))
             .collect();
     }
+    let prompt = prompt_for_run(spec, resume_aware);
     let mut args = Vec::new();
     let mut has_prompt = false;
     for arg in &command[1..] {
         match arg.as_str() {
             "{prompt}" => {
-                args.push(spec.prompt.clone());
+                args.push(prompt.clone());
                 has_prompt = true;
             }
+            "{session_id}" => args.push(session_id.clone()),
             "{job_dir}" => args.push(spec.job_dir.to_string_lossy().to_string()),
             "{cwd}" => args.push(spec.cwd.to_string_lossy().to_string()),
             "{model}" => {
@@ -920,9 +955,13 @@ async fn run_cli(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Resul
     let stdin = if has_prompt {
         None
     } else {
-        Some(spec.prompt.as_bytes().to_vec())
+        Some(prompt.into_bytes())
     };
-    run_process(&command[0], &args, spec, timeout, stdin).await
+    let mut run = run_process(&command[0], &args, spec, timeout, stdin).await?;
+    if resume_aware {
+        run.session_id = spec.session_id.clone();
+    }
+    Ok(run)
 }
 
 fn configured_command(agent: &AgentRow) -> Option<Vec<String>> {
@@ -938,15 +977,27 @@ async fn run_codex(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Res
     if configured_command(agent).is_some() {
         return run_cli(agent, spec, timeout).await;
     }
-    let args = codex_args(&agent.model, &spec.job_dir);
+    let resume_id = spec
+        .session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty());
+    let can_resume = spec.continuation && resume_id.is_some();
+    let args = if can_resume {
+        codex_resume_args(&agent.model, resume_id.unwrap_or_default())
+    } else {
+        codex_args(&agent.model, &spec.job_dir)
+    };
+    let prompt = prompt_for_run(spec, can_resume);
     let mut run = run_process(
         &codex_bin(),
         &args,
         spec,
         timeout,
-        Some(spec.prompt.as_bytes().to_vec()),
+        Some(prompt.into_bytes()),
     )
     .await?;
+    run.session_id = parse_codex_session_id(&run.stdout)
+        .or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
     run.usage = parse_codex_usage(&run.stdout);
     Ok(run)
 }
@@ -955,15 +1006,27 @@ async fn run_workbuddy(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) ->
     if configured_command(agent).is_some() {
         return run_cli(agent, spec, timeout).await;
     }
-    let args = workbuddy_args(&agent.model, &spec.job_dir);
+    let resume_id = spec
+        .session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty());
+    let can_resume = spec.continuation && resume_id.is_some();
+    let args = if can_resume {
+        workbuddy_resume_args(&agent.model, &spec.job_dir, resume_id.unwrap_or_default())
+    } else {
+        workbuddy_args(&agent.model, &spec.job_dir)
+    };
+    let prompt = prompt_for_run(spec, can_resume);
     let mut run = run_process(
         &workbuddy_bin(),
         &args,
         spec,
         timeout,
-        Some(spec.prompt.as_bytes().to_vec()),
+        Some(prompt.into_bytes()),
     )
     .await?;
+    run.session_id = parse_workbuddy_session_id(&run.stdout)
+        .or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
     run.usage = parse_workbuddy_usage(&run.stdout);
     Ok(run)
 }
@@ -1018,6 +1081,73 @@ fn workbuddy_args(model: &str, job_dir: &Path) -> Vec<String> {
         args.push(model.to_string());
     }
     args
+}
+
+fn codex_resume_args(model: &str, session_id: &str) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "resume".to_string(),
+        "--json".to_string(),
+    ];
+    let model = model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args.push(session_id.to_string());
+    args.push("-".to_string());
+    args
+}
+
+fn workbuddy_resume_args(model: &str, job_dir: &Path, session_id: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--add-dir".to_string(),
+        job_dir.to_string_lossy().to_string(),
+        "--resume".to_string(),
+        session_id.to_string(),
+    ];
+    let model = model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args
+}
+
+fn parse_codex_session_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(|item| item.as_str()) != Some("thread.started") {
+            continue;
+        }
+        if let Some(thread_id) = value.get("thread_id").and_then(|item| item.as_str()) {
+            if !thread_id.trim().is_empty() {
+                return Some(thread_id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_workbuddy_session_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(session_id) = value.get("session_id").and_then(|item| item.as_str()) {
+            if !session_id.trim().is_empty() {
+                return Some(session_id.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn codex_usage_record(usage: &serde_json::Map<String, serde_json::Value>) -> UsageRecord {
@@ -1150,8 +1280,6 @@ async fn run_process(
     let stderr = child.stderr.take().expect("stderr pipe");
     let stdout_log = spec.job_dir.join("stdout.log");
     let stderr_log = spec.job_dir.join("stderr.log");
-    let _ = tokio::fs::write(&stdout_log, b"").await;
-    let _ = tokio::fs::write(&stderr_log, b"").await;
     let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true, stdout_log));
     let stderr_task = tokio::spawn(read_capped(
         stderr,
@@ -1180,6 +1308,7 @@ async fn run_process(
         exit_code: status.code().map(|code| code as i64),
         timed_out,
         stalled: false,
+        session_id: None,
         usage: None,
     })
 }
@@ -1381,6 +1510,39 @@ mod tests {
         assert!(progress.idle_for() < Duration::from_millis(100));
     }
 
+    #[test]
+    fn resume_args_keep_the_agent_session_id() {
+        let codex = codex_resume_args("gpt-test", "thread-1");
+        assert_eq!(codex[0], "exec");
+        assert_eq!(codex[1], "resume");
+        assert!(codex.contains(&"--json".to_string()));
+        assert!(codex.contains(&"thread-1".to_string()));
+        assert_eq!(codex.last().map(String::as_str), Some("-"));
+
+        let workbuddy = workbuddy_resume_args("hy3", Path::new("/tmp/job"), "session-1");
+        assert!(workbuddy.contains(&"--resume".to_string()));
+        assert!(workbuddy.contains(&"session-1".to_string()));
+        assert!(workbuddy.contains(&"--add-dir".to_string()));
+    }
+
+    #[test]
+    fn parses_session_ids_from_agent_streams() {
+        let codex = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n",
+            "{\"type\":\"turn.completed\"}\n"
+        );
+        assert_eq!(parse_codex_session_id(codex).as_deref(), Some("thread-1"));
+
+        let workbuddy = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"session-1\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
+        );
+        assert_eq!(
+            parse_workbuddy_session_id(workbuddy).as_deref(),
+            Some("session-1")
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn spawns_with_cwd_and_pwd_aligned() {
@@ -1393,7 +1555,9 @@ mod tests {
             cwd: cwd.clone(),
             job_dir: cwd.clone(),
             prompt: String::new(),
-            opencode_session_id: crate::opencode::session_id("job_test"),
+            original_prompt: String::new(),
+            session_id: Some(crate::opencode::session_id("job_test")),
+            continuation: false,
             progress: JobProgress::new(),
         };
         let args = vec![
@@ -1537,6 +1701,7 @@ mod tests {
             exit_code: None,
             timed_out: false,
             stalled: true,
+            session_id: None,
             usage: None,
         };
         assert!(run.process_failure());
@@ -1546,6 +1711,7 @@ mod tests {
             exit_code: Some(0),
             timed_out: false,
             stalled: false,
+            session_id: None,
             usage: None,
         };
         assert!(!clean.process_failure());

@@ -59,6 +59,7 @@ pub const JOB_STATUS_CANCELED: &str = "canceled";
 pub const FAILURE_RATE_LIMIT: &str = "rate_limit";
 pub const FAILURE_TRANSIENT: &str = "transient";
 pub const FAILURE_PERMANENT: &str = "permanent";
+pub const FAILURE_PROTOCOL: &str = "protocol";
 pub const FAILURE_TASK: &str = "task";
 
 pub const JOB_ROLE_ANALYSIS: &str = "analysis";

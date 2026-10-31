@@ -41,7 +41,7 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(30 * 60));
+            .unwrap_or_else(|| Duration::from_secs(60 * 60));
         let stall_timeout = env::var("DOMO_STALL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())

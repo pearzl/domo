@@ -79,6 +79,17 @@ pub fn render(data: &PromptData) -> String {
     }
 }
 
+/// Follow-up message for a run that exited cleanly without a result file. The
+/// same OpenCode session keeps the original prompt; other agents receive the
+/// original prompt followed by this message.
+pub fn continuation(data: &PromptData) -> String {
+    if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
+        "继续。\n如果任务仍然过于复杂，可以派生子任务。\n".to_string()
+    } else {
+        "继续。\n".to_string()
+    }
+}
+
 fn common_header(data: &PromptData) -> String {
     format!(
         "你是 DOMO 本地多 Agent 协作平台中的团队成员。\n\
@@ -650,6 +661,18 @@ mod tests {
             JOB_ROLE_SUMMARY => "\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"",
             other => panic!("未知的作业角色: {other}"),
         }
+    }
+
+    #[test]
+    fn continuation_only_asks_to_continue_and_offers_derivation() {
+        let prompt = continuation(&sample_data(JOB_ROLE_EXECUTOR));
+        assert!(prompt.contains("继续"));
+        assert!(prompt.contains("派生子任务"));
+        assert!(!prompt.contains(RESULT_PATH));
+
+        let verifier = continuation(&sample_data(JOB_ROLE_VERIFIER));
+        assert!(verifier.contains("继续"));
+        assert!(!verifier.contains("派生子任务"));
     }
 
     #[test]
