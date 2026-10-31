@@ -5,7 +5,9 @@ use anyhow::{anyhow, Result};
 
 use crate::models::AGENT_CLI;
 
-use super::adapter::{AgentAdapter, AgentConfig, AgentRun, AgentSpec, TurnContext};
+use super::adapter::{
+    derived_session_id, AgentAdapter, AgentConfig, AgentRun, AgentSpec, TurnContext,
+};
 use super::process::run_process;
 
 #[derive(Debug, Default)]
@@ -25,8 +27,12 @@ impl AgentAdapter for CliAdapter {
         Ok(())
     }
 
-    fn session_for_job(_job_id: &str, existing: Option<&str>) -> Option<String> {
-        existing.map(str::to_string)
+    fn session_for_job(job_id: &str, existing: Option<&str>) -> Option<String> {
+        Some(
+            existing
+                .map(str::to_string)
+                .unwrap_or_else(|| derived_session_id(job_id)),
+        )
     }
 
     async fn run_turn(&self, context: TurnContext<'_>) -> Result<AgentRun> {

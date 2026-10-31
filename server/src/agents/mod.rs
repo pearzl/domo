@@ -113,8 +113,51 @@ pub async fn execute(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> R
     }
 }
 
-/// Runs one adapter statically. The adapter validates its settings, executes
-/// the turn, then settles usage through its own accounting rule.
+/// Session id a fresh job starts under. Continuations keep the id reported by
+/// the previous run, so this only consults the adapter's derived value.
+pub fn session_for_job(agent: &AgentRow, job_id: &str) -> Option<String> {
+    let kind = agent.kind.as_str();
+    if kind == <MockAdapter as AgentAdapter>::KIND {
+        return MockAdapter::session_for_job(job_id, None);
+    }
+    if kind == <OpencodeAdapter as AgentAdapter>::KIND {
+        return OpencodeAdapter::session_for_job(job_id, None);
+    }
+    if kind == <CliAdapter as AgentAdapter>::KIND {
+        return CliAdapter::session_for_job(job_id, None);
+    }
+    if kind == <CodexAdapter as AgentAdapter>::KIND {
+        return CodexAdapter::session_for_job(job_id, None);
+    }
+    if kind == <WorkbuddyAdapter as AgentAdapter>::KIND {
+        return WorkbuddyAdapter::session_for_job(job_id, None);
+    }
+    None
+}
+
+/// Settles usage after the final turn through the adapter that owns the job.
+pub async fn finish_job(context: FinishContext<'_>) -> JobUsage {
+    let kind = context.agent.kind.as_str();
+    if kind == <MockAdapter as AgentAdapter>::KIND {
+        return MockAdapter.finish_job(context).await;
+    }
+    if kind == <OpencodeAdapter as AgentAdapter>::KIND {
+        return OpencodeAdapter.finish_job(context).await;
+    }
+    if kind == <CliAdapter as AgentAdapter>::KIND {
+        return CliAdapter.finish_job(context).await;
+    }
+    if kind == <CodexAdapter as AgentAdapter>::KIND {
+        return CodexAdapter.finish_job(context).await;
+    }
+    if kind == <WorkbuddyAdapter as AgentAdapter>::KIND {
+        return WorkbuddyAdapter.finish_job(context).await;
+    }
+    JobUsage::PerTurn
+}
+
+/// Runs one adapter statically. The adapter validates its settings and executes
+/// the turn; usage settlement happens once after the final turn.
 async fn run_with<A: AgentAdapter>(
     config: &AgentConfig,
     spec: &AgentSpec,
@@ -122,24 +165,13 @@ async fn run_with<A: AgentAdapter>(
 ) -> Result<AgentRun> {
     A::validate(config)?;
     let adapter = A::default();
-    let mut run = adapter
+    adapter
         .run_turn(TurnContext {
             config,
             spec,
             timeout,
         })
-        .await?;
-    let usage = adapter
-        .finish_job(FinishContext {
-            config,
-            spec,
-            run: &run,
-        })
-        .await;
-    if let JobUsage::Authoritative(usage) = usage {
-        run.usage = usage;
-    }
-    Ok(run)
+        .await
 }
 
 #[cfg(test)]

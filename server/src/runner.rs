@@ -154,7 +154,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         job_dir: job_dir.clone(),
         prompt: prompt.clone(),
         original_prompt: prompt.clone(),
-        session_id: Some(initial_session_id(&agent.kind, &job.id)),
+        session_id: agents::session_for_job(&agent, &job.id),
         continuation: false,
         progress: progress.clone(),
     };
@@ -226,17 +226,16 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
     run.stdout = combined_stdout;
     run.stderr = combined_stderr;
-    if agent.kind == AGENT_OPENCODE && !state.is_shutting_down() {
-        let session_id = spec
-            .session_id
-            .clone()
-            .unwrap_or_else(|| crate::opencode::session_id(&job.id));
-        if run.process_failure() {
-            // The server-side session can outlive the killed CLI process. Stop it
-            // before taking the settlement snapshot so no further usage accrues.
-            crate::opencode::settle(&session_id).await;
-        }
-        run.usage = crate::opencode::fetch_usage(&session_id).await;
+    let usage = agents::finish_job(agents::FinishContext {
+        agent: &agent,
+        job_id: &job.id,
+        session_id: spec.session_id.as_deref(),
+        process_failed: run.process_failure(),
+        shutting_down: state.is_shutting_down(),
+    })
+    .await;
+    if let agents::JobUsage::Authoritative(value) = usage {
+        run.usage = value;
     }
     state.unregister_job(&job_dir);
 
@@ -728,28 +727,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         transition?;
     }
     Ok(())
-}
-
-/// OpenCode uses its own deterministic session id. Other agents receive a
-/// UUID-shaped id for CLI templates that require one.
-fn initial_session_id(agent_kind: &str, job_id: &str) -> String {
-    if agent_kind == AGENT_OPENCODE {
-        return crate::opencode::session_id(job_id);
-    }
-    let suffix = job_id.strip_prefix("job_").unwrap_or(job_id);
-    let hex: String = suffix.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
-    if hex.len() >= 32 {
-        format!(
-            "{}-{}-{}-{}-{}",
-            &hex[0..8],
-            &hex[8..12],
-            &hex[12..16],
-            &hex[16..20],
-            &hex[20..32]
-        )
-    } else {
-        format!("ses_domo{suffix}")
-    }
 }
 
 /// A continuation is allowed only while the job is still running and neither

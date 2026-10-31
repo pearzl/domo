@@ -155,6 +155,26 @@ pub(super) fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     value.and_then(|item| item.as_i64())
 }
 
+/// Session id for CLI templates that require one. The job id already carries a
+/// UUID, so the derived value is stable per job execution and never collides
+/// across retries.
+pub(super) fn derived_session_id(job_id: &str) -> String {
+    let suffix = job_id.strip_prefix("job_").unwrap_or(job_id);
+    let hex: String = suffix.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
+    if hex.len() >= 32 {
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        )
+    } else {
+        format!("ses_domo{suffix}")
+    }
+}
+
 #[cfg(test)]
 pub(super) fn args_contain_pair(args: &[String], first: &str, second: &str) -> bool {
     args.windows(2)
@@ -182,9 +202,11 @@ pub struct TurnContext<'a> {
 /// Input for usage settlement after the final turn.
 #[allow(dead_code)]
 pub struct FinishContext<'a> {
-    pub config: &'a AgentConfig,
-    pub spec: &'a AgentSpec,
-    pub run: &'a AgentRun,
+    pub agent: &'a AgentRow,
+    pub job_id: &'a str,
+    pub session_id: Option<&'a str>,
+    pub process_failed: bool,
+    pub shutting_down: bool,
 }
 
 /// One agent kind, distinguished only by business capabilities.
