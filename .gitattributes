@@ -1,6 +1,7 @@
 # Keep scripts and sources LF even when checked out with core.autocrlf=true.
 * text=auto
 *.py text eol=lf
+*.sh text eol=lf
 *.rs text eol=lf
 *.toml text eol=lf
 *.ts text eol=lf
