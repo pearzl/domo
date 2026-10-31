@@ -12,7 +12,7 @@ DOMO 是一个面向个人使用、本地部署的多 Agent 协作平台。
 
 ```bash
 # 重新构建前端并启动后端（默认 release；加 --debug 使用调试构建）
-./run.sh
+node run.mjs
 # 打开启动日志中打印的地址，默认 http://127.0.0.1:8787
 # 默认端口被占用时自动改用相邻空闲端口；显式设置 DOMO_SERVER_PORT 时端口冲突会直接报错
 ```
@@ -27,7 +27,7 @@ cd web && npm install && npm run build && cd ..
 cd server && cargo run --release
 ```
 
-Windows 使用同样的命令，可在 Git Bash 或 WSL 中运行 `./run.sh`。数据默认保存在 `%USERPROFILE%\.domo`，可用 `DOMO_DATA_ROOT`、`DOMO_WORKSPACE_ROOT`、`DOMO_LOG_ROOT` 覆盖。npm 安装的 `opencode`、`codebuddy` 等 `.cmd` 入口会被自动解析为实际可执行文件；命令行工具不在 `PATH` 中时用 `DOMO_*_BIN` 指向 `.exe` 路径。
+Windows 使用同样的命令。在 Windows 的 PowerShell、cmd 或 Git Bash 中运行会启动 Windows 版后端，可调用 Windows 上安装的 Agent；在 WSL 中运行的是 Linux 版后端，只能使用 WSL 内的可执行文件。Windows 数据默认保存在 `%USERPROFILE%\.domo`，可用 `DOMO_DATA_ROOT`、`DOMO_WORKSPACE_ROOT`、`DOMO_LOG_ROOT` 覆盖。npm 安装的 `opencode`、`codebuddy` 等 `.cmd` 入口会被自动解析为实际可执行文件；命令行工具不在 `PATH` 中时用 `DOMO_*_BIN` 指向 `.exe` 路径。
 
 
 ## 测试
