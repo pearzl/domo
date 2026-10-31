@@ -689,7 +689,7 @@ async fn create_project(
     .await;
     if let Err(error) = result {
         let _ = git::remove_worktree(&repo, &repo_worktree).await;
-        let _ = tokio::fs::remove_dir_all(&workspace).await;
+        let _ = crate::platform::remove_dir_all(&workspace).await;
         return Err(error.into());
     }
     crate::db::ensure_project_agents(&state.db, &project_id).await?;

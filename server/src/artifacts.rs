@@ -11,6 +11,7 @@ use crate::domain::now;
 use crate::git;
 use crate::models::*;
 use crate::paths;
+use crate::platform;
 use crate::state::AppState;
 
 pub const ARTIFACTS_RELEASING: &str = "releasing";
@@ -333,7 +334,7 @@ async fn remove_project_layout(workspace: &Path) -> Result<()> {
     for name in ["repo", "tasks", "verify"] {
         let path = workspace.join(name);
         if path.exists() {
-            tokio::fs::remove_dir_all(&path).await?;
+            platform::remove_dir_all(&path).await?;
         }
     }
     Ok(())

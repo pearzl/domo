@@ -76,6 +76,38 @@ fn expand_tilde_with(home: Option<&Path>, raw: &str) -> PathBuf {
     }
 }
 
+/// Recursive directory removal that also covers trees deeper than the legacy
+/// `MAX_PATH` limit on Windows.
+pub async fn remove_dir_all(path: &Path) -> std::io::Result<()> {
+    let path = extended_length(path);
+    tokio::fs::remove_dir_all(&path).await
+}
+
+/// Absolute Windows paths in extended-length form. Relative paths, device
+/// paths, and paths that already carry the `\\?\` prefix are returned
+/// unchanged.
+#[cfg(windows)]
+fn extended_length(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let text = path.to_string_lossy().replace('/', "\\");
+    if !matches!(path.components().next(), Some(Component::Prefix(_)))
+        || text.starts_with(r"\\?\")
+        || text.starts_with(r"\\.\")
+    {
+        return path.to_path_buf();
+    }
+    match text.strip_prefix(r"\\") {
+        Some(rest) => PathBuf::from(format!(r"\\?\UNC\{rest}")),
+        None => PathBuf::from(format!(r"\\?\{text}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn extended_length(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 /// A program plus any arguments that must precede the caller's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProgram {
@@ -320,6 +352,47 @@ mod tests {
             expand_tilde_path(PathBuf::from("repo/~/x")),
             PathBuf::from("repo/~/x")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_length_prefixes_only_absolute_drive_and_unc_paths() {
+        assert_eq!(
+            extended_length(Path::new(r"C:\Users\pearzl\.domo\workspace\prj_1\tasks\19")),
+            PathBuf::from(r"\\?\C:\Users\pearzl\.domo\workspace\prj_1\tasks\19")
+        );
+        assert_eq!(
+            extended_length(Path::new("C:/Users/pearzl")),
+            PathBuf::from(r"\\?\C:\Users\pearzl")
+        );
+        assert_eq!(
+            extended_length(Path::new(r"\\server\share\dir")),
+            PathBuf::from(r"\\?\UNC\server\share\dir")
+        );
+        for unchanged in [
+            Path::new(r"\\?\C:\a"),
+            Path::new(r"\\.\pipe\domo"),
+            Path::new(r"relative\path"),
+        ] {
+            assert_eq!(extended_length(unchanged), unchanged);
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn remove_dir_all_accepts_trees_beyond_the_legacy_limit() {
+        let dir = std::env::temp_dir().join(format!("domo-long-{}", uuid::Uuid::new_v4()));
+        let mut deep = dir.clone();
+        for _ in 0..6 {
+            deep.push("0123456789012345678901234567890123456789");
+        }
+        std::fs::create_dir_all(extended_length(&deep)).unwrap();
+        std::fs::write(extended_length(&deep.join("file.txt")), b"content").unwrap();
+        assert!(deep.to_string_lossy().len() > 260);
+
+        remove_dir_all(&dir).await.unwrap();
+
+        assert!(!dir.exists());
     }
 
     #[test]

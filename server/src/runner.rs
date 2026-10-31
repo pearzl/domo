@@ -1015,7 +1015,7 @@ async fn prepare_task_worktree(
         if path.exists() {
             let _ = git::remove_worktree(&repo, &path).await;
             if path.exists() {
-                let _ = tokio::fs::remove_dir_all(&path).await;
+                let _ = crate::platform::remove_dir_all(&path).await;
             }
         }
         // A crash can leave the worktree registered while its directory is
@@ -1055,7 +1055,7 @@ async fn prepare_verify_worktree(
         if path.exists() {
             let _ = git::remove_worktree(&repo, &path).await;
             if path.exists() {
-                let _ = tokio::fs::remove_dir_all(&path).await;
+                let _ = crate::platform::remove_dir_all(&path).await;
             }
         }
         git::prune_worktrees(&repo).await?;

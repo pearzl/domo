@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
+use crate::platform;
+
 const GIT_IDENTITY: [&str; 6] = [
     "-c",
     "user.name=DOMO",
@@ -19,6 +21,9 @@ pub async fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
+        // Checkouts routinely hold trees deeper than the legacy Windows path
+        // limit, so every command accepts them.
+        .args(["-c", "core.longpaths=true"])
         .args(args)
         .output()
         .await
@@ -128,10 +133,26 @@ pub async fn create_verify_worktree(
     Ok(())
 }
 
+/// Removes a worktree checkout together with its metadata. Git refuses to delete
+/// checkout contents that exceed the legacy Windows path limit, so a failed
+/// removal deletes the directory directly and prunes the stale metadata.
 pub async fn remove_worktree(project_ws: &Path, dest: &Path) -> Result<()> {
     let dest_s = dest.to_string_lossy().to_string();
-    run_git(project_ws, &["worktree", "remove", "--force", &dest_s]).await?;
-    Ok(())
+    let result = run_git(project_ws, &["worktree", "remove", "--force", &dest_s]).await;
+    let Err(error) = result else {
+        return Ok(());
+    };
+    tracing::debug!(
+        path = %dest.display(),
+        error = %format!("{error:#}"),
+        "git 无法删除工作树，改为直接删除目录"
+    );
+    match platform::remove_dir_all(dest).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    prune_worktrees(project_ws).await
 }
 
 pub async fn prune_worktrees(repo: &Path) -> Result<()> {
