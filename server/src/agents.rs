@@ -857,26 +857,40 @@ async fn run_opencode(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> 
         .session_id
         .clone()
         .unwrap_or_else(|| crate::opencode::session_id(&spec.job_id));
+    let args = opencode_args(&agent.model, &session_id, spec);
+    // Prompts routinely exceed the 32767-character Windows command line, so
+    // they reach the CLI over stdin.
+    let mut run = run_process(
+        &bin,
+        &args,
+        spec,
+        timeout,
+        Some(spec.prompt.as_bytes().to_vec()),
+    )
+    .await?;
+    run.session_id = Some(session_id);
+    Ok(run)
+}
+
+fn opencode_args(model: &str, session_id: &str, spec: &AgentSpec) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
         "--auto".into(),
         "--format".into(),
         "json".into(),
         "--session".into(),
-        session_id.clone(),
+        session_id.to_string(),
         // An explicit title skips the separate title-generation model call, so
         // the session ledger contains only this job's work.
         "--title".into(),
         format!("DOMO {} {}", spec.role, spec.job_id),
     ];
-    if !agent.model.trim().is_empty() {
+    let model = model.trim();
+    if !model.is_empty() {
         args.push("--model".into());
-        args.push(agent.model.trim().to_string());
+        args.push(model.to_string());
     }
-    args.push(spec.prompt.clone());
-    let mut run = run_process(&bin, &args, spec, timeout, None).await?;
-    run.session_id = Some(session_id);
-    Ok(run)
+    args
 }
 
 /// Continuation prompts are sent as-is when the agent can resume the original
@@ -1598,6 +1612,28 @@ mod tests {
         assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
         assert!(args_contain_pair(&args, "--model", "gpt-5-codex"));
         assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn opencode_args_keep_the_prompt_out_of_the_command_line() {
+        let spec = AgentSpec {
+            job_id: "job_test".into(),
+            role: JOB_ROLE_EXECUTOR.into(),
+            cwd: PathBuf::from("/tmp/repo"),
+            job_dir: PathBuf::from("/tmp/job"),
+            prompt: "x".repeat(40_000),
+            original_prompt: String::new(),
+            session_id: None,
+            continuation: false,
+            progress: JobProgress::new(),
+        };
+        let session_id = crate::opencode::session_id("job_test");
+        let args = opencode_args(" opencode/big ", &session_id, &spec);
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert!(args_contain_pair(&args, "--format", "json"));
+        assert!(args_contain_pair(&args, "--session", &session_id));
+        assert!(args_contain_pair(&args, "--model", "opencode/big"));
+        assert!(!args.iter().any(|arg| arg.len() > 1024));
     }
 
     #[test]
