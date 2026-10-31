@@ -196,12 +196,16 @@ async fn recover(state: &AppState) -> Result<()> {
             .await?;
             if human_gate > 0 {
                 if project.status.as_deref() != Some(STATUS_BLOCKED) {
-                    sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
-                        .bind(STATUS_BLOCKED)
-                        .bind(now())
-                        .bind(&project.id)
-                        .execute(&state.db)
-                        .await?;
+                    sqlx::query(
+                        "UPDATE projects SET status = CASE WHEN status IN \
+                         ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+                         updated_at = ? WHERE id = ?",
+                    )
+                    .bind(STATUS_BLOCKED)
+                    .bind(now())
+                    .bind(&project.id)
+                    .execute(&state.db)
+                    .await?;
                 }
                 continue;
             }
@@ -226,7 +230,9 @@ async fn recover(state: &AppState) -> Result<()> {
             .await?;
             if blocked > 0 && blocked == incomplete {
                 sqlx::query(
-                    "UPDATE projects SET status = ?, updated_at = ? WHERE id = ? AND stage = ?",
+                    "UPDATE projects SET status = CASE WHEN status IN \
+                     ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+                     updated_at = ? WHERE id = ? AND stage = ?",
                 )
                 .bind(STATUS_BLOCKED)
                 .bind(now())
