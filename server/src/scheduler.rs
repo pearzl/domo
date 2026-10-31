@@ -323,9 +323,8 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 if has_project_job(&state.db, &project.id, JOB_ROLE_ANALYSIS).await? {
                     continue;
                 }
-                let replan_pending = crate::replan::pending(&state.db, &project).await?;
-                let last_role = latest_message_role(&state.db, &project.id).await?;
-                if !replan_pending && last_role.as_deref() != Some("user") {
+                if !crate::runner::analysis_needs_dispatch(&state.db, &project).await? {
+                    let last_role = latest_message_role(&state.db, &project.id).await?;
                     sqlx::query(
                         "UPDATE projects SET status = ?, blocked_reason = COALESCE(blocked_reason, ?), \
                          updated_at = ? WHERE id = ? AND status = ?",

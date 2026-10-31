@@ -3046,6 +3046,44 @@ fn failure_kind_label(kind: FailureKind) -> &'static str {
     }
 }
 
+/// Project analysis runs again without a new user message after a replan
+/// request, a manual retry, or an agent failure. Otherwise the planner is
+/// waiting for the user to answer its questions or confirm the proposal.
+pub(crate) async fn analysis_needs_dispatch(
+    pool: &SqlitePool,
+    project: &ProjectRow,
+) -> Result<bool> {
+    if project.retry_role.as_deref() == Some(ROLE_PLANNER) && project.retry_agent_id.is_some() {
+        return Ok(true);
+    }
+    if crate::replan::pending(pool, project).await? {
+        return Ok(true);
+    }
+    let last_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM messages WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(&project.id)
+    .fetch_optional(pool)
+    .await?;
+    if last_role.as_deref() == Some("user") {
+        return Ok(true);
+    }
+    let last_analysis: Option<String> = sqlx::query_scalar(
+        "SELECT failure_kind FROM jobs WHERE project_id = ? AND task_id IS NULL AND role = ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(&project.id)
+    .bind(JOB_ROLE_ANALYSIS)
+    .fetch_optional(pool)
+    .await?;
+    // Agent failures are retried by policy. A task-level failure means the
+    // request itself was rejected, so the planner stays waiting for the user.
+    let retryable = [FAILURE_RATE_LIMIT, FAILURE_TRANSIENT, FAILURE_PERMANENT];
+    Ok(last_analysis
+        .as_deref()
+        .is_some_and(|kind| retryable.contains(&kind)))
+}
+
 async fn has_active_tasks(pool: &SqlitePool, project_id: &str) -> Result<bool> {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \

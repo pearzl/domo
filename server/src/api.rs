@@ -1951,16 +1951,9 @@ async fn resume_project(
     ) {
         return Err(ApiError::bad("项目当前没有暂停"));
     }
-    let last_message_role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM messages WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    )
-    .bind(&project.id)
-    .fetch_optional(&state.db)
-    .await?;
-    let replan_pending = replan::pending(&state.db, &project).await?;
-    let waiting_human = (project.stage == STAGE_ANALYSIS
-        && !replan_pending
-        && last_message_role.as_deref() != Some("user"))
+    let analysis_pending = project.stage == STAGE_ANALYSIS
+        && crate::runner::analysis_needs_dispatch(&state.db, &project).await?;
+    let waiting_human = (project.stage == STAGE_ANALYSIS && !analysis_pending)
         || (project.stage == STAGE_SUMMARIZING && project.report.is_some());
     {
         let _guard = state.schedule_lock.lock().await;
