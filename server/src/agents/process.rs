@@ -1,0 +1,224 @@
+//! Process supervision shared by agent kinds that run an external CLI.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+use super::adapter::{AgentRun, AgentSpec, JobProgress};
+
+const OUTPUT_CAP: usize = 2 * 1024 * 1024;
+
+pub(super) async fn run_process(
+    program: &str,
+    args: &[String],
+    spec: &AgentSpec,
+    timeout: Duration,
+    stdin: Option<Vec<u8>>,
+) -> Result<AgentRun> {
+    let mut command = crate::platform::command(program, args);
+    command
+        .current_dir(&spec.cwd)
+        // CLIs may resolve their workspace from PWD; keep it aligned with cwd.
+        .env("PWD", &spec.cwd)
+        .env_remove("OLDPWD")
+        .env("DOMO_JOB_ID", &spec.job_id)
+        .env("DOMO_JOB_ROLE", &spec.role)
+        .env("DOMO_JOB_DIR", &spec.job_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("启动 Agent 进程失败: {program}"))?;
+    let pid = child.id();
+    if let Some(pid) = pid {
+        // Only record a pid that can be checked later. Without a start time a
+        // recycled pid could make recovery kill an unrelated process.
+        if let Some(start) = process_start_time(pid) {
+            let _ = std::fs::write(spec.job_dir.join("pid"), format!("{pid}:{start}"));
+        }
+    }
+    if let Some(input) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            tokio::spawn(async move {
+                let _ = pipe.write_all(&input).await;
+                let _ = pipe.shutdown().await;
+            });
+        }
+    }
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let stdout_log = spec.job_dir.join("stdout.log");
+    let stderr_log = spec.job_dir.join("stderr.log");
+    let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true, stdout_log));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr,
+        spec.progress.clone(),
+        false,
+        stderr_log,
+    ));
+
+    let mut timed_out = false;
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result?,
+        Err(_) => {
+            timed_out = true;
+            if let Some(pid) = pid {
+                kill_process_group(pid);
+            }
+            let _ = child.kill().await;
+            child.wait().await?
+        }
+    };
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
+    Ok(AgentRun {
+        stdout,
+        stderr,
+        exit_code: status.code().map(|code| code as i64),
+        timed_out,
+        stalled: false,
+        session_id: None,
+        usage: None,
+    })
+}
+
+async fn read_capped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    progress: JobProgress,
+    stdout: bool,
+    log_path: PathBuf,
+) -> String {
+    let mut output = Vec::new();
+    let mut written = 0usize;
+    let mut buffer = [0u8; 8192];
+    let mut log = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .await
+        .ok();
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if output.len() < OUTPUT_CAP {
+                    let take = n.min(OUTPUT_CAP - output.len());
+                    output.extend_from_slice(&buffer[..take]);
+                }
+                if let Some(log) = &mut log {
+                    if written < OUTPUT_CAP {
+                        let take = n.min(OUTPUT_CAP - written);
+                        let _ = log.write_all(&buffer[..take]).await;
+                        written += take;
+                    }
+                }
+                if stdout {
+                    progress.record_stdout(n);
+                } else {
+                    progress.record_stderr(n);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+pub fn kill_process_group(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        if libc::kill(-(pid as i32), libc::SIGKILL) == 0 {
+            return true;
+        }
+        libc::kill(pid as i32, libc::SIGKILL) == 0
+    }
+    #[cfg(windows)]
+    {
+        // `child.kill()` only terminates the direct child. Agent CLIs spawn
+        // their own tools, so the whole process tree has to be removed.
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Kills the process recorded for a job. Returns true only when the pid file
+/// matched and the process was actually terminated, which lets the runner tell
+/// a watchdog kill from a process that had already exited on its own.
+pub fn kill_job_dir(job_dir: &Path) -> bool {
+    let path = job_dir.join("pid");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (pid_text, recorded_start) = match raw.trim().split_once(':') {
+        Some((pid, start)) => (pid, Some(start)),
+        None => (raw.trim(), None),
+    };
+    let Ok(pid) = pid_text.parse::<u32>() else {
+        return false;
+    };
+    if let Some(recorded) = recorded_start {
+        if !recorded.is_empty() && process_start_time(pid).as_deref() != Some(recorded) {
+            return false;
+        }
+    }
+    kill_process_group(pid)
+}
+
+#[cfg(not(windows))]
+pub(super) fn process_start_time(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The executable name may contain spaces; fields after the closing parenthesis
+    // are stable. Start time is field 22 overall, index 19 after the state field.
+    let rest = stat.rsplit_once(") ").map(|(_, rest)| rest)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    fields.get(19).map(|value| value.to_string())
+}
+
+#[cfg(windows)]
+pub(super) fn process_start_time(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        Some(ticks.to_string())
+    }
+}

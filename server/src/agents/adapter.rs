@@ -1,0 +1,195 @@
+//! Business-facing contracts for one agent type. A job is one process (or one
+//! in-process mock) that changes the workspace and writes a result JSON file.
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::models::AgentRow;
+use crate::usage::UsageRecord;
+
+/// Liveness signal for one job. Reader tasks update it whenever the agent
+/// writes to stdout/stderr; the runner compares it against the stall threshold.
+#[derive(Debug, Clone)]
+pub struct JobProgress {
+    inner: std::sync::Arc<JobProgressInner>,
+}
+
+#[derive(Debug)]
+struct JobProgressInner {
+    started: std::time::Instant,
+    last_activity_ms: AtomicU64,
+    stdout_bytes: AtomicU64,
+    stderr_bytes: AtomicU64,
+}
+
+impl JobProgress {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(JobProgressInner {
+                started: std::time::Instant::now(),
+                last_activity_ms: AtomicU64::new(0),
+                stdout_bytes: AtomicU64::new(0),
+                stderr_bytes: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.inner.started.elapsed().as_millis() as u64
+    }
+
+    pub fn touch(&self) {
+        self.inner
+            .last_activity_ms
+            .store(self.elapsed_ms(), Ordering::Relaxed);
+    }
+
+    pub fn idle_for(&self) -> Duration {
+        Duration::from_millis(
+            self.elapsed_ms()
+                .saturating_sub(self.inner.last_activity_ms.load(Ordering::Relaxed)),
+        )
+    }
+
+    pub fn record_stdout(&self, bytes: usize) {
+        self.inner
+            .stdout_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub fn record_stderr(&self, bytes: usize) {
+        self.inner
+            .stderr_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub fn output_bytes(&self) -> (u64, u64) {
+        (
+            self.inner.stdout_bytes.load(Ordering::Relaxed),
+            self.inner.stderr_bytes.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl Default for JobProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRun {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    pub timed_out: bool,
+    pub stalled: bool,
+    pub session_id: Option<String>,
+    pub usage: Option<UsageRecord>,
+}
+
+impl AgentRun {
+    /// True when the process did not finish on its own terms, regardless of
+    /// whether the watchdog or the OS ended it.
+    pub fn process_failure(&self) -> bool {
+        self.timed_out || self.stalled || self.exit_code != Some(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentSpec {
+    pub job_id: String,
+    pub role: String,
+    pub cwd: PathBuf,
+    pub job_dir: PathBuf,
+    pub prompt: String,
+    pub original_prompt: String,
+    pub session_id: Option<String>,
+    pub continuation: bool,
+    pub progress: JobProgress,
+}
+
+/// Agent settings an adapter needs before a run starts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct AgentConfig {
+    pub kind: String,
+    pub model: String,
+    pub command: Vec<String>,
+    pub model_args: Vec<String>,
+}
+
+impl AgentConfig {
+    pub fn from_row(agent: &AgentRow) -> Self {
+        Self {
+            kind: agent.kind.clone(),
+            model: agent.model.clone(),
+            command: parse_arg_list(agent.command_json.as_deref()),
+            model_args: parse_arg_list(agent.model_args_json.as_deref()),
+        }
+    }
+}
+
+fn parse_arg_list(raw: Option<&str>) -> Vec<String> {
+    raw.map(|raw| serde_json::from_str::<Vec<String>>(raw).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Usage an adapter attributes to one job. `PerTurn` keeps whatever the run
+/// reported; `Authoritative` replaces it with the adapter's own record.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobUsage {
+    PerTurn,
+    Authoritative(Option<UsageRecord>),
+}
+
+/// Input for one turn of work. The adapter owns argument expansion and prompt
+/// delivery, so callers only describe the job and its settings.
+#[allow(dead_code)]
+pub struct TurnContext<'a> {
+    pub config: &'a AgentConfig,
+    pub spec: &'a AgentSpec,
+    pub timeout: Duration,
+}
+
+/// Input for usage settlement after the final turn.
+#[allow(dead_code)]
+pub struct FinishContext<'a> {
+    pub config: &'a AgentConfig,
+    pub spec: &'a AgentSpec,
+    pub run: &'a AgentRun,
+}
+
+/// One agent kind, distinguished only by business capabilities.
+#[allow(dead_code)]
+pub trait AgentAdapter: Default + Send + Sync + 'static {
+    /// Whether a run needs a configured command template.
+    fn requires_command_template(config: &AgentConfig) -> bool;
+
+    /// Rejects settings this adapter cannot run.
+    fn validate(config: &AgentConfig) -> Result<()>;
+
+    /// Session id a job runs under, given an existing continuation session.
+    fn session_for_job(job_id: &str, existing: Option<&str>) -> Option<String>;
+
+    /// Runs one turn, including this kind's argument and prompt delivery.
+    fn run_turn<'a>(
+        &'a self,
+        context: TurnContext<'a>,
+    ) -> impl Future<Output = Result<AgentRun>> + Send + 'a;
+
+    /// Reports the usage this adapter accounts for the job.
+    fn finish_job<'a>(
+        &'a self,
+        _context: FinishContext<'a>,
+    ) -> impl Future<Output = JobUsage> + Send + 'a {
+        async { JobUsage::PerTurn }
+    }
+}
