@@ -667,38 +667,45 @@ impl FailureKind {
 
 pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
     let lowered = reason.to_lowercase();
-    if contains_any(
-        &lowered,
-        &[
-            "429",
-            "rate limit",
-            "ratelimit",
-            "too many requests",
-            "quota",
-            "限流",
-            "请求过多",
-        ],
-    ) {
+    if contains_status_code(&lowered, "429")
+        || contains_any(
+            &lowered,
+            &[
+                "rate limit",
+                "rate-limit",
+                "ratelimit",
+                "rate_limit",
+                "too many requests",
+                "quota",
+                "限流",
+                "请求过多",
+            ],
+        )
+    {
         return FailureKind::RateLimit;
     }
-    if contains_any(
-        &lowered,
-        &[
-            "永久错误",
-            "permanent",
-            "unauthorized",
-            "forbidden",
-            "invalid api key",
-            "invalid_request",
-            "401",
-            "403",
-            "配置无效",
-            "不可恢复",
-        ],
-    ) {
+    if contains_status_code(&lowered, "401")
+        || contains_status_code(&lowered, "403")
+        || contains_any(
+            &lowered,
+            &[
+                "永久错误",
+                "permanent",
+                "unauthorized",
+                "forbidden",
+                "invalid api key",
+                "invalid_request",
+                "配置无效",
+                "不可恢复",
+            ],
+        )
+    {
         return FailureKind::Permanent;
     }
     if process_failure
+        || contains_status_code(&lowered, "502")
+        || contains_status_code(&lowered, "503")
+        || contains_status_code(&lowered, "504")
         || contains_any(
             &lowered,
             &[
@@ -710,9 +717,6 @@ pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
                 "overloaded",
                 "connection",
                 "network",
-                "502",
-                "503",
-                "504",
                 "broken pipe",
                 "provider",
             ],
@@ -725,6 +729,17 @@ pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+/// Matches an HTTP status code as a standalone token so timestamps and file
+/// sizes do not become failure signals.
+fn contains_status_code(text: &str, code: &str) -> bool {
+    text.match_indices(code).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + code.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric())
+    })
 }
 
 /// Rate limits may carry their own retry window. The default is 30 minutes.
@@ -1199,6 +1214,27 @@ mod tests {
             classify_failure("mock 首次执行失败", false),
             FailureKind::Task
         );
+    }
+
+    #[test]
+    fn ignores_status_codes_embedded_in_numbers() {
+        let reason = "Agent 进程退出码 Some(1): {\"timestamp\":1793430854011,\"size\":2403}";
+        assert_eq!(classify_failure(reason, true), FailureKind::Transient);
+        assert_eq!(
+            classify_failure("request id 14290", false),
+            FailureKind::Task
+        );
+    }
+
+    #[test]
+    fn classifies_standalone_provider_status_codes() {
+        assert_eq!(
+            classify_failure(r#"{"status":429}"#, true),
+            FailureKind::RateLimit
+        );
+        assert_eq!(classify_failure("HTTP 401", true), FailureKind::Permanent);
+        assert_eq!(classify_failure("HTTP 403", true), FailureKind::Permanent);
+        assert_eq!(classify_failure("HTTP 503", true), FailureKind::Transient);
     }
 
     #[test]

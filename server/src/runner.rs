@@ -200,7 +200,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             format!(
                 "Agent 进程退出码 {:?}: {}",
                 run.exit_code,
-                first_lines(&detail, 30)
+                crate::failure::error_detail(&detail, 30)
             )
         };
         (JOB_STATUS_FAILED, raw_result.clone(), Some(reason))
@@ -2933,15 +2933,6 @@ fn role_label(role: &str) -> &'static str {
         JOB_ROLE_SUMMARY => "总结",
         _ => "未知",
     }
-}
-
-fn first_lines(text: &str, count: usize) -> String {
-    text.lines()
-        .take(count)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
 }
 
 async fn load_job(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>> {

@@ -39,6 +39,42 @@ pub fn summarize(raw: Option<&str>) -> Option<FailureSummary> {
     Some(summarize_text(text))
 }
 
+/// Builds the stored failure detail for an agent run. The opening lines keep
+/// local context, and the last structured error event is appended because it
+/// may fall outside the excerpt and carries the provider status that drives
+/// retry policy.
+pub fn error_detail(text: &str, line_count: usize) -> String {
+    let excerpt = text
+        .lines()
+        .take(line_count)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    match last_error_line(text) {
+        Some(error) if !excerpt.contains(error) => {
+            if excerpt.is_empty() {
+                error.to_string()
+            } else {
+                format!("{excerpt}\n{error}")
+            }
+        }
+        _ => excerpt,
+    }
+}
+
+/// Returns the last JSONL line whose top-level payload is an error event.
+/// Nested tool-state errors are not failure events for the job.
+pub fn last_error_line(text: &str) -> Option<&str> {
+    text.lines().rev().find_map(|line| {
+        let fragment = json_fragment(line)?;
+        let value = serde_json::from_str::<Value>(fragment).ok()?;
+        let is_error = value.get("type").and_then(Value::as_str) == Some("error")
+            || value.get("error").is_some_and(|error| !error.is_null());
+        is_error.then_some(fragment)
+    })
+}
+
 fn summarize_json_lines(text: &str) -> Option<FailureSummary> {
     let mut last = None;
     for line in text.lines() {
@@ -469,5 +505,36 @@ mod tests {
         assert!(summary.message.ends_with('…'));
         assert!(summarize(Some("   ")).is_none());
         assert!(summarize(None).is_none());
+    }
+
+    #[test]
+    fn appends_the_last_error_event_outside_the_excerpt() {
+        let mut raw = String::new();
+        for _ in 0..30 {
+            raw.push_str("{\"type\":\"step_start\",\"timestamp\":1793430854011,\"size\":2403}\n");
+        }
+        raw.push_str(
+            "{\"type\":\"error\",\"error\":{\"type\":\"provider.rate-limit\",\
+             \"message\":\"Too many requests\",\"status\":429}}",
+        );
+        let detail = error_detail(&raw, 30);
+        assert!(detail.contains("provider.rate-limit"));
+        let summary = summarize(Some(&detail)).expect("error event is summarized");
+        assert_eq!(summary.kind, KIND_RATE_LIMIT);
+        assert_eq!(summary.message, "Too many requests");
+        assert_eq!(summary.status, Some(429));
+    }
+
+    #[test]
+    fn does_not_duplicate_an_error_event_inside_the_excerpt() {
+        let raw = "{\"type\":\"error\",\"error\":{\"message\":\"boom\",\"status\":401}}";
+        assert_eq!(error_detail(raw, 30), raw);
+    }
+
+    #[test]
+    fn ignores_nested_tool_errors_when_selecting_the_job_error() {
+        let raw = "{\"type\":\"tool\",\"state\":{\"status\":\"error\",\"error\":\"exit 1\"}}\n\
+                   {\"type\":\"step_start\",\"timestamp\":1793430854011}";
+        assert!(last_error_line(raw).is_none());
     }
 }
