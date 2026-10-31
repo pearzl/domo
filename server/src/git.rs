@@ -192,6 +192,22 @@ pub fn archive_ref(branch: &str) -> String {
     format!("refs/domo-archive/heads/{branch}")
 }
 
+/// True when `dir` is the root of a Git worktree. Plain directories and
+/// subdirectories of another checkout are rejected so leftover directories are
+/// never mistaken for a task workspace.
+pub async fn is_worktree(dir: &Path) -> bool {
+    let Ok(root) = repo_root(dir).await else {
+        return false;
+    };
+    match (
+        tokio::fs::canonicalize(dir).await,
+        tokio::fs::canonicalize(&root).await,
+    ) {
+        (Ok(dir), Ok(root)) => dir == root,
+        _ => false,
+    }
+}
+
 pub async fn status_porcelain(dir: &Path) -> Result<String> {
     run_git(dir, &["status", "--porcelain"]).await
 }
@@ -495,6 +511,21 @@ detached
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
         assert_eq!(entries[1].path, PathBuf::from("/tmp/task one"));
         assert_eq!(entries[1].branch, None);
+    }
+
+    #[tokio::test]
+    async fn is_worktree_rejects_plain_and_nested_directories() {
+        let root = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("nested")).unwrap();
+
+        assert!(!is_worktree(&repo).await);
+
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        assert!(is_worktree(&repo).await);
+        assert!(!is_worktree(&repo.join("nested")).await);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

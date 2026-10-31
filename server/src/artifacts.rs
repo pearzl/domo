@@ -48,6 +48,12 @@ pub async fn cleanup_task(
             if !managed_child(&workspace, path) {
                 tracing::warn!(path = %path.display(), "任务工作区不在项目工作区内，跳过清理");
                 clean = false;
+            } else if !git::is_worktree(path).await {
+                tracing::debug!(
+                    path = %path.display(),
+                    "任务工作区不是 Git 工作树，按残留目录清理"
+                );
+                remove_worktree = true;
             } else if !git::status_porcelain(path).await?.trim().is_empty() {
                 tracing::warn!(path = %path.display(), "任务工作区有未提交改动，跳过清理");
                 clean = false;
@@ -149,6 +155,12 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
                 "项目工作区不在项目目录内，跳过清理"
             );
             clean = false;
+        } else if !git::is_worktree(&project_worktree).await {
+            tracing::debug!(
+                path = %project_worktree.display(),
+                "项目工作区不是 Git 工作树，按残留目录清理"
+            );
+            git::remove_worktree(&repo, &project_worktree).await?;
         } else if !git::status_porcelain(&project_worktree)
             .await?
             .trim()
@@ -533,6 +545,23 @@ mod tests {
                 .unwrap();
         assert!(released_at.is_some());
         assert_ne!(released_at.as_deref(), Some(ARTIFACTS_RELEASING));
+
+        std::fs::create_dir_all(&task_worktree).unwrap();
+        std::fs::write(task_worktree.join("leftover.txt"), "value").unwrap();
+        sqlx::query("UPDATE tasks SET artifacts_released_at = ? WHERE id = ?")
+            .bind(ARTIFACTS_RELEASING)
+            .bind("tsk_test")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+            .bind("tsk_test")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(cleanup_task(&state, &project, &task, false).await.unwrap());
+        assert!(!task_worktree.exists());
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }
