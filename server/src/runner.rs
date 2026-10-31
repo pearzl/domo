@@ -2076,6 +2076,12 @@ async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRow, task: &T
     }
 }
 
+/// A missing result is terminal after its continuation budget. A malformed
+/// result can be corrected on retry and stays within the task attempt budget.
+fn protocol_failure_blocks(reason: &str) -> bool {
+    reason.contains("没有写 result.json")
+}
+
 async fn handle_executor_failure(
     state: &AppState,
     project: &ProjectRow,
@@ -2089,7 +2095,12 @@ async fn handle_executor_failure(
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = task.attempts + 1;
-    let mut blocked = kind == FailureKind::Protocol || (!kind.is_agent_failure() && attempts >= 3);
+    // Missing results have already consumed the continuation budget, so they
+    // block. A malformed result can be corrected on retry and uses the normal
+    // attempt budget.
+    let mut blocked = (kind == FailureKind::Protocol
+        && (protocol_failure_blocks(reason) || attempts >= 3))
+        || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && !has_usable_agent(state, &project.id, ROLE_EXECUTOR, Some(&agent.id)).await?
@@ -2448,7 +2459,12 @@ async fn handle_verifier_failure(
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = task.attempts + 1;
-    let mut blocked = kind == FailureKind::Protocol || (!kind.is_agent_failure() && attempts >= 3);
+    // Missing results have already consumed the continuation budget, so they
+    // block. A malformed result can be corrected on retry and uses the normal
+    // attempt budget.
+    let mut blocked = (kind == FailureKind::Protocol
+        && (protocol_failure_blocks(reason) || attempts >= 3))
+        || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && !has_usable_agent(state, &project.id, ROLE_VERIFIER, Some(&agent.id)).await?
