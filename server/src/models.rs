@@ -177,6 +177,9 @@ pub struct ProjectAgentEntry {
     pub priority: i64,
     pub enabled: bool,
     pub agent_enabled: bool,
+    /// 项目 Agent 池中同一 Agent 在该角色下的启用状态。默认团队恒为 true；
+    /// 任务池用它表示项目层是否屏蔽了这个 Agent。
+    pub project_enabled: bool,
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub max_concurrency: i64,

@@ -10,11 +10,7 @@ import {
   formatUsageAmount,
   shortText,
 } from "../ui";
-import {
-  nextRoleTab,
-  resolveActiveRole,
-  roleTabs,
-} from "../presentation/agentPool";
+import { nextRoleTab, resolveActiveRole, roleTabs } from "../presentation/agentPool";
 
 export interface AgentPoolPanelProps {
   /** 面板标题，例如"项目 Agent 池"或"默认团队"。 */
@@ -23,6 +19,8 @@ export interface AgentPoolPanelProps {
   subtitle: string;
   roles: ProjectRolePool[];
   disabled?: boolean;
+  /** 面板控制范围：默认团队、项目池或任务池，决定停用提示与按钮可用性。 */
+  scope?: "default" | "project" | "task";
   /** 交换相邻两个 Agent 的顺序。 */
   onMove: (role: Role, agentId: string, direction: "up" | "down") => Promise<unknown>;
   /** 把条目移动到该角色内 0 基目标位置；拖动排序经由这里持久化。 */
@@ -71,6 +69,7 @@ export function AgentPoolPanel({
   subtitle,
   roles,
   disabled = false,
+  scope = "project",
   onMove,
   onReorder,
   onToggle,
@@ -200,6 +199,9 @@ export function AgentPoolPanel({
           ) : (
             <div className="agent-pool-list">
               {currentGroup.entries.map((entry, index) => {
+                const globallyBlocked = !entry.agent_enabled;
+                const projectBlocked = scope === "task" && !entry.project_enabled;
+                const upperBlocked = globallyBlocked || projectBlocked;
                 const isDragSource =
                   dragEnabled &&
                   drag?.role === currentGroup.role &&
@@ -273,10 +275,22 @@ export function AgentPoolPanel({
                           不可用
                         </Badge>
                       ) : null}
-                      {entry.available && !entry.enabled ? (
-                        <Badge tone="warn">已停用</Badge>
+                      {globallyBlocked ? (
+                        <Badge tone="danger" title="在 Agent 团队页全局停用">
+                          全局已停用
+                        </Badge>
                       ) : null}
-                      {entry.available && entry.enabled ? (
+                      {projectBlocked ? (
+                        <Badge tone="warn" title="项目 Agent 池已停用该 Agent">
+                          项目已停用
+                        </Badge>
+                      ) : null}
+                      {!entry.enabled ? (
+                        <Badge tone="warn">
+                          {scope === "task" ? "任务池已停用" : "已停用"}
+                        </Badge>
+                      ) : null}
+                      {entry.enabled ? (
                         <Badge tone="success">已启用</Badge>
                       ) : null}
                       {entry.cooldown_until &&
@@ -336,12 +350,29 @@ export function AgentPoolPanel({
                       <button
                         type="button"
                         className={entry.enabled ? "secondary" : "ghost"}
-                        disabled={disabled || busy || !entry.available}
+                        disabled={disabled || busy || !entry.available || upperBlocked}
+                        title={
+                          globallyBlocked
+                            ? "全局已停用，请先在 Agent 团队页启用"
+                            : projectBlocked
+                              ? "项目 Agent 池已停用该 Agent，请先在项目页启用"
+                              : undefined
+                        }
                         onClick={() =>
                           act(() => onToggle(currentGroup.role, entry.agent_id, !entry.enabled))
                         }
                       >
-                        {entry.enabled ? "停用" : "启用"}
+                        {scope === "task"
+                          ? entry.enabled
+                            ? "任务停用"
+                            : "任务启用"
+                          : scope === "project"
+                            ? entry.enabled
+                              ? "本项目停用"
+                              : "本项目启用"
+                            : entry.enabled
+                              ? "默认团队停用"
+                              : "默认团队启用"}
                       </button>
                     </span>
                     {entry.unavailable_reason ? (

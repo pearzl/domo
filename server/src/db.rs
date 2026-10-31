@@ -1,5 +1,6 @@
 //! SQLite connection setup and embedded schema.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -684,7 +685,7 @@ pub async fn load_project_agent_pool(
     .await?;
     Ok(ProjectAgentPool {
         project_id: project_id.to_string(),
-        roles: build_role_pools(pool, &rows, PROJECT_POOL_ROLES).await?,
+        roles: build_role_pools(pool, Some(project_id), &rows, PROJECT_POOL_ROLES).await?,
     })
 }
 
@@ -694,7 +695,7 @@ pub async fn load_default_team_pool(pool: &SqlitePool) -> anyhow::Result<Project
     let rows = default_team_pool_rows(pool).await?;
     Ok(ProjectAgentPool {
         project_id: "default".to_string(),
-        roles: build_role_pools(pool, &rows, PROJECT_POOL_ROLES).await?,
+        roles: build_role_pools(pool, None, &rows, PROJECT_POOL_ROLES).await?,
     })
 }
 
@@ -736,15 +737,33 @@ async fn default_team_pool_rows(pool: &SqlitePool) -> anyhow::Result<Vec<Project
 }
 
 /// 把池行与全局 Agent 合并成带可用性信息的角色分组视图。`roles` 决定返回哪些
-/// 角色分组，项目池三种角色，任务池只有执行者与验收者。
+/// 角色分组，项目池三种角色，任务池只有执行者与验收者。`project_id` 存在时，
+/// 同一角色下项目池已停用的 Agent 会标记为项目层不可用；任务池据此展示项目
+/// 池对已有任务的屏蔽状态。
 async fn build_role_pools(
     pool: &SqlitePool,
+    project_id: Option<&str>,
     rows: &[ProjectAgentRow],
     roles: &[&str],
 ) -> anyhow::Result<Vec<ProjectRolePool>> {
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(pool)
         .await?;
+    let project_enabled = match project_id {
+        Some(project_id) => {
+            let project_rows = sqlx::query_as::<_, ProjectAgentRow>(
+                "SELECT * FROM project_agents WHERE project_id = ?",
+            )
+            .bind(project_id)
+            .fetch_all(pool)
+            .await?;
+            project_rows
+                .into_iter()
+                .map(|row| ((row.role, row.agent_id), row.enabled != 0))
+                .collect::<HashMap<_, _>>()
+        }
+        None => HashMap::new(),
+    };
     let mut role_pools = Vec::new();
     for role in roles {
         let mut entries = Vec::new();
@@ -797,6 +816,10 @@ async fn build_role_pools(
                 priority: row.priority,
                 enabled: row.enabled != 0,
                 agent_enabled: agent.map(|agent| agent.enabled != 0).unwrap_or(false),
+                project_enabled: project_enabled
+                    .get(&(row.role.clone(), row.agent_id.clone()))
+                    .copied()
+                    .unwrap_or(true),
                 available: unavailable_reason.is_none(),
                 unavailable_reason,
                 max_concurrency: agent.map(|agent| agent.max_concurrency.max(1)).unwrap_or(1),
@@ -977,7 +1000,7 @@ pub async fn load_task_agent_pool(
     Ok(TaskAgentPool {
         project_id: project_id.to_string(),
         task_id: task_id.to_string(),
-        roles: build_role_pools(pool, &rows, TASK_POOL_ROLES).await?,
+        roles: build_role_pools(pool, Some(project_id), &rows, TASK_POOL_ROLES).await?,
     })
 }
 

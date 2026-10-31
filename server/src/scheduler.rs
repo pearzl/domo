@@ -724,6 +724,24 @@ async fn choose_agent(
             reason: Some(format!("{scope}没有{}角色 Agent，{hint}", role_label(role))),
         });
     }
+    // 任务池是项目池的快照，但项目池的停用状态是更高层约束：
+    // 项目池中同一角色停用后，已有任务也不再派发该 Agent。项目池缺少条目时
+    // 不阻塞任务池，避免历史快照中的 Agent 因成员清理而失效。
+    let project_disabled: HashSet<String> = if scope == "任务 Agent 池" {
+        sqlx::query_as::<_, (String,)>(
+            "SELECT agent_id FROM project_agents \
+             WHERE project_id = ? AND role = ? AND enabled = 0",
+        )
+        .bind(&project.id)
+        .bind(role)
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|(agent_id,)| agent_id)
+        .collect()
+    } else {
+        HashSet::new()
+    };
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(&state.db)
         .await?;
@@ -776,6 +794,10 @@ async fn choose_agent(
         }
         if agent.enabled == 0 {
             unavailable.push(format!("「{}」（全局已禁用）", agent.name));
+            continue;
+        }
+        if project_disabled.contains(&agent.id) {
+            unavailable.push(format!("「{}」（项目 Agent 池已停用）", agent.name));
             continue;
         }
         if avoided == Some(agent.id.as_str()) {

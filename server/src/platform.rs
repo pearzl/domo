@@ -313,6 +313,7 @@ fn resolve_token(program: &str, depth: usize) -> Option<ResolvedProgram> {
     Some(ResolvedProgram::direct(path))
 }
 
+#[cfg(any(windows, test))]
 fn split_shim_tokens(command: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

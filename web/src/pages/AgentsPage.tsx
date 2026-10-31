@@ -254,8 +254,8 @@ export function AgentsPage() {
         <div>
           <h1>Agent 团队</h1>
           <p className="subtitle">
-            同一 Agent 可以扮演多个角色。默认团队决定新项目的初始 Agent 池；
-            可用时段按本地时区生效，用量限额达到后自动跳过，新窗口开始后自动恢复。
+            同一 Agent 可以扮演多个角色。卡片上的启停是全局开关，影响所有项目与任务；
+            默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量限额达到后自动跳过，新窗口开始后自动恢复。
           </p>
         </div>
         <button className="primary" onClick={startCreate}>
@@ -276,6 +276,7 @@ export function AgentsPage() {
           title="默认团队"
           subtitle="系统级团队模板：全部已注册 Agent 按角色出现在默认团队中，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
           roles={team.roles}
+          scope="default"
           defaultOpen
           onReorder={(role, agentId, position) =>
             api.updateDefaultTeamAgent(role, agentId, { position })
@@ -534,7 +535,7 @@ export function AgentsPage() {
                 <div className="badge-row">
                   <Badge tone="info">{agent.kind}</Badge>
                   <Badge tone={agent.enabled ? "success" : "muted"}>
-                    {agent.enabled ? "已启用" : "已禁用"}
+                    {agent.enabled ? "全局已启用" : "全局已停用"}
                   </Badge>
                   <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
                   {agent.usage_window?.exceeded ? (
@@ -546,8 +547,12 @@ export function AgentsPage() {
                 <button className="ghost" onClick={() => startEdit(agent)}>
                   编辑
                 </button>
-                <button className="ghost" onClick={() => void toggle(agent)}>
-                  {agent.enabled ? "禁用" : "启用"}
+                <button
+                  className="ghost"
+                  title="全局开关：影响所有项目和任务"
+                  onClick={() => void toggle(agent)}
+                >
+                  {agent.enabled ? "全局停用" : "全局启用"}
                 </button>
                 <button
                   className="ghost danger-text"

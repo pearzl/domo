@@ -14,6 +14,7 @@ function entry(overrides: Partial<ProjectAgentEntry> = {}): ProjectAgentEntry {
     priority: 0,
     enabled: true,
     agent_enabled: true,
+    project_enabled: true,
     available: true,
     unavailable_reason: null,
     max_concurrency: 1,
@@ -194,4 +195,20 @@ describe("AgentPoolPanel 选项卡渲染", () => {
     expect(html).toContain("Verifier A");
     expect(html).not.toContain("Planner A");
   });
+
+  it("任务池展示项目层停用并禁用任务开关", () => {
+    const html = render({
+      activeRole: "executor",
+      scope: "task",
+      roles: [
+        {
+          role: "executor",
+          entries: [entry({ name: "Masked", project_enabled: false })],
+        },
+      ],
+    });
+    expect(html).toContain("项目已停用");
+    expect(html).toMatch(/disabled="" title="项目 Agent 池已停用该 Agent/);
+  });
 });
+

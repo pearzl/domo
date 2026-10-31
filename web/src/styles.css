@@ -1972,8 +1972,10 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
 
 .agent-pool-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .agent-pool-actions button {
@@ -1985,6 +1987,7 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   grid-column: 2 / -1;
   font-size: 0.78rem;
 }
+
 
 .jobs {
   display: flex;

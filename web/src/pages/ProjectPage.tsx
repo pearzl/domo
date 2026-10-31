@@ -1315,9 +1315,10 @@ export function ProjectPage({
         </details>
         <AgentPoolPanel
           title="项目 Agent 池"
-          subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护。"
+          subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护；角色启停只影响当前项目，项目池停用会屏蔽已有任务。"
           roles={detail.agent_pool.roles}
           disabled={archived}
+          scope="project"
           onReorder={(role, agentId, position) =>
             api.updateProjectAgent(project.id, role, agentId, { position })
           }
@@ -2341,6 +2342,7 @@ function TaskAgentPoolPanel({
       roles={pool.roles}
       activeRole="executor"
       disabled={disabled}
+      scope="task"
       onReorder={(role, agentId, position) =>
         api.updateTaskAgent(task.project_id, task.id, role, agentId, { position })
       }

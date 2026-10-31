@@ -116,6 +116,8 @@ export interface ProjectAgentEntry {
   priority: number;
   enabled: boolean;
   agent_enabled: boolean;
+  /** 项目 Agent 池中同一 Agent 在该角色下的启用状态；任务池据此展示项目层屏蔽。 */
+  project_enabled: boolean;
   available: boolean;
   unavailable_reason: string | null;
   max_concurrency: number;
