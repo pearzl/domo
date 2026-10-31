@@ -253,9 +253,10 @@ async fn create_agent(
     let id = domain::new_id("agt");
     let timestamp = now();
     sqlx::query(
-        "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
-         command_json, model_args_json, availability_json, usage_limit_json, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, \
+         allow_priority_fallback, enabled, command_json, model_args_json, availability_json, \
+         usage_limit_json, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
@@ -263,6 +264,7 @@ async fn create_agent(
     .bind(request.model.unwrap_or_default().trim())
     .bind(serde_json::to_string(&roles).unwrap_or_else(|_| "[]".into()))
     .bind(request.max_concurrency.unwrap_or(1).max(1))
+    .bind(i64::from(request.allow_priority_fallback.unwrap_or(false)))
     .bind(if request.enabled.unwrap_or(true) {
         1
     } else {
@@ -336,6 +338,10 @@ async fn update_agent(
         .enabled
         .map(|value| if value { 1 } else { 0 })
         .unwrap_or(existing.enabled);
+    let allow_priority_fallback = request
+        .allow_priority_fallback
+        .map(i64::from)
+        .unwrap_or(existing.allow_priority_fallback);
     let availability_json = match request.availability {
         None => existing.availability_json.clone(),
         Some(None) => None,
@@ -354,8 +360,8 @@ async fn update_agent(
     };
     sqlx::query(
         "UPDATE agents SET name = ?, kind = ?, model = ?, roles = ?, \
-         max_concurrency = ?, enabled = ?, command_json = ?, model_args_json = ?, \
-         availability_json = ?, usage_limit_json = ?, \
+         max_concurrency = ?, allow_priority_fallback = ?, enabled = ?, command_json = ?, \
+         model_args_json = ?, availability_json = ?, usage_limit_json = ?, \
          cooldown_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(&name)
@@ -363,6 +369,7 @@ async fn update_agent(
     .bind(model.trim())
     .bind(&roles)
     .bind(max_concurrency)
+    .bind(allow_priority_fallback)
     .bind(enabled)
     .bind(&command_json)
     .bind(&model_args)

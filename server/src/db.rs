@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS agents (
     roles TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
     max_concurrency INTEGER NOT NULL DEFAULT 1,
+    allow_priority_fallback INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     command_json TEXT,
     model_args_json TEXT,
@@ -311,6 +312,13 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "agents", "availability_json", "TEXT").await?;
     ensure_column(pool, "agents", "usage_limit_json", "TEXT").await?;
     ensure_column(pool, "agents", "usage_reset_at", "TEXT").await?;
+    ensure_column(
+        pool,
+        "agents",
+        "allow_priority_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
     sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_jobs_agent ON jobs(agent_id, created_at)")
         .execute(pool)
         .await?;
@@ -823,6 +831,9 @@ async fn build_role_pools(
                 available: unavailable_reason.is_none(),
                 unavailable_reason,
                 max_concurrency: agent.map(|agent| agent.max_concurrency.max(1)).unwrap_or(1),
+                allow_priority_fallback: agent
+                    .map(|agent| agent.allow_priority_fallback != 0)
+                    .unwrap_or(false),
                 cooldown_until: agent.and_then(|agent| agent.cooldown_until.clone()),
                 last_error,
                 failure_kind: agent.and_then(|agent| agent.failure_kind.clone()),

@@ -84,6 +84,8 @@ pub struct AgentRow {
     #[allow(dead_code)]
     priority: i64,
     pub max_concurrency: i64,
+    /// 并发已满时是否允许调度到同角色池中后续优先级的 Agent。
+    pub allow_priority_fallback: i64,
     pub enabled: i64,
     pub command_json: Option<String>,
     pub model_args_json: Option<String>,
@@ -106,6 +108,7 @@ pub struct AgentView {
     pub model: String,
     pub roles: Vec<String>,
     pub max_concurrency: i64,
+    pub allow_priority_fallback: bool,
     pub enabled: bool,
     pub command: Vec<String>,
     pub model_args: Vec<String>,
@@ -131,6 +134,7 @@ impl AgentView {
             model: row.model,
             roles: parse_string_list(&row.roles),
             max_concurrency: row.max_concurrency.max(1),
+            allow_priority_fallback: row.allow_priority_fallback != 0,
             enabled: row.enabled != 0,
             command: row
                 .command_json
@@ -184,6 +188,7 @@ pub struct ProjectAgentEntry {
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub max_concurrency: i64,
+    pub allow_priority_fallback: bool,
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
     pub failure_kind: Option<String>,
@@ -757,6 +762,8 @@ pub struct CreateAgentRequest {
     pub model: Option<String>,
     pub roles: Option<Vec<String>>,
     pub max_concurrency: Option<i64>,
+    /// 并发已满时是否允许调度到同角色池中后续优先级的 Agent，缺省为 false。
+    pub allow_priority_fallback: Option<bool>,
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
     pub model_args: Option<Vec<String>>,
@@ -771,6 +778,7 @@ pub struct UpdateAgentRequest {
     pub model: Option<String>,
     pub roles: Option<Vec<String>>,
     pub max_concurrency: Option<i64>,
+    pub allow_priority_fallback: Option<bool>,
     pub enabled: Option<bool>,
     pub command: Option<Vec<String>>,
     pub model_args: Option<Vec<String>>,
