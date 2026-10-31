@@ -6,7 +6,10 @@
   2. confirm/goal 作业角色合并为 analysis；
   3. goal_confirm_mode / goal_proposal / goal_confirmed_at 列重命名为
      confirm_mode / proposal / confirmed_at；
-  4. 旧 ready 方案被清空，已确认时间保持不变。
+  4. 旧 ready 方案被清空，已确认时间保持不变；
+  5. 旧 agents 表缺少 allow_priority_fallback 时由迁移补齐，列保持
+     INTEGER NOT NULL DEFAULT 0；
+  6. 历史 Agent 行在迁移后读取开关值为 0。
 
 约定：只启动一次服务完成迁移，不派发作业；临时数据全部放在系统临时目录。
 退出码 0 表示全部通过。
@@ -26,6 +29,16 @@ def main():
         db = sqlite3.connect(db_path)
         db.executescript(
             """
+CREATE TABLE agents (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '', roles TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    max_concurrency INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    command_json TEXT, model_args_json TEXT,
+    cooldown_until TEXT, last_error TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE projects (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, goal TEXT NOT NULL,
     repo_path TEXT NOT NULL, base_branch TEXT NOT NULL, branch TEXT NOT NULL,
@@ -55,6 +68,8 @@ INSERT INTO projects VALUES
 INSERT INTO jobs (id, project_id, role, status, prompt, created_at) VALUES
  ('j1','p1','confirm','succeeded','x','2026-01-01T00:00:00Z'),
  ('j2','p2','goal','succeeded','x','2026-01-01T00:00:00Z');
+INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, command_json, model_args_json, created_at, updated_at) VALUES
+ ('agt_legacy','Legacy','opencode','','["planner","executor","verifier"]',0,1,1,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 """
         )
         db.commit()
@@ -90,6 +105,18 @@ INSERT INTO jobs (id, project_id, role, status, prompt, created_at) VALUES
 
         roles = {row[0]: row[1] for row in db.execute("SELECT id, role FROM jobs")}
         assert roles == {"j1": "analysis", "j2": "analysis"}, roles
+
+        agent_columns = {row[1]: row for row in db.execute("PRAGMA table_info('agents')")}
+        assert "allow_priority_fallback" in agent_columns, agent_columns.keys()
+        column = agent_columns["allow_priority_fallback"]
+        assert column[2].upper() == "INTEGER", column
+        assert column[3] == 1, column
+        assert column[4] in ("0", 0), column
+        historical = db.execute(
+            "SELECT allow_priority_fallback FROM agents WHERE id = 'agt_legacy'"
+        ).fetchone()
+        assert historical is not None, historical
+        assert historical[0] == 0, historical
 
         db.close()
 
