@@ -27,43 +27,90 @@ pub use opencode::OpencodeAdapter;
 pub use process::kill_job_dir;
 pub use workbuddy::WorkbuddyAdapter;
 
-/// Every supported agent kind, in display order. Adding an agent type means
-/// implementing `AgentAdapter` and adding its `KIND` here.
-const KINDS: [&str; 5] = [
-    <MockAdapter as AgentAdapter>::KIND,
-    <OpencodeAdapter as AgentAdapter>::KIND,
-    <CodexAdapter as AgentAdapter>::KIND,
-    <WorkbuddyAdapter as AgentAdapter>::KIND,
-    <CliAdapter as AgentAdapter>::KIND,
-];
+/// Declares the registered adapter types once. `KINDS` and every dispatch hook
+/// below are generated from this list, so adding an agent kind means writing
+/// its adapter module and naming it here.
+macro_rules! adapter_registry {
+    ($($adapter:ty),+ $(,)?) => {
+        /// Every supported agent kind, in display order.
+        const KINDS: &[&str] = &[$(<$adapter as AgentAdapter>::KIND),+];
+
+        fn dispatch_requires_command_template(
+            kind: &str,
+            config: &AgentConfig,
+        ) -> Option<bool> {
+            $(
+                if kind == <$adapter as AgentAdapter>::KIND {
+                    return Some(<$adapter as AgentAdapter>::requires_command_template(config));
+                }
+            )+
+            None
+        }
+
+        fn dispatch_validate_config(kind: &str, config: &AgentConfig) -> Option<Result<()>> {
+            $(
+                if kind == <$adapter as AgentAdapter>::KIND {
+                    return Some(<$adapter as AgentAdapter>::validate(config));
+                }
+            )+
+            None
+        }
+
+        async fn dispatch_execute(
+            agent: &AgentRow,
+            spec: &AgentSpec,
+            timeout: Duration,
+        ) -> Option<Result<AgentRun>> {
+            let config = AgentConfig::from_row(agent);
+            $(
+                if agent.kind == <$adapter as AgentAdapter>::KIND {
+                    return Some(run_with::<$adapter>(&config, spec, timeout).await);
+                }
+            )+
+            None
+        }
+    };
+}
+
+adapter_registry!(
+    MockAdapter,
+    OpencodeAdapter,
+    CodexAdapter,
+    WorkbuddyAdapter,
+    CliAdapter,
+);
 
 /// Agent kinds accepted by the registry, in display order.
 pub fn kinds() -> &'static [&'static str] {
-    &KINDS
+    KINDS
+}
+
+/// Whether the adapter registered for `kind` needs an explicit command
+/// template. Unknown kinds report `false`; callers validate the kind first.
+pub fn requires_command_template(kind: &str) -> bool {
+    let config = AgentConfig {
+        kind: kind.to_string(),
+        ..AgentConfig::default()
+    };
+    dispatch_requires_command_template(kind, &config).unwrap_or(false)
+}
+
+/// Rejects settings the adapter registered for `kind` cannot run. Unknown
+/// kinds report `Ok(())`; callers validate the kind first.
+pub fn validate_config(kind: &str, command: &[String]) -> Result<()> {
+    let config = AgentConfig {
+        kind: kind.to_string(),
+        command: command.to_vec(),
+        ..AgentConfig::default()
+    };
+    dispatch_validate_config(kind, &config).unwrap_or(Ok(()))
 }
 
 pub async fn execute(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
-    let kind = agent.kind.as_str();
-    if !kinds().contains(&kind) {
-        return Err(anyhow!("未知 Agent 类型: {kind}"));
+    match dispatch_execute(agent, spec, timeout).await {
+        Some(result) => result,
+        None => Err(anyhow!("未知 Agent 类型: {}", agent.kind)),
     }
-    let config = AgentConfig::from_row(agent);
-    if kind == <MockAdapter as AgentAdapter>::KIND {
-        return run_with::<MockAdapter>(&config, spec, timeout).await;
-    }
-    if kind == <OpencodeAdapter as AgentAdapter>::KIND {
-        return run_with::<OpencodeAdapter>(&config, spec, timeout).await;
-    }
-    if kind == <CliAdapter as AgentAdapter>::KIND {
-        return run_with::<CliAdapter>(&config, spec, timeout).await;
-    }
-    if kind == <CodexAdapter as AgentAdapter>::KIND {
-        return run_with::<CodexAdapter>(&config, spec, timeout).await;
-    }
-    if kind == <WorkbuddyAdapter as AgentAdapter>::KIND {
-        return run_with::<WorkbuddyAdapter>(&config, spec, timeout).await;
-    }
-    Err(anyhow!("未知 Agent 类型: {kind}"))
 }
 
 /// Runs one adapter statically. The adapter validates its settings, executes

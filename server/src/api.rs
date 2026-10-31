@@ -16,7 +16,7 @@ use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 use tokio_stream::StreamExt;
 
 use crate::activity;
-use crate::agents::kill_job_dir;
+use crate::agents::{self, kill_job_dir};
 use crate::domain::{self, deps_complete, now, short_id};
 use crate::events::emit;
 use crate::git;
@@ -4141,22 +4141,31 @@ async fn require_project(state: &AppState, id: &str) -> Result<ProjectRow, ApiEr
 }
 
 fn validate_kind(kind: &str) -> Result<String, ApiError> {
-    match kind {
-        AGENT_MOCK | AGENT_OPENCODE | AGENT_CLI | AGENT_CODEX | AGENT_WORKBUDDY => {
-            Ok(kind.to_string())
-        }
-        _ => Err(ApiError::bad(
-            "Agent 类型必须是 mock、opencode、codex、workbuddy 或 cli",
-        )),
+    let kinds = agents::kinds();
+    if !kinds.contains(&kind) {
+        return Err(ApiError::bad(format!(
+            "Agent 类型必须是 {}",
+            kind_options(kinds)
+        )));
+    }
+    Ok(kind.to_string())
+}
+
+/// Registry kinds joined as prose, keeping the last option after "或".
+fn kind_options(kinds: &[&str]) -> String {
+    match kinds.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} 或 {last}", rest.join("、")),
+        _ => kinds.join("、"),
     }
 }
 
-/// 只有自定义 CLI 需要显式命令模板；内置 CLI 类型自带默认命令。
+/// Ask the adapter registry, so a kind that needs a command template declares
+/// it in one place instead of being special-cased here.
 fn require_command_if_needed(kind: &str, command: &[String]) -> Result<(), ApiError> {
-    if kind == AGENT_CLI && command.is_empty() {
+    if agents::requires_command_template(kind) && command.is_empty() {
         return Err(ApiError::bad("CLI Agent 必须配置命令模板"));
     }
-    Ok(())
+    agents::validate_config(kind, command).map_err(|error| ApiError::bad(format!("{error:#}")))
 }
 
 fn validate_role(role: &str) -> Result<String, ApiError> {
@@ -4193,46 +4202,51 @@ mod tests {
         validate_kind(kind).expect_err("未知类型应被拒绝").message
     }
 
+    fn cli_kind() -> &'static str {
+        <agents::CliAdapter as agents::AgentAdapter>::KIND
+    }
+
     #[test]
-    fn validate_kind_accepts_builtin_cli_types() {
-        for kind in [
-            AGENT_MOCK,
-            AGENT_OPENCODE,
-            AGENT_CODEX,
-            AGENT_WORKBUDDY,
-            AGENT_CLI,
-        ] {
-            assert_eq!(validate_kind(kind).unwrap(), kind);
+    fn validate_kind_accepts_every_registered_type() {
+        for kind in agents::kinds() {
+            assert_eq!(validate_kind(kind).unwrap(), *kind);
         }
     }
 
     #[test]
     fn validate_kind_rejects_unknown_type_and_lists_options() {
         let message = bad_message("unknown");
-        for kind in [
-            AGENT_MOCK,
-            AGENT_OPENCODE,
-            AGENT_CODEX,
-            AGENT_WORKBUDDY,
-            AGENT_CLI,
-        ] {
-            assert!(message.contains(kind), "错误信息缺少 {kind}: {message}");
+        let mut cursor = 0;
+        for kind in agents::kinds() {
+            let index = message
+                .find(kind)
+                .unwrap_or_else(|| panic!("错误信息缺少 {kind}: {message}"));
+            assert!(
+                index >= cursor,
+                "错误信息未按注册表顺序列出 {kind}: {message}"
+            );
+            cursor = index + kind.len();
         }
     }
 
     #[test]
-    fn builtin_cli_types_do_not_require_command_template() {
+    fn only_the_cli_adapter_requires_a_command_template() {
         let empty: [String; 0] = [];
-        for kind in [AGENT_MOCK, AGENT_OPENCODE, AGENT_CODEX, AGENT_WORKBUDDY] {
-            assert!(require_command_if_needed(kind, &empty).is_ok());
+        for kind in agents::kinds() {
+            let result = require_command_if_needed(kind, &empty);
+            if *kind == cli_kind() {
+                let error = result.unwrap_err();
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(error.message, "CLI Agent 必须配置命令模板");
+            } else {
+                result.unwrap();
+            }
         }
-        let error = require_command_if_needed(AGENT_CLI, &empty).unwrap_err();
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn custom_cli_accepts_non_empty_command_template() {
         let command = vec!["codex".to_string(), "exec".to_string()];
-        assert!(require_command_if_needed(AGENT_CLI, &command).is_ok());
+        assert!(require_command_if_needed(cli_kind(), &command).is_ok());
     }
 }
