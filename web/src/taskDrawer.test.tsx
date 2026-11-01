@@ -115,7 +115,7 @@ function renderDrawer(current: Task, jobs: JobSummary[] = []) {
       onClose={() => {}}
       onRetry={() => {}}
       onRetryJob={() => {}}
-      onSaveGuidance={() => {}}
+      onSaveGuidance={async () => true}
       onToggleMilestone={() => {}}
       onRefresh={async () => {}}
       archived={false}

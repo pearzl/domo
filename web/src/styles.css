@@ -476,6 +476,134 @@ button:disabled {
   gap: 8px;
 }
 
+/* 统一输入框：编辑/预览切换、字数提示、超限内部滚动与底部固定操作区。 */
+.input-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.input-box-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.input-box-modes {
+  display: inline-flex;
+  padding: 2px;
+  background: #eef2f7;
+  border-radius: 8px;
+}
+
+.input-box-modes button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 3px 10px;
+  font-size: 0.82rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.input-box-modes button.active {
+  background: white;
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(18, 32, 56, 0.12);
+}
+
+.input-box-count {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.input-box-count-warn {
+  color: var(--warn);
+}
+
+.input-box textarea {
+  resize: none;
+  max-height: 260px;
+  overflow-y: hidden;
+  line-height: 1.55;
+}
+
+.input-box--scroll textarea {
+  overflow-y: auto;
+}
+
+.input-box-preview {
+  width: 100%;
+  min-height: 76px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  background: #fbfcfe;
+  padding: 10px 12px;
+}
+
+.input-box-preview .rich-markdown {
+  font-size: 0.92rem;
+}
+
+.input-box-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* 长文本时操作区吸附在输入框底部，发送/保存按钮始终可达。 */
+.input-box-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0 2px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0), #ffffff 45%);
+}
+
+.project-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.project-tabs button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-weight: 600;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.project-tabs button:hover {
+  background: #eef2f7;
+  color: var(--text);
+}
+
+.project-tabs button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.confirm-row .input-box,
+.report-actions .input-box {
+  width: 100%;
+}
+
 .form {
   display: flex;
   flex-direction: column;

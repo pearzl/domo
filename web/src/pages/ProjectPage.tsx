@@ -1,3 +1,13 @@
+/**
+ * 项目详情页。主体选项卡与任务抽屉的选中状态同步到 URL 查询参数，
+ * 刷新、复制链接与浏览器前进后退都回到同一视图。
+ *
+ * 人工核对清单（输入持久化）：
+ * 1. 在“项目分析”输入框输入文字，刷新页面，内容仍在。
+ * 2. 输入文字后离开项目页，再后退/前进回到项目页，内容仍在。
+ * 3. 成功发送后输入框清空，刷新后仍为空。
+ * 4. 打开任务抽屉或切换主体选项卡，地址栏出现 tab/task 参数；刷新与后退后视图一致。
+ */
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
@@ -13,6 +23,8 @@ import type {
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { InputBox } from "../components/InputBox";
+import { useDraftJson, useDraftValue } from "../components/useDraft";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView, JobRecordList } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
@@ -48,6 +60,11 @@ import {
 } from "../presentation/taskDrawer";
 import { projectBlockOrder } from "../presentation/projectLayout";
 import {
+  readProjectView,
+  updateProjectView,
+  type ProjectViewState,
+} from "../presentation/projectView";
+import {
   Badge,
   EmptySteps,
   ErrorBox,
@@ -67,6 +84,49 @@ import {
 /// Mirrors the backend marker that is written before a worktree is removed.
 const ARTIFACTS_RELEASING = "releasing";
 
+interface AddTaskDraft {
+  key: string;
+  title: string;
+  description: string;
+  acceptance: string;
+  deps: string[];
+  milestone: boolean;
+}
+
+const EMPTY_TASK_DRAFT: AddTaskDraft = {
+  key: "",
+  title: "",
+  description: "",
+  acceptance: "",
+  deps: [],
+  milestone: false,
+};
+
+const TAB_LABELS: Record<string, string> = {
+  analysis: "项目分析",
+  tasks: "任务",
+  report: "项目报告",
+};
+
+function isAddTaskDraft(value: unknown): value is AddTaskDraft {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.key === "string" &&
+    typeof record.title === "string" &&
+    typeof record.description === "string" &&
+    typeof record.acceptance === "string" &&
+    Array.isArray(record.deps) &&
+    record.deps.every((item) => typeof item === "string") &&
+    typeof record.milestone === "boolean"
+  );
+}
+
+function readWindowView(): ProjectViewState {
+  if (typeof window === "undefined") return { tab: null, taskId: null };
+  return readProjectView(window.location.search);
+}
+
 export function ProjectPage({
   id,
   onBack,
@@ -77,19 +137,44 @@ export function ProjectPage({
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState("");
-  const [feedback, setFeedback] = useState("");
+  const analysisDraft = useDraftValue(
+    { projectId: id, field: "analysis-message" },
+    "",
+  );
+  const message = analysisDraft.value;
+  const setMessage = analysisDraft.setValue;
+  const feedbackDraft = useDraftValue(
+    { projectId: id, field: "report-feedback" },
+    "",
+  );
+  const feedback = feedbackDraft.value;
+  const setFeedback = feedbackDraft.setValue;
   const [busy, setBusy] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const initialView = readWindowView();
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    initialView.taskId,
+  );
+  const [activeTab, setActiveTab] = useState<string | null>(initialView.tab);
   const [replanOpen, setReplanOpen] = useState(false);
-  const [replanReason, setReplanReason] = useState("");
+  const replanDraft = useDraftValue(
+    { projectId: id, field: "replan-reason" },
+    "",
+  );
+  const replanReason = replanDraft.value;
+  const setReplanReason = replanDraft.setValue;
   const [addTaskOpen, setAddTaskOpen] = useState(false);
-  const [taskKey, setTaskKey] = useState("");
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskDescription, setTaskDescription] = useState("");
-  const [taskAcceptance, setTaskAcceptance] = useState("");
-  const [taskDeps, setTaskDeps] = useState<string[]>([]);
-  const [taskMilestone, setTaskMilestone] = useState(false);
+  const taskDraft = useDraftJson(
+    { projectId: id, field: "add-task-form" },
+    EMPTY_TASK_DRAFT,
+    isAddTaskDraft,
+  );
+  const taskForm = taskDraft.value;
+  const taskKey = taskForm.key;
+  const taskTitle = taskForm.title;
+  const taskDescription = taskForm.description;
+  const taskAcceptance = taskForm.acceptance;
+  const taskDeps = taskForm.deps;
+  const taskMilestone = taskForm.milestone;
   /// 任务面板视图只在页面内保持，不写入任务数据。
   const [taskView, setTaskView] = useState<"list" | "dag">("list");
   /// 任务搜索与筛选同样只存在于页面状态，不改变任务数据。
@@ -103,6 +188,51 @@ export function ProjectPage({
   const [archiveRefs, setArchiveRefs] = useState<ProjectArchiveRefs | null>(
     null,
   );
+
+  function setTaskField<K extends keyof AddTaskDraft>(
+    field: K,
+    value: AddTaskDraft[K],
+  ) {
+    taskDraft.setValue((current) => ({ ...current, [field]: value }));
+  }
+
+  /// 视图状态写入 URL：用户切换选项卡或打开抽屉时新增历史，程序修正时替换当前历史。
+  function applyProjectView(
+    patch: Partial<ProjectViewState>,
+    mode: "push" | "replace" = "push",
+  ) {
+    if (typeof window === "undefined") return;
+    const nextSearch = updateProjectView(window.location.search, patch);
+    const next = `${window.location.pathname}${nextSearch}`;
+    if (`${window.location.pathname}${window.location.search}` === next) return;
+    if (mode === "replace") {
+      window.history.replaceState(window.history.state, "", next);
+    } else {
+      window.history.pushState({}, "", next);
+    }
+  }
+
+  function selectTask(taskId: string | null) {
+    setSelectedTaskId(taskId);
+    applyProjectView({ taskId }, taskId ? "push" : "replace");
+  }
+
+  function selectTab(tab: string) {
+    setActiveTab(tab);
+    setSelectedTaskId(null);
+    applyProjectView({ tab, taskId: null }, "push");
+  }
+
+  // 浏览器前进/后退时同步选项卡与抽屉；路径变化由 App 负责。
+  useEffect(() => {
+    function handlePop() {
+      const view = readWindowView();
+      setActiveTab(view.tab);
+      setSelectedTaskId(view.taskId);
+    }
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  }, []);
 
   async function refresh(silent = false) {
     try {
@@ -143,8 +273,21 @@ export function ProjectPage({
       !visibleTasks.some((task) => task.id === selectedTaskId)
     ) {
       setSelectedTaskId(null);
+      applyProjectView({ taskId: null }, "replace");
     }
   }, [detail, selectedTaskId, visibleTasks]);
+
+  // 选项卡必须属于当前阶段；URL 中缺失或失效时回退到阶段默认值并写回地址栏。
+  useEffect(() => {
+    if (!detail) return;
+    const order = projectBlockOrder(detail.project.stage);
+    const next =
+      activeTab && order.includes(activeTab as (typeof order)[number])
+        ? activeTab
+        : order[0];
+    if (next !== activeTab) setActiveTab(next);
+    applyProjectView({ tab: next, taskId: selectedTaskId }, "replace");
+  }, [detail, activeTab, selectedTaskId]);
 
   useEffect(() => {
     if (detail?.project.status !== "archived") {
@@ -165,14 +308,16 @@ export function ProjectPage({
     };
   }, [id, detail?.project.status]);
 
-  async function run(action: () => Promise<unknown>) {
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     setError("");
     try {
       await action();
       await refresh();
+      return true;
     } catch (err) {
       setError(errorMessage(err));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -267,11 +412,20 @@ export function ProjectPage({
   );
   const depOptions = dependencyOptions(activeTasks);
   const replanPreview = replanSummary(tasks);
+  const blockOrder = projectBlockOrder(project.stage);
+  const activeBlock =
+    activeTab && blockOrder.includes(activeTab as (typeof blockOrder)[number])
+      ? activeTab
+      : blockOrder[0];
 
-  // 打开添加任务表单：key 为空时自动填入下一个可用的 T 编号。
+  // 打开添加任务表单：切到任务选项卡，key 为空时自动填入下一个可用的 T 编号。
   function openAddTaskForm() {
+    selectTab("tasks");
     setAddTaskOpen(true);
-    setTaskKey((current) => current.trim() || nextTaskKey(tasks));
+    taskDraft.setValue((current) => ({
+      ...current,
+      key: current.key.trim() || nextTaskKey(tasks),
+    }));
   }
 
   function toggleAddTaskForm() {
@@ -307,8 +461,8 @@ export function ProjectPage({
     event.preventDefault();
     if (!draftCheck.valid) return;
     const key = taskKey.trim();
-    await run(async () => {
-      await api.createTask(project.id, {
+    const ok = await run(() =>
+      api.createTask(project.id, {
         key,
         title: taskTitle.trim(),
         description: taskDescription.trim(),
@@ -318,15 +472,11 @@ export function ProjectPage({
           .filter(Boolean),
         deps: taskDeps,
         milestone: taskMilestone,
-      });
-      setTaskKey("");
-      setTaskTitle("");
-      setTaskDescription("");
-      setTaskAcceptance("");
-      setTaskDeps([]);
-      setTaskMilestone(false);
-      setAddTaskOpen(false);
-    });
+      }),
+    );
+    if (!ok) return;
+    taskDraft.clear(EMPTY_TASK_DRAFT);
+    setAddTaskOpen(false);
   }
 
   function resetTaskFilter() {
@@ -504,64 +654,68 @@ export function ProjectPage({
       ) : null}
       {!analysisJob ? (
         <div className="confirm-row">
-          <textarea
+          <InputBox
             value={message}
-            onChange={(event) => setMessage(event.target.value)}
+            onChange={setMessage}
+            draftKey={analysisDraft.key}
             disabled={busy || paused || archived}
             rows={3}
+            maxAutoGrowChars={520}
             placeholder={
               goalMessages.length === 0
                 ? "描述项目目标、边界和验收预期。"
                 : "补充信息、回答规划者的问题，或对方案提出修改意见。"
             }
+            actions={
+              <div className="button-row">
+                <button
+                  className="secondary"
+                  disabled={busy || paused || archived || !message.trim()}
+                  onClick={async () => {
+                    const ok = await run(() =>
+                      api.postAnalysisMessage(
+                        project.id,
+                        message,
+                        project.confirm_mode,
+                      ),
+                    );
+                    if (ok) analysisDraft.clear();
+                  }}
+                >
+                  {goalMessages.length === 0 ? "开始分析" : "发送"}
+                </button>
+                {proposal ? (
+                  <button
+                    className="primary"
+                    disabled={
+                      busy ||
+                      paused ||
+                      archived ||
+                      !!message.trim() ||
+                      (proposal.kind === "direct" && activeTasks.length > 0)
+                    }
+                    title={
+                      message.trim()
+                        ? "请先发送修改意见或清空输入后再确认"
+                        : proposal.kind === "direct" && activeTasks.length > 0
+                          ? "项目已有任务，不能直接完成"
+                          : undefined
+                    }
+                    onClick={async () => {
+                      const ok = await run(() =>
+                        api.confirmAnalysis(project.id),
+                      );
+                      if (ok) analysisDraft.clear();
+                    }}
+                  >
+                    {proposal.kind === "direct"
+                      ? "确认并直接完成"
+                      : "确认方案，开始执行"}
+                  </button>
+                ) : null}
+              </div>
+            }
           />
-          <div className="button-row">
-            <button
-              className="secondary"
-              disabled={busy || paused || archived || !message.trim()}
-              onClick={() =>
-                run(async () => {
-                  await api.postAnalysisMessage(
-                    project.id,
-                    message,
-                    project.confirm_mode,
-                  );
-                  setMessage("");
-                })
-              }
-            >
-              {goalMessages.length === 0 ? "开始分析" : "发送"}
-            </button>
-            {proposal ? (
-              <button
-                className="primary"
-                disabled={
-                  busy ||
-                  paused ||
-                  archived ||
-                  !!message.trim() ||
-                  (proposal.kind === "direct" && activeTasks.length > 0)
-                }
-                title={
-                  message.trim()
-                    ? "请先发送修改意见或清空输入后再确认"
-                    : proposal.kind === "direct" && activeTasks.length > 0
-                      ? "项目已有任务，不能直接完成"
-                      : undefined
-                }
-                onClick={() =>
-                  run(async () => {
-                    await api.confirmAnalysis(project.id);
-                    setMessage("");
-                  })
-                }
-              >
-                {proposal.kind === "direct"
-                  ? "确认并直接完成"
-                  : "确认方案，开始执行"}
-              </button>
-            ) : null}
-          </div>
         </div>
       ) : null}
     </section>
@@ -670,7 +824,7 @@ export function ProjectPage({
               <span>任务 key</span>
               <input
                 value={taskKey}
-                onChange={(event) => setTaskKey(event.target.value)}
+                onChange={(event) => setTaskField("key", event.target.value)}
                 placeholder="例如：T3"
                 aria-invalid={draftCheck.errors.key ? true : undefined}
                 required
@@ -683,31 +837,30 @@ export function ProjectPage({
               <span>标题</span>
               <input
                 value={taskTitle}
-                onChange={(event) => setTaskTitle(event.target.value)}
+                onChange={(event) => setTaskField("title", event.target.value)}
                 placeholder="一句话说明这个任务做什么"
                 required
               />
             </label>
           </div>
-          <label>
-            <span>描述</span>
-            <textarea
+          <div className="field">
+            <span className="field-label">描述</span>
+            <InputBox
               value={taskDescription}
-              onChange={(event) => setTaskDescription(event.target.value)}
+              onChange={(next) => setTaskField("description", next)}
               rows={3}
               placeholder="任务目标、边界和实现要点。"
-              required
             />
-          </label>
-          <label>
-            <span>验收标准（每行一条，留空使用默认标准）</span>
-            <textarea
+          </div>
+          <div className="field">
+            <span className="field-label">验收标准（每行一条，留空使用默认标准）</span>
+            <InputBox
               value={taskAcceptance}
-              onChange={(event) => setTaskAcceptance(event.target.value)}
+              onChange={(next) => setTaskField("acceptance", next)}
               rows={3}
               placeholder={"例如：\ndomo_mock/T3.txt 存在且包含 T3"}
             />
-          </label>
+          </div>
           <div className="field">
             <span className="field-label">前置任务（依赖）</span>
             <small className="muted">
@@ -723,10 +876,11 @@ export function ProjectPage({
                       type="checkbox"
                       checked={taskDeps.includes(option.key)}
                       onChange={(event) => {
-                        setTaskDeps((current) =>
+                        setTaskField(
+                          "deps",
                           event.target.checked
-                            ? [...current, option.key]
-                            : current.filter((dep) => dep !== option.key),
+                            ? [...taskDeps, option.key]
+                            : taskDeps.filter((dep) => dep !== option.key),
                         );
                       }}
                     />
@@ -746,7 +900,7 @@ export function ProjectPage({
             <input
               type="checkbox"
               checked={taskMilestone}
-              onChange={(event) => setTaskMilestone(event.target.checked)}
+              onChange={(event) => setTaskField("milestone", event.target.checked)}
             />
             <span>标记为里程碑（验收通过后需人工确认）</span>
           </label>
@@ -779,7 +933,7 @@ export function ProjectPage({
         <TaskDag
           tasks={tasks}
           selectedTaskId={selectedTaskId}
-          onSelect={setSelectedTaskId}
+          onSelect={selectTask}
         />
       ) : (
         <>
@@ -819,12 +973,12 @@ export function ProjectPage({
                 className={`task-row ${task.id === selectedTaskId ? "selected" : ""}`}
                 role="button"
                 tabIndex={0}
-                onClick={() => setSelectedTaskId(task.id)}
+                onClick={() => selectTask(task.id)}
                 onKeyDown={(event) => {
                   if (event.key === " " || event.key === "Enter") {
                     // Space 默认会滚动页面，打开抽屉时阻止滚动。
                     event.preventDefault();
-                    setSelectedTaskId(task.id);
+                    selectTask(task.id);
                   }
                 }}
               >
@@ -905,73 +1059,82 @@ export function ProjectPage({
       ) : null}
       {project.stage === "summarizing" ? (
         <div className="report-actions">
-          <textarea
+          <InputBox
             value={feedback}
-            onChange={(event) => setFeedback(event.target.value)}
+            onChange={setFeedback}
+            draftKey={feedbackDraft.key}
             rows={3}
+            maxAutoGrowChars={520}
             placeholder="对报告的意见（提交意见可供多轮讨论；要求重写或重新规划时必须填写）。"
+            actions={
+              <div className="button-row">
+                <button
+                  className="primary"
+                  disabled={busy || !project.report}
+                  onClick={async () => {
+                    const ok = await run(() =>
+                      api.submitReport(project.id, "accept"),
+                    );
+                    if (ok) feedbackDraft.clear();
+                  }}
+                >
+                  通过并完成
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || !feedback.trim()}
+                  onClick={async () => {
+                    const ok = await run(() =>
+                      api.submitReport(project.id, "comment", feedback),
+                    );
+                    if (ok) feedbackDraft.clear();
+                  }}
+                >
+                  提交意见
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || !project.report || !feedback.trim()}
+                  onClick={async () => {
+                    const ok = await run(() =>
+                      api.submitReport(project.id, "reject", feedback),
+                    );
+                    if (ok) feedbackDraft.clear();
+                  }}
+                  title={
+                    project.completion_mode === "direct"
+                      ? "记录意见并重新执行直接完成"
+                      : "记录意见并要求规划者重新撰写报告"
+                  }
+                >
+                  {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || !project.report || !feedback.trim()}
+                  onClick={async () => {
+                    const ok = await run(() =>
+                      api.submitReport(project.id, "replan", feedback),
+                    );
+                    if (ok) feedbackDraft.clear();
+                  }}
+                  title="记录意见并要求重新规划，项目回到项目分析阶段"
+                >
+                  要求重新规划
+                </button>
+                {project.completion_mode !== "direct" ? (
+                  <button
+                    className="secondary"
+                    disabled={busy || archived}
+                    onClick={openAddTaskForm}
+                    title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
+                  >
+                    增加新任务
+                  </button>
+                ) : null}
+              </div>
+            }
           />
-          <div className="button-row">
-            <button
-              className="primary"
-              disabled={busy || !project.report}
-              onClick={() => run(() => api.submitReport(project.id, "accept"))}
-            >
-              通过并完成
-            </button>
-            <button
-              className="secondary"
-              disabled={busy || !feedback.trim()}
-              onClick={() =>
-                run(async () => {
-                  await api.submitReport(project.id, "comment", feedback);
-                  setFeedback("");
-                })
-              }
-            >
-              提交意见
-            </button>
-            <button
-              className="secondary"
-              disabled={busy || !project.report || !feedback.trim()}
-              onClick={() =>
-                run(async () => {
-                  await api.submitReport(project.id, "reject", feedback);
-                  setFeedback("");
-                })
-              }
-              title={
-                project.completion_mode === "direct"
-                  ? "记录意见并重新执行直接完成"
-                  : "记录意见并要求规划者重新撰写报告"
-              }
-            >
-              {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
-            </button>
-            <button
-              className="secondary"
-              disabled={busy || !project.report || !feedback.trim()}
-              onClick={() =>
-                run(async () => {
-                  await api.submitReport(project.id, "replan", feedback);
-                  setFeedback("");
-                })
-              }
-              title="记录意见并要求重新规划，项目回到项目分析阶段"
-            >
-              要求重新规划
-            </button>
-            {project.completion_mode !== "direct" ? (
-              <button
-                className="secondary"
-                disabled={busy || archived}
-                onClick={openAddTaskForm}
-                title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
-              >
-                增加新任务
-              </button>
-            ) : null}
-          </div>
           {project.completion_mode !== "direct" ? (
             <p className="muted">
               “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
@@ -1158,44 +1321,72 @@ export function ProjectPage({
             </div>
           </div>
           <div className="confirm-row">
-            <textarea
+            <InputBox
               value={replanReason}
-              onChange={(event) => setReplanReason(event.target.value)}
+              onChange={setReplanReason}
+              draftKey={replanDraft.key}
               rows={3}
+              maxAutoGrowChars={520}
               placeholder="例如：原计划遗漏了必要的数据迁移步骤，需要调整为……"
+              actions={
+                <div className="button-row">
+                  <button
+                    className="primary"
+                    disabled={busy || !replanReason.trim()}
+                    onClick={async () => {
+                      const ok = await run(() =>
+                        api.replanProject(project.id, replanReason),
+                      );
+                      if (!ok) return;
+                      replanDraft.clear();
+                      setReplanOpen(false);
+                    }}
+                  >
+                    提交重规划
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setReplanOpen(false);
+                      replanDraft.clear();
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              }
             />
-            <div className="button-row">
-              <button
-                className="primary"
-                disabled={busy || !replanReason.trim()}
-                onClick={() =>
-                  run(async () => {
-                    await api.replanProject(project.id, replanReason);
-                    setReplanReason("");
-                    setReplanOpen(false);
-                  })
-                }
-              >
-                提交重规划
-              </button>
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => {
-                  setReplanOpen(false);
-                  setReplanReason("");
-                }}
-              >
-                取消
-              </button>
-            </div>
           </div>
         </section>
       ) : null}
 
+      <nav className="project-tabs" role="tablist" aria-label="项目主体视图">
+        {projectBlockOrder(project.stage).map((block) => (
+          <button
+            key={block}
+            type="button"
+            role="tab"
+            aria-selected={block === activeBlock}
+            className={block === activeBlock ? "active" : undefined}
+            onClick={() => selectTab(block)}
+          >
+            {TAB_LABELS[block]}
+          </button>
+        ))}
+      </nav>
+
       {projectBlockOrder(project.stage).map((block) => (
         <Fragment key={block}>
-          {block === "analysis" ? analysisBlock : block === "tasks" ? tasksBlock : block === "report" ? reportBlock : null}
+          {block === activeBlock
+            ? block === "analysis"
+              ? analysisBlock
+              : block === "tasks"
+                ? tasksBlock
+                : block === "report"
+                  ? reportBlock
+                  : null
+            : null}
         </Fragment>
       ))}
 
@@ -1334,9 +1525,10 @@ export function ProjectPage({
 
       {selectedTask ? (
         <TaskDrawer
+          key={selectedTask.id}
           task={selectedTask}
           detail={detail}
-          onClose={() => setSelectedTaskId(null)}
+          onClose={() => selectTask(null)}
           onRetry={() =>
             run(async () => {
               await api.retryTask(project.id, selectedTask.id);
@@ -1763,7 +1955,7 @@ export function TaskDrawer({
   onClose: () => void;
   onRetry: () => void;
   onRetryJob: (jobId: string) => void;
-  onSaveGuidance: (guidance: string) => void;
+  onSaveGuidance: (guidance: string) => Promise<boolean>;
   onToggleMilestone: () => void;
   onRefresh: () => Promise<void>;
   archived: boolean;
@@ -1795,12 +1987,14 @@ export function TaskDrawer({
     children.length > 0 &&
     task.stage === "pending" &&
     childCompleted < children.length;
-  const [guidance, setGuidance] = useState(task.guidance);
+  const guidanceDraft = useDraftValue(
+    { projectId: task.project_id, taskId: task.id, field: "guidance" },
+    task.guidance,
+  );
+  const guidance = guidanceDraft.value;
+  const setGuidance = guidanceDraft.setValue;
   const [controlBusy, setControlBusy] = useState(false);
   const [controlError, setControlError] = useState("");
-  useEffect(() => {
-    setGuidance(task.guidance);
-  }, [task.id, task.guidance]);
   const guidanceLocked = archived || task.stage === "completed" || task.status === "canceled";
   const taskPaused = task.status === "paused" || task.status === "pausing";
   // 首区块按状态决定：blocked 与里程碑人工验收先裁决，已完成/已取消先给结果，其余进行中先给控制条。
@@ -2055,39 +2249,47 @@ export function TaskDrawer({
         </div>
       </details>
     ) : null;
+  const saveGuidance = async () => {
+    const ok = await onSaveGuidance(guidance);
+    if (ok) guidanceDraft.clear(guidance);
+  };
   const guidanceEditor = (
     <section>
       <h3>人工指导</h3>
-      <textarea
+      <InputBox
         value={guidance}
-        onChange={(event) => setGuidance(event.target.value)}
+        onChange={setGuidance}
+        draftKey={guidanceDraft.key}
         rows={4}
+        maxAutoGrowChars={520}
         disabled={guidanceLocked || busy}
         placeholder="指导会在该任务下一次执行作业时生效；保存后，执行者会带着这段说明开始下一次作业。"
+        actions={
+          <div className="button-row guidance-actions">
+            <button
+              className="primary"
+              disabled={
+                guidanceLocked ||
+                busy ||
+                !guidance.trim() ||
+                guidance.trim() === task.guidance.trim()
+              }
+              onClick={() => void saveGuidance()}
+            >
+              保存指导
+            </button>
+            {guidanceLocked ? (
+              <span className="muted">
+                {task.status === "canceled"
+                  ? "任务已取消，不能再编辑指导。"
+                  : task.stage === "completed"
+                    ? "任务已完成，不能再编辑指导。"
+                    : "项目已归档，不能再编辑指导。"}
+              </span>
+            ) : null}
+          </div>
+        }
       />
-      <div className="button-row guidance-actions">
-        <button
-          className="primary"
-          disabled={
-            guidanceLocked ||
-            busy ||
-            !guidance.trim() ||
-            guidance.trim() === task.guidance.trim()
-          }
-          onClick={() => onSaveGuidance(guidance)}
-        >
-          保存指导
-        </button>
-        {guidanceLocked ? (
-          <span className="muted">
-            {task.status === "canceled"
-              ? "任务已取消，不能再编辑指导。"
-              : task.stage === "completed"
-                ? "任务已完成，不能再编辑指导。"
-                : "项目已归档，不能再编辑指导。"}
-          </span>
-        ) : null}
-      </div>
     </section>
   );
   const guidanceReadonly = (
@@ -2371,8 +2573,16 @@ function HumanAcceptancePanel({
   onRefresh: () => Promise<void>;
   disabled: boolean;
 }) {
-  const [reason, setReason] = useState("");
-  const [guidance, setGuidance] = useState("");
+  const reasonDraft = useDraftValue(
+    { projectId: task.project_id, taskId: task.id, field: "acceptance-reason" },
+    "",
+  );
+  const guidanceDraft = useDraftValue(
+    { projectId: task.project_id, taskId: task.id, field: "acceptance-guidance" },
+    "",
+  );
+  const reason = reasonDraft.value;
+  const guidance = guidanceDraft.value;
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -2389,8 +2599,8 @@ function HumanAcceptancePanel({
       } else {
         await api.rejectMilestone(projectId, task.id, reason, guidance, action);
       }
-      setReason("");
-      setGuidance("");
+      reasonDraft.clear();
+      guidanceDraft.clear();
       await onRefresh();
     } catch (err) {
       setError(errorMessage(err));
@@ -2409,43 +2619,47 @@ function HumanAcceptancePanel({
           emptyText="里程碑任务必须由人工确认。"
         />
       </div>
-      <textarea
+      <InputBox
         value={reason}
-        onChange={(event) => setReason(event.target.value)}
+        onChange={reasonDraft.setValue}
+        draftKey={reasonDraft.key}
         rows={3}
         disabled={disabled || busy}
         placeholder="通过意见（可选）；拒绝时必须填写理由。"
       />
-      <textarea
+      <InputBox
         value={guidance}
-        onChange={(event) => setGuidance(event.target.value)}
+        onChange={guidanceDraft.setValue}
+        draftKey={guidanceDraft.key}
         rows={3}
         disabled={disabled || busy}
         placeholder="拒绝时可选：给执行者或规划者的补充指导。"
+        actions={
+          <div className="button-row">
+            <button
+              className="primary"
+              disabled={disabled || busy}
+              onClick={() => void submit("accept")}
+            >
+              人工通过并合并
+            </button>
+            <button
+              className="secondary"
+              disabled={disabled || busy}
+              onClick={() => void submit("retry")}
+            >
+              拒绝并退回执行
+            </button>
+            <button
+              className="secondary"
+              disabled={disabled || busy}
+              onClick={() => void submit("replan")}
+            >
+              拒绝并要求重新规划
+            </button>
+          </div>
+        }
       />
-      <div className="button-row">
-        <button
-          className="primary"
-          disabled={disabled || busy}
-          onClick={() => void submit("accept")}
-        >
-          人工通过并合并
-        </button>
-        <button
-          className="secondary"
-          disabled={disabled || busy}
-          onClick={() => void submit("retry")}
-        >
-          拒绝并退回执行
-        </button>
-        <button
-          className="secondary"
-          disabled={disabled || busy}
-          onClick={() => void submit("replan")}
-        >
-          拒绝并要求重新规划
-        </button>
-      </div>
       <small>
         退回执行会把验收意见和指导交给执行者；要求重新规划会作废未完成任务，并把意见交给规划者。
       </small>
@@ -2470,7 +2684,11 @@ function ArbitrationPanel({
   const [context, setContext] = useState<ArbitrationContext | null>(null);
   const [contextError, setContextError] = useState("");
   const [agentId, setAgentId] = useState("");
-  const [guidance, setGuidance] = useState("");
+  const guidanceDraft = useDraftValue(
+    { projectId, taskId: task.id, field: "arbitration-guidance" },
+    "",
+  );
+  const guidance = guidanceDraft.value;
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -2501,7 +2719,7 @@ function ArbitrationPanel({
     setError("");
     try {
       await api.submitTaskArbitration(projectId, task.id, input);
-      setGuidance("");
+      guidanceDraft.clear();
       await onRefresh();
       const next = await api.getTaskArbitration(projectId, task.id);
       setContext(next);
@@ -2629,22 +2847,25 @@ function ArbitrationPanel({
               换 Agent 执行
             </button>
           </div>
-          <textarea
+          <InputBox
             value={guidance}
-            onChange={(event) => setGuidance(event.target.value)}
+            onChange={guidanceDraft.setValue}
+            draftKey={guidanceDraft.key}
             rows={3}
             disabled={disabled || busy}
             placeholder="补充指导：说明下一步应如何处理；提交后任务重新排队，等待派发新作业。"
-          />
-          <button
-            className="secondary"
-            disabled={disabled || busy || !guidance.trim()}
-            onClick={() =>
-              void submit({ action: "guide", guidance: guidance.trim() })
+            actions={
+              <button
+                className="secondary"
+                disabled={disabled || busy || !guidance.trim()}
+                onClick={() =>
+                  void submit({ action: "guide", guidance: guidance.trim() })
+                }
+              >
+                记录指导并重新排队
+              </button>
             }
-          >
-            记录指导并重新排队
-          </button>
+          />
         </>
       ) : null}
       {error ? <div className="error-box">{error}</div> : null}

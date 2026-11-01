@@ -13,7 +13,15 @@ import type {
 } from "../types";
 import { api, errorMessage } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { InputBox } from "../components/InputBox";
 import { RichContent } from "../components/RichContent";
+import {
+  browserDraftStorage,
+  clearDraft,
+  draftStorageKey,
+  readDraft,
+  writeDraftJson,
+} from "../presentation/draft";
 import {
   Badge,
   Empty,
@@ -95,6 +103,91 @@ function emptyForm(): FormState {
   };
 }
 
+function newAgentDraftKey(): string {
+  return draftStorageKey({ field: "agent-form:new" });
+}
+
+/// 编辑已有 Agent 时草稿按 Agent id 分开存放，避免在不同 Agent 之间串用未保存内容。
+function agentDraftKey(agentId: string): string {
+  return draftStorageKey({ field: `agent-form:${agentId}` });
+}
+
+function isSlotState(value: unknown): value is SlotState {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.enabled === "boolean" &&
+    typeof record.start === "string" &&
+    typeof record.end === "string"
+  );
+}
+
+function isAgentFormDraft(value: unknown): value is FormState {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.name === "string" &&
+    typeof record.kind === "string" &&
+    typeof record.model === "string" &&
+    Array.isArray(record.roles) &&
+    record.roles.every((role) => ALL_ROLES.includes(role as Role)) &&
+    typeof record.maxConcurrency === "string" &&
+    typeof record.allowPriorityFallback === "boolean" &&
+    typeof record.enabled === "boolean" &&
+    typeof record.command === "string" &&
+    typeof record.modelArgs === "string" &&
+    typeof record.availabilityEnabled === "boolean" &&
+    Array.isArray(record.slots) &&
+    record.slots.length === DAY_LABELS.length &&
+    record.slots.every(isSlotState) &&
+    typeof record.usageLimitEnabled === "boolean" &&
+    typeof record.usageMetric === "string" &&
+    typeof record.usageWindow === "string" &&
+    typeof record.usageLimit === "string"
+  );
+}
+
+function readAgentFormDraft(key: string): FormState | null {
+  const raw = readDraft(browserDraftStorage(), key);
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isAgentFormDraft(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function formForAgent(agent: Agent): FormState {
+  const slots = emptySlots();
+  agent.availability?.slots.forEach((slot) => {
+    if (slot.weekday >= 1 && slot.weekday <= 7) {
+      slots[slot.weekday - 1] = {
+        enabled: true,
+        start: slot.start,
+        end: slot.end,
+      };
+    }
+  });
+  return {
+    name: agent.name,
+    kind: agent.kind,
+    model: agent.model,
+    roles: agent.roles,
+    maxConcurrency: String(agent.max_concurrency),
+    allowPriorityFallback: Boolean(agent.allow_priority_fallback),
+    enabled: agent.enabled,
+    command: agent.command.length ? JSON.stringify(agent.command) : "",
+    modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
+    availabilityEnabled: Boolean(agent.availability?.enabled),
+    slots,
+    usageLimitEnabled: Boolean(agent.usage_limit?.enabled),
+    usageMetric: agent.usage_limit?.metric ?? "tokens",
+    usageWindow: agent.usage_limit?.window ?? "day",
+    usageLimit: agent.usage_limit ? String(agent.usage_limit.limit) : "100000",
+  };
+}
+
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [team, setTeam] = useState<DefaultTeamPool | null>(null);
@@ -128,40 +221,29 @@ export function AgentsPage() {
 
   function startCreate() {
     setEditing(null);
-    setForm(emptyForm());
+    setForm(readAgentFormDraft(newAgentDraftKey()) ?? emptyForm());
     setShowForm(true);
   }
 
   function startEdit(agent: Agent) {
     setEditing(agent);
-    const slots = emptySlots();
-    agent.availability?.slots.forEach((slot) => {
-      if (slot.weekday >= 1 && slot.weekday <= 7) {
-        slots[slot.weekday - 1] = {
-          enabled: true,
-          start: slot.start,
-          end: slot.end,
-        };
-      }
-    });
-    setForm({
-      name: agent.name,
-      kind: agent.kind,
-      model: agent.model,
-      roles: agent.roles,
-      maxConcurrency: String(agent.max_concurrency),
-      allowPriorityFallback: Boolean(agent.allow_priority_fallback),
-      enabled: agent.enabled,
-      command: agent.command.length ? JSON.stringify(agent.command) : "",
-      modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
-      availabilityEnabled: Boolean(agent.availability?.enabled),
-      slots,
-      usageLimitEnabled: Boolean(agent.usage_limit?.enabled),
-      usageMetric: agent.usage_limit?.metric ?? "tokens",
-      usageWindow: agent.usage_limit?.window ?? "day",
-      usageLimit: agent.usage_limit ? String(agent.usage_limit.limit) : "100000",
-    });
+    setForm(readAgentFormDraft(agentDraftKey(agent.id)) ?? formForAgent(agent));
     setShowForm(true);
+  }
+
+  // 表单打开期间持续保存草稿；提交成功或取消后不再写入。
+  useEffect(() => {
+    if (!showForm) return;
+    writeDraftJson(
+      browserDraftStorage(),
+      editing ? agentDraftKey(editing.id) : newAgentDraftKey(),
+      form,
+    );
+  }, [showForm, editing, form]);
+
+  function closeForm() {
+    // 取消时保留草稿，下次打开同一表单继续编辑。
+    setShowForm(false);
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -189,6 +271,10 @@ export function AgentsPage() {
       } else {
         await api.createAgent(input);
       }
+      clearDraft(
+        browserDraftStorage(),
+        editing ? agentDraftKey(editing.id) : newAgentDraftKey(),
+      );
       setShowForm(false);
       await refresh();
     } catch (err) {
@@ -504,28 +590,30 @@ export function AgentsPage() {
 
           {form.kind === "cli" ? (
             <div className="form-grid">
-              <label>
-                <span>命令模板（JSON 数组）</span>
-                <textarea
+              <div className="field">
+                <span className="field-label">命令模板（JSON 数组）</span>
+                <InputBox
                   value={form.command}
-                  onChange={(event) => setForm({ ...form, command: event.target.value })}
+                  onChange={(next) => setForm({ ...form, command: next })}
                   rows={3}
+                  maxAutoGrowChars={420}
                   placeholder={'["codex","exec","--json","{model_args}","-"]'}
                 />
                 <small>
                   支持占位符：{"{prompt}"}、{"{job_dir}"}、{"{cwd}"}、{"{model}"}、
                   {"{model_args}"}。没有 {"{prompt}"} 时提示词走 stdin。
                 </small>
-              </label>
-              <label>
-                <span>模型参数模板（JSON 数组）</span>
-                <textarea
+              </div>
+              <div className="field">
+                <span className="field-label">模型参数模板（JSON 数组）</span>
+                <InputBox
                   value={form.modelArgs}
-                  onChange={(event) => setForm({ ...form, modelArgs: event.target.value })}
+                  onChange={(next) => setForm({ ...form, modelArgs: next })}
                   rows={3}
+                  maxAutoGrowChars={320}
                   placeholder={'["-m","{model}"]'}
                 />
-              </label>
+              </div>
             </div>
           ) : null}
 
@@ -533,7 +621,7 @@ export function AgentsPage() {
             <button className="primary" type="submit" disabled={saving}>
               {saving ? "保存中…" : "保存"}
             </button>
-            <button className="ghost" type="button" onClick={() => setShowForm(false)}>
+            <button className="ghost" type="button" onClick={closeForm}>
               取消
             </button>
           </div>

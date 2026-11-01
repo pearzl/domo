@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, subscribeEvents } from "./api";
 import type { Health } from "./types";
+import { browserDraftStorage, pruneDrafts } from "./presentation/draft";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { AgentsPage } from "./pages/AgentsPage";
@@ -25,6 +26,10 @@ export default function App() {
     if (window.location.pathname !== canonical) {
       window.history.replaceState(window.history.state, "", canonical);
     }
+  }, []);
+
+  useEffect(() => {
+    pruneDrafts(browserDraftStorage());
   }, []);
 
   useEffect(() => {
@@ -134,6 +139,7 @@ export default function App() {
       <main className="content">
         {projectMatch ? (
           <ProjectPage
+            key={projectMatch[1]}
             id={projectMatch[1]}
             onBack={() => navigate("/")}
           />
