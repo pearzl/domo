@@ -28,7 +28,8 @@ import { useDraftJson, useDraftValue } from "../components/useDraft";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView, JobRecordList } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
-import { ProjectGoal, ProjectOverview } from "../components/ProjectOverview";
+import { ProjectOverview } from "../components/ProjectOverview";
+import { ProjectHeader } from "../components/ProjectHeader";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
@@ -1157,136 +1158,27 @@ export function ProjectPage({
         </button>
       </div>
 
-      <header className="project-header panel">
-        <div className="project-heading">
-          <div>
-            <h1>{project.name}</h1>
-          </div>
-          <div className="header-actions">
-            {!archived && project.stage !== "completed" ? (
-              paused ? (
-                <button
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() => run(() => api.resumeProject(project.id))}
-                >
-                  恢复
-                </button>
-              ) : (
-                <>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() => run(() => api.pauseProject(project.id))}
-                  >
-                    暂停
-                  </button>
-                  <button
-                    className="danger"
-                    disabled={busy}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "强制暂停会立即终止所有在途作业，任务进入已暂停；之后点“恢复”继续推进。确认继续？",
-                        )
-                      ) {
-                        void run(() => api.pauseProject(project.id, true));
-                      }
-                    }}
-                  >
-                    强制暂停
-                  </button>
-                </>
-              )
-            ) : null}
-            {canReplan ? (
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => setReplanOpen((value) => !value)}
-              >
-                重新规划
-              </button>
-            ) : null}
-            {!archived ? (
-              <button
-                className="danger"
-                disabled={busy}
-                onClick={() => void handleArchive()}
-              >
-                归档
-              </button>
-            ) : null}
-          </div>
-        </div>
-        <ProjectGoal goal={project.goal} />
-        {project.blocked_reason ? (
-          <div className="blocked-banner">
-            <strong>{project.status === "blocked" ? "阻塞原因" : "提示"}</strong>
-            <RichContent content={project.blocked_reason} />
-          </div>
-        ) : null}
-        {project.stage === "completed" ? (
-          <div className="success-banner merge-banner">
-            <div>
-              {project.merged_at && detail.merged_into_base ? (
-                <>
-                  已合入 <span className="mono">{project.base_branch}</span>（
-                  {formatTime(project.merged_at)}，提交{" "}
-                  <span className="mono">
-                    {project.merged_commit?.slice(0, 7) ?? "—"}
-                  </span>
-                  ）。项目分支 <span className="mono">{project.branch}</span> 已 rebase
-                  到目标分支。
-                </>
-              ) : detail.merged_into_base ? (
-                <>
-                  目标分支 <span className="mono">{project.base_branch}</span> 已包含项目分支{" "}
-                  <span className="mono">{project.branch}</span> 的全部提交。
-                </>
-              ) : archived ? (
-                <>
-                  未合入，项目分支 <span className="mono">{project.branch}</span>{" "}
-                  已归档。归档 ref：
-                  <span className="mono">
-                    {`refs/domo-archive/heads/${project.branch}`}
-                  </span>
-                  <br />
-                  恢复命令：
-                  <span className="mono">
-                    {`git branch ${project.branch} refs/domo-archive/heads/${project.branch}`}
-                  </span>
-                </>
-              ) : (
-                <>
-                  项目已完成。改动位于 <span className="mono">{project.branch}</span>
-                  ，请审阅后合入 <span className="mono">{project.base_branch}</span>。
-                </>
-              )}
-            </div>
-            {!detail.merged_into_base && !archived ? (
-              <div className="button-row merge-actions">
-                <button
-                  className="primary"
-                  disabled={busy || merging}
-                  onClick={() => void handleMerge()}
-                >
-                  {merging ? "合入中…" : `合入到 ${project.base_branch}`}
-                </button>
-              </div>
-            ) : null}
-            {mergeNotice ? (
-              <div
-                className={`merge-result ${
-                  mergeNotice.tone === "error" ? "merge-error" : "merge-ok"
-                }`}
-              >
-                <RichContent content={mergeNotice.text} />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </header>
+      <ProjectHeader
+        detail={detail}
+        canReplan={canReplan}
+        busy={busy}
+        merging={merging}
+        mergeNotice={mergeNotice}
+        onResume={() => void run(() => api.resumeProject(project.id))}
+        onPause={() => void run(() => api.pauseProject(project.id))}
+        onForcePause={() => {
+          if (
+            window.confirm(
+              "强制暂停会立即终止所有在途作业，任务进入已暂停；之后点“恢复”继续推进。确认继续？",
+            )
+          ) {
+            void run(() => api.pauseProject(project.id, true));
+          }
+        }}
+        onToggleReplan={() => setReplanOpen((value) => !value)}
+        onArchive={() => void handleArchive()}
+        onMerge={() => void handleMerge()}
+      />
 
       <ProjectOverview detail={detail} />
 
@@ -1483,45 +1375,23 @@ export function ProjectPage({
         </details>
       </section>
 
-      <details className="panel project-settings">
-        <summary>项目设置</summary>
-        <details className="project-meta">
-          <summary>项目元信息</summary>
-          <div className="meta-grid">
-            <div>
-              <span className="meta-label">仓库</span>
-              <span className="mono">{project.repo_path}</span>
-            </div>
-            <div>
-              <span className="meta-label">交付分支</span>
-              <span className="mono">
-                {project.base_branch} → {project.branch}
-              </span>
-            </div>
-            <div>
-              <span className="meta-label">工作区</span>
-              <span className="mono">{project.workspace}</span>
-            </div>
-          </div>
-        </details>
-        <AgentPoolPanel
-          title="项目 Agent 池"
-          subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护；角色启停只影响当前项目，项目池停用会屏蔽已有任务。"
-          roles={detail.agent_pool.roles}
-          disabled={archived}
-          scope="project"
-          onReorder={(role, agentId, position) =>
-            api.updateProjectAgent(project.id, role, agentId, { position })
-          }
-          onMove={(role, agentId, direction) =>
-            api.updateProjectAgent(project.id, role, agentId, { direction })
-          }
-          onToggle={(role, agentId, enabled) =>
-            api.updateProjectAgent(project.id, role, agentId, { enabled })
-          }
-          onRefresh={() => refresh()}
-        />
-      </details>
+      <AgentPoolPanel
+        title="项目 Agent 池"
+        subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护；角色启停只影响当前项目，项目池停用会屏蔽已有任务。"
+        roles={detail.agent_pool.roles}
+        disabled={archived}
+        scope="project"
+        onReorder={(role, agentId, position) =>
+          api.updateProjectAgent(project.id, role, agentId, { position })
+        }
+        onMove={(role, agentId, direction) =>
+          api.updateProjectAgent(project.id, role, agentId, { direction })
+        }
+        onToggle={(role, agentId, enabled) =>
+          api.updateProjectAgent(project.id, role, agentId, { enabled })
+        }
+        onRefresh={() => refresh()}
+      />
 
       {selectedTask ? (
         <TaskDrawer

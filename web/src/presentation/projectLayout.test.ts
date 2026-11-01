@@ -9,6 +9,7 @@ import {
   type ProjectBlockKey,
 } from "./projectLayout";
 import projectPageSource from "../pages/ProjectPage.tsx?raw";
+import projectHeaderSource from "../components/ProjectHeader.tsx?raw";
 
 const STAGES = ["analysis", "executing", "summarizing", "completed"] as const;
 
@@ -65,7 +66,6 @@ describe("projectBlockOrder 阶段顺序", () => {
 
 describe("项目详情页区块布局", () => {
   const blockMap = 'projectBlockOrder(project.stage).map';
-  const settings = '<details className="panel project-settings">';
 
   it("按 projectLayout 输出顶层区块", () => {
     expect(projectPageSource).toContain(blockMap);
@@ -75,45 +75,40 @@ describe("项目详情页区块布局", () => {
     expect(projectPageSource).toContain('<Fragment key={block}>');
   });
 
-  it("Agent 池位于项目设置折叠内，且排在分析、任务与报告之后", () => {
+  it("项目 Agent 池为顶层面板，且排在分析、任务与报告之后", () => {
     const mapIndex = projectPageSource.indexOf(blockMap);
-    const settingsIndex = projectPageSource.indexOf(settings);
-    const poolIndex = projectPageSource.indexOf("<AgentPoolPanel", settingsIndex);
+    const poolIndex = projectPageSource.indexOf("<AgentPoolPanel", mapIndex);
     expect(mapIndex).toBeGreaterThan(0);
-    expect(settingsIndex).toBeGreaterThan(mapIndex);
-    expect(poolIndex).toBeGreaterThan(settingsIndex);
-    expect(projectPageSource.slice(settingsIndex, poolIndex)).toContain(
-      "项目设置",
-    );
-    expect(projectPageSource.slice(settingsIndex, poolIndex)).toContain(
-      "项目元信息",
-    );
+    expect(poolIndex).toBeGreaterThan(mapIndex);
+    expect(projectPageSource).not.toContain("项目设置");
+    expect(projectPageSource).not.toContain("project-settings");
   });
 
-  it("项目元信息默认收起", () => {
-    const start = projectPageSource.indexOf(
-      '<details className="project-meta">',
-    );
-    expect(start).toBeGreaterThan(0);
-    const openTag = projectPageSource.slice(
-      start,
-      projectPageSource.indexOf(">", start),
-    );
-    expect(openTag).not.toContain("open");
-    const metaGrid = projectPageSource.indexOf('<div className="meta-grid">', start);
-    expect(metaGrid).toBeGreaterThan(start);
-  });
-
-  it("页头不重复概览中的任务进度与状态徽章", () => {
-    const start = projectPageSource.indexOf(
+  it("页头交给 ProjectHeader，并展示阶段、状态、进度与运行作业数", () => {
+    expect(projectPageSource).toContain("<ProjectHeader");
+    const start = projectHeaderSource.indexOf(
       '<header className="project-header panel">',
     );
-    const end = projectPageSource.indexOf("</header>", start);
-    const header = projectPageSource.slice(start, end);
-    expect(header).not.toContain("<Progress");
-    expect(header).not.toContain("<StageBadge");
-    expect(header).not.toContain("<StatusBadge");
-    expect(header).not.toContain("任务完成");
+    expect(start).toBeGreaterThan(0);
+    expect(projectHeaderSource).toContain("<ProjectStatusBar");
+    expect(projectHeaderSource).toContain("<StageBadge");
+    expect(projectHeaderSource).toContain("<StatusBadge");
+    expect(projectHeaderSource).toContain("任务进度");
+    expect(projectHeaderSource).toContain("运行作业");
+  });
+
+  it("项目源信息默认收起，并提供逐项复制入口", () => {
+    const start = projectHeaderSource.indexOf(
+      '<details className="project-source">',
+    );
+    expect(start).toBeGreaterThan(0);
+    const openTag = projectHeaderSource.slice(
+      start,
+      projectHeaderSource.indexOf(">", start),
+    );
+    expect(openTag).not.toContain("open");
+    expect(projectHeaderSource).toContain("<CopyButton");
+    expect(projectHeaderSource).toContain("项目源信息");
   });
 
   it("项目作业区使用默认最近记录与展开入口", () => {

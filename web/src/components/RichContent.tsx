@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { writeClipboard } from "../presentation/clipboard";
 import { JsonView } from "./JsonView";
 import { Markdown, looksLikeMarkdown } from "./markdown";
 
@@ -32,31 +33,6 @@ function analyze(
     return { kind: "markdown", json: null };
   }
   return { kind: "text", json: null };
-}
-
-async function writeClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall back to the selection based copy path below.
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const copied = document.execCommand("copy");
-    document.body.removeChild(area);
-    return copied;
-  } catch {
-    return false;
-  }
 }
 
 /**

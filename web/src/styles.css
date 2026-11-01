@@ -1004,29 +1004,91 @@ small {
   gap: 14px;
 }
 
-/* 项目设置收在页面末尾：元信息与 Agent 池都按需展开，不抢占任务主区。 */
-.project-settings {
+/* 状态条紧跟标题：阶段、状态、任务进度与运行作业数一行读完。 */
+.project-status-bar {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 
-.project-settings > summary {
+.project-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-status-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态值变化时整个条目重新挂载，用淡入提示刷新结果。 */
+.project-status-fade {
+  animation: project-status-fade 220ms ease;
+}
+
+@keyframes project-status-fade {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-status-fade {
+    animation: none;
+  }
+}
+
+/* 项目源信息贴在标题区，默认折叠；展开后逐项展示并可单独复制。 */
+.project-source {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  font-size: 0.86rem;
+}
+
+.project-source > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
   font-weight: 600;
 }
 
-.project-settings .agent-pool {
-  background: #f8fafc;
-  box-shadow: none;
+.project-source > summary:hover {
+  color: var(--text);
 }
 
-.project-meta > summary {
-  color: var(--muted);
-  font-size: 0.88rem;
-}
-
-.project-meta .meta-grid {
+.project-source-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   margin-top: 10px;
+}
+
+.project-source-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.project-source-value {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.project-source .copy-button {
+  padding: 2px 8px;
+  font-size: 0.78rem;
 }
 
 .project-heading {
@@ -1049,22 +1111,6 @@ small {
   flex-wrap: wrap;
   justify-content: flex-end;
   max-width: 100%;
-}
-
-.meta-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px 22px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.86rem;
-}
-
-.meta-grid > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
 }
 
 .project-overview {
@@ -3404,12 +3450,12 @@ summary {
     overflow-wrap: anywhere;
   }
 
-  .meta-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .project-source-row {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .meta-grid .mono {
-    overflow-wrap: anywhere;
+  .project-source-row .meta-label {
+    grid-column: 1 / -1;
   }
 
   /* 事件筛选条在窄屏横向滚动，不挤压事件列表。 */
