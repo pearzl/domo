@@ -304,9 +304,9 @@ export interface JobDetail extends JobSummary {
   pid: number | null;
 }
 
-/** 作业活动条目：助手消息、工具调用、步骤或纯文本行预览。 */
+/** 作业活动条目：助手消息、推理（思维链）、工具调用、步骤或纯文本行预览。 */
 export interface JobActivityItem {
-  kind: "message" | "tool" | "step" | "line";
+  kind: "message" | "reasoning" | "tool" | "step" | "line";
   text: string | null;
   tool: string | null;
   target: string | null;
@@ -316,6 +316,7 @@ export interface JobActivityItem {
 
 export interface JobActivitySummary {
   messages: number;
+  reasoning: number;
   tool_calls: number;
   tool_failures: number;
   steps: number;

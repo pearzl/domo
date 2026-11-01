@@ -22,6 +22,7 @@ pub const FORMAT_WORKBUDDY: &str = "workbuddy";
 pub const FORMAT_TEXT: &str = "text";
 
 pub const KIND_MESSAGE: &str = "message";
+pub const KIND_REASONING: &str = "reasoning";
 pub const KIND_TOOL: &str = "tool";
 pub const KIND_STEP: &str = "step";
 pub const KIND_LINE: &str = "line";
@@ -47,6 +48,7 @@ pub struct ActivityItem {
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ActivitySummary {
     pub messages: usize,
+    pub reasoning: usize,
     pub tool_calls: usize,
     pub tool_failures: usize,
     pub steps: usize,
@@ -56,6 +58,7 @@ pub struct ActivitySummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventKind {
     Text,
+    Reasoning,
     Tool,
     Step,
 }
@@ -139,6 +142,18 @@ impl ParseState {
         }
         self.items
             .push(item(KIND_LINE, Some(text), None, None, None, None));
+    }
+
+    /// Reasoning text is trimmed like message text; an empty payload yields no
+    /// item so blank thinking blocks do not count as reasoning.
+    fn reasoning(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.summary.reasoning += 1;
+        self.items
+            .push(item(KIND_REASONING, Some(text), None, None, None, None));
     }
 
     fn step(&mut self, text: Option<&str>) {
@@ -312,6 +327,7 @@ fn line_value(line: &str) -> Option<Value> {
 fn opencode_kind(value: &str) -> Option<EventKind> {
     match value {
         "text" => Some(EventKind::Text),
+        "reasoning" | "thinking" => Some(EventKind::Reasoning),
         "tool_use" | "tool" => Some(EventKind::Tool),
         "step_finish" | "step-finish" => Some(EventKind::Step),
         _ => None,
@@ -333,6 +349,15 @@ fn parse_opencode(raw: &str, state: &mut ParseState) {
             EventKind::Text => {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     state.message(text);
+                }
+            }
+            EventKind::Reasoning => {
+                let text = part
+                    .get("text")
+                    .or_else(|| part.get("thinking"))
+                    .and_then(Value::as_str);
+                if let Some(text) = text {
+                    state.reasoning(text);
                 }
             }
             EventKind::Tool => {
@@ -423,6 +448,13 @@ fn codex_item(
             if completed {
                 if let Some(text) = item.get("text").and_then(Value::as_str) {
                     state.message(text);
+                }
+            }
+        }
+        "reasoning" => {
+            if completed {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    state.reasoning(text);
                 }
             }
         }
@@ -551,8 +583,10 @@ fn parse_workbuddy(raw: &str, state: &mut ParseState) {
                     let thinking = block
                         .get("thinking")
                         .or_else(|| block.get("text"))
-                        .and_then(error_first_line);
-                    state.step(thinking.as_deref());
+                        .and_then(|value| value.as_str());
+                    if let Some(thinking) = thinking {
+                        state.reasoning(thinking);
+                    }
                 }
                 "tool_use" => {
                     let tool = block
@@ -806,6 +840,7 @@ mod tests {
             activity.summary,
             ActivitySummary {
                 messages: 1,
+                reasoning: 0,
                 tool_calls: 3,
                 tool_failures: 1,
                 steps: 1,
@@ -964,6 +999,7 @@ mod tests {
             activity.summary,
             ActivitySummary {
                 messages: 1,
+                reasoning: 0,
                 tool_calls: 2,
                 tool_failures: 1,
                 steps: 1,
@@ -1059,12 +1095,9 @@ mod tests {
         assert_eq!(activity.items[1].target.as_deref(), Some("activity"));
         assert_eq!(activity.items[2].tool.as_deref(), Some("web_search"));
         assert_eq!(activity.items[2].target.as_deref(), Some("codex jsonl"));
-        assert_eq!(activity.items[3].kind, KIND_LINE);
-        assert!(activity.items[3]
-            .text
-            .as_deref()
-            .unwrap()
-            .contains("reasoning"));
+        assert_eq!(activity.items[3].kind, KIND_REASONING);
+        assert_eq!(activity.items[3].text.as_deref(), Some("内部推理"));
+        assert_eq!(activity.summary.reasoning, 1);
     }
 
     fn workbuddy_replay() -> String {
@@ -1099,6 +1132,7 @@ mod tests {
             activity.summary,
             ActivitySummary {
                 messages: 1,
+                reasoning: 0,
                 tool_calls: 2,
                 tool_failures: 1,
                 steps: 0,
@@ -1145,7 +1179,8 @@ mod tests {
         assert_eq!(activity.format, FORMAT_WORKBUDDY);
         assert_eq!(activity.summary.tool_calls, 1);
         assert_eq!(activity.summary.tool_failures, 1);
-        assert_eq!(activity.summary.steps, 1);
+        assert_eq!(activity.summary.reasoning, 1);
+        assert_eq!(activity.summary.steps, 0);
         assert_eq!(activity.summary.messages, 0);
         assert_eq!(activity.items[0].kind, KIND_TOOL);
         assert_eq!(activity.items[0].status.as_deref(), Some("error"));
@@ -1153,8 +1188,8 @@ mod tests {
             activity.items[0].error.as_deref(),
             Some("permission denied")
         );
-        assert_eq!(activity.items[1].kind, KIND_STEP);
-        assert_eq!(activity.items[1].text.as_deref(), Some("需要重试"));
+        assert_eq!(activity.items[1].kind, KIND_REASONING);
+        assert_eq!(activity.items[1].text.as_deref(), Some("需要重试\n下一行"));
     }
 
     #[test]
@@ -1202,5 +1237,142 @@ mod tests {
         let empty = report("");
         assert_eq!(empty.format, FORMAT_TEXT);
         assert!(empty.items.is_empty());
+    }
+
+    #[test]
+    fn opencode_reasoning_is_recognized_in_both_event_shapes() {
+        // Shape A: the outer `type` names the event; the part repeats it.
+        // Shape B: only `payload.part.type` names the event.
+        let raw = concat!(
+            r#"{"type":"reasoning","timestamp":1,"sessionID":"ses_1","part":{"type":"reasoning","text":"先确认入口文件的位置。"}}"#,
+            "\n",
+            r#"{"part":{"type":"thinking","text":"再检查依赖解析。"}}"#,
+            "\n",
+            r#"{"type":"thinking","part":{"type":"thinking","thinking":"确认测试范围。"}}"#,
+            "\n",
+            r#"{"type":"text","timestamp":2,"sessionID":"ses_1","part":{"type":"text","text":"读完了。"}}"#,
+            "\n",
+            r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}"#,
+            "\n",
+            r#"{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"src/main.rs"}}}}"#,
+            "\n",
+        );
+        let activity = report(raw);
+        assert_eq!(activity.format, FORMAT_OPENCODE);
+        assert_eq!(activity.summary.reasoning, 3);
+        assert_eq!(activity.summary.messages, 1);
+        assert_eq!(activity.summary.steps, 1);
+        assert_eq!(activity.summary.tool_calls, 1);
+        assert_eq!(activity.items[0].kind, KIND_REASONING);
+        assert_eq!(
+            activity.items[0].text.as_deref(),
+            Some("先确认入口文件的位置。")
+        );
+        assert_eq!(activity.items[1].kind, KIND_REASONING);
+        assert_eq!(activity.items[1].text.as_deref(), Some("再检查依赖解析。"));
+        assert_eq!(activity.items[2].kind, KIND_REASONING);
+        assert_eq!(activity.items[2].text.as_deref(), Some("确认测试范围。"));
+        // Non-reasoning events keep their own kinds.
+        assert_eq!(activity.items[3].kind, KIND_MESSAGE);
+        assert_eq!(activity.items[4].kind, KIND_STEP);
+        assert_eq!(activity.items[5].kind, KIND_TOOL);
+
+        // A reasoning event without text adds no item and no count.
+        let empty = report(concat!(
+            r#"{"type":"reasoning","part":{"type":"reasoning","text":"   "}}"#,
+            "\n",
+            r#"{"part":{"type":"text","text":"继续"}}"#,
+            "\n",
+        ));
+        assert_eq!(empty.summary.reasoning, 0);
+        assert_eq!(empty.items.len(), 1);
+        assert_eq!(empty.items[0].kind, KIND_MESSAGE);
+    }
+
+    #[test]
+    fn codex_reasoning_item_is_recognized_only_with_text() {
+        let raw = concat!(
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"先汇总任务边界。"}}"#,
+            "\n",
+            // A reasoning item without any text must not produce an entry.
+            r#"{"type":"item.completed","item":{"id":"item_2","type":"reasoning","summary":[]}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"完成后说明。"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}"#,
+            "\n",
+            r#"{"type":"turn.completed"}"#,
+            "\n",
+        );
+        let activity = report(raw);
+        assert_eq!(activity.format, FORMAT_CODEX);
+        assert_eq!(activity.summary.reasoning, 1);
+        assert_eq!(activity.summary.messages, 1);
+        assert_eq!(activity.summary.tool_calls, 1);
+        assert_eq!(activity.summary.steps, 1);
+        assert_eq!(activity.items.len(), 4);
+        assert_eq!(activity.items[0].kind, KIND_REASONING);
+        assert_eq!(activity.items[0].text.as_deref(), Some("先汇总任务边界。"));
+        // The textless reasoning item is skipped; the next entry is the message.
+        assert_eq!(activity.items[1].kind, KIND_MESSAGE);
+        assert_eq!(activity.items[2].kind, KIND_TOOL);
+        assert_eq!(activity.items[3].kind, KIND_STEP);
+    }
+
+    #[test]
+    fn workbuddy_thinking_block_becomes_reasoning_not_step() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"thinking","thinking":"需要先读任务文件。"},{"type":"text","text":"开始处理。"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+            "\n",
+        );
+        let activity = report(raw);
+        assert_eq!(activity.format, FORMAT_WORKBUDDY);
+        assert_eq!(activity.summary.reasoning, 1);
+        assert_eq!(activity.summary.messages, 1);
+        assert_eq!(activity.summary.steps, 0);
+        assert_eq!(activity.items[0].kind, KIND_REASONING);
+        assert_eq!(
+            activity.items[0].text.as_deref(),
+            Some("需要先读任务文件。")
+        );
+        assert_eq!(activity.items[1].kind, KIND_MESSAGE);
+    }
+
+    #[test]
+    fn reasoning_respects_item_limits() {
+        let mut raw = String::new();
+        for index in 0..(MAX_ITEMS + 3) {
+            let event = serde_json::json!({
+                "type": "reasoning",
+                "part": {
+                    "type": "reasoning",
+                    "text": format!("reason-{index}-{}", "z".repeat(900)),
+                },
+            });
+            raw.push_str(&event.to_string());
+            raw.push('\n');
+        }
+        let activity = report(&raw);
+        assert_eq!(activity.summary.reasoning, MAX_ITEMS + 3);
+        assert_eq!(activity.items.len(), MAX_ITEMS);
+        assert!(activity.summary.truncated);
+        assert!(activity
+            .items
+            .first()
+            .unwrap()
+            .text
+            .as_deref()
+            .unwrap()
+            .starts_with("reason-3-"));
+        for item in &activity.items {
+            assert_eq!(item.kind, KIND_REASONING);
+            assert!(item.text.as_deref().unwrap().chars().count() <= MAX_ITEM_CHARS);
+        }
     }
 }

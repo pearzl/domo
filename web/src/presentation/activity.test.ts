@@ -43,6 +43,7 @@ function activity(items: JobActivityItem[]): JobActivity {
     items,
     summary: {
       messages: items.filter((entry) => entry.kind === "message").length,
+      reasoning: items.filter((entry) => entry.kind === "reasoning").length,
       tool_calls: items.filter((entry) => entry.kind === "tool").length,
       tool_failures: items.filter((entry) => isToolFailure(entry)).length,
       steps: items.filter((entry) => entry.kind === "step").length,
