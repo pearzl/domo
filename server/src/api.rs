@@ -1254,7 +1254,8 @@ async fn create_task(
         sqlx::query(
             "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
              ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
-             report = NULL, report_feedback = NULL, completion_mode = ?, merged_at = NULL, \
+             report = NULL, report_feedback = NULL, acceptance = NULL, acceptance_passed = 0, \
+             acceptance_round = 0, acceptance_at = NULL, completion_mode = ?, merged_at = NULL, \
              merged_commit = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(STAGE_EXECUTING)
@@ -2771,6 +2772,11 @@ async fn retry_job(
                 JOB_ROLE_DIRECT => {
                     project.stage == STAGE_EXECUTING && project.completion_mode == COMPLETION_DIRECT
                 }
+                JOB_ROLE_ACCEPTANCE => {
+                    project.stage == STAGE_SUMMARIZING
+                        && project.report.is_none()
+                        && project.acceptance_passed == 0
+                }
                 JOB_ROLE_SUMMARY => project.stage == STAGE_SUMMARIZING,
                 _ => false,
             };
@@ -2802,6 +2808,16 @@ async fn retry_job(
         .bind(&project.id)
         .execute(&state.db)
         .await?;
+        if job.role == JOB_ROLE_ACCEPTANCE {
+            sqlx::query(
+                "UPDATE projects SET acceptance = NULL, acceptance_passed = 0, \
+                 acceptance_round = 0, acceptance_at = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(now())
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
+        }
     } else {
         sqlx::query(
             "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
@@ -3574,8 +3590,12 @@ fn arbitration_role(task: &TaskRow) -> &'static str {
 
 fn role_label(role: &str) -> &'static str {
     match role {
+        JOB_ROLE_ANALYSIS => "项目分析",
+        JOB_ROLE_DIRECT => "直接完成",
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",
+        JOB_ROLE_ACCEPTANCE => "项目验收",
+        JOB_ROLE_SUMMARY => "总结",
         ROLE_PLANNER => "规划",
         _ => "未知",
     }

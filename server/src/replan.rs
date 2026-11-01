@@ -102,6 +102,7 @@ pub async fn request(
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
+         acceptance = NULL, acceptance_passed = 0, acceptance_round = 0, acceptance_at = NULL, \
          completion_mode = ?, proposal = NULL, replan_reason = ?, replan_source = ?, \
          replan_requested_at = ?, updated_at = ? WHERE id = ?",
     )
@@ -182,6 +183,7 @@ pub async fn pending(pool: &SqlitePool, project: &ProjectRow) -> Result<bool> {
 fn source_label(source: &str) -> &'static str {
     match source {
         REPLAN_SOURCE_EXECUTOR => "执行者",
+        REPLAN_SOURCE_ACCEPTANCE => "项目验收",
         REPLAN_SOURCE_HUMAN => "人工",
         _ => "未知",
     }

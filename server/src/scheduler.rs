@@ -135,6 +135,20 @@ async fn recover(state: &AppState) -> Result<()> {
             .bind(STAGE_EXECUTING)
             .execute(&state.db)
             .await?;
+        } else if job.role == JOB_ROLE_ACCEPTANCE {
+            sqlx::query(
+                "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+                 THEN status ELSE ? END, blocked_reason = NULL, acceptance = NULL, \
+                 acceptance_passed = 0, acceptance_at = NULL, updated_at = ? \
+                 WHERE id = ? AND stage = ? AND acceptance_passed = 0",
+            )
+            .bind(STAGE_SUMMARIZING)
+            .bind(STATUS_RUNNING)
+            .bind(now())
+            .bind(&job.project_id)
+            .bind(STAGE_SUMMARIZING)
+            .execute(&state.db)
+            .await?;
         } else if job.role == JOB_ROLE_SUMMARY {
             sqlx::query(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
@@ -428,7 +442,8 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     sqlx::query(
                         "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
                          ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-                         blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                         blocked_reason = NULL, acceptance = NULL, acceptance_passed = 0, \
+                         acceptance_at = NULL, updated_at = ? WHERE id = ?",
                     )
                     .bind(STAGE_SUMMARIZING)
                     .bind(STATUS_RUNNING)
@@ -442,7 +457,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         Some(&project.id),
                         None,
                         "summarizing",
-                        "全部任务完成，开始撰写项目报告",
+                        "全部任务完成，开始项目验收",
                     )
                     .await;
                     let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
@@ -451,7 +466,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                             state,
                             &project,
                             &agent,
-                            JOB_ROLE_SUMMARY,
+                            JOB_ROLE_ACCEPTANCE,
                             &choice.yielded,
                         )
                         .await?
@@ -522,22 +537,37 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 recompute_blocked(state, &project.id).await?;
             }
             STAGE_SUMMARIZING => {
-                if has_project_job(&state.db, &project.id, JOB_ROLE_SUMMARY).await? {
+                let (role, waiting) = if project.acceptance_passed == 0 {
+                    if project.acceptance.is_some() {
+                        let reason = "项目验收未通过，等待重规划或人工裁决";
+                        sqlx::query(
+                            "UPDATE projects SET status = CASE WHEN status IN \
+                             ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+                             blocked_reason = COALESCE(blocked_reason, ?), updated_at = ? WHERE id = ?",
+                        )
+                        .bind(STATUS_BLOCKED)
+                        .bind(reason)
+                        .bind(now())
+                        .bind(&project.id)
+                        .execute(&state.db)
+                        .await?;
+                        continue;
+                    }
+                    (JOB_ROLE_ACCEPTANCE, "等待可用的项目验收 Agent")
+                } else {
+                    (JOB_ROLE_SUMMARY, "等待可用的总结 Agent")
+                };
+                if has_project_job(&state.db, &project.id, role).await? {
                     continue;
                 }
                 let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
                 let Some(agent) = choice.agent else {
-                    note_waiting(
-                        state,
-                        &project,
-                        choice.reason.as_deref().unwrap_or("等待可用的总结 Agent"),
-                    )
-                    .await?;
+                    note_waiting(state, &project, choice.reason.as_deref().unwrap_or(waiting))
+                        .await?;
                     continue;
                 };
                 if let Some(job_id) =
-                    spawn_project_job(state, &project, &agent, JOB_ROLE_SUMMARY, &choice.yielded)
-                        .await?
+                    spawn_project_job(state, &project, &agent, role, &choice.yielded).await?
                 {
                     spawns.push(job_id);
                 }
@@ -1196,6 +1226,7 @@ fn role_label(role: &str) -> &'static str {
         ROLE_PLANNER => "规划",
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",
+        JOB_ROLE_ACCEPTANCE => "项目验收",
         JOB_ROLE_SUMMARY => "总结",
         _ => "未知",
     }

@@ -12,7 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::models::{
     AgentRow, AGENT_CLI, AGENT_CODEX, AGENT_MOCK, AGENT_OPENCODE, AGENT_WORKBUDDY, CONFIRM_AUTO,
-    JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY,
+    JOB_ROLE_VERIFIER,
 };
 use crate::usage::UsageRecord;
 
@@ -157,6 +158,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
             JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
             JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
             JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
+            JOB_ROLE_ACCEPTANCE => mock_project_acceptance(&context, &spec.cwd)?,
             JOB_ROLE_SUMMARY => mock_summary(&context),
             other => return Err(anyhow!("mock 不支持角色 {other}")),
         },
@@ -527,12 +529,16 @@ fn mock_switch_matches(context: &serde_json::Value, switch_env: &str, key: &str)
     matches_goal && matches_key && matches_agent
 }
 
-/// Planned failures for the project roles (analysis, direct completion and
-/// summary). The mock writes a failed result before running the role logic, so
-/// project jobs can exercise the same failure policy as task jobs. The switches
-/// are separate from the task-level ones so goals and pools stay orthogonal.
+/// Planned failures for the project roles (analysis, direct completion,
+/// project acceptance and summary). The mock writes a failed result before
+/// running the role logic, so project jobs can exercise the same failure policy
+/// as task jobs. The switches are separate from the task-level ones so goals and
+/// pools stay orthogonal.
 fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_json::Value> {
-    if !matches!(role, JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY) {
+    if !matches!(
+        role,
+        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+    ) {
         return None;
     }
     let failed = |reason: String| Some(serde_json::json!({ "kind": "failed", "reason": reason }));
@@ -810,6 +816,75 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
     } else {
         Ok(serde_json::json!({"pass": false, "reason": "mock 产物缺失", "issues": missing}))
     }
+}
+
+fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
+    let criteria: Vec<String> = context
+        .get("acceptance_criteria")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let criteria = if criteria.is_empty() {
+        vec!["项目目标已达成".to_string()]
+    } else {
+        criteria
+    };
+    let always_fail = std::env::var("DOMO_MOCK_ACCEPT_ALWAYS_FAIL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let human_only = std::env::var("DOMO_MOCK_ACCEPT_HUMAN_ONLY")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let fail_once = std::env::var("DOMO_MOCK_ACCEPT_FAIL_ONCE")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+        && take_once_marker(context, cwd, ".mock-accept-fail-once")?;
+    let fail = !human_only && (always_fail || fail_once);
+    let items = criteria
+        .iter()
+        .enumerate()
+        .map(|(index, criterion)| {
+            let failed = fail && index == 0;
+            let verdict = if failed {
+                "unmet"
+            } else if human_only {
+                "human_required"
+            } else {
+                "met"
+            };
+            serde_json::json!({
+                "id": format!("A{}", index + 1),
+                "source": "proposal_acceptance",
+                "criterion": criterion,
+                "verdict": verdict,
+                "evidence": if failed {
+                    serde_json::json!([])
+                } else if human_only {
+                    serde_json::json!(["human: 需要人工确认"])
+                } else {
+                    serde_json::json!(["mock: 项目交付分支产物已核查"])
+                },
+                "gap": if failed {
+                    "mock 项目验收未通过"
+                } else if human_only {
+                    "mock 需要人工确认"
+                } else {
+                    ""
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "kind": "project_acceptance",
+        "summary": if fail { "mock 项目验收未通过" } else { "mock 项目验收通过" },
+        "criteria": items,
+        "replan_reason": if fail { "mock 项目验收发现未满足条目" } else { "" },
+    }))
 }
 
 fn mock_summary(context: &serde_json::Value) -> serde_json::Value {

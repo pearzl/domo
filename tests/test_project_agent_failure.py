@@ -44,6 +44,22 @@ if role == "analysis":
         ],
         "skip_confirmation": True,
     }
+elif role == "project_acceptance":
+    result = {
+        "kind": "project_acceptance",
+        "summary": "脚本化项目验收通过",
+        "criteria": [
+            {
+                "id": "A1",
+                "source": "proposal_acceptance",
+                "criterion": "产物符合目标描述",
+                "verdict": "met",
+                "evidence": ["file: domo_mock/T1.txt"],
+                "gap": "",
+            }
+        ],
+        "replan_reason": "",
+    }
 elif role == "summary":
     result = {"kind": "report", "summary": "脚本化报告：全部任务已完成。"}
 else:

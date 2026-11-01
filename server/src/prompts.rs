@@ -3,8 +3,9 @@
 
 use crate::domain::{MAX_DERIVED_TASKS, MAX_PLAN_TASKS};
 use crate::models::{
-    MessageRow, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR, JOB_ROLE_SUMMARY,
-    JOB_ROLE_VERIFIER, REPORT_MESSAGE_ROLE,
+    MessageRow, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR,
+    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE, REPLAN_SOURCE_EXECUTOR,
+    REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,10 @@ pub struct PromptData {
     pub report_feedback: Option<String>,
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub acceptance_result: Option<String>,
+    pub project_summary: Option<String>,
+    pub project_assumptions: Vec<String>,
     pub confirm_mode: String,
 }
 
@@ -74,6 +79,7 @@ pub fn render(data: &PromptData) -> String {
         JOB_ROLE_DIRECT => direct_prompt(data),
         JOB_ROLE_EXECUTOR => executor_prompt(data),
         JOB_ROLE_VERIFIER => verifier_prompt(data),
+        JOB_ROLE_ACCEPTANCE => acceptance_prompt(data),
         JOB_ROLE_SUMMARY => summary_prompt(data),
         _ => format!("未知作业角色: {}", data.role),
     }
@@ -239,8 +245,9 @@ fn replan_section(data: &PromptData) -> String {
         return String::new();
     };
     let source = match data.replan_source.as_deref() {
-        Some("executor") => "执行者",
-        Some("human") => "人工",
+        Some(REPLAN_SOURCE_EXECUTOR) => "执行者",
+        Some(REPLAN_SOURCE_ACCEPTANCE) => "项目验收",
+        Some(REPLAN_SOURCE_HUMAN) => "人工",
         _ => "未知",
     };
     let completed = if data.completed_tasks.is_empty() {
@@ -293,7 +300,8 @@ fn replan_section(data: &PromptData) -> String {
          - 新计划最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段推进，本次只规划距离关键进展最近的一批，后续再通过重规划派发新任务；\n\
          - deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n\
          - 可以复用已取消任务的 key；\n\
-         - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正。\n"
+         - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正；\n\
+         - 不得降低项目级验收口径；如需调整范围，必须在方案摘要中说明原因和影响。\n"
     )
 }
 
@@ -409,8 +417,8 @@ fn executor_prompt(data: &PromptData) -> String {
          - 不要执行 git add、git commit、git checkout、git reset、git merge、git rebase 等改变暂存区、历史或分支的命令；DOMO 会负责暂存、提交和合并；\n\
          - 如果工作区已由 DOMO 置于合并冲突状态，直接编辑冲突文件消除冲突标记并保留任务需要的改动；可以运行只读的 git 命令查看冲突状态，不要执行会改变暂存区、历史或分支的 git 命令；DOMO 会完成提交并重新验收；\n\
          - 如果无法完成，写清失败原因，不要伪造成功；\n\
-         - 如果原计划存在事实错误，导致当前任务无法按描述完成，输出 replan 请求并说明原因；\n\
-         - 大型项目按阶段推进：当前计划内的关键进展完成后，如果仍有大量工作没有纳入计划，输出 replan 请求，由规划者派发下一批任务；本批还有任务可以继续执行时不要请求重规划；\n\
+         - 只有在当前任务的事实前提错误、按任务描述无法完成，或任务范围内的约束冲突必须由规划者裁决时，才输出 replan 请求并说明原因；\n\
+         - 不要判断其他任务或整个项目计划的进度，全局缺口由项目验收阶段统一处理；\n\
          - {}；\n\
          - 结果文件路径固定，不要写到其他位置。\n\
          {}",
@@ -507,6 +515,124 @@ fn verifier_prompt(data: &PromptData) -> String {
     )
 }
 
+fn dialogue_history(data: &PromptData) -> String {
+    let mut history = String::new();
+    for message in &data.messages {
+        if message.role != "user" {
+            continue;
+        }
+        history.push_str(&format!("\n[用户]\n{}\n", message.content));
+    }
+    if history.is_empty() {
+        history.push_str("\n（暂无对话）\n");
+    }
+    history
+}
+
+fn acceptance_criteria(data: &PromptData) -> String {
+    if data.acceptance_criteria.is_empty() {
+        "（项目方案未给出验收条目，请从项目目标和对话派生可核查的验收条目）".to_string()
+    } else {
+        data.acceptance_criteria
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("{}. {}", index + 1, item))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn acceptance_prompt(data: &PromptData) -> String {
+    let tasks = data
+        .completed_tasks
+        .iter()
+        .map(|task| {
+            format!(
+                "- {} {}：{}",
+                task.key,
+                task.title,
+                if task.summary.is_empty() {
+                    "已完成"
+                } else {
+                    &task.summary
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let canceled = if data.canceled_tasks.is_empty() {
+        "（没有被取消的任务）".to_string()
+    } else {
+        data.canceled_tasks
+            .iter()
+            .map(|task| format!("- {} {}：{}", task.key, task.title, task.summary))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let summary = data
+        .project_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n## 项目方案摘要\n{value}\n"))
+        .unwrap_or_default();
+    let assumptions = if data.project_assumptions.is_empty() {
+        "（方案未记录关键假设）".to_string()
+    } else {
+        data.project_assumptions
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let replan = data
+        .replan_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|reason| format!("\n## 上次重规划原因（本次验收需核对是否已闭合）\n{reason}\n"))
+        .unwrap_or_default();
+    format!(
+        "{}你当前扮演**规划者**，负责项目整体验收。当前计划的活动任务已经完成并合入项目交付分支；你只做验收，不写项目报告。\n\
+         {}\
+         \n## 项目验收条目\n{}\
+         \n## 关键假设与范围\n{}\
+         \n## 已完成任务\n{}\
+         \n## 已取消任务\n{}\
+         \n## 交付分支改动规模\n{}\
+         \n## 项目对话\n{}\
+         {}\
+         \n## 验收要求\n\
+         - 逐条对照上面的项目验收条目，以交付分支的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；\n\
+         - 你可以运行只读验证命令（测试、探针、构建检查等）获取证据；命令产生的构建与测试产物应落在仓库已忽略的目录；\n\
+         - 不要修改源码、配置或文档，不要执行 git add、git commit、git merge、git rebase、git push 等改变暂存区、历史或分支的命令；\n\
+         - 每条验收条目给出 verdict：met（有可核查证据）、unmet（代理本应完成但未完成）、unverifiable（代理应能验证但当前无法验证）、human_required（只能由人完成的签字、试听、实机对照等）；\n\
+         - 方案明确允许以 UNKNOWN 收口的条目，判为 met，并在 evidence 中引用允许该口径的方案条文；不为通过验收而放宽标准；\n\
+         - human_required 不是重规划理由，会作为人工待办写入项目报告；只有 unmet 和 unverifiable 需要重新规划；\n\
+         - 证据必须具体，写清命令与退出码、文件路径、提交号或作业 id，不要只复述任务摘要；\n\
+         - 如果存在 unmet 或 unverifiable，在 replan_reason 中列出需要规划者补齐的工作；如果没有，replan_reason 留空；\n\
+         - 不要写项目报告，也不要修改结果文件以外的任何文件。\n\
+         {}",
+        common_header(data),
+        summary,
+        acceptance_criteria(data),
+        assumptions,
+        tasks,
+        canceled,
+        if data.diff_stat.is_empty() {
+            "（没有检测到改动）"
+        } else {
+            &data.diff_stat
+        },
+        dialogue_history(data),
+        replan,
+        result_rules(
+            data,
+            "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met|unmet|unverifiable|human_required\",\"evidence\":[\"command: 命令 -> 退出码\",\"file: 路径 -> 结论\"],\"gap\":\"未满足或无法验证的原因\"}],\"replan_reason\":\"存在 unmet 或 unverifiable 时的重规划原因，否则为空\"}"
+        )
+    )
+}
+
 fn summary_prompt(data: &PromptData) -> String {
     let tasks = data
         .summary_tasks
@@ -549,13 +675,23 @@ fn summary_prompt(data: &PromptData) -> String {
             reviews.len()
         )
     };
+    let acceptance = data
+        .acceptance_result
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|result| {
+            format!("\n## 项目验收结论（已通过，报告必须与此一致）\n```json\n{result}\n```\n")
+        })
+        .unwrap_or_default();
     format!(
-        "{}你当前扮演**规划者**，负责撰写项目总结报告。所有任务已经完成并合并到项目交付分支。\n\
+        "{}你当前扮演**规划者**，负责撰写项目总结报告。项目整体验收已经通过，所有任务已经完成并合并到项目交付分支。\n\
          \n## 任务结果\n{}\n\
          \n## 交付分支改动规模\n{}\n\
-         {}\n\
+         {}{}\n\
          ## 报告要求\n\
          - 使用 Markdown，面向用户说明最终交付了什么、关键思路、验证情况、已知风险；\n\
+         - 报告必须与项目验收结论一致；verdict 为 human_required 的条目作为人工待办列出；\n\
          - 如实验证并说明依据，不要编造没有发生的验证、测试或产物；\n\
          - 报告是用户验收项目的依据，要具体、可核查；\n\
          - 不要在工作区以外读写文件，也不要修改任何代码或文件。\n\
@@ -567,6 +703,7 @@ fn summary_prompt(data: &PromptData) -> String {
         } else {
             &data.diff_stat
         },
+        acceptance,
         feedback,
         result_rules(
             data,
@@ -642,6 +779,10 @@ mod tests {
             report_feedback: None,
             replan_reason: None,
             replan_source: None,
+            acceptance_criteria: vec!["项目验收条目".into()],
+            acceptance_result: None,
+            project_summary: Some("项目方案摘要".into()),
+            project_assumptions: vec!["关键假设".into()],
             confirm_mode: CONFIRM_MANUAL.into(),
         }
     }
@@ -659,6 +800,7 @@ mod tests {
             JOB_ROLE_EXECUTOR => "\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\"",
             JOB_ROLE_VERIFIER => "\"pass\":true,\"reason\":\"通过原因\",\"issues\":[]",
             JOB_ROLE_SUMMARY => "\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"",
+            JOB_ROLE_ACCEPTANCE => "\"kind\":\"project_acceptance\"",
             other => panic!("未知的作业角色: {other}"),
         }
     }
@@ -682,6 +824,7 @@ mod tests {
             JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
             JOB_ROLE_SUMMARY,
         ] {
             let prompt = render_role(role);
@@ -735,6 +878,10 @@ mod tests {
             prompt.contains(&format!("新计划最多包含 {MAX_PLAN_TASKS} 个任务")),
             "缺少重规划任务数量上限"
         );
+        assert!(
+            prompt.contains("不得降低项目级验收口径"),
+            "缺少重规划验收口径约束"
+        );
 
         let mut child = sample_data(JOB_ROLE_EXECUTOR);
         child.derived_from = Some(DependencyInfo {
@@ -758,6 +905,16 @@ mod tests {
             status: None,
             summary: "已完成".into(),
         }];
+        let executor = render_role(JOB_ROLE_EXECUTOR);
+        assert!(
+            executor.contains("不要判断其他任务或整个项目计划的进度"),
+            "执行者不应承担全局进度判断"
+        );
+        assert!(
+            !executor.contains("本批还有任务可以继续执行"),
+            "执行者 replan 条件不应要求全局批次信息"
+        );
+
         let parent_prompt = render(&parent);
         assert!(
             parent_prompt.contains("## 派生子任务"),
@@ -788,6 +945,7 @@ mod tests {
             JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
             JOB_ROLE_SUMMARY,
         ] {
             let prompt = render_role(role);
@@ -800,6 +958,42 @@ mod tests {
             assert!(prompt.contains("domo/p-1"), "{role} 缺少项目交付分支");
             assert!(prompt.contains("只读边界"), "{role} 缺少只读边界");
         }
+    }
+
+    #[test]
+    fn acceptance_prompt_lists_criteria_tasks_and_command_permission() {
+        let mut data = sample_data(JOB_ROLE_ACCEPTANCE);
+        data.acceptance_criteria = vec!["产物可以运行".into(), "记录完整".into()];
+        data.completed_tasks = vec![SummaryTaskInfo {
+            key: "T1".into(),
+            title: "实现产物".into(),
+            summary: "已生成产物".into(),
+        }];
+        data.diff_stat = "1 file changed".into();
+        let prompt = render(&data);
+        assert!(prompt.contains("产物可以运行"), "缺少项目验收条目");
+        assert!(prompt.contains("项目方案摘要"), "缺少项目方案摘要");
+        assert!(prompt.contains("关键假设"), "缺少关键假设");
+        assert!(prompt.contains("实现产物"), "缺少已完成任务");
+        assert!(prompt.contains("1 file changed"), "缺少改动规模");
+        assert!(prompt.contains("运行只读验证命令"), "缺少验证命令权限");
+        assert!(prompt.contains("human_required"), "缺少人工待办口径");
+        assert!(prompt.contains("不要写项目报告"), "缺少不写报告约束");
+    }
+
+    #[test]
+    fn summary_prompt_includes_acceptance_result() {
+        let mut data = sample_data(JOB_ROLE_SUMMARY);
+        data.acceptance_result = Some(
+            r#"{"kind":"project_acceptance","criteria":[{"id":"A1","verdict":"met"}]}"#.into(),
+        );
+        let prompt = render(&data);
+        assert!(prompt.contains("项目验收结论"), "缺少验收结论标题");
+        assert!(prompt.contains("\"verdict\":\"met\""), "缺少验收结论内容");
+        assert!(
+            prompt.contains("报告必须与项目验收结论一致"),
+            "缺少一致性约束"
+        );
     }
 
     #[test]

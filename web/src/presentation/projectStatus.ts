@@ -158,7 +158,7 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
       "info",
       "总结中",
       "等待报告",
-      "规划者正在撰写项目报告。",
+      "规划者正在验收项目或撰写项目报告。",
     );
   }
 

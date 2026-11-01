@@ -31,6 +31,7 @@ pub const STATUS_CANCELED: &str = "canceled";
 
 pub const REPLAN_SOURCE_HUMAN: &str = "human";
 pub const REPLAN_SOURCE_EXECUTOR: &str = "executor";
+pub const REPLAN_SOURCE_ACCEPTANCE: &str = "acceptance";
 
 /// 项目报告评议中，人工提交的意见以该角色持久化到 messages，
 /// 供多轮重写时进入总结作业的提示词，并作为回溯审计记录。
@@ -67,6 +68,7 @@ pub const JOB_ROLE_DIRECT: &str = "direct";
 pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
 pub const JOB_ROLE_VERIFIER: &str = ROLE_VERIFIER;
 pub const JOB_ROLE_SUMMARY: &str = "summary";
+pub const JOB_ROLE_ACCEPTANCE: &str = "project_acceptance";
 
 pub const CONFIRM_MANUAL: &str = "manual";
 pub const CONFIRM_AUTO: &str = "auto";
@@ -325,6 +327,16 @@ pub struct ProjectRow {
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
     pub replan_requested_at: Option<String>,
+    /// Latest project-level acceptance verdict. The job result keeps the full
+    /// audit trail; this copy is the current gate for report dispatch.
+    #[serde(skip_serializing)]
+    pub acceptance: Option<String>,
+    #[serde(skip_serializing)]
+    pub acceptance_passed: i64,
+    #[serde(skip_serializing)]
+    pub acceptance_round: i64,
+    #[serde(skip_serializing)]
+    pub acceptance_at: Option<String>,
     pub confirm_mode: String,
     #[serde(skip_serializing)]
     pub proposal: Option<String>,

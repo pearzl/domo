@@ -12,7 +12,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::agents::{self, AgentSpec};
-use crate::domain::{self, now, parse_result, short_id, slug, FailureKind, ParsedResult};
+use crate::domain::{
+    self, now, parse_result, short_id, slug, AcceptanceCriterion, FailureKind, ParsedResult,
+};
 use crate::events::{emit, emit_job};
 use crate::git;
 use crate::models::*;
@@ -73,7 +75,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
 
     let workspace = PathBuf::from(&project.workspace);
     let cwd = match job.role.as_str() {
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY => paths::project_repo(&workspace),
+        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
+            paths::project_repo(&workspace)
+        }
         JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
         JOB_ROLE_VERIFIER => {
             prepare_verify_worktree(state, &project, task.as_ref(), &job.id).await?
@@ -242,7 +246,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         let _guard = state.git_lock.lock().await;
         let _ = git::remove_worktree(&paths::project_repo(&workspace), &cwd).await;
     }
-    if matches!(job.role.as_str(), JOB_ROLE_ANALYSIS | JOB_ROLE_SUMMARY) {
+    if matches!(
+        job.role.as_str(),
+        JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+    ) {
         let _guard = state.git_lock.lock().await;
         let _ = git::reset_hard(&paths::project_repo(&workspace)).await;
     }
@@ -672,6 +679,25 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(())
             }
         }
+        (
+            JOB_ROLE_ACCEPTANCE,
+            Some(ParsedResult::ProjectAcceptance {
+                summary,
+                criteria,
+                replan_reason,
+            }),
+        ) => handle_project_acceptance(state, &project, summary, criteria, replan_reason).await,
+        (JOB_ROLE_ACCEPTANCE, _) => {
+            let process_failure = run.process_failure();
+            handle_acceptance_failure(
+                state,
+                &project,
+                error.as_deref().unwrap_or("项目验收失败"),
+                Some(&agent),
+                process_failure,
+            )
+            .await
+        }
         (JOB_ROLE_SUMMARY, Some(ParsedResult::Report { summary })) => {
             handle_report(state, &project, summary).await
         }
@@ -1049,6 +1075,25 @@ async fn build_prompt_data(
         _ => String::new(),
     };
     let job_dir = paths::job_dir(&workspace, &job.id);
+    let proposal = project
+        .proposal
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
+    let mut acceptance_criteria = proposal
+        .as_ref()
+        .map(|value| value.acceptance.clone())
+        .unwrap_or_default();
+    if acceptance_criteria.is_empty() {
+        acceptance_criteria = proposal
+            .as_ref()
+            .map(|value| value.verification.clone())
+            .unwrap_or_default();
+    }
+    let project_summary = proposal.as_ref().map(|value| value.summary.clone());
+    let project_assumptions = proposal
+        .as_ref()
+        .map(|value| value.assumptions.clone())
+        .unwrap_or_default();
     Ok(PromptData {
         role: job.role.clone(),
         project_id: project.id.clone(),
@@ -1074,6 +1119,10 @@ async fn build_prompt_data(
         report_feedback: project.report_feedback.clone(),
         replan_reason: project.replan_reason.clone(),
         replan_source: project.replan_source.clone(),
+        acceptance_criteria,
+        acceptance_result: project.acceptance.clone(),
+        project_summary,
+        project_assumptions,
         confirm_mode: project.confirm_mode.clone(),
     })
 }
@@ -1110,6 +1159,7 @@ fn build_context(
             "confirm_mode": project.confirm_mode,
             "completion_mode": project.completion_mode,
             "confirmed_at": project.confirmed_at,
+            "acceptance_at": project.acceptance_at,
         },
         "task": task.map(|task| json!({
             "id": task.id,
@@ -1148,6 +1198,10 @@ fn build_context(
             "key": task.key, "title": task.title, "summary": task.summary,
         })).collect::<Vec<_>>(),
         "diff_stat": data.diff_stat,
+        "acceptance_criteria": data.acceptance_criteria,
+        "acceptance_result": data.acceptance_result,
+        "project_summary": data.project_summary,
+        "project_assumptions": data.project_assumptions,
     })
 }
 
@@ -2518,12 +2572,255 @@ async fn handle_report(state: &AppState, project: &ProjectRow, report: &str) -> 
     Ok(())
 }
 
+async fn handle_project_acceptance(
+    state: &AppState,
+    project: &ProjectRow,
+    summary: &str,
+    criteria: &[AcceptanceCriterion],
+    replan_reason: &str,
+) -> Result<()> {
+    let snapshot = serde_json::to_string(&json!({
+        "kind": "project_acceptance",
+        "summary": summary,
+        "criteria": criteria.iter().map(|item| json!({
+            "id": &item.id,
+            "source": &item.source,
+            "criterion": &item.criterion,
+            "verdict": &item.verdict,
+            "evidence": &item.evidence,
+            "gap": &item.gap,
+        })).collect::<Vec<_>>(),
+        "replan_reason": replan_reason,
+    }))
+    .unwrap_or_default();
+    let gaps: Vec<&AcceptanceCriterion> = criteria
+        .iter()
+        .filter(|item| item.blocks_report())
+        .collect();
+    let passed = gaps.is_empty();
+    let timestamp = now();
+    {
+        let _guard = state.schedule_lock.lock().await;
+        if has_active_tasks(&state.db, &project.id).await? {
+            return apply_stale_result(
+                state,
+                project,
+                "acceptance_superseded",
+                "项目已有未完成任务，验收结论作废，回到执行阶段".into(),
+            )
+            .await;
+        }
+        if passed {
+            sqlx::query(
+                "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
+                 ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+                 acceptance = ?, acceptance_passed = 1, acceptance_round = 0, \
+                 acceptance_at = ?, blocked_reason = NULL, report = NULL, \
+                 report_feedback = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(STAGE_SUMMARIZING)
+            .bind(STATUS_RUNNING)
+            .bind(&snapshot)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE projects SET stage = ?, acceptance = ?, acceptance_passed = 0, \
+                 acceptance_at = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(STAGE_SUMMARIZING)
+            .bind(&snapshot)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
+        }
+    }
+    if passed {
+        let suffix = if summary.trim().is_empty() {
+            String::new()
+        } else {
+            format!("：{summary}")
+        };
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "project_accepted",
+            format!("项目验收通过{suffix}"),
+        )
+        .await;
+        return Ok(());
+    }
+
+    let gap_text = acceptance_gap_text(criteria);
+    let reason = if replan_reason.trim().is_empty() {
+        format!("项目验收存在未闭合条目：\n{gap_text}")
+    } else {
+        format!("{}\n{gap_text}", replan_reason.trim())
+    };
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "project_acceptance_failed",
+        format!("项目验收未通过：\n{gap_text}"),
+    )
+    .await;
+
+    if project.acceptance_round >= domain::MAX_AUTO_ACCEPTANCE_REPLANS {
+        let _guard = state.schedule_lock.lock().await;
+        let blocked_reason = format!(
+            "项目验收自动重规划次数已达上限（{} 次），最近一次仍未通过，等待人工裁决：\n{gap_text}",
+            domain::MAX_AUTO_ACCEPTANCE_REPLANS
+        );
+        sqlx::query(
+            "UPDATE projects SET status = CASE WHEN status IN \
+             ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+             blocked_reason = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_BLOCKED)
+        .bind(&blocked_reason)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "project_acceptance_blocked",
+            blocked_reason,
+        )
+        .await;
+        return Ok(());
+    }
+
+    let outcome = replan::request(state, &project.id, &reason, REPLAN_SOURCE_ACCEPTANCE).await?;
+    if outcome.is_some() {
+        sqlx::query("UPDATE projects SET acceptance_round = ?, updated_at = ? WHERE id = ?")
+            .bind(project.acceptance_round + 1)
+            .bind(now())
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "acceptance_replan",
+            format!(
+                "项目验收未通过，自动重新规划（{}/{}）：\n{gap_text}",
+                project.acceptance_round + 1,
+                domain::MAX_AUTO_ACCEPTANCE_REPLANS
+            ),
+        )
+        .await;
+    } else {
+        let _guard = state.schedule_lock.lock().await;
+        if let Some(current) = load_project(&state.db, &project.id).await? {
+            if current.stage == STAGE_SUMMARIZING
+                && current.acceptance_passed == 0
+                && current.status.as_deref() != Some(STATUS_ARCHIVED)
+            {
+                sqlx::query(
+                    "UPDATE projects SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(STATUS_BLOCKED)
+                .bind(&reason)
+                .bind(now())
+                .bind(&project.id)
+                .execute(&state.db)
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn acceptance_gap_text(criteria: &[AcceptanceCriterion]) -> String {
+    criteria
+        .iter()
+        .filter(|item| item.blocks_report())
+        .map(|item| {
+            let verdict = if item.verdict == "unmet" {
+                "未满足"
+            } else {
+                "无法验证"
+            };
+            let gap = if item.gap.trim().is_empty() {
+                String::new()
+            } else {
+                format!("：{}", item.gap.trim())
+            };
+            let evidence = if item.evidence.is_empty() {
+                String::new()
+            } else {
+                format!("（证据：{}）", item.evidence.join("；"))
+            };
+            format!(
+                "- [{}] {}（{}）{}{}",
+                item.id, item.criterion, verdict, gap, evidence
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn handle_acceptance_failure(
+    state: &AppState,
+    project: &ProjectRow,
+    reason: &str,
+    agent: Option<&AgentRow>,
+    process_failure: bool,
+) -> Result<()> {
+    handle_project_job_failure(
+        state,
+        project,
+        reason,
+        agent,
+        process_failure,
+        "acceptance_failed",
+        "项目验收",
+    )
+    .await
+}
+
 async fn handle_summary_failure(
     state: &AppState,
     project: &ProjectRow,
     reason: &str,
     agent: Option<&AgentRow>,
     process_failure: bool,
+) -> Result<()> {
+    handle_project_job_failure(
+        state,
+        project,
+        reason,
+        agent,
+        process_failure,
+        "summary_failed",
+        "总结",
+    )
+    .await
+}
+
+async fn handle_project_job_failure(
+    state: &AppState,
+    project: &ProjectRow,
+    reason: &str,
+    agent: Option<&AgentRow>,
+    process_failure: bool,
+    failed_kind: &'static str,
+    label: &str,
 ) -> Result<()> {
     let failure = plan_project_failure(
         state,
@@ -2537,8 +2834,8 @@ async fn handle_summary_failure(
         return apply_stale_result(
             state,
             project,
-            "summary_failed",
-            format!("总结失败：{reason}（项目已有未完成任务，回到执行阶段）"),
+            failed_kind,
+            format!("{label}失败：{reason}（项目已有未完成任务，回到执行阶段）"),
         )
         .await;
     }
@@ -2565,8 +2862,8 @@ async fn handle_summary_failure(
         &state.bus,
         Some(&project.id),
         None,
-        failure.event_kind("summary_failed"),
-        format!("总结{}：{reason}", failure.label()),
+        failure.event_kind(failed_kind),
+        format!("{label}{}：{reason}", failure.label()),
     )
     .await;
     Ok(())
@@ -2734,6 +3031,8 @@ async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -> Result<()
             handle_analysis_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         } else if job.role == JOB_ROLE_DIRECT {
             handle_direct_failure(state, &project, reason, job_agent.as_ref(), true).await?;
+        } else if job.role == JOB_ROLE_ACCEPTANCE {
+            handle_acceptance_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         } else if job.role == JOB_ROLE_SUMMARY {
             handle_summary_failure(state, &project, reason, job_agent.as_ref(), true).await?;
         }
@@ -2910,6 +3209,7 @@ impl ProjectFailure {
             match failed {
                 "direct_failed" => "direct_failed",
                 "summary_failed" => "summary_retry",
+                "acceptance_failed" => "acceptance_retry",
                 _ => "analysis_retry",
             }
         }
@@ -2932,8 +3232,8 @@ async fn plan_project_failure(
     };
     let kind = domain::classify_failure(reason, process_failure);
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
-    // Project jobs (analysis, direct, summary) all dispatch from the planner
-    // group of the project pool.
+    // Project jobs (analysis, direct, project acceptance and summary) all
+    // dispatch from the planner group of the project pool.
     let blocked = kind == FailureKind::Protocol
         || (kind.is_agent_failure()
             && effect.switch
@@ -3023,7 +3323,10 @@ async fn task_pause_intent(state: &AppState, task_id: &str) -> Result<Option<&'s
 /// A project-level failure result is a valid protocol message carrying a
 /// provider or task reason. It must not be relabeled as a schema violation.
 fn result_is_failure(role: &str, raw: &str) -> bool {
-    if !matches!(role, JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY) {
+    if !matches!(
+        role,
+        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+    ) {
         return false;
     }
     domain::extract_json(raw)
@@ -3097,10 +3400,10 @@ async fn has_active_tasks(pool: &SqlitePool, project_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-/// An analysis or summary result is stale when the project already carries
-/// active tasks, for example after tasks were added by hand while the job was
-/// in flight. The project returns to the executing stage and the stale result
-/// only remains in the audit log.
+/// A project-phase result is stale when the project already carries active
+/// tasks, for example after tasks were added by hand while the job was in
+/// flight. The project returns to the executing stage and the stale result only
+/// remains in the audit log.
 async fn apply_stale_result(
     state: &AppState,
     project: &ProjectRow,
@@ -3110,7 +3413,8 @@ async fn apply_stale_result(
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
          ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
-         report = NULL, report_feedback = NULL, updated_at = ? WHERE id = ?",
+         report = NULL, report_feedback = NULL, acceptance = NULL, acceptance_passed = 0, \
+         acceptance_round = 0, acceptance_at = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(STAGE_EXECUTING)
     .bind(STATUS_RUNNING)
@@ -3183,6 +3487,7 @@ fn role_label(role: &str) -> &'static str {
         JOB_ROLE_DIRECT => "直接完成",
         JOB_ROLE_EXECUTOR => "执行",
         JOB_ROLE_VERIFIER => "验收",
+        JOB_ROLE_ACCEPTANCE => "项目验收",
         JOB_ROLE_SUMMARY => "总结",
         _ => "未知",
     }

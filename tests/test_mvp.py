@@ -159,7 +159,13 @@ def main():
 
             jobs = detail["jobs"]
             roles = {job["role"] for job in jobs}
-            assert {"analysis", "executor", "verifier", "summary"} <= roles, roles
+            assert {
+                "analysis",
+                "executor",
+                "verifier",
+                "project_acceptance",
+                "summary",
+            } <= roles, roles
             assert any(job["status"] == "failed" for job in jobs), "未覆盖失败作业审计"
             assert any(
                 job["role"] == "verifier" and job["attempt"] > 1 for job in jobs

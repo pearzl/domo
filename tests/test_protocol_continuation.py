@@ -34,7 +34,7 @@ def option(name):
 
 session = option("--session")
 model = option("--model") if "--model" in args else ""
-prompt = args[-1]
+prompt = sys.stdin.read()
 role = os.environ.get("DOMO_JOB_ROLE", "")
 
 state_dir = pathlib.Path(os.environ["FAKE_OPENCODE_STATE"])
@@ -78,6 +78,20 @@ elif role == "analysis":
             "deps": [],
         }],
         "skip_confirmation": True,
+    }
+elif role == "project_acceptance":
+    result = {
+        "kind": "project_acceptance",
+        "summary": "项目验收通过",
+        "criteria": [{
+            "id": "A1",
+            "source": "proposal_acceptance",
+            "criterion": "产物存在",
+            "verdict": "met",
+            "evidence": ["file: domo_mock/T1.txt"],
+            "gap": "",
+        }],
+        "replan_reason": "",
     }
 elif role == "summary":
     result = {"kind": "report", "report": "# 报告\\n\\n完成。"}

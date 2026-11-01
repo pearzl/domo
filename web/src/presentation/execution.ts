@@ -14,6 +14,7 @@ const ROLE_TEXT: Record<string, string> = {
   planner: "规划",
   executor: "执行",
   verifier: "验收",
+  project_acceptance: "项目验收",
   summary: "总结",
 };
 

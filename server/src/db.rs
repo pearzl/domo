@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS projects (
     replan_reason TEXT,
     replan_source TEXT,
     replan_requested_at TEXT,
+    acceptance TEXT,
+    acceptance_passed INTEGER NOT NULL DEFAULT 0,
+    acceptance_round INTEGER NOT NULL DEFAULT 0,
+    acceptance_at TEXT,
     confirm_mode TEXT NOT NULL DEFAULT 'manual',
     proposal TEXT,
     confirmed_at TEXT,
@@ -238,6 +242,22 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
     ensure_column(pool, "projects", "replan_source", "TEXT").await?;
     ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
+    ensure_column(pool, "projects", "acceptance", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "acceptance_passed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "projects",
+        "acceptance_round",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(pool, "projects", "acceptance_at", "TEXT").await?;
     rename_column(pool, "projects", "goal_confirm_mode", "confirm_mode").await?;
     rename_column(pool, "projects", "goal_proposal", "proposal").await?;
     rename_column(pool, "projects", "goal_confirmed_at", "confirmed_at").await?;

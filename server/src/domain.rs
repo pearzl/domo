@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::{
-    parse_string_list, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_SUMMARY, ROLE_EXECUTOR,
-    ROLE_VERIFIER,
+    parse_string_list, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_SUMMARY,
+    ROLE_EXECUTOR, ROLE_VERIFIER,
 };
 
 pub fn now() -> String {
@@ -70,6 +70,9 @@ pub struct NormalizedTask {
 
 pub const MAX_PLAN_TASKS: usize = 50;
 pub const MAX_DERIVED_TASKS: usize = 25;
+/// Consecutive project-acceptance failures that may trigger automatic
+/// replanning before the project waits for a human decision.
+pub const MAX_AUTO_ACCEPTANCE_REPLANS: i64 = 10;
 
 #[derive(Debug, Clone)]
 pub enum ParsedResult {
@@ -117,6 +120,30 @@ pub enum ParsedResult {
     Report {
         summary: String,
     },
+    ProjectAcceptance {
+        summary: String,
+        criteria: Vec<AcceptanceCriterion>,
+        replan_reason: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptanceCriterion {
+    pub id: String,
+    pub source: String,
+    pub criterion: String,
+    pub verdict: String,
+    pub evidence: Vec<String>,
+    pub gap: String,
+}
+
+impl AcceptanceCriterion {
+    /// A criterion blocks the report only when the agent is still responsible
+    /// for closing or verifying it. Human-only checks stay in the report as
+    /// pending items instead of causing replan loops.
+    pub fn blocks_report(&self) -> bool {
+        matches!(self.verdict.as_str(), "unmet" | "unverifiable")
+    }
 }
 
 pub fn extract_json(raw: &str) -> Option<Value> {
@@ -152,6 +179,7 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
         ROLE_EXECUTOR => parse_executor_result(&value),
         ROLE_VERIFIER => parse_verifier_result(&value),
         JOB_ROLE_SUMMARY => parse_report_result(&value),
+        JOB_ROLE_ACCEPTANCE => parse_acceptance_result(&value),
         other => Err(format!("未知作业角色: {other}")),
     }
 }
@@ -341,6 +369,52 @@ fn parse_report_result(value: &Value) -> Result<ParsedResult, String> {
         .or_else(|| string_field(value, "summary"))
         .ok_or_else(|| "总结结果缺少 report 内容".to_string())?;
     Ok(ParsedResult::Report { summary })
+}
+
+fn parse_acceptance_result(value: &Value) -> Result<ParsedResult, String> {
+    if let Some(reason) = parse_project_failure(value) {
+        return Err(reason);
+    }
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if kind != "project_acceptance" {
+        return Err(format!("项目验收结果类型不合法: {kind}"));
+    }
+    let items = value
+        .get("criteria")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "项目验收结果缺少 criteria 数组".to_string())?;
+    if items.is_empty() {
+        return Err("项目验收结果 criteria 不能为空".to_string());
+    }
+    let mut criteria = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let verdict = string_field(item, "verdict")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(
+            verdict.as_str(),
+            "met" | "unmet" | "unverifiable" | "human_required"
+        ) {
+            return Err(format!("项目验收条目 verdict 不合法: {verdict}"));
+        }
+        criteria.push(AcceptanceCriterion {
+            id: string_field(item, "id").unwrap_or_else(|| format!("A{}", index + 1)),
+            source: string_field(item, "source").unwrap_or_else(|| "goal".into()),
+            criterion: string_field(item, "criterion")
+                .ok_or_else(|| "项目验收条目缺少 criterion".to_string())?,
+            verdict,
+            evidence: string_array(item.get("evidence")),
+            gap: string_field(item, "gap").unwrap_or_default(),
+        });
+    }
+    Ok(ParsedResult::ProjectAcceptance {
+        summary: string_field(value, "summary").unwrap_or_default(),
+        criteria,
+        replan_reason: string_field(value, "replan_reason").unwrap_or_default(),
+    })
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -970,6 +1044,43 @@ mod tests {
             ParsedResult::DirectDone { report, .. } => assert_eq!(report, "report body"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_project_acceptance_and_only_blocks_on_agent_gaps() {
+        let raw = r#"{"kind":"project_acceptance","summary":"s","criteria":[
+            {"id":"A1","criterion":"产物可运行","verdict":"met","evidence":["command: check -> exit 0"]},
+            {"id":"A2","criterion":"人工签字","verdict":"human_required","evidence":[]},
+            {"id":"A3","criterion":"缺失的能力","verdict":"unmet","gap":"尚未实现"}
+        ]}"#;
+        match parse_result(JOB_ROLE_ACCEPTANCE, raw).unwrap() {
+            ParsedResult::ProjectAcceptance {
+                summary, criteria, ..
+            } => {
+                assert_eq!(summary, "s");
+                assert_eq!(criteria.len(), 3);
+                assert_eq!(criteria[0].source, "goal");
+                assert_eq!(
+                    criteria
+                        .iter()
+                        .filter(|item| item.blocks_report())
+                        .map(|item| item.id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["A3"]
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_project_acceptance_without_criteria_or_verdict() {
+        assert!(parse_result(JOB_ROLE_ACCEPTANCE, r#"{"kind":"project_acceptance"}"#).is_err());
+        assert!(parse_result(
+            JOB_ROLE_ACCEPTANCE,
+            r#"{"kind":"project_acceptance","criteria":[{"criterion":"x","verdict":"maybe"}]}"#
+        )
+        .is_err());
     }
 
     #[test]
