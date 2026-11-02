@@ -41,12 +41,12 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(60 * 60));
+            .unwrap_or_else(|| Duration::from_secs(36_000));
         let stall_timeout = env::var("DOMO_STALL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(10 * 60));
+            .unwrap_or_else(|| Duration::from_secs(30 * 60));
         let web_dist = env::var("DOMO_WEB_DIST")
             .map(PathBuf::from)
             .unwrap_or_else(|_| discover_web_dist());

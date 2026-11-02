@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     usage_known INTEGER NOT NULL DEFAULT 0,
     started_at TEXT,
     finished_at TEXT,
+    resume INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
@@ -329,6 +330,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "jobs", "cost", "REAL").await?;
     ensure_column(pool, "jobs", "duration_ms", "INTEGER").await?;
     ensure_column(pool, "jobs", "usage_known", "INTEGER NOT NULL DEFAULT 0").await?;
+    ensure_column(pool, "jobs", "resume", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(pool, "agents", "availability_json", "TEXT").await?;
     ensure_column(pool, "agents", "usage_limit_json", "TEXT").await?;
     ensure_column(pool, "agents", "usage_reset_at", "TEXT").await?;

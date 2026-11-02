@@ -85,19 +85,28 @@ pub fn render(data: &PromptData) -> String {
     }
 }
 
-/// Follow-up message for a run that exited cleanly without a result file. The
-/// same OpenCode session keeps the original prompt; other agents receive the
+/// Follow-up message for a run that exited cleanly without a result file. A
+/// resumable session keeps the original prompt; other agents receive the
 /// original prompt followed by this message.
 pub fn continuation(data: &PromptData) -> String {
-    if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
+    let mut text = if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
         "继续。\n如果任务仍然过于复杂，可以派生子任务。\n".to_string()
     } else {
         "继续。\n".to_string()
+    };
+    let guidance = data
+        .task
+        .as_ref()
+        .map(|task| task.guidance.trim())
+        .unwrap_or_default();
+    if !guidance.is_empty() {
+        text.push_str(&format!("\n人工指导：{guidance}\n"));
     }
+    text
 }
 
 fn common_header(data: &PromptData) -> String {
-    format!(
+    let mut header = format!(
         "你是 DOMO 本地多 Agent 协作平台中的团队成员。\n\
          \n## 工作区\n\
          - 当前工作目录就是你的工作区，也是唯一可写目录：{}\n\
@@ -111,7 +120,7 @@ fn common_header(data: &PromptData) -> String {
          - base 分支：{}\n\
          - 项目交付分支：{}\n\
          \n## 只读边界\n\
-         - 仓库主工作树与其他工作区只读，只能在工作区内创建和修改文件。\n",
+         - 仓库主工作树与其他工作区只读；只能在工作区或作业目录内创建和修改文件。\n",
         data.cwd,
         data.job_dir,
         data.project_name,
@@ -120,7 +129,22 @@ fn common_header(data: &PromptData) -> String {
         data.repo_path,
         data.base_branch,
         data.project_branch
-    )
+    );
+    header.push_str(long_command_rules());
+    header
+}
+
+fn long_command_rules() -> &'static str {
+    "\n## 长命令进度\n\
+     - 预计超过 5 分钟的任务放到后台运行，并用多次短命令轮询状态。\n\
+     - 每次轮询控制在 2–5 分钟，并输出时间、状态或日志摘要；连续 30 分钟没有 stdout/stderr 输出会被判定卡死。\n\
+     - 不要用单条前台命令静默运行超过 30 分钟。\n\
+     - Windows PowerShell 示例：\n\
+       # 启动后台任务：$p = Start-Process ... -PassThru\n\
+       # 每次单独执行一次轮询：Start-Sleep -Seconds 120; Get-Date; Get-Content <日志> -Tail 5\n\
+     - POSIX shell 示例：\n\
+       # 启动后台任务：nohup <长命令> > <日志> 2>&1 & echo $!\n\
+       # 每次单独执行一次轮询：sleep 120; date; tail -n 5 <日志>\n"
 }
 
 fn result_rules(data: &PromptData, schema: &str) -> String {
@@ -810,6 +834,7 @@ mod tests {
         let prompt = continuation(&sample_data(JOB_ROLE_EXECUTOR));
         assert!(prompt.contains("继续"));
         assert!(prompt.contains("派生子任务"));
+        assert!(prompt.contains(GUIDANCE));
         assert!(!prompt.contains(RESULT_PATH));
 
         let verifier = continuation(&sample_data(JOB_ROLE_VERIFIER));
@@ -832,6 +857,11 @@ mod tests {
             assert!(
                 prompt.contains(result_schema_text(role)),
                 "{role} 缺少输出 schema"
+            );
+            assert!(prompt.contains("长命令进度"), "{role} 缺少长命令进度说明");
+            assert!(
+                prompt.contains("连续 30 分钟没有 stdout/stderr 输出"),
+                "{role} 缺少卡死判定说明"
             );
         }
     }

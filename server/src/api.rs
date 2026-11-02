@@ -2657,6 +2657,111 @@ fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
+/// Marks a failed job for an in-place resume. The next `run_job` uses the same
+/// job id and therefore the same agent session.
+async fn mark_job_resumed(
+    conn: &mut sqlx::SqliteConnection,
+    job_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE jobs SET status = ?, started_at = NULL, finished_at = NULL, duration_ms = NULL, \
+         error = NULL, failure_kind = NULL, exit_code = NULL, pid = NULL, result = NULL, \
+         stdout = NULL, stderr = NULL, usage_known = 0, input_tokens = NULL, \
+         output_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL, \
+         reasoning_tokens = NULL, cost = NULL, resume = 1 \
+         WHERE id = ? AND status = ?",
+    )
+    .bind(JOB_STATUS_RUNNING)
+    .bind(job_id)
+    .bind(JOB_STATUS_FAILED)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+fn spawn_saved_job(state: &AppState, job_id: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        crate::runner::execute_job(state, job_id).await;
+    });
+}
+
+/// Resumes the latest failed task job in place: the task and project return to
+/// running, the same agent keeps the job, and the session is reused.
+async fn resume_task_job(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    job: &JobRow,
+    guidance: &str,
+    role: &str,
+) -> Result<(), ApiError> {
+    if matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED) | Some(STATUS_ARCHIVED)
+    ) {
+        return Err(ApiError::bad("项目已暂停或归档，不能直接重试"));
+    }
+    let agent_id = job
+        .agent_id
+        .clone()
+        .ok_or_else(|| ApiError::bad("作业没有关联 Agent"))?;
+    let Some(agent) = crate::db::load_agent(&state.db, &agent_id).await? else {
+        return Err(ApiError::not_found("Agent 不存在"));
+    };
+    if agent.enabled == 0 {
+        return Err(ApiError::bad("Agent 已停用，请更换 Agent 后重试"));
+    }
+    if !parse_list(&agent.roles).iter().any(|item| item == role) {
+        return Err(ApiError::bad("Agent 已不具备该角色，请更换 Agent 后重试"));
+    }
+    let stage = if role == ROLE_VERIFIER {
+        TASK_STAGE_VERIFYING
+    } else {
+        TASK_STAGE_EXECUTING
+    };
+    let mut tx = state.db.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_agent_id = ?, \
+         attempts = 0, rejections = 0, last_error = NULL, last_failure_kind = NULL, \
+         waiting_reason = NULL, human_gate = NULL, avoid_agent_id = NULL, \
+         avoid_agent_role = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
+         retry_agent_id = NULL, retry_role = NULL, guidance = ?, updated_at = ? \
+         WHERE id = ? AND status = ?",
+    )
+    .bind(stage)
+    .bind(STATUS_RUNNING)
+    .bind(&agent_id)
+    .bind(&agent_id)
+    .bind(guidance)
+    .bind(now())
+    .bind(&task.id)
+    .bind(STATUS_BLOCKED)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::bad("任务状态已变化"));
+    }
+    if !mark_job_resumed(&mut tx, &job.id).await? {
+        return Err(ApiError::bad("作业状态已变化"));
+    }
+    sqlx::query(
+        "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
+         avoid_agent_role = NULL, retry_agent_id = NULL, retry_role = NULL, updated_at = ? \
+         WHERE id = ? AND status != ?",
+    )
+    .bind(STATUS_RUNNING)
+    .bind(now())
+    .bind(&project.id)
+    .bind(STATUS_ARCHIVED)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    crate::db::clear_agent_backoff(&state.db, &agent_id).await?;
+    spawn_saved_job(state, job.id.clone());
+    Ok(())
+}
+
 async fn retry_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2755,19 +2860,7 @@ async fn retry_job(
             if job.role != expected {
                 return Err(ApiError::bad("作业与任务当前阶段不一致"));
             }
-            sqlx::query(
-                "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-                 last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
-                 last_error = NULL, last_failure_kind = NULL, waiting_reason = NULL, \
-                 retry_agent_id = ?, retry_role = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(STATUS_QUEUED)
-            .bind(&job.agent_id)
-            .bind(&job.role)
-            .bind(now())
-            .bind(&task.id)
-            .execute(&state.db)
-            .await?;
+            resume_task_job(&state, &project, &task, &job, &task.guidance, &job.role).await?;
             Some(task.key)
         }
         None => {
@@ -2822,19 +2915,6 @@ async fn retry_job(
             .execute(&state.db)
             .await?;
         }
-    } else {
-        sqlx::query(
-            "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-             THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
-             updated_at = ? WHERE id = ?",
-        )
-        .bind(STATUS_RUNNING)
-        .bind(paused)
-        .bind("人工重试已记录，等待项目恢复后生效")
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
     }
     let subject = task_key
         .map(|key| format!("任务 {key} "))
@@ -3630,18 +3710,38 @@ async fn submit_arbitration(
         _ => {}
     }
     let reset_counts = matches!(action.as_str(), ARBITRATION_RETRY | ARBITRATION_GUIDE);
-    let retry_agent = if reset_counts {
-        latest_failed_job(&state, &project_id, Some(&task.id), role)
-            .await?
-            .and_then(|job| job.agent_id)
+    let latest_job = if reset_counts {
+        latest_failed_job(&state, &project_id, Some(&task.id), role).await?
     } else {
         None
     };
+    let retry_agent = latest_job.as_ref().and_then(|job| job.agent_id.clone());
     let next_guidance = guidance.unwrap_or_else(|| task.guidance.clone());
     let paused = matches!(
         project.status.as_deref(),
         Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
     );
+    if !paused {
+        if let Some(job) = &latest_job {
+            resume_task_job(&state, &project, &task, job, &next_guidance, role).await?;
+            let message = if action == ARBITRATION_GUIDE {
+                format!("人工裁决：任务 {} 收到指导并复用原作业会话继续", task.key)
+            } else {
+                format!("人工裁决：任务 {} 重试并复用原作业会话", task.key)
+            };
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&project_id),
+                Some(&task.id),
+                event_kind,
+                message,
+            )
+            .await;
+            state.notify_scheduler();
+            return load_detail(&state, &project_id).await.map(Json);
+        }
+    }
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE tasks SET status = ?, attempts = ?, rejections = ?, agent_id = NULL, \

@@ -66,6 +66,17 @@ async fn recover(state: &AppState) -> Result<()> {
         .fetch_all(&state.db)
         .await?;
     for job in jobs {
+        if let Ok(Some(workspace)) =
+            sqlx::query_scalar::<_, String>("SELECT workspace FROM projects WHERE id = ?")
+                .bind(&job.project_id)
+                .fetch_optional(&state.db)
+                .await
+        {
+            let job_dir = paths::job_dir(&PathBuf::from(workspace), &job.id);
+            if crate::agents::kill_job_dir(&job_dir) {
+                tracing::info!(job_id = %job.id, "服务重启后终止旧作业进程");
+            }
+        }
         let finished_at = now();
         let duration_ms = job
             .started_at
@@ -508,6 +519,17 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         ROLE_EXECUTOR
                     };
                     if has_task_job(&state.db, &task.id, role).await? {
+                        continue;
+                    }
+                    if let Some(job_id) =
+                        orphan_task_process(&state.db, &project.workspace, &task.id).await?
+                    {
+                        set_task_waiting(
+                            state,
+                            &task.id,
+                            &format!("等待上一个 Agent 进程退出（{}）", short_id(&job_id)),
+                        )
+                        .await?;
                         continue;
                     }
                     let choice = choose_agent(state, &project, role, Some(task)).await?;
@@ -1120,6 +1142,36 @@ async fn has_task_job(pool: &SqlitePool, task_id: &str, role: &str) -> Result<bo
     .fetch_one(pool)
     .await?;
     Ok(count > 0)
+}
+
+/// A failed job can leave its process tree running. Starting a replacement in
+/// the same task worktree would let both agents edit the same files, so
+/// terminate the old tree and hold the task until the pid is gone.
+async fn orphan_task_process(
+    pool: &SqlitePool,
+    workspace: &str,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let job_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM jobs WHERE task_id = ? AND status IN (?, ?) \
+         ORDER BY created_at DESC LIMIT 5",
+    )
+    .bind(task_id)
+    .bind(JOB_STATUS_FAILED)
+    .bind(JOB_STATUS_CANCELED)
+    .fetch_all(pool)
+    .await?;
+    for job_id in job_ids {
+        let job_dir = paths::job_dir(&PathBuf::from(workspace), &job_id);
+        if !crate::agents::job_process_alive(&job_dir) {
+            continue;
+        }
+        crate::agents::kill_job_dir(&job_dir);
+        if crate::agents::job_process_alive(&job_dir) {
+            return Ok(Some(job_id));
+        }
+    }
+    Ok(None)
 }
 
 async fn task_has_running_job(pool: &SqlitePool, task_id: &str) -> Result<bool> {

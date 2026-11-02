@@ -27,7 +27,7 @@ pub use cli::CliAdapter;
 pub use codex::CodexAdapter;
 pub use mock::MockAdapter;
 pub use opencode::OpencodeAdapter;
-pub use process::kill_job_dir;
+pub use process::{job_process_alive, kill_job_dir};
 pub use workbuddy::WorkbuddyAdapter;
 
 /// Declares the registered adapter types once. `KINDS` and every dispatch hook

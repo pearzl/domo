@@ -164,27 +164,37 @@ pub fn kill_process_group(pid: u32) -> bool {
     }
 }
 
+/// True while the process recorded for a job is still the same process.
+pub fn job_process_alive(job_dir: &Path) -> bool {
+    recorded_job_pid(job_dir).is_some_and(process_running)
+}
+
 /// Kills the process recorded for a job. Returns true only when the pid file
 /// matched and the process was actually terminated, which lets the runner tell
 /// a watchdog kill from a process that had already exited on its own.
 pub fn kill_job_dir(job_dir: &Path) -> bool {
-    let path = job_dir.join("pid");
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    let Some(pid) = recorded_job_pid(job_dir) else {
         return false;
     };
+    kill_process_group(pid)
+}
+
+/// Reads the pid file and rejects a recycled pid by comparing the recorded
+/// process start time.
+fn recorded_job_pid(job_dir: &Path) -> Option<u32> {
+    let path = job_dir.join("pid");
+    let raw = std::fs::read_to_string(path).ok()?;
     let (pid_text, recorded_start) = match raw.trim().split_once(':') {
         Some((pid, start)) => (pid, Some(start)),
         None => (raw.trim(), None),
     };
-    let Ok(pid) = pid_text.parse::<u32>() else {
-        return false;
-    };
+    let pid = pid_text.parse::<u32>().ok()?;
     if let Some(recorded) = recorded_start {
         if !recorded.is_empty() && process_start_time(pid).as_deref() != Some(recorded) {
-            return false;
+            return None;
         }
     }
-    kill_process_group(pid)
+    Some(pid)
 }
 
 #[cfg(not(windows))]
@@ -195,6 +205,17 @@ pub(super) fn process_start_time(pid: u32) -> Option<String> {
     let rest = stat.rsplit_once(") ").map(|(_, rest)| rest)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     fields.get(19).map(|value| value.to_string())
+}
+
+#[cfg(not(windows))]
+fn process_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, rest)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    !rest.starts_with('Z')
 }
 
 #[cfg(windows)]
@@ -223,6 +244,27 @@ pub(super) fn process_start_time(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    const STILL_ACTIVE: u32 = 259;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +287,7 @@ mod tests {
         )
         .unwrap();
         assert!(!kill_job_dir(&dir));
+        assert!(!job_process_alive(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -268,8 +311,10 @@ mod tests {
         let start = process_start_time(pid).expect("child start time");
         std::fs::write(dir.join("pid"), format!("{pid}:{start}")).unwrap();
 
+        assert!(job_process_alive(&dir));
         assert!(kill_job_dir(&dir));
         let _ = child.wait();
+        assert!(!job_process_alive(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

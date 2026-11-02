@@ -1,20 +1,23 @@
-//! OpenCode session usage lookup. Every job owns a dedicated OpenCode session.
-//! After the process exits, the session ledger is the authoritative source for
-//! tokens and cost: it includes every step plus title and compaction usage.
-//! Child subagent sessions are separate rows and are summed through `parent_id`.
+//! OpenCode session integration. Every job owns a dedicated session. After the
+//! process exits, the session ledger is the authoritative source for tokens and
+//! cost: it includes every step plus title and compaction usage. Child subagent
+//! sessions are separate rows and are summed through `parent_id`.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
 
 use crate::usage::UsageRecord;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
-const MAX_SESSIONS: usize = 256;
+const DB_PATH_MISS_TTL: Duration = Duration::from_secs(30);
+
+static DB_PATH: OnceLock<PathBuf> = OnceLock::new();
+static DB_PATH_MISS: OnceLock<tokio::sync::Mutex<Option<Instant>>> = OnceLock::new();
 
 pub fn bin() -> String {
     std::env::var("DOMO_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into())
@@ -28,34 +31,39 @@ pub fn session_id(job_id: &str) -> String {
 }
 
 pub async fn fetch_usage(session_id: &str) -> Option<UsageRecord> {
-    if let Some(path) = db_path().await {
-        match fetch_usage_db(&path, session_id).await {
-            Ok(Some(usage)) => return Some(usage),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(session_id, error = %error, "从 OpenCode 数据库读取用量失败");
-            }
-        }
-    }
-    match fetch_usage_api(session_id).await {
-        Ok(Some(usage)) => Some(usage),
-        Ok(None) => None,
+    let path = cached_db_path().await?;
+    match fetch_usage_db(&path, session_id).await {
+        Ok(usage) => usage,
         Err(error) => {
-            tracing::debug!(session_id, error = %error, "从 OpenCode API 读取用量失败");
+            tracing::debug!(session_id, error = %error, "从 OpenCode 数据库读取用量失败");
             None
         }
     }
 }
 
-/// Stops a session that outlived its OpenCode client. The server-side execution
-/// keeps running after the client process dies, so interrupt and wait before the
-/// final usage snapshot.
-pub async fn settle(session_id: &str) {
-    let bin = bin();
-    let interrupt = format!("/api/session/{session_id}/interrupt");
-    let wait = format!("/api/experimental/session/{session_id}/wait");
-    let _ = command_output(&bin, &["api", "post", &interrupt]).await;
-    let _ = command_output(&bin, &["api", "post", &wait]).await;
+async fn cached_db_path() -> Option<PathBuf> {
+    if let Some(path) = DB_PATH.get() {
+        return Some(path.clone());
+    }
+    let miss = DB_PATH_MISS.get_or_init(|| tokio::sync::Mutex::new(None));
+    {
+        let guard = miss.lock().await;
+        if let Some(at) = *guard {
+            if at.elapsed() < DB_PATH_MISS_TTL {
+                return None;
+            }
+        }
+    }
+    match db_path().await {
+        Some(path) => {
+            let _ = DB_PATH.set(path.clone());
+            Some(path)
+        }
+        None => {
+            *miss.lock().await = Some(Instant::now());
+            None
+        }
+    }
 }
 
 async fn db_path() -> Option<PathBuf> {
@@ -69,16 +77,20 @@ async fn db_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-async fn fetch_usage_db(path: &Path, session_id: &str) -> Result<Option<UsageRecord>> {
+async fn readonly_pool(path: &Path) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .read_only(true)
         .busy_timeout(Duration::from_secs(2));
-    let pool = SqlitePoolOptions::new()
+    SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
         .await
-        .with_context(|| format!("打开 OpenCode 数据库失败: {}", path.display()))?;
+        .with_context(|| format!("打开 OpenCode 数据库失败: {}", path.display()))
+}
+
+async fn fetch_usage_db(path: &Path, session_id: &str) -> Result<Option<UsageRecord>> {
+    let pool = readonly_pool(path).await?;
     let result = sqlx::query_as::<_, UsageRow>(
         "WITH RECURSIVE tree(id) AS ( \
              SELECT ?1 \
@@ -113,72 +125,6 @@ async fn fetch_usage_db(path: &Path, session_id: &str) -> Result<Option<UsageRec
         row.cache_read,
         row.cache_write,
     )))
-}
-
-async fn fetch_usage_api(session_id: &str) -> Result<Option<UsageRecord>> {
-    let mut totals = ApiTotals::default();
-    let mut pending = vec![session_id.to_string()];
-    let mut seen = HashSet::new();
-    let mut found = false;
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if seen.len() > MAX_SESSIONS {
-            break;
-        }
-        let Some(data) = api_session(&id).await? else {
-            continue;
-        };
-        found = true;
-        totals.add(&data);
-        pending.extend(api_children(&id).await?);
-    }
-    if !found {
-        return Ok(None);
-    }
-    Ok(Some(totals.into_record()))
-}
-
-async fn api_session(session_id: &str) -> Result<Option<Value>> {
-    let path = format!("/api/session/{session_id}");
-    let Some(output) = command_output(&bin(), &["api", "get", &path]).await else {
-        return Ok(None);
-    };
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    Ok(value.get("data").filter(|data| !data.is_null()).cloned())
-}
-
-async fn api_children(session_id: &str) -> Result<Vec<String>> {
-    let parent = format!("parentID={session_id}");
-    let Some(output) = command_output(
-        &bin(),
-        &[
-            "api",
-            "get",
-            "/api/session",
-            "--param",
-            &parent,
-            "--param",
-            "limit=100",
-        ],
-    )
-    .await
-    else {
-        return Ok(Vec::new());
-    };
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    Ok(value
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default())
 }
 
 async fn command_output(bin: &str, args: &[&str]) -> Option<std::process::Output> {
@@ -221,55 +167,6 @@ fn record(
         cost: Some(cost),
         duration_ms: None,
     }
-}
-
-#[derive(Debug, Default)]
-struct ApiTotals {
-    cost: f64,
-    input: i64,
-    output: i64,
-    reasoning: i64,
-    cache_read: i64,
-    cache_write: i64,
-}
-
-impl ApiTotals {
-    fn add(&mut self, data: &Value) {
-        self.cost += data.get("cost").and_then(number).unwrap_or(0.0);
-        let Some(tokens) = data.get("tokens") else {
-            return;
-        };
-        self.input += tokens.get("input").and_then(integer).unwrap_or(0);
-        self.output += tokens.get("output").and_then(integer).unwrap_or(0);
-        self.reasoning += tokens.get("reasoning").and_then(integer).unwrap_or(0);
-        if let Some(cache) = tokens.get("cache") {
-            self.cache_read += cache.get("read").and_then(integer).unwrap_or(0);
-            self.cache_write += cache.get("write").and_then(integer).unwrap_or(0);
-        }
-    }
-
-    fn into_record(self) -> UsageRecord {
-        record(
-            self.cost,
-            self.input,
-            self.output,
-            self.reasoning,
-            self.cache_read,
-            self.cache_write,
-        )
-    }
-}
-
-fn number(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_i64().map(|value| value as f64))
-}
-
-fn integer(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
 }
 
 #[cfg(test)]
@@ -323,27 +220,6 @@ mod tests {
     fn derives_session_id_from_job_id() {
         assert_eq!(session_id("job_abc123"), "ses_domoabc123");
         assert_eq!(session_id("ses_existing"), "ses_domoses_existing");
-    }
-
-    #[test]
-    fn maps_api_tokens_into_usage_record() {
-        let mut totals = ApiTotals::default();
-        totals.add(&serde_json::json!({
-            "cost": 0.5,
-            "tokens": {
-                "input": 10,
-                "output": 3,
-                "reasoning": 2,
-                "cache": { "read": 5, "write": 1 }
-            }
-        }));
-        let usage = totals.into_record();
-        assert_eq!(usage.input_tokens, Some(16));
-        assert_eq!(usage.output_tokens, Some(5));
-        assert_eq!(usage.cache_read_tokens, Some(5));
-        assert_eq!(usage.cache_write_tokens, Some(1));
-        assert_eq!(usage.reasoning_tokens, Some(2));
-        assert_eq!(usage.cost, Some(0.5));
     }
 
     #[tokio::test]

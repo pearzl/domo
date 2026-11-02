@@ -28,6 +28,9 @@ use crate::state::AppState;
 /// A clean run without a result file gets up to five continuation rounds in the
 /// same job before the protocol failure is settled.
 const MAX_CONTINUATIONS: usize = 5;
+/// A timeout may resume the same session with a fresh run window. The total
+/// job time stays bounded by this count plus the initial run.
+const MAX_TIMEOUT_CONTINUATIONS: usize = 2;
 
 pub async fn execute_job(state: AppState, job_id: String) {
     if let Err(error) = run_job(&state, &job_id).await {
@@ -91,8 +94,17 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
-    let prompt = prompts::render(&prompt_data);
-    fs::write(job_dir.join("prompt.md"), &prompt).await?;
+    let full_prompt = prompts::render(&prompt_data);
+    let resume = job.resume != 0;
+    let prompt = if resume {
+        prompts::continuation(&prompt_data)
+    } else {
+        full_prompt.clone()
+    };
+    fs::write(job_dir.join("prompt.md"), &full_prompt).await?;
+    if resume {
+        fs::write(job_dir.join("resume.md"), &prompt).await?;
+    }
     let context = build_context(
         &project,
         task.as_ref(),
@@ -108,8 +120,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     )
     .await?;
 
-    sqlx::query("UPDATE jobs SET prompt = ?, started_at = ? WHERE id = ?")
-        .bind(&prompt)
+    sqlx::query("UPDATE jobs SET prompt = ?, started_at = ?, resume = 0 WHERE id = ?")
+        .bind(&full_prompt)
         .bind(now())
         .bind(&job.id)
         .execute(&state.db)
@@ -146,37 +158,81 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let progress = agents::JobProgress::new();
-    let job_deadline = Instant::now() + state.cfg.job_timeout;
+    let mut job_deadline = Instant::now() + state.cfg.job_timeout;
+    let mut run_timeout = state.cfg.job_timeout;
     let mut spec = AgentSpec {
         job_id: job.id.clone(),
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
-        prompt: prompt.clone(),
-        original_prompt: prompt.clone(),
+        prompt,
+        original_prompt: full_prompt,
         session_id: agents::session_for_job(&agent, &job.id),
-        continuation: false,
+        continuation: resume,
         progress: progress.clone(),
     };
-    let mut run = run_agent_job(
-        state,
-        &job,
-        &job_dir,
-        &agent,
-        &spec,
-        &progress,
-        state.cfg.job_timeout,
-    )
-    .await?;
+    let mut run =
+        run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout).await?;
     spec.session_id = run.session_id.clone();
     let mut combined_stdout = run.stdout.clone();
     let mut combined_stderr = run.stderr.clone();
     let mut continuations = 0;
+    let mut timeout_continuations = 0;
     loop {
         let process_ok = run.exit_code == Some(0) && !run.timed_out && !run.stalled;
+        if !process_ok {
+            // A timeout is a process failure, but the session still holds the
+            // work context. Resume the same session with a short continuation
+            // prompt and a fresh run window.
+            let retryable = run.timed_out;
+            if retryable
+                && timeout_continuations < MAX_TIMEOUT_CONTINUATIONS
+                && continuation_allowed(state, &job, &project, task.as_ref()).await?
+            {
+                timeout_continuations += 1;
+                let follow_up = prompts::continuation(&prompt_data);
+                fs::write(
+                    job_dir.join(format!("timeout-continuation-{timeout_continuations}.md")),
+                    &follow_up,
+                )
+                .await?;
+                append_log_separator(&job_dir).await?;
+                progress.touch();
+                spec.prompt = follow_up;
+                spec.continuation = true;
+                emit_job(
+                    &state.db,
+                    &state.bus,
+                    Some(&project.id),
+                    job.task_id.as_deref(),
+                    Some(&job.id),
+                    "job_continued",
+                    format!(
+                        "{}作业超时，已追加第 {} 轮继续提示（复用同一会话）",
+                        role_label(&job.role),
+                        timeout_continuations
+                    ),
+                )
+                .await;
+                run_timeout = state.cfg.job_timeout;
+                job_deadline = Instant::now() + run_timeout;
+                let next =
+                    run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout)
+                        .await?;
+                combined_stdout.push_str("\n--- 继续执行 ---\n");
+                combined_stdout.push_str(&next.stdout);
+                combined_stderr.push_str("\n--- 继续执行 ---\n");
+                combined_stderr.push_str(&next.stderr);
+                let usage = merge_usage(run.usage.clone(), next.usage.clone());
+                run = next;
+                run.usage = usage;
+                spec.session_id = run.session_id.clone();
+                continue;
+            }
+            break;
+        }
         let missing_result = fs::read_to_string(&result_path).await.ok().is_none();
-        if !process_ok
-            || !missing_result
+        if !missing_result
             || continuations >= MAX_CONTINUATIONS
             || !continuation_allowed(state, &job, &project, task.as_ref()).await?
         {
@@ -226,6 +282,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
     run.stdout = combined_stdout;
     run.stderr = combined_stderr;
+    if !state.is_shutting_down() {
+        // The watchdog kills the job process tree on stall or timeout; retry
+        // here when the recorded process is still alive.
+        agents::kill_job_dir(&job_dir);
+    }
     let usage = agents::finish_job(agents::FinishContext {
         agent: &agent,
         job_id: &job.id,
@@ -767,7 +828,8 @@ async fn continuation_allowed(
 }
 
 /// Sums usage from the first run and the continuation for agents whose usage
-/// comes from process output. OpenCode replaces this with the session ledger.
+/// comes from process output. Agents that report a session ledger replace this
+/// total after the final run.
 fn merge_usage(
     mut base: Option<crate::usage::UsageRecord>,
     extra: Option<crate::usage::UsageRecord>,
@@ -851,7 +913,7 @@ async fn run_agent_job(
                 let (stdout_bytes, stderr_bytes) = progress.output_bytes();
                 let idle_secs = progress.idle_for().as_secs();
                 let reason = format!(
-                    "Agent 作业卡死：连续 {idle_secs} 秒无 stdout/stderr 输出或进度\
+                    "Agent 作业卡死：连续 {idle_secs} 秒无 stdout/stderr 输出\
                      （stdout {stdout_bytes} 字节，stderr {stderr_bytes} 字节），已终止进程"
                 );
                 emit_job(

@@ -10,27 +10,6 @@ use super::adapter::{
 };
 use super::process::run_process;
 
-/// Settlement work opencode needs after the final turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FinalizePlan {
-    /// The server is shutting down; the ledger may still be in flux.
-    Skip,
-    /// The clean run only needs its ledger snapshot.
-    FetchOnly,
-    /// A failed process may have left a server-side session running.
-    SettleThenFetch,
-}
-
-pub(super) fn finalize_plan(process_failed: bool, shutting_down: bool) -> FinalizePlan {
-    if shutting_down {
-        FinalizePlan::Skip
-    } else if process_failed {
-        FinalizePlan::SettleThenFetch
-    } else {
-        FinalizePlan::FetchOnly
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct OpencodeAdapter;
 
@@ -77,27 +56,24 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     async fn finish_job(&self, context: FinishContext<'_>) -> JobUsage {
+        if context.shutting_down {
+            // The ledger may still be in flux while the process tree is ending.
+            return JobUsage::PerTurn;
+        }
         let session_id = context
             .session_id
             .filter(|session_id| !session_id.trim().is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| crate::opencode::session_id(context.job_id));
-        match finalize_plan(context.process_failed, context.shutting_down) {
-            FinalizePlan::Skip => JobUsage::PerTurn,
-            FinalizePlan::FetchOnly => {
-                JobUsage::Authoritative(crate::opencode::fetch_usage(&session_id).await)
-            }
-            FinalizePlan::SettleThenFetch => {
-                crate::opencode::settle(&session_id).await;
-                JobUsage::Authoritative(crate::opencode::fetch_usage(&session_id).await)
-            }
-        }
+        JobUsage::Authoritative(crate::opencode::fetch_usage(&session_id).await)
     }
 }
 
 pub(super) fn opencode_args(model: &str, session_id: &str, spec: &AgentSpec) -> Vec<String> {
-    let mut args = vec![
-        "run".to_string(),
+    // A private server keeps the session inside this job's process tree.
+    // Killing the tree then stops the session without a separate settle API.
+    let mut args = vec!["run".to_string(), "--standalone".into()];
+    args.extend([
         "--auto".into(),
         "--format".into(),
         "json".into(),
@@ -107,7 +83,7 @@ pub(super) fn opencode_args(model: &str, session_id: &str, spec: &AgentSpec) -> 
         // the session ledger contains only this job's work.
         "--title".into(),
         format!("DOMO {} {}", spec.role, spec.job_id),
-    ];
+    ]);
     let model = model.trim();
     if !model.is_empty() {
         args.push("--model".into());
@@ -140,6 +116,7 @@ mod tests {
         let session_id = crate::opencode::session_id("job_test");
         let args = opencode_args(" opencode/big ", &session_id, &spec);
         assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert!(args.contains(&"--standalone".to_string()));
         assert!(args_contain_pair(&args, "--format", "json"));
         assert!(args_contain_pair(&args, "--session", &session_id));
         assert!(args_contain_pair(&args, "--model", "opencode/big"));
@@ -156,13 +133,5 @@ mod tests {
             OpencodeAdapter::session_for_job("job_test", Some("session-1")).as_deref(),
             Some("session-1")
         );
-    }
-
-    #[test]
-    fn finalize_plan_covers_every_outcome_combination() {
-        assert_eq!(finalize_plan(false, false), FinalizePlan::FetchOnly);
-        assert_eq!(finalize_plan(true, false), FinalizePlan::SettleThenFetch);
-        assert_eq!(finalize_plan(false, true), FinalizePlan::Skip);
-        assert_eq!(finalize_plan(true, true), FinalizePlan::Skip);
     }
 }
