@@ -5,8 +5,10 @@ import { AutoConfirmRow, ProposalCard } from "./ProposalCard";
 import {
   PROPOSAL_LONG_CHARS,
   PROPOSAL_SECTION_LABELS,
+  autoConfirmLocked,
   confirmImpact,
   confirmModeRow,
+  confirmModeRuntimeNote,
   proposalSections,
   proposalTaskSectionLabel,
 } from "../presentation/proposalView";
@@ -41,9 +43,15 @@ function proposal(overrides: Partial<AnalysisProposal> = {}): AnalysisProposal {
   };
 }
 
-function renderRow(mode: "manual" | "auto") {
+function renderRow(mode: "manual" | "auto", note?: string) {
   return renderToStaticMarkup(
-    <AutoConfirmRow mode={mode} busy={false} disabled={false} onChange={() => {}} />,
+    <AutoConfirmRow
+      mode={mode}
+      busy={false}
+      disabled={false}
+      note={note}
+      onChange={() => {}}
+    />,
   );
 }
 
@@ -80,6 +88,23 @@ describe("自动确认开关行", () => {
     });
     expect(confirmModeRow("auto").description).not.toBe("");
     expect(confirmModeRow("manual").description).not.toBe("");
+  });
+
+  it("运行中切换给出下一轮生效说明且开关保持可操作", () => {
+    const markup = renderRow("auto", confirmModeRuntimeNote(true) ?? undefined);
+    expect(markup).toContain("将在下一轮分析生效");
+    expect(markup).toContain("policy-row-note");
+    expect(markup).not.toContain("disabled");
+  });
+
+  it("只有归档与暂停会锁住开关", () => {
+    expect(autoConfirmLocked("archived")).toBe(true);
+    expect(autoConfirmLocked("paused")).toBe(true);
+    expect(autoConfirmLocked("pausing")).toBe(true);
+    expect(autoConfirmLocked("running")).toBe(false);
+    expect(autoConfirmLocked("blocked")).toBe(false);
+    expect(autoConfirmLocked(null)).toBe(false);
+    expect(confirmModeRuntimeNote(false)).toBeNull();
   });
 });
 

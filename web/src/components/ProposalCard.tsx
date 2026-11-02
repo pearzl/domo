@@ -15,11 +15,13 @@ export function AutoConfirmRow({
   mode,
   busy,
   disabled,
+  note,
   onChange,
 }: {
   mode: "manual" | "auto";
   busy: boolean;
   disabled: boolean;
+  note?: string | null;
   onChange: (next: "manual" | "auto") => void;
 }) {
   const label = confirmModeRow(mode);
@@ -37,6 +39,7 @@ export function AutoConfirmRow({
         <span className="policy-row-desc" id={descriptionId}>
           {label.description}
         </span>
+        {note ? <span className="policy-row-note muted">{note}</span> : null}
       </span>
       <button
         type="button"

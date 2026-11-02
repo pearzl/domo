@@ -251,6 +251,15 @@ pub(super) fn analysis_proposal_content(
     content
 }
 
+/// 自动确认取作业结束时刻的确认方式，运行中切换对当前作业立即生效。
+async fn latest_confirm_mode(state: &AppState, project_id: &str) -> Result<String> {
+    let mode = sqlx::query_scalar::<_, String>("SELECT confirm_mode FROM projects WHERE id = ?")
+        .bind(project_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(mode)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_analysis_plan(
     state: &AppState,
@@ -290,8 +299,9 @@ pub(super) async fn handle_analysis_plan(
         skip_confirmation,
     };
     let proposal_json = serde_json::to_string(&proposal)?;
-    let auto = project.confirmed_at.is_some()
-        || (skip_confirmation && project.confirm_mode == CONFIRM_AUTO);
+    let confirm_mode = latest_confirm_mode(state, &project.id).await?;
+    let auto =
+        project.confirmed_at.is_some() || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
     if auto {
         return apply_analysis_plan(state, project, &goal, &tasks, summary, &proposal_json).await;
     }
@@ -358,8 +368,9 @@ pub(super) async fn handle_analysis_direct(
         skip_confirmation,
     };
     let proposal_json = serde_json::to_string(&proposal)?;
-    let auto = project.confirmed_at.is_some()
-        || (skip_confirmation && project.confirm_mode == CONFIRM_AUTO);
+    let confirm_mode = latest_confirm_mode(state, &project.id).await?;
+    let auto =
+        project.confirmed_at.is_some() || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
     let _guard = state.schedule_lock.lock().await;
     let content =
         analysis_proposal_content(summary, Some(&goal), &[], &[], &[], plan, verification);
@@ -475,6 +486,7 @@ pub(super) async fn handle_analysis_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn remaps_proposal_keys_and_dependencies() {
@@ -499,5 +511,63 @@ mod tests {
     fn empty_mapping_keeps_proposal_raw() {
         let raw = r#"{"kind":"plan","summary":"s","tasks":[]}"#;
         assert_eq!(remap_proposal_keys(raw, &HashMap::new()).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn latest_confirm_mode_reads_the_project_row_at_completion() {
+        let root = std::env::temp_dir().join(format!("domo-confirm-mode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::connect(&root.join("data/domo.db"))
+            .await
+            .unwrap();
+        let timestamp = "2026-01-01T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
+             stage, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("prj_reload")
+        .bind("test")
+        .bind("goal")
+        .bind("/tmp/repo")
+        .bind("main")
+        .bind("domo/p-test")
+        .bind("/tmp/workspace")
+        .bind(STAGE_ANALYSIS)
+        .bind(STATUS_RUNNING)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&db)
+        .await
+        .unwrap();
+        let cfg = crate::config::Config {
+            data_root: root.join("data"),
+            workspace_root: root.join("workspace"),
+            log_root: root.join("log"),
+            web_dist: root.join("web"),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            port_explicit: false,
+            job_timeout: Duration::ZERO,
+            stall_timeout: Duration::ZERO,
+        };
+        let (notify, _receiver) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(db, cfg, crate::events::EventBus::new(), notify);
+
+        assert_eq!(
+            latest_confirm_mode(&state, "prj_reload").await.unwrap(),
+            CONFIRM_MANUAL
+        );
+        sqlx::query("UPDATE projects SET confirm_mode = ? WHERE id = ?")
+            .bind(CONFIRM_AUTO)
+            .bind("prj_reload")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            latest_confirm_mode(&state, "prj_reload").await.unwrap(),
+            CONFIRM_AUTO
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

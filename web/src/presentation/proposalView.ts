@@ -101,6 +101,16 @@ export function sectionSummary(section: ProposalSection): string {
   return `${section.count} 条`;
 }
 
+/// 自动确认开关的可操作边界：归档与暂停会锁住开关，分析作业运行中仍可调整。
+export function autoConfirmLocked(status: string | null | undefined): boolean {
+  return status === "archived" || status === "paused" || status === "pausing";
+}
+
+/// 分析作业运行中调整确认方式时，提示新设置从下一轮分析开始生效。
+export function confirmModeRuntimeNote(analysisRunning: boolean): string | null {
+  return analysisRunning ? "将在下一轮分析生效" : null;
+}
+
 /// 切换开关行的展示：状态文案、说明与是否为开启态。
 export interface ConfirmModeRow {
   enabled: boolean;

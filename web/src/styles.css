@@ -4442,6 +4442,11 @@ summary {
   line-height: 1.45;
 }
 
+.policy-row-note {
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .switch {
   position: relative;
   flex: none;

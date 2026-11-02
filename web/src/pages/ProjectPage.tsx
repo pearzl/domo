@@ -29,6 +29,10 @@ import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
 import { ProjectHeader } from "../components/ProjectHeader";
 import { ProjectTabs, tabButtonId, tabPanelId } from "../components/ProjectTabs";
 import { AutoConfirmRow, ProposalCard } from "../components/ProposalCard";
+import {
+  autoConfirmLocked,
+  confirmModeRuntimeNote,
+} from "../presentation/proposalView";
 import { RichContent } from "../components/RichContent";
 import { ProjectTasksSection } from "../components/ProjectTasksSection";
 import { ProjectReportPanel } from "../components/ProjectReportPanel";
@@ -186,7 +190,8 @@ export function ProjectPage({
       <AutoConfirmRow
         mode={project.confirm_mode}
         busy={busy}
-        disabled={archived || paused || !!analysisJob}
+        disabled={autoConfirmLocked(project.status)}
+        note={confirmModeRuntimeNote(!!analysisJob)}
         onChange={(mode) =>
           void run(() => api.updateAnalysisPolicy(project.id, mode))
         }

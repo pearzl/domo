@@ -1,10 +1,11 @@
 //! API 模块的单元测试。
 use super::agents::{require_command_if_needed, validate_kind};
+use super::tasks::update_analysis_policy;
 use super::verification::{task_verifications, VERIFICATION_HISTORY_LIMIT};
 use crate::agents;
 use crate::models::*;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use std::path::PathBuf;
 
@@ -448,4 +449,88 @@ async fn verification_history_keeps_the_newest_entries_and_marks_truncation() {
     assert!(rounds.windows(2).all(|pair| pair[0] <= pair[1]));
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+async fn set_project_analysis_state(state: &AppState, status: &str) {
+    sqlx::query("UPDATE projects SET stage = ?, status = ? WHERE id = ?")
+        .bind(STAGE_ANALYSIS)
+        .bind(status)
+        .bind("prj_test")
+        .execute(&state.db)
+        .await
+        .unwrap();
+}
+
+async fn insert_running_analysis_job(state: &AppState) {
+    let timestamp = "2026-01-01T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+         result, usage_known, started_at, finished_at, created_at) \
+         VALUES (?, ?, NULL, ?, NULL, ?, 1, '', NULL, 0, ?, NULL, ?)",
+    )
+    .bind("job_analysis_running")
+    .bind("prj_test")
+    .bind(JOB_ROLE_ANALYSIS)
+    .bind(JOB_STATUS_RUNNING)
+    .bind(timestamp)
+    .bind(timestamp)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn analysis_policy_updates_while_analysis_job_is_running() {
+    let (state, root) = verification_test_state().await;
+    set_project_analysis_state(&state, STATUS_RUNNING).await;
+    insert_running_analysis_job(&state).await;
+
+    let detail = update_analysis_policy(
+        State(state.clone()),
+        Path("prj_test".to_string()),
+        Json(AnalysisPolicyRequest {
+            mode: CONFIRM_AUTO.into(),
+        }),
+    )
+    .await
+    .expect("分析作业运行中应允许调整确认方式")
+    .0;
+    assert_eq!(detail.project.confirm_mode, CONFIRM_AUTO);
+    let stored: String = sqlx::query_scalar("SELECT confirm_mode FROM projects WHERE id = ?")
+        .bind("prj_test")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(stored, CONFIRM_AUTO);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn analysis_policy_rejects_paused_projects() {
+    for status in [STATUS_PAUSED, STATUS_PAUSING] {
+        let (state, root) = verification_test_state().await;
+        set_project_analysis_state(&state, status).await;
+
+        let error = update_analysis_policy(
+            State(state.clone()),
+            Path("prj_test".to_string()),
+            Json(AnalysisPolicyRequest {
+                mode: CONFIRM_AUTO.into(),
+            }),
+        )
+        .await
+        .expect_err("暂停中的项目应拒绝调整确认方式")
+        .message;
+        assert_eq!(error, "项目已暂停，请先恢复");
+
+        let stored: String = sqlx::query_scalar("SELECT confirm_mode FROM projects WHERE id = ?")
+            .bind("prj_test")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(stored, CONFIRM_MANUAL);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

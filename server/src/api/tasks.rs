@@ -537,8 +537,11 @@ pub(super) async fn update_analysis_policy(
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档"));
     }
-    if running_project_job(&state, &id, JOB_ROLE_ANALYSIS).await? {
-        return Err(ApiError::bad("规划者正在处理当前消息"));
+    if matches!(
+        project.status.as_deref(),
+        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
+    ) {
+        return Err(ApiError::bad("项目已暂停，请先恢复"));
     }
     {
         let _guard = state.schedule_lock.lock().await;
