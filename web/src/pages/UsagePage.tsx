@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Agent, ProjectSummary, UsageReport, UsageTotals } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
+import { SkeletonLines } from "../components/Skeleton";
 import { UsageTable } from "../components/UsageGroupsTable";
 import { readUsageProjectId, usagePath } from "../router";
 import {
@@ -395,7 +396,7 @@ export function UsagePage() {
 
       {loading && !totals ? (
         <section className="panel">
-          <div className="muted">正在加载用量记录…</div>
+          <SkeletonLines label="正在加载用量记录…" />
         </section>
       ) : null}
 

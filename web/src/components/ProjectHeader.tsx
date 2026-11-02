@@ -3,6 +3,7 @@ import { ProjectGoal } from "./ProjectOverview";
 import { CopyButton } from "./CopyButton";
 import { RichContent } from "./RichContent";
 import { StageBadge, StatusBadge, formatTime } from "../ui";
+import { AnimatedNumber } from "./AnimatedNumber";
 
 export interface ProjectHeaderProps {
   detail: ProjectDetail;
@@ -20,6 +21,12 @@ export interface ProjectHeaderProps {
 
 /// 项目页头部：标题、阶段与状态条、目标、项目源信息与交付横幅。
 /// 项目操作按钮只负责回传意图，确认与请求留在页面层，保持原有行为。
+///
+/// 人工核对清单（浏览器手动核对）：
+/// 1. 依次切换项目选项卡，面板淡入上移且内容区高度稳定，无布局跳动。
+/// 2. 展开活动时间线，新条目淡入、列表不抖动；上滚后“回到最新”仍在原处。
+/// 3. 任务进度与运行作业数变化时数字逐位滚动，值不变时不动画。
+/// 4. 开启系统“减少动效”后，上述动画不再位移与缩放，只保留透明度变化。
 export function ProjectHeader({
   detail,
   canReplan,
@@ -48,6 +55,7 @@ export function ProjectHeader({
         <div>
           <h1>{project.name}</h1>
           <ProjectStatusBar
+            session={`project:${project.id}`}
             stage={project.stage}
             status={project.status}
             taskTotal={activeTasks.length}
@@ -160,12 +168,15 @@ export function ProjectHeader({
 /// 标题下的状态条：阶段、状态、任务进度与当前运行作业数。
 /// 阶段与状态徽标以取值为 key，刷新后状态变化即重挂载并淡入。
 export function ProjectStatusBar({
+  session,
   stage,
   status,
   taskTotal,
   taskCompleted,
   runningJobs,
 }: {
+  /// 项目会话键，数字滚动按它记忆上一次进度与作业数。
+  session: string;
   stage: string;
   status: string | null;
   taskTotal: number;
@@ -192,13 +203,23 @@ export function ProjectStatusBar({
       <span className="project-status-item">
         <span className="meta-label">任务进度</span>
         <span className="project-status-value">
-          {taskCompleted}/{taskTotal}
+          <AnimatedNumber
+            session={session}
+            slot="tasks:progress"
+            value={`${taskCompleted}/${taskTotal}`}
+          />
           <span className="muted"> · {percent}%</span>
         </span>
       </span>
       <span className="project-status-item">
         <span className="meta-label">运行作业</span>
-        <span className="project-status-value">{runningJobs} 个</span>
+        <span className="project-status-value">
+          <AnimatedNumber
+            session={session}
+            slot="jobs:running"
+            value={`${runningJobs} 个`}
+          />
+        </span>
       </span>
     </div>
   );

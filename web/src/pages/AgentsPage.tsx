@@ -13,6 +13,7 @@
 import { useEffect, useState } from "react";
 import type { Agent, AgentInput, DefaultTeamPool } from "../types";
 import { api, errorMessage } from "../api";
+import { SkeletonLines } from "../components/Skeleton";
 import { AgentCard } from "../components/AgentCard";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import {
@@ -211,7 +212,7 @@ export function AgentsPage() {
 
       {loading ? (
         <section className="panel">
-          <div className="muted">正在加载 Agent…</div>
+          <SkeletonLines label="正在加载 Agent…" />
         </section>
       ) : null}
 

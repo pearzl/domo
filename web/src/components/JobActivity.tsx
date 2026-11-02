@@ -19,6 +19,7 @@ import {
   type ActivityBlock,
 } from "../presentation/activity";
 import { Markdown } from "./markdown";
+import { SkeletonLines } from "./Skeleton";
 
 /** 作业记录默认展示的最近条数；更早的记录通过“展开全部”显示。 */
 export const RECENT_ACTIVITY_LIMIT = 20;
@@ -32,6 +33,8 @@ export const RECENT_ACTIVITY_LIMIT = 20;
  *    相对时间随固定节拍推进，不因轮询间隔变化而跳动。
  * 2. 新活动出现时列表自动滚到底部；上滚后出现“回到最新”，点回或重新贴底后恢复跟随。
  * 3. 思维链默认展开、可折叠；工具与步骤分组默认收起，失败项保持高亮。
+ * 4. 依次切换项目选项卡并展开活动时间线，条目淡入、自动跟随到底部，滚动高度不跳变；
+ *    开启系统“减少动效”后条目只淡入、不位移，也不再有状态点循环脉冲。
  */
 export function JobActivity({
   jobId,
@@ -189,7 +192,7 @@ export function ActivityStream({
           仅展示最近的 {ACTIVITY_PREVIEW_LIMIT} 条活动，更早的记录已省略。
         </div>
       ) : null}
-      {loading && !activity ? <div className="muted">加载活动…</div> : null}
+      {loading && !activity ? <SkeletonLines label="加载活动…" /> : null}
       {error ? <div className="error-box">读取活动失败：{error}</div> : null}
       {activity && activity.items.length === 0 ? (
         <div className="muted">

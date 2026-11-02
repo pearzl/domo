@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { ProjectSummary } from "../types";
 import { api, errorMessage } from "../api";
+import { SkeletonLines } from "../components/Skeleton";
 import {
   Badge,
   EmptySteps,
@@ -149,7 +150,9 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       ) : null}
 
       {loading ? (
-        <div className="muted">加载中…</div>
+        <div className="panel">
+          <SkeletonLines label="加载中…" />
+        </div>
       ) : projects.length === 0 ? (
         <EmptySteps
           title="还没有项目"
@@ -223,7 +226,11 @@ function renderProjectCards(
         </div>
       </div>
       <div className="project-card-side">
-        <Progress total={project.task_total} completed={project.task_completed} />
+        <Progress
+          total={project.task_total}
+          completed={project.task_completed}
+          session={`project:${project.id}`}
+        />
       </div>
     </article>
   ));

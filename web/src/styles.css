@@ -16,6 +16,17 @@
   --danger: #b42318;
   --danger-soft: #fde8e6;
   --shadow: 0 1px 2px rgba(18, 32, 56, 0.04), 0 8px 24px rgba(18, 32, 56, 0.05);
+  /* 动效统一口径：时长、缓动与位移都从这里取，减少动效时只保留透明度变化。 */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 260ms;
+  --motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-rise: 4px;
+  --motion-lift: 1px;
+  --motion-press: 0.97;
+  /* 颜色过渡慢于位移，状态徽标换色时不抢视线。 */
+  --motion-color: 200ms;
   font-family: "Inter", "Noto Sans SC", system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 15px;
   line-height: 1.55;
@@ -45,6 +56,11 @@ select {
 
 button {
   cursor: pointer;
+}
+
+/* 按钮回弹：按下时轻微缩放，松开回到原尺寸；禁用态不响应。 */
+button:not(:disabled):active {
+  animation: motion-pop var(--motion-fast) var(--motion-ease) both;
 }
 
 h1,
@@ -122,6 +138,178 @@ pre {
   .content {
     overflow-x: clip;
   }
+}
+
+/* ===== 动效层 =====
+   全站动效的唯一定义处：变量见 :root 的 --motion-*，关键帧与可复用类集中在本段，
+   本段之后各面板只引用类名，不各自发明时长。
+   - 淡入上移：.motion-rise / .project-panel，只做透明度与位移，不改变布局尺寸。
+   - 颜色过渡：.badge 与 .project-tab-badge 在状态换色时平滑过渡。
+   - 悬停抬升：.task-row 与 .project-card 上浮 1px 并加深阴影。
+   - 新条目淡入：活动时间线与事件列表的条目。
+   - 按钮回弹：按下时轻微缩放，松开后回弹。
+   - 加载骨架与状态点脉冲：骨架用背景扫光，状态点只呼吸透明度。
+   - 字符滚动：.animated-number-digit 只对变化过的数字位播放，其余字符保持静态。
+   减少动效时由文件末尾的 prefers-reduced-motion 块统一关闭位移与循环，只保留透明度变化。 */
+
+@keyframes motion-fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-rise));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes motion-pop {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(var(--motion-press));
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes motion-skeleton-sweep {
+  from {
+    background-position: -160% 0;
+  }
+  to {
+    background-position: 260% 0;
+  }
+}
+
+@keyframes motion-pulse-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes motion-digit-up {
+  from {
+    opacity: 0;
+    transform: translateY(70%);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes motion-digit-down {
+  from {
+    opacity: 0;
+    transform: translateY(-70%);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.motion-rise {
+  animation: motion-fade-rise var(--motion-base) var(--motion-ease-out) both;
+}
+
+.motion-fade {
+  animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+/* 加载骨架：占据内容高度，避免数据到达后页面跳动。 */
+.skeleton {
+  display: block;
+  border-radius: 8px;
+  background: #eef2f7;
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.75) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 60% 100%;
+  background-repeat: no-repeat;
+  background-position: -160% 0;
+  animation: motion-skeleton-sweep 1.6s var(--motion-ease) infinite;
+}
+
+/* 加载骨架组：页面首次加载时铺几行占位，宽度递减以贴合文本行。 */
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.skeleton-lines .skeleton {
+  height: 12px;
+}
+
+.skeleton-lines .skeleton:nth-child(2) {
+  width: 82%;
+}
+
+.skeleton-lines .skeleton:nth-child(3) {
+  width: 64%;
+}
+
+.skeleton-card {
+  height: 64px;
+  border-radius: 12px;
+}
+
+/* 状态点脉冲：循环呼吸，减少动效时只保留恒定透明度。 */
+.status-dot {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: motion-pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* 数字字符滚动：内层字符上下滚动一小段后落位。
+   外层行高固定，逐位换字不会改变行高；裁剪框上下各留 0.35em 行间，
+   含单位与“—”的整串数值既不会被切边，滚动时也不会露出相邻内容。 */
+.animated-number {
+  display: inline-flex;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  clip-path: inset(-0.35em -0.1em -0.35em -0.1em);
+}
+
+.animated-number-digit {
+  display: inline-block;
+  line-height: inherit;
+  animation-duration: var(--motion-slow);
+  animation-timing-function: var(--motion-ease-out);
+  animation-fill-mode: both;
+}
+
+.animated-number-digit.is-up {
+  animation-name: motion-digit-up;
+}
+
+.animated-number-digit.is-down {
+  animation-name: motion-digit-down;
 }
 
 .sidebar {
@@ -316,17 +504,17 @@ button.event-filter:focus-visible,
   border-radius: 14px;
   background: #f8fafc;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
-  animation: task-card-in 180ms ease-out;
+  animation: task-card-in var(--motion-base) var(--motion-ease-out) both;
 }
 
 @keyframes task-card-in {
   from {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(calc(-1 * var(--motion-rise)));
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
@@ -638,6 +826,15 @@ button:disabled {
   font-size: 0.72rem;
   font-weight: 600;
   line-height: 1.6;
+  /* 徽标文案变化（任务数、待确认、报告就绪）时颜色平滑过渡，宽度随内容即时变化不撑高选项卡。 */
+  transition:
+    background-color var(--motion-color) var(--motion-ease),
+    color var(--motion-color) var(--motion-ease);
+}
+
+/* 徽标数字与文本随状态变化淡入，不改变选项卡高度。 */
+.project-tab-badge .animated-number {
+  transition: color var(--motion-color) var(--motion-ease);
 }
 
 .project-tab.active .project-tab-badge {
@@ -664,14 +861,20 @@ button:disabled {
   margin: 0;
 }
 
+/* 选项卡切换：整个面板区淡入上移，位移只有 4px，不推动下方内容。
+   面板始终保持文档流占位，动画不改变高度，切换时不会出现布局跳动。 */
+.project-panel {
+  animation: project-panel-in var(--motion-base) var(--motion-ease-out) both;
+}
+
 .project-panel > .panel:first-child {
-  animation: project-panel-in 0.18s ease-out;
+  animation: none;
 }
 
 @keyframes project-panel-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(var(--motion-rise));
   }
   to {
     opacity: 1;
@@ -796,6 +999,11 @@ small {
   white-space: nowrap;
   background: #eef2f7;
   color: #526173;
+  /* 状态徽标换色时平滑过渡，不闪断；只动颜色，不动尺寸。 */
+  transition:
+    background-color var(--motion-color) var(--motion-ease),
+    color var(--motion-color) var(--motion-ease),
+    border-color var(--motion-color) var(--motion-ease);
 }
 
 .badge-info {
@@ -990,12 +1198,20 @@ small {
   padding: 18px 20px;
   box-shadow: var(--shadow);
   cursor: pointer;
-  transition: 0.15s ease;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
 }
 
 .project-card:hover {
   border-color: #b9c7dc;
-  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(18, 32, 56, 0.09);
+  transform: translateY(calc(-1 * var(--motion-lift)));
+}
+
+.project-card:active {
+  transform: none;
 }
 
 /* 卡片位于纵向列表中，焦点环用内描边避免被容器裁切。 */
@@ -1115,30 +1331,9 @@ small {
   font-variant-numeric: tabular-nums;
 }
 
-/* 状态值变化时整个条目重新挂载，用淡入提示刷新结果。 */
+/* 状态值变化时整个条目重新挂载，用统一的淡入上移提示刷新结果。 */
 .project-status-fade {
-  animation: project-status-fade 220ms ease;
-}
-
-@keyframes project-status-fade {
-  from {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .project-status-fade {
-    animation: none;
-  }
-
-  .project-panel > .panel:first-child {
-    animation: none;
-  }
+  animation: motion-fade-rise var(--motion-base) var(--motion-ease-out) both;
 }
 
 /* 项目源信息贴在标题区，默认折叠；展开后逐项展示并可单独复制。 */
@@ -1636,14 +1831,23 @@ small {
   text-align: left;
   color: var(--text);
   cursor: pointer;
+  /* 悬停抬升：位移只有 1px，列表行高不变，不会把相邻行推开。 */
   transition:
     border-color 140ms ease,
-    background 140ms ease;
+    background 140ms ease,
+    transform var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
 }
 
 .task-row:hover {
   background: #f7f9fc;
   border-color: var(--line-strong);
+  transform: translateY(calc(-1 * var(--motion-lift)));
+  box-shadow: 0 4px 12px rgba(18, 32, 56, 0.07);
+}
+
+.task-row:hover:active {
+  transform: none;
 }
 
 .task-row.selected {
@@ -2125,15 +2329,6 @@ button.dag-fit-btn {
   outline-offset: 2px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .dag-canvas,
-  .dag-edge,
-  .dag-node,
-  button.dag-zoom-btn {
-    transition: none;
-  }
-}
-
 .dag-node-head {
   display: flex;
   align-items: center;
@@ -2464,6 +2659,15 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   overscroll-behavior: contain;
 }
 
+/* 新条目淡入：活动块与块内条目挂载时淡入，不位移、不改变滚动高度，
+   因此自动跟随到底部与“回到最新”的判定都不受影响。 */
+.activity-list > [data-activity-kind],
+.activity-list > [data-activity-block],
+.activity-reasoning-item,
+.activity-tool-list > * {
+  animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
 /* 运行中作业的活动区限高跟随，读到底部时自动滚到最新一条。 */
 .activity-scroll {
   position: relative;
@@ -2503,20 +2707,11 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   background: var(--accent);
 }
 
+/* 运行中状态点：复用统一的状态点脉冲（只呼吸透明度），减少动效时保持恒亮。 */
 .activity-dot-live {
-  animation: activity-dot-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes activity-dot-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.85);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
+  animation: motion-pulse-dot 1.4s ease-in-out infinite;
+  color: var(--accent);
+  background: currentColor;
 }
 
 .activity-progress-window {
@@ -2830,6 +3025,8 @@ button.event-filter.active .event-filter-count {
 
 .event-item {
   border-bottom: 1px solid #eef1f5;
+  /* 事件条目挂载时淡入，与活动时间线一致。 */
+  animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
 }
 
 .event {
@@ -3060,7 +3257,7 @@ button.event-job-title:hover:not(:disabled) {
   padding-bottom: 2px;
 }
 
-/* 依赖与位置的折叠区从属于所在区块，不再重复画区块分隔线。 */
+/* 依赖与位置的折叠区从属于所在区块，不单独画区块分隔线。 */
 .drawer .deps-fold {
   margin-top: 8px;
   border-top: 1px dashed var(--line);
@@ -3364,12 +3561,6 @@ summary {
   padding-top: 12px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .agent-form-section > summary::before {
-    transition: none;
-  }
-}
-
 .usage-form-grid {
   margin-top: 8px;
 }
@@ -3511,7 +3702,7 @@ summary {
   background: var(--accent-soft);
 }
 
-/* 窄屏布局：侧栏改为顶部横向导航，内容区取消左边距并让出导航高度。 */
+/* 窄屏布局：侧栏位于顶部并横向排列导航，内容区无左边距并让出导航高度。 */
 @media (max-width: 840px) {
   :root {
     --sidebar-height: 58px;
@@ -3762,7 +3953,7 @@ summary {
   }
 }
 
-/* 更窄的屏幕（320px 起）：收紧面板与抽屉内边距，任务行改为单列卡片。 */
+/* 更窄的屏幕（320px 起）：收紧面板与抽屉内边距，任务行按单列卡片排列。 */
 @media (max-width: 560px) {
   .page {
     width: calc(100% - 20px);
@@ -4277,31 +4468,6 @@ summary {
   color: inherit;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .add-task-card,
-  .task-row {
-    animation: none;
-    transition: none;
-  }
-
-  .activity-progress-track,
-  .activity-dot-live {
-    animation: none;
-  }
-
-  .activity-progress-window {
-    mask-image: none;
-  }
-
-  .activity-progress-track {
-    white-space: normal;
-  }
-
-  .activity-progress-dup {
-    display: none;
-  }
-}
-
 /* 任务面板：操作区与列表、表单保持间距；窄档下操作区独占一行并靠左。 */
 .task-panel .panel-head {
   row-gap: 12px;
@@ -4336,5 +4502,95 @@ summary {
 
   .task-row-meta {
     padding-left: 0;
+  }
+}
+
+/* ===== 减少动效 =====
+   系统开启“减少动效”时，全站关闭位移、缩放与循环动画，只保留透明度变化。
+   覆盖范围与本文件的动效层一一对应：淡入上移、选项卡切换、新条目淡入、悬停抬升、
+   按钮回弹、骨架扫光、状态点脉冲、字符滚动，以及各处 transition 中的位移与颜色。 */
+@media (prefers-reduced-motion: reduce) {
+  .motion-rise,
+  .project-panel,
+  .add-task-card,
+  .project-status-fade {
+    animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+  }
+
+  /* 新条目：只淡入。 */
+  .motion-fade,
+  .activity-list > [data-activity-kind],
+  .activity-list > [data-activity-block],
+  .activity-reasoning-item,
+  .activity-tool-list > *,
+  .event-item {
+    animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+  }
+
+  /* 悬停抬升：只保留颜色过渡，不做位移与阴影变化。 */
+  .task-row,
+  .project-card {
+    transform: none;
+    transition:
+      border-color var(--motion-color) var(--motion-ease),
+      background-color var(--motion-color) var(--motion-ease);
+  }
+
+  .task-row:hover,
+  .task-row:hover:active,
+  .project-card:hover,
+  .project-card:active {
+    transform: none;
+  }
+
+  /* 按钮回弹：关闭按下缩放。 */
+  button:not(:disabled):active {
+    animation: none;
+  }
+
+  /* 循环类：骨架扫光与状态点脉冲停止，骨架保持静态底色，状态点保持常亮。 */
+  .skeleton {
+    animation: none;
+    background-image: none;
+  }
+
+  .status-dot,
+  .activity-dot-live {
+    animation: none;
+    opacity: 1;
+  }
+
+  /* 活动进展条：跑马灯停成静态文本，裁切遮罩与重复副本一并移除。 */
+  .activity-progress-track {
+    animation: none;
+    white-space: normal;
+  }
+
+  .activity-progress-window {
+    mask-image: none;
+  }
+
+  .activity-progress-dup {
+    display: none;
+  }
+
+  /* 字符滚动：逐位淡入，不上下移动。 */
+  .animated-number-digit.is-up,
+  .animated-number-digit.is-down {
+    animation-name: motion-fade-in;
+  }
+
+  /* 进度条宽度即时变化，不做平滑推进。 */
+  .progress-fill {
+    transition: none;
+  }
+
+  /* 画布平移、缩放与节点、折叠三角的过渡即时完成。 */
+  .dag-canvas,
+  .dag-edge,
+  .dag-node,
+  button.dag-zoom-btn,
+  .agent-form-section > summary::before {
+    transition: none;
   }
 }

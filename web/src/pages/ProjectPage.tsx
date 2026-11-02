@@ -10,6 +10,13 @@
  * 5. 方向键在选项卡内左右切换，Home/End 跳到首尾；每项徽标随任务、方案与报告状态更新。
  * 6. 概览里的用量摘要显示作业数、token、费用、时长与覆盖；没有记录的指标显示“—”，
  *    “查看用量明细”带着项目过滤跳到用量页；项目页不再有独立的用量面板。
+ *
+ * 人工核对清单（动效）：
+ * 1. 依次切换全部选项卡：面板淡入上移约 4px，上方选项卡与下方 Agent 池位置不动，无布局跳动。
+ * 2. 切换过程中重复点击、用方向键快速切换：动画不叠加、不闪白，页面不出现滚动条抖动。
+ * 3. 展开活动与审计时间线：条目淡入，列表自动跟随底部，“回到最新”出现时不推动页面。
+ * 4. 概览用量摘要与页头进度在数值变化时逐位滚动，刷新后首次展示保持静态。
+ * 5. 开启系统“减少动效”：以上动画全部只淡入不位移，状态点与骨架不再循环。
  */
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -24,6 +31,7 @@ import type {
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { SkeletonLines } from "../components/Skeleton";
 import { InputBox } from "../components/InputBox";
 import { useDraftJson, useDraftValue } from "../components/useDraft";
 import { EventTimeline } from "../components/EventTimeline";
@@ -358,7 +366,12 @@ export function ProjectPage({
     }
   }
 
-  if (loading) return <div className="page muted">加载项目…</div>;
+  if (loading)
+    return (
+      <div className="page">
+        <SkeletonLines label="加载项目…" />
+      </div>
+    );
   if (!detail) {
     return (
       <div className="page">
@@ -1333,7 +1346,9 @@ export function ProjectPage({
         onSelect={(block) => selectTab(block)}
       />
 
+      {/* 以选项卡为 key：切换时面板淡入上移，面板本身始终占位，内容区高度不跳动。 */}
       <section
+        key={activeBlock}
         className="project-panel"
         role="tabpanel"
         id={tabPanelId(activeBlock)}

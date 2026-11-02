@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode, SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
+import { SkeletonLines } from "./Skeleton";
 import { JobActivity } from "./JobActivity";
 import { RichContent } from "./RichContent";
 import {
@@ -153,7 +154,7 @@ export function JobDetailView({
               </details>
             ) : null}
             <JobActivity jobId={job.id} running={job.status === "running"} />
-            {loading ? <div className="muted">加载作业详情…</div> : null}
+            {loading ? <SkeletonLines label="加载作业详情…" /> : null}
             {error ? <div className="error-box">{error}</div> : null}
             {detail ? <JobBlock title="结果" value={detail.result} /> : null}
             {detail ? <JobPrompt value={detail.prompt} /> : null}
