@@ -5074,7 +5074,8 @@ summary {
 /* ===== 减少动效 =====
    系统开启“减少动效”时，全站关闭位移、缩放与循环动画，只保留透明度变化。
    覆盖范围与本文件的动效层一一对应：淡入上移、选项卡切换、新条目淡入、悬停抬升、
-   按钮回弹、骨架扫光、状态点脉冲、字符滚动，以及各处 transition 中的位移与颜色。 */
+   按钮回弹、骨架扫光、状态点脉冲、字符滚动，以及各处 transition 中的位移与颜色。
+   任务抽屉的执行轮次、验收尝试、概览卡片与用量摘要同样只保留透明度变化。 */
 @media (prefers-reduced-motion: reduce) {
   .motion-rise,
   .project-panel,
@@ -5083,14 +5084,25 @@ summary {
     animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
   }
 
-  /* 新条目：只淡入。 */
+  /* 新条目：只淡入。任务抽屉的轮次、本轮验收尝试与未关联提示随内容挂载一次性淡入。 */
   .motion-fade,
   .task-history-round,
+  .drawer .task-history .task-history-round,
+  .drawer .task-history .task-history-attempt,
+  .drawer .task-history .task-history-unlinked,
   .activity-list > [data-activity-kind],
   .activity-list > [data-activity-block],
   .activity-reasoning-item,
   .activity-tool-list > *,
   .event-item {
+    animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+  }
+
+  /* 概览卡片与用量摘要：网格重排后卡片位置随视口变化，挂载只淡入不着陆位移。 */
+  .overview-stat,
+  .overview-todo,
+  .usage-summary,
+  .usage-summary-stat {
     animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
   }
 
@@ -5108,6 +5120,23 @@ summary {
   .project-card:hover,
   .project-card:active {
     transform: none;
+  }
+
+  /* 任务抽屉轮次头与未关联提示：悬停只换底色与描边。 */
+  .drawer .task-history .task-history-round-head,
+  .drawer .task-history .task-history-unlinked {
+    transform: none;
+    transition:
+      border-color var(--motion-color) var(--motion-ease),
+      background-color var(--motion-color) var(--motion-ease);
+  }
+
+  /* 概览与用量摘要中的数值字符滚动只淡入，滚动位不做上下位移。 */
+  .overview-value .animated-number-digit.is-up,
+  .overview-value .animated-number-digit.is-down,
+  .usage-summary-value .animated-number-digit.is-up,
+  .usage-summary-value .animated-number-digit.is-down {
+    animation-name: motion-fade-in;
   }
 
   /* 按钮回弹：关闭按下缩放。 */
