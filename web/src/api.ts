@@ -18,6 +18,7 @@ import type {
   Task,
   TaskAgentPool,
   UsageReport,
+  VerificationHistory,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -78,6 +79,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+  getTaskVerifications: (projectId: string, taskId: string) =>
+    request<VerificationHistory>(
+      `/api/projects/${projectId}/tasks/${taskId}/verifications`,
+      { cache: "no-store" },
+    ),
   getTaskAgentPool: (projectId: string, taskId: string) =>
     request<TaskAgentPool>(`/api/projects/${projectId}/tasks/${taskId}/agents`),
   updateTaskAgent: (

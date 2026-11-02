@@ -3218,6 +3218,79 @@ button.event-job-title:hover:not(:disabled) {
   color: var(--success);
 }
 
+/* 结果摘要与验收摘要的标题行：标题与来源说明同行，窄宽度下换行。 */
+.drawer .task-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin: 0 0 8px;
+}
+
+.drawer .task-result-head h3 {
+  margin: 0;
+}
+
+.drawer .task-result-source {
+  font-size: 0.8rem;
+}
+
+.drawer .task-result-hint {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+}
+
+/* 验收摘要：结论徽标、计数与最近一轮原因并列。 */
+.drawer .task-verification {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--bg);
+}
+
+.drawer .task-verification .verification-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.drawer .task-verification .verification-label {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.drawer .task-verification .verification-reason,
+.drawer .task-verification .verification-issues,
+.drawer .task-verification .verification-unparsed {
+  margin-top: 10px;
+}
+
+.drawer .task-verification .verification-issues ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.drawer .task-verification .verification-issues li > .rich-content,
+.drawer .task-verification .verification-reason .rich-content {
+  margin: 0;
+}
+
+.drawer .task-verification .verification-unparsed pre {
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.drawer .task-verification .verification-note {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+}
+
 /* 首区块与末尾配置区单独成组，避免与普通信息区块混排。 */
 .drawer-lead {
   border-top: 1px solid var(--line);

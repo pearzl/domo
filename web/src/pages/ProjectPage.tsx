@@ -54,6 +54,11 @@ import {
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
 import { useAlignedNow } from "../clock";
 import { useJobActivity } from "../useJobActivity";
+import {
+  ResultSummary,
+  VerificationRecapBlock,
+  useVerificationHistory,
+} from "../components/TaskVerification";
 import { analysisThread } from "../presentation/analysisThread";
 import { activitySignature, isNearBottom } from "../presentation/activity";
 import {
@@ -85,6 +90,10 @@ import {
   type DepsField,
   type DrawerTailSection,
 } from "../presentation/taskDrawer";
+import {
+  verificationRecap,
+  verificationSignature,
+} from "../presentation/taskSummary";
 import {
   projectBlockOrder,
   projectTabBadge,
@@ -158,6 +167,8 @@ export function ProjectPage({
   onBack: () => void;
 }) {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
+  const [snapshotVersion, setSnapshotVersion] = useState(0);
+  const verificationSignatureRef = useRef("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const analysisDraft = useDraftValue(
@@ -262,6 +273,13 @@ export function ProjectPage({
     try {
       const next = await api.getProject(id);
       setDetail(next);
+      // 验收相关数据变化时递增版本号，抽屉按版本号重新读取验收记录；
+      // 仅轮询心跳而没有新数据时不重复请求。
+      const signature = verificationSignature(next.tasks, next.jobs);
+      if (signature !== verificationSignatureRef.current) {
+        verificationSignatureRef.current = signature;
+        setSnapshotVersion((current) => current + 1);
+      }
       setError("");
     } catch (err) {
       if (!silent) setError(errorMessage(err));
@@ -1328,6 +1346,7 @@ export function ProjectPage({
           archived={archived}
           busy={busy}
           agentName={agentName}
+          snapshotVersion={snapshotVersion}
         />
       ) : null}
     </div>
@@ -1440,6 +1459,7 @@ export function TaskDrawer({
   archived,
   busy,
   agentName,
+  snapshotVersion = 0,
 }: {
   task: Task;
   detail: ProjectDetail;
@@ -1452,8 +1472,17 @@ export function TaskDrawer({
   archived: boolean;
   busy: boolean;
   agentName: (id: string | null) => string;
+  /** 项目快照版本：验收记录随任务与作业一起刷新。 */
+  snapshotVersion?: number;
 }) {
   const jobs = detail.jobs.filter((job) => job.task_id === task.id);
+  // 验收摘要优先取逐轮验收记录；接口不可用时呈现层回退到任务字段并标注来源。
+  const verificationHistory = useVerificationHistory(
+    task.project_id,
+    task.id,
+    snapshotVersion,
+  );
+
   const artifactsReleasing = task.artifacts_released_at === ARTIFACTS_RELEASING;
   const artifactsReleased = Boolean(task.artifacts_released_at);
   const archiveReference = task.branch
@@ -1490,6 +1519,17 @@ export function TaskDrawer({
   const taskPaused = task.status === "paused" || task.status === "pausing";
   // 首区块按状态决定：blocked 与里程碑人工验收先裁决，已完成/已取消先给结果，其余进行中先给控制条。
   const layout = drawerLayout({ ...task, archived });
+  // 裁决面板与原始错误入口已经呈现失败原因，验收摘要不再重复同一条原文。
+  const verificationRecapValue = verificationRecap(
+    {
+      ...task,
+      last_error: layout.gateCarriesError || rawErrorEntry(layout) === "collapsed"
+        ? null
+        : task.last_error,
+    },
+    verificationHistory.history,
+    verificationHistory.state,
+  );
   const resultFirst = layout.lead === "result";
   const canControl =
     !archived && task.stage !== "completed" && task.status !== "canceled";
@@ -1561,12 +1601,11 @@ export function TaskDrawer({
       setControlBusy(false);
     }
   }
+  // 结果摘要按 Markdown 排版，并标注来自哪一次执行作业；没有结果时给出空状态。
   const resultSection = (
-    <section className="task-result">
-      <h3>结果摘要</h3>
-      <RichContent content={task.result_summary} emptyText="没有记录执行摘要。" />
-    </section>
+    <ResultSummary taskId={task.id} summary={task.result_summary} jobs={jobs} />
   );
+  const verificationSection = <VerificationRecapBlock recap={verificationRecapValue} />;
   const jobsSection = (
     <section>
       <h3>作业（{jobs.length}）</h3>
@@ -1951,6 +1990,8 @@ export function TaskDrawer({
     switch (key) {
       case "control":
         return <div key={key}>{controlBlock}</div>;
+      case "verification":
+        return <div key={key}>{verificationSection}</div>;
       case "milestone":
         return <div key={key}>{milestoneSection}</div>;
       case "result":

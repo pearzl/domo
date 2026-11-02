@@ -135,6 +135,12 @@ function leadStart(markup: string) {
   return markup.indexOf('class="drawer-lead"');
 }
 
+function verificationMarkup(markup: string) {
+  const start = markup.indexOf('data-drawer-block="verification"');
+  if (start < 0) return "";
+  return markup.slice(start, markup.indexOf("</div>", markup.indexOf("verification-note", start)) + 6);
+}
+
 function leadMarkup(markup: string) {
   const start = leadStart(markup);
   const end = markup.indexOf("</section></div>", start);
@@ -202,9 +208,11 @@ describe("TaskDrawer 信息去重", () => {
   it("blocked 时抽屉不额外渲染原始错误入口，由 gate 面板承载", () => {
     const markup = renderDrawer(task({ status: "blocked", last_error: RAW }));
     expect((markup.match(/查看原始错误/g) ?? []).length).toBe(0);
-    expect(markup).not.toContain(RAW);
     const drawer = markup.slice(leadStart(markup));
     expect(drawer).not.toContain("raw-error drawer-fold");
+    // 失败原因只在 gate 面板承载，验收摘要不回退重复同一条原文。
+    expect(markup).not.toContain(RAW);
+    expect(verificationMarkup(markup)).not.toContain(RAW);
   });
 
   it("里程碑验收时原始错误只由 gate 面板承载，全文只出现一次", () => {
@@ -213,6 +221,7 @@ describe("TaskDrawer 信息去重", () => {
     );
     expect((markup.match(new RegExp(RAW, "g")) ?? []).length).toBe(1);
     expect(leadMarkup(markup)).toContain(RAW);
+    expect(verificationMarkup(markup)).not.toContain(RAW);
   });
 
   it("任务描述与验收标准同级并列、使用同一容器类，不再有单独的“验收”标题", () => {
@@ -297,6 +306,73 @@ describe("TaskDrawer 信息去重", () => {
     const folded = section.slice(section.indexOf("更多位置信息"));
     expect(folded).toContain("归档 ref");
     expect(folded).toContain("恢复命令");
+  });
+
+  it("验收摘要紧跟验收标准，无验收作业时显示未验收而非空区块", () => {
+    const markup = renderDrawer(task());
+    const acceptanceIndex = markup.indexOf('data-drawer-block="acceptance"');
+    const verificationIndex = markup.indexOf('data-drawer-block="verification"');
+    expect(verificationIndex).toBeGreaterThan(acceptanceIndex);
+    const section = verificationMarkup(markup);
+    expect(section).toContain("<h3>验收摘要</h3>");
+    expect(section).toContain(">未验收<");
+    expect(section).toContain("验收 0 次 · 拒绝 0 次");
+    // 回退来源：验收记录尚未读出时标注来源与回退依据。
+    expect(section).toContain("来源：");
+    expect(section).toContain("还没有验收作业产出结论");
+  });
+
+  it("已完成且有验收反馈的任务渲染拒绝结论、原因与问题", () => {
+    const markup = renderDrawer(
+      task({
+        stage: "executing",
+        attempts: 2,
+        rejections: 1,
+        verifier_issues: ["ISSUE_MARKER"],
+        last_error: "REASON_MARKER",
+      }),
+    );
+    const section = verificationMarkup(markup);
+    expect(section).toContain(">拒绝<");
+    expect(section).toContain("ISSUE_MARKER");
+    expect(section).toContain("验收 2 次 · 拒绝 1 次");
+    // 服务端首渲染时验收记录尚未读出，来源标注为加载中；读取失败后同一区块标注回退来源。
+    expect(section).toContain("来源：验收记录（加载中）");
+    expect(section).toContain("data-source=\"task\"");
+    expect((markup.match(/ISSUE_MARKER/g) ?? []).length).toBe(2);
+  });
+
+  it("完成且执行过的任务在验收记录不可用时按任务字段显示通过", () => {
+    const markup = renderDrawer(task({ stage: "completed", attempts: 1 }));
+    expect(verificationMarkup(markup)).toContain(">通过<");
+  });
+
+  it("结果摘要按 Markdown 排版并标注来源作业，没有结果时给出空状态", () => {
+    const markup = renderDrawer(
+      task({
+        stage: "completed",
+        result_summary: "## 完成内容\n\n- 第一项\n- 第二项",
+      }),
+      [job(1)],
+    );
+    const result = markup.slice(
+      markup.indexOf('data-drawer-block="result"'),
+      markup.indexOf("</section>", markup.indexOf('data-drawer-block="result"')),
+    );
+    expect(result).toContain("<h2");
+    expect(result).toContain("<ul");
+    expect(result).toContain("<li>第一项</li>");
+    expect(result).toContain('class="rich-content rich-content-markdown"');
+    expect(result).toContain("来自第 1 次执行作业");
+    expect(result).not.toContain("## 完成内容");
+
+    const empty = renderDrawer(task({ stage: "completed" }), [job(1)]);
+    const emptyResult = empty.slice(
+      empty.indexOf('data-drawer-block="result"'),
+      empty.indexOf("</section>", empty.indexOf('data-drawer-block="result"')),
+    );
+    expect(emptyResult).toContain("rich-content-empty");
+    expect(emptyResult).toContain("执行作业产出结果后");
   });
 
   it("Agent 池配置区位于作业记录之后且位于抽屉末尾", () => {

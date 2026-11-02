@@ -153,6 +153,35 @@ export interface TaskAgentPool {
   roles: ProjectRolePool[];
 }
 
+/** 单条验收作业摘要：验收记录接口按轮次返回验收者的解析结论。 */
+export interface VerificationRecord {
+  id: string;
+  round: number;
+  attempt: number;
+  status: string;
+  passed: boolean | null;
+  reason: string | null;
+  issues: string[];
+  parsed: boolean;
+  parse_error: string | null;
+  raw_excerpt: string | null;
+  agent_id: string | null;
+  agent_name: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  usage_known: boolean;
+}
+
+/** 验收记录：按 created_at/id 升序，最多返回 limit 条；truncated 表示更早的记录已省略。 */
+export interface VerificationHistory {
+  project_id: string;
+  task_id: string;
+  total: number;
+  limit: number;
+  truncated: boolean;
+  verifications: VerificationRecord[];
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

@@ -5,6 +5,7 @@ export type DrawerLead = "gate" | "result" | "control";
 export type DrawerTailSection =
   | "control"
   | "result"
+  | "verification"
   | "milestone"
   | "description"
   | "acceptance"
@@ -76,6 +77,8 @@ export function drawerLayout(task: DrawerTaskInput): DrawerLayout {
   }
 
   tail.push("description", "acceptance");
+  // 验收摘要紧跟验收标准：没有验收作业时也呈现“未验收”结论，不留空区块。
+  tail.push("verification");
   // 验收反馈只在验收者留下问题时出现，与验收标准分开并列。
   if (hasVerifierFeedback(task)) tail.push("feedback");
   tail.push("derive", "deps");
