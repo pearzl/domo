@@ -303,10 +303,31 @@ button.event-filter:focus-visible,
 
 .add-task-form {
   padding: 16px;
-  margin: 14px 0 18px;
-  border: 1px solid var(--line);
+  margin: 0;
+  border: 0;
   border-radius: 12px;
+  background: transparent;
+}
+
+/* 添加任务表单卡片：与任务列表平级的独立区块，和列表之间留出固定间距与分隔。 */
+.add-task-card {
+  margin: 16px 0 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
   background: #f8fafc;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+  animation: task-card-in 180ms ease-out;
+}
+
+@keyframes task-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .subtitle {
@@ -1596,41 +1617,58 @@ small {
   width: 100%;
 }
 
+/* 任务列表：与上方操作区/表单之间保留外边距，行自带边框，不与按钮共享边界。 */
 .task-list {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  overflow: hidden;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 .task-row {
-  display: grid;
-  grid-template-columns: 56px minmax(180px, 1.4fr) 110px 130px 150px 100px;
-  gap: 10px;
-  align-items: center;
-  padding: 11px 14px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   background: white;
   text-align: left;
   color: var(--text);
   cursor: pointer;
-}
-
-.task-row:last-child {
-  border-bottom: 0;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
 }
 
 .task-row:hover {
   background: #f7f9fc;
+  border-color: var(--line-strong);
 }
 
 .task-row.selected {
   background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
-/* 任务行被 .task-list 的 overflow 裁切，焦点环画在行内不越界。 */
+/* 任务行首行：key、标题与状态徽标；窄屏也不会把状态挤到第二行。 */
+.task-row-main {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+/* 任务行第二行：依赖、Agent 与执行计数。 */
+.task-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+  padding-left: 66px;
+}
+
+/* 焦点环画在行内，避免圆角卡片外扩。 */
 .task-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -1650,6 +1688,8 @@ small {
   font-size: 0.8rem;
   font-weight: 700;
   color: var(--accent);
+  white-space: nowrap;
+  overflow: visible;
 }
 
 .task-title {
@@ -1663,9 +1703,21 @@ small {
 .task-agent,
 .task-counts {
   font-size: 0.8rem;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-agent-label {
+  color: #8491a3;
+}
+
+.task-counts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
 }
 
 .queue-controls {
@@ -3582,76 +3634,43 @@ summary {
     overflow-wrap: anywhere;
   }
 
-  /* 任务列表在窄屏改为多行卡片：key 与状态一行，标题独占一行，明细按需换行。 */
-  .task-row {
-    grid-template-columns: minmax(48px, auto) minmax(0, 1fr);
+  /* 任务行在窄屏保持两行：首行 key、标题与状态徽标，第二行依赖、Agent 与计数。 */
+  .task-row-main {
+    grid-template-columns: minmax(48px, auto) minmax(0, 1fr) auto;
     gap: 4px 10px;
-    align-items: start;
-    padding: 10px 12px;
-  }
-
-  .task-row .task-key {
-    grid-column: 1;
-    grid-row: 1;
-    align-self: center;
   }
 
   .task-row .task-state {
-    grid-column: 2;
-    grid-row: 1;
-    min-width: 0;
     flex-wrap: wrap;
     justify-content: flex-end;
   }
 
   .task-row .task-title {
-    grid-column: 1 / -1;
-    grid-row: 2;
     white-space: normal;
     overflow: visible;
     overflow-wrap: anywhere;
   }
 
-  .task-row .task-deps {
-    grid-column: 1 / -1;
-    grid-row: 3;
-  }
-
-  .task-row .task-agent {
-    grid-column: 1 / -1;
-    grid-row: 4;
-  }
-
+  /* 行切换为两行排布后，计数区的重排按钮与计数左对齐。 */
   .task-row .task-counts {
-    grid-column: 1 / -1;
-    grid-row: 5;
-    justify-self: stretch;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 2px 6px;
+    justify-self: start;
+  }
+
+  .task-row-meta {
+    padding-left: 0;
   }
 
   .task-deps,
   .task-agent,
   .task-counts {
-    overflow: visible;
     white-space: normal;
+    overflow: visible;
     text-overflow: clip;
     overflow-wrap: anywhere;
     line-height: 1.4;
   }
 
-  .task-deps {
-    font-size: 0.78rem;
-  }
-
-  .task-agent::before {
-    content: "Agent：";
-    color: #8491a3;
-  }
-
+  .task-deps,
   .task-agent {
     font-size: 0.78rem;
   }
@@ -3784,33 +3803,43 @@ summary {
     font-size: 0.68rem;
   }
 
-  /* 单列任务卡片：key、状态、标题、依赖、Agent、计数依次换行，320px 下不溢出。 */
+  /* 单列任务卡片：首行 key 与状态徽标同行，标题换行，明细落在第二行，320px 下不溢出。 */
   .task-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 3px;
     padding: 9px 10px;
   }
 
-  .task-row .task-key,
-  .task-row .task-state,
-  .task-row .task-title,
-  .task-row .task-deps,
-  .task-row .task-agent,
-  .task-row .task-counts {
-    grid-column: 1;
-    grid-row: auto;
+  .task-row-main {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "key state"
+      "title title";
+    gap: 3px 8px;
+    align-items: center;
+  }
+
+  .task-row-main .task-key {
+    grid-area: key;
+    justify-self: start;
+  }
+
+  .task-row-main .task-state {
+    grid-area: state;
     min-width: 0;
-    justify-self: stretch;
+    justify-content: flex-end;
   }
 
-  .task-row .task-state,
-  .task-row .task-counts {
-    justify-content: flex-start;
-  }
-
-  .task-row .task-title {
+  .task-row-main .task-title {
+    grid-area: title;
     margin-top: 1px;
     font-size: 0.92rem;
+  }
+
+  .task-row-meta {
+    gap: 2px 10px;
+  }
+
+  .task-row .task-counts {
+    justify-content: flex-start;
   }
 
   .queue-controls {
@@ -4249,6 +4278,12 @@ summary {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .add-task-card,
+  .task-row {
+    animation: none;
+    transition: none;
+  }
+
   .activity-progress-track,
   .activity-dot-live {
     animation: none;
@@ -4264,5 +4299,42 @@ summary {
 
   .activity-progress-dup {
     display: none;
+  }
+}
+
+/* 任务面板：操作区与列表、表单保持间距；窄档下操作区独占一行并靠左。 */
+.task-panel .panel-head {
+  row-gap: 12px;
+  margin-bottom: 4px;
+}
+
+.task-panel .task-panel-actions {
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .task-panel .panel-head {
+    align-items: flex-start;
+  }
+
+  .task-panel .task-panel-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .task-panel .task-panel-actions > button {
+    margin-top: 4px;
+  }
+
+  .task-list {
+    margin-top: 14px;
+  }
+
+  .add-task-card {
+    margin: 14px 0 18px;
+  }
+
+  .task-row-meta {
+    padding-left: 0;
   }
 }
