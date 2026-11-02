@@ -1,0 +1,451 @@
+//! API 模块的单元测试。
+use super::agents::{require_command_if_needed, validate_kind};
+use super::verification::{task_verifications, VERIFICATION_HISTORY_LIMIT};
+use crate::agents;
+use crate::models::*;
+use crate::state::AppState;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use std::path::PathBuf;
+
+fn bad_message(kind: &str) -> String {
+    validate_kind(kind).expect_err("未知类型应被拒绝").message
+}
+
+fn cli_kind() -> &'static str {
+    <agents::CliAdapter as agents::AgentAdapter>::KIND
+}
+
+#[test]
+fn validate_kind_accepts_every_registered_type() {
+    for kind in agents::kinds() {
+        assert_eq!(validate_kind(kind).unwrap(), *kind);
+    }
+}
+
+#[test]
+fn validate_kind_rejects_unknown_type_and_lists_options() {
+    let message = bad_message("unknown");
+    let mut cursor = 0;
+    for kind in agents::kinds() {
+        let index = message
+            .find(kind)
+            .unwrap_or_else(|| panic!("错误信息缺少 {kind}: {message}"));
+        assert!(
+            index >= cursor,
+            "错误信息未按注册表顺序列出 {kind}: {message}"
+        );
+        cursor = index + kind.len();
+    }
+}
+
+#[test]
+fn only_the_cli_adapter_requires_a_command_template() {
+    let empty: [String; 0] = [];
+    for kind in agents::kinds() {
+        let result = require_command_if_needed(kind, &empty);
+        if *kind == cli_kind() {
+            let error = result.unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.message, "CLI Agent 必须配置命令模板");
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+fn custom_cli_accepts_non_empty_command_template() {
+    let command = vec!["codex".to_string(), "exec".to_string()];
+    assert!(require_command_if_needed(cli_kind(), &command).is_ok());
+}
+
+async fn verification_test_state() -> (AppState, PathBuf) {
+    let root = std::env::temp_dir().join(format!("domo-verifications-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let db = crate::db::connect(&root.join("data/domo.db"))
+        .await
+        .unwrap();
+    let timestamp = "2026-01-01T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
+         stage, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("prj_test")
+    .bind("test")
+    .bind("goal")
+    .bind("/tmp/repo")
+    .bind("main")
+    .bind("domo/p-test")
+    .bind("/tmp/workspace")
+    .bind(STAGE_EXECUTING)
+    .bind(STATUS_RUNNING)
+    .bind(timestamp)
+    .bind(timestamp)
+    .execute(&db)
+    .await
+    .unwrap();
+    for (id, key) in [("tsk_a", "T1"), ("tsk_empty", "T2")] {
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, seq, queue_order, key, title, description, \
+             acceptance, deps, stage, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind("prj_test")
+        .bind(1)
+        .bind(1)
+        .bind(key)
+        .bind(key)
+        .bind("description")
+        .bind("[]")
+        .bind("[]")
+        .bind(TASK_STAGE_EXECUTING)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, kind, model, roles, created_at, updated_at) \
+         VALUES (?, ?, ?, '', ?, ?, ?)",
+    )
+    .bind("agt_verifier")
+    .bind("验收 Agent")
+    .bind(AGENT_MOCK)
+    .bind(string_list_json(&[ROLE_VERIFIER.to_string()]))
+    .bind(timestamp)
+    .bind(timestamp)
+    .execute(&db)
+    .await
+    .unwrap();
+    let cfg = crate::config::Config {
+        data_root: root.join("data"),
+        workspace_root: root.join("workspace"),
+        log_root: root.join("log"),
+        web_dist: root.join("web"),
+        bind: "127.0.0.1".into(),
+        port: 0,
+        port_explicit: false,
+        job_timeout: std::time::Duration::ZERO,
+        stall_timeout: std::time::Duration::ZERO,
+    };
+    let (notify, _receiver) = tokio::sync::mpsc::channel(1);
+    let state = AppState::new(db, cfg, crate::events::EventBus::new(), notify);
+    (state, root)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_verification_job(
+    state: &AppState,
+    id: &str,
+    task_id: &str,
+    role: &str,
+    status: &str,
+    attempt: i64,
+    result: Option<&str>,
+    usage_known: bool,
+    created_at: &str,
+    agent_id: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+         result, usage_known, started_at, finished_at, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind("prj_test")
+    .bind(task_id)
+    .bind(role)
+    .bind(agent_id)
+    .bind(status)
+    .bind(attempt)
+    .bind(result)
+    .bind(i64::from(usage_known))
+    .bind(created_at)
+    .bind(created_at)
+    .bind(created_at)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn verification_history_parses_orders_and_reports_unknown_results() {
+    let (state, root) = verification_test_state().await;
+    insert_verification_job(
+        &state,
+        "job_executor",
+        "tsk_a",
+        JOB_ROLE_EXECUTOR,
+        JOB_STATUS_SUCCEEDED,
+        1,
+        Some(r#"{"kind":"done","summary":"执行完成"}"#),
+        true,
+        "2026-01-01T00:00:00Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v1",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_SUCCEEDED,
+        1,
+        Some(r#"{"pass":true,"reason":"符合验收标准","issues":[]}"#),
+        true,
+        "2026-01-01T00:00:01Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v2",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_SUCCEEDED,
+        1,
+        Some("不是 JSON"),
+        false,
+        "2026-01-01T00:00:03Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v3",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_FAILED,
+        2,
+        Some(r#"{"reason":"验收作业超时"}"#),
+        false,
+        "2026-01-01T00:00:04Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v4",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_SUCCEEDED,
+        2,
+        Some(r#"{"pass":false,"reason":"测试失败","issues":["a","b"]}"#),
+        true,
+        "2026-01-01T00:00:05Z",
+        None,
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v0",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_FAILED,
+        1,
+        None,
+        false,
+        "2025-12-31T23:59:59Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_executor_2",
+        "tsk_a",
+        JOB_ROLE_EXECUTOR,
+        JOB_STATUS_SUCCEEDED,
+        2,
+        Some(r#"{"kind":"done","summary":"再次执行完成"}"#),
+        true,
+        "2026-01-01T00:00:06Z",
+        Some("agt_verifier"),
+    )
+    .await;
+    insert_verification_job(
+        &state,
+        "job_v5",
+        "tsk_a",
+        JOB_ROLE_VERIFIER,
+        JOB_STATUS_SUCCEEDED,
+        3,
+        Some(r#"{"pass":true,"reason":"第二轮通过","issues":[]}"#),
+        true,
+        "2026-01-01T00:00:07Z",
+        Some("agt_verifier"),
+    )
+    .await;
+
+    let response = task_verifications(
+        State(state.clone()),
+        Path(("prj_test".to_string(), "tsk_a".to_string())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(response.total, 6);
+    assert!(!response.truncated);
+    let ids: Vec<&str> = response
+        .verifications
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["job_v0", "job_v1", "job_v2", "job_v3", "job_v4", "job_v5"]
+    );
+    let rounds: Vec<i64> = response
+        .verifications
+        .iter()
+        .map(|item| item.round)
+        .collect();
+    assert_eq!(rounds, vec![0, 1, 1, 1, 1, 2]);
+    let attempts: Vec<i64> = response
+        .verifications
+        .iter()
+        .map(|item| item.attempt)
+        .collect();
+    assert_eq!(attempts, vec![1, 1, 1, 2, 2, 3]);
+
+    let unanchored = &response.verifications[0];
+    assert_eq!(unanchored.round, 0);
+    assert_eq!(unanchored.status, JOB_STATUS_FAILED);
+    assert!(!unanchored.parsed);
+
+    let passed = &response.verifications[1];
+    assert_eq!(passed.passed, Some(true));
+    assert_eq!(passed.reason.as_deref(), Some("符合验收标准"));
+    assert!(passed.parsed);
+    assert!(passed.parse_error.is_none());
+    assert_eq!(passed.agent_name.as_deref(), Some("验收 Agent"));
+    assert!(passed.usage_known);
+
+    let unparsed = &response.verifications[2];
+    assert_eq!(unparsed.passed, None);
+    assert!(!unparsed.parsed);
+    assert_eq!(unparsed.raw_excerpt.as_deref(), Some("不是 JSON"));
+    assert!(unparsed
+        .parse_error
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("无法解析"));
+    assert!(!unparsed.usage_known);
+    assert_eq!(unparsed.agent_name.as_deref(), Some("验收 Agent"));
+
+    let missing_pass = &response.verifications[3];
+    assert_eq!(missing_pass.status, JOB_STATUS_FAILED);
+    assert!(!missing_pass.parsed);
+    assert_eq!(
+        missing_pass.raw_excerpt.as_deref(),
+        Some(r#"{"reason":"验收作业超时"}"#)
+    );
+
+    let rejected = &response.verifications[4];
+    assert_eq!(rejected.passed, Some(false));
+    assert_eq!(rejected.reason.as_deref(), Some("测试失败"));
+    assert_eq!(rejected.issues, vec!["a", "b"]);
+    assert_eq!(rejected.agent_name, None);
+
+    let second_round = &response.verifications[5];
+    assert_eq!(second_round.round, 2);
+    assert_eq!(second_round.passed, Some(true));
+    assert_eq!(second_round.reason.as_deref(), Some("第二轮通过"));
+
+    let empty = task_verifications(
+        State(state.clone()),
+        Path(("prj_test".to_string(), "tsk_empty".to_string())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(empty.total, 0);
+    assert!(empty.verifications.is_empty());
+
+    let missing = task_verifications(
+        State(state.clone()),
+        Path(("prj_test".to_string(), "tsk_missing".to_string())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn verification_history_keeps_the_newest_entries_and_marks_truncation() {
+    let (state, root) = verification_test_state().await;
+    for (index, created_at) in [
+        (1, "2025-12-31T23:00:00Z"),
+        (2, "2026-01-01T00:20:00Z"),
+        (3, "2026-01-01T00:40:00Z"),
+    ] {
+        insert_verification_job(
+            &state,
+            &format!("job_x{index}"),
+            "tsk_a",
+            JOB_ROLE_EXECUTOR,
+            JOB_STATUS_SUCCEEDED,
+            index,
+            Some(r#"{"kind":"done","summary":"执行完成"}"#),
+            true,
+            created_at,
+            None,
+        )
+        .await;
+    }
+    for index in 1..=55 {
+        insert_verification_job(
+            &state,
+            &format!("job_{index:02}"),
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_SUCCEEDED,
+            index,
+            None,
+            false,
+            &format!("2026-01-01T00:{index:02}:00Z"),
+            None,
+        )
+        .await;
+    }
+
+    let response = task_verifications(
+        State(state.clone()),
+        Path(("prj_test".to_string(), "tsk_a".to_string())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(response.total, 55);
+    assert_eq!(response.limit, VERIFICATION_HISTORY_LIMIT);
+    assert!(response.truncated);
+    assert_eq!(
+        response.verifications.len(),
+        VERIFICATION_HISTORY_LIMIT as usize
+    );
+    assert_eq!(response.verifications[0].id, "job_06");
+    assert_eq!(response.verifications[0].round, 1);
+    assert_eq!(response.verifications[13].id, "job_19");
+    assert_eq!(response.verifications[13].round, 1);
+    assert_eq!(response.verifications[14].id, "job_20");
+    assert_eq!(response.verifications[14].round, 2);
+    assert_eq!(response.verifications[33].id, "job_39");
+    assert_eq!(response.verifications[33].round, 2);
+    assert_eq!(response.verifications[34].id, "job_40");
+    assert_eq!(response.verifications[34].round, 3);
+    assert_eq!(response.verifications[49].id, "job_55");
+    assert_eq!(response.verifications[49].round, 3);
+    let rounds: Vec<i64> = response
+        .verifications
+        .iter()
+        .map(|item| item.round)
+        .collect();
+    assert!(rounds.iter().all(|round| (1..=3).contains(round)));
+    assert!(rounds.windows(2).all(|pair| pair[0] <= pair[1]));
+
+    let _ = std::fs::remove_dir_all(root);
+}
