@@ -23,6 +23,7 @@ mod version;
 
 use std::time::Duration;
 
+use anyhow::Context;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -39,7 +40,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = Config::from_env()?;
+    let cfg = Config::from_env().context("读取配置失败")?;
     tokio::fs::create_dir_all(&cfg.data_root).await?;
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
     tokio::fs::create_dir_all(&cfg.log_root).await?;
@@ -59,7 +60,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let db = db::connect(&cfg.db_path()).await?;
+    let db = db::connect(&cfg.db_path())
+        .await
+        .context("打开数据库失败")?;
     let bus = EventBus::new();
     let (notify, notify_rx) = tokio::sync::mpsc::channel(64);
     let state = AppState::new(db, cfg.clone(), bus, notify);
@@ -91,7 +94,9 @@ async fn main() -> anyhow::Result<()> {
     let index = web_dist.join("index.html");
     let app = api::router(state.clone())
         .fallback_service(ServeDir::new(&web_dist).fallback(ServeFile::new(index)));
-    let (listener, port) = bind_listener(&cfg.bind, cfg.port, !cfg.port_explicit).await?;
+    let (listener, port) = bind_listener(&cfg.bind, cfg.port, !cfg.port_explicit)
+        .await
+        .context("绑定监听端口失败")?;
     let address = format!("{}:{}", cfg.bind, port);
     tracing::info!(
         address = %address,

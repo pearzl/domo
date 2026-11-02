@@ -13,6 +13,25 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Filesystem failures raised by the platform helpers. The underlying
+/// `std::io::Error` keeps its `ErrorKind`, so callers can distinguish a missing
+/// directory from a real removal failure.
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+impl PlatformError {
+    pub fn kind(&self) -> std::io::ErrorKind {
+        match self {
+            Self::Io(error) => error.kind(),
+        }
+    }
+}
+
+pub type PlatformResult<T> = std::result::Result<T, PlatformError>;
+
 /// The user's home directory in a form native processes can use.
 pub fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -78,9 +97,9 @@ fn expand_tilde_with(home: Option<&Path>, raw: &str) -> PathBuf {
 
 /// Recursive directory removal that also covers trees deeper than the legacy
 /// `MAX_PATH` limit on Windows.
-pub async fn remove_dir_all(path: &Path) -> std::io::Result<()> {
+pub async fn remove_dir_all(path: &Path) -> PlatformResult<()> {
     let path = extended_length(path);
-    tokio::fs::remove_dir_all(&path).await
+    tokio::fs::remove_dir_all(&path).await.map_err(Into::into)
 }
 
 /// Absolute Windows paths in extended-length form. Relative paths, device

@@ -14,10 +14,30 @@ mod workbuddy;
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use crate::models::AgentRow;
 use crate::usage::UsageRecord;
+
+/// Failures returned across the agents module boundary. Adapter messages keep
+/// their full context chain so dispatch errors read the same everywhere.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentError {
+    #[error("未知 Agent 类型: {kind}")]
+    UnknownKind { kind: String },
+    #[error("{message}")]
+    Adapter { message: String },
+}
+
+impl AgentError {
+    fn adapter(error: anyhow::Error) -> Self {
+        Self::Adapter {
+            message: format!("{error:#}"),
+        }
+    }
+}
+
+pub type AgentResult<T> = std::result::Result<T, AgentError>;
 
 pub use adapter::{
     AgentAdapter, AgentConfig, AgentRun, AgentSpec, FinishContext, JobProgress, JobUsage,
@@ -100,19 +120,27 @@ pub fn requires_command_template(kind: &str) -> bool {
 
 /// Rejects settings the adapter registered for `kind` cannot run. Unknown
 /// kinds report `Ok(())`; callers validate the kind first.
-pub fn validate_config(kind: &str, command: &[String]) -> Result<()> {
+pub fn validate_config(kind: &str, command: &[String]) -> AgentResult<()> {
     let config = AgentConfig {
         kind: kind.to_string(),
         command: command.to_vec(),
         ..AgentConfig::default()
     };
-    dispatch_validate_config(kind, &config).unwrap_or(Ok(()))
+    dispatch_validate_config(kind, &config)
+        .unwrap_or(Ok(()))
+        .map_err(AgentError::adapter)
 }
 
-pub async fn execute(agent: &AgentRow, spec: &AgentSpec, timeout: Duration) -> Result<AgentRun> {
+pub async fn execute(
+    agent: &AgentRow,
+    spec: &AgentSpec,
+    timeout: Duration,
+) -> AgentResult<AgentRun> {
     match dispatch_execute(agent, spec, timeout).await {
-        Some(result) => result,
-        None => Err(anyhow!("未知 Agent 类型: {}", agent.kind)),
+        Some(result) => result.map_err(AgentError::adapter),
+        None => Err(AgentError::UnknownKind {
+            kind: agent.kind.clone(),
+        }),
     }
 }
 

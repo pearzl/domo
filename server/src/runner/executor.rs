@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::domain::{self, now, FailureKind};
 use crate::events::emit;
@@ -263,7 +263,10 @@ pub(super) async fn handle_derived_task_success(
 }
 
 pub(super) async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRow, task: &TaskRow) {
-    if let Err(error) = crate::artifacts::cleanup_task(state, project, task, false).await {
+    if let Err(error) = crate::artifacts::cleanup_task(state, project, task, false)
+        .await
+        .context("清理任务工作区失败")
+    {
         tracing::warn!(
             task = %task.id,
             error = %format!("{error:#}"),
@@ -280,7 +283,10 @@ pub(super) async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRo
     if parent.stage != TASK_STAGE_COMPLETED {
         return;
     }
-    if let Err(error) = crate::artifacts::cleanup_task(state, project, &parent, false).await {
+    if let Err(error) = crate::artifacts::cleanup_task(state, project, &parent, false)
+        .await
+        .context("清理父任务工作区失败")
+    {
         tracing::warn!(
             task = %parent.id,
             error = %format!("{error:#}"),

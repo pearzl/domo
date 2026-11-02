@@ -13,6 +13,22 @@ use crate::models::{
     ProjectAgentEntry, ProjectAgentPool, ProjectAgentRow, ProjectRolePool, TaskAgentPool,
     TaskAgentRow, TaskRow, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
 };
+use crate::usage::UsageError;
+
+/// Failures raised while opening the database and seeding its tables.
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Usage(#[from] UsageError),
+    #[error("Agent {agent_id} 不存在")]
+    AgentNotFound { agent_id: String },
+}
+
+pub type DbResult<T> = std::result::Result<T, DbError>;
 
 /// 项目池覆盖全部三种角色；任务池只派生执行者与验收者，规划者始终用项目池。
 pub const PROJECT_POOL_ROLES: &[&str] = &[ROLE_PLANNER, ROLE_EXECUTOR, ROLE_VERIFIER];
@@ -219,7 +235,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id, id);
 "#;
 
-pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
+pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -239,7 +255,7 @@ pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
+async fn migrate(pool: &SqlitePool) -> DbResult<()> {
     ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
     ensure_column(pool, "projects", "replan_source", "TEXT").await?;
     ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
@@ -460,7 +476,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn rename_column(pool: &SqlitePool, table: &str, old: &str, new: &str) -> anyhow::Result<()> {
+async fn rename_column(pool: &SqlitePool, table: &str, old: &str, new: &str) -> DbResult<()> {
     let old_exists: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
     ))
@@ -486,7 +502,7 @@ async fn ensure_column(
     table: &str,
     column: &str,
     definition: &str,
-) -> anyhow::Result<()> {
+) -> DbResult<()> {
     let exists: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
     ))
@@ -503,7 +519,7 @@ async fn ensure_column(
     Ok(())
 }
 
-async fn seed_defaults(pool: &SqlitePool) -> anyhow::Result<()> {
+async fn seed_defaults(pool: &SqlitePool) -> DbResult<()> {
     let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
         .fetch_one(pool)
         .await?;
@@ -537,7 +553,7 @@ async fn seed_defaults(pool: &SqlitePool) -> anyhow::Result<()> {
 /// 默认团队始终覆盖全部已注册 Agent：按 Agent 的 roles 展开到各角色，
 /// 已存在的条目保留优先级与启停，缺失的条目追加到角色末尾。全局 Agent
 /// 被删除或角色集合变化时，对应条目随之清理并重排优先级。
-pub async fn ensure_default_team(pool: &SqlitePool) -> anyhow::Result<()> {
+pub async fn ensure_default_team(pool: &SqlitePool) -> DbResult<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let agents = sqlx::query_as::<_, AgentRow>(
         "SELECT * FROM agents ORDER BY priority ASC, created_at ASC, id ASC",
@@ -624,7 +640,7 @@ pub async fn ensure_default_team(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn load_agent(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<AgentRow>> {
+pub async fn load_agent(pool: &SqlitePool, id: &str) -> DbResult<Option<AgentRow>> {
     Ok(
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents WHERE id = ?")
             .bind(id)
@@ -635,7 +651,7 @@ pub async fn load_agent(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Ag
 
 /// Manual retry clears the backoff of the one agent that receives the retried
 /// dispatch, after that dispatch succeeds.
-pub async fn clear_agent_backoff(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
+pub async fn clear_agent_backoff(pool: &SqlitePool, id: &str) -> DbResult<()> {
     sqlx::query(
         "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
          updated_at = ? WHERE id = ?",
@@ -651,7 +667,7 @@ pub async fn clear_agent_backoff(pool: &SqlitePool, id: &str) -> anyhow::Result<
 /// first touched. Priorities are normalized per role so project changes only
 /// reorder the project's own pool. Entries whose global agent has been deleted
 /// are skipped, and a disabled global agent starts disabled in the pool.
-pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyhow::Result<()> {
+pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> DbResult<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_agents WHERE project_id = ?")
         .bind(project_id)
         .fetch_one(pool)
@@ -705,7 +721,7 @@ pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> anyho
 pub async fn load_project_agent_pool(
     pool: &SqlitePool,
     project_id: &str,
-) -> anyhow::Result<ProjectAgentPool> {
+) -> DbResult<ProjectAgentPool> {
     ensure_project_agents(pool, project_id).await?;
     let rows = sqlx::query_as::<_, ProjectAgentRow>(
         "SELECT * FROM project_agents WHERE project_id = ? ORDER BY role ASC, priority ASC, agent_id ASC",
@@ -721,7 +737,7 @@ pub async fn load_project_agent_pool(
 
 /// 默认团队视图：返回 ProjectAgentPool 形态（project_id 固定为 "default"），
 /// 条目带全局 Agent 的可用性与启停信息，供前端面板直接复用。
-pub async fn load_default_team_pool(pool: &SqlitePool) -> anyhow::Result<ProjectAgentPool> {
+pub async fn load_default_team_pool(pool: &SqlitePool) -> DbResult<ProjectAgentPool> {
     let rows = default_team_pool_rows(pool).await?;
     Ok(ProjectAgentPool {
         project_id: "default".to_string(),
@@ -733,7 +749,7 @@ pub async fn load_default_team_pool(pool: &SqlitePool) -> anyhow::Result<Project
 /// agent_id 排序保证稳定。
 /// 默认团队按角色展开为项目池形态的行，角色顺序固定，条目按 priority 与
 /// agent_id 排序保证稳定。启停与全局 Agent 状态合并，和继承语义保持一致。
-async fn default_team_pool_rows(pool: &SqlitePool) -> anyhow::Result<Vec<ProjectAgentRow>> {
+async fn default_team_pool_rows(pool: &SqlitePool) -> DbResult<Vec<ProjectAgentRow>> {
     let members = sqlx::query_as::<_, DefaultTeamRow>("SELECT * FROM default_team")
         .fetch_all(pool)
         .await?;
@@ -775,7 +791,7 @@ async fn build_role_pools(
     project_id: Option<&str>,
     rows: &[ProjectAgentRow],
     roles: &[&str],
-) -> anyhow::Result<Vec<ProjectRolePool>> {
+) -> DbResult<Vec<ProjectRolePool>> {
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(pool)
         .await?;
@@ -883,7 +899,7 @@ pub async fn ensure_task_agents(
     pool: &SqlitePool,
     project_id: &str,
     task_id: &str,
-) -> anyhow::Result<()> {
+) -> DbResult<()> {
     let initialized: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM task_agent_roles WHERE task_id = ?")
             .bind(task_id)
@@ -905,7 +921,7 @@ pub async fn ensure_task_agents(
 pub async fn ensure_task_agents_tx(
     executor: &mut sqlx::SqliteConnection,
     task_id: &str,
-) -> anyhow::Result<()> {
+) -> DbResult<()> {
     let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
         .bind(task_id)
         .fetch_optional(&mut *executor)
@@ -1018,7 +1034,7 @@ pub async fn load_task_agent_pool(
     pool: &SqlitePool,
     project_id: &str,
     task_id: &str,
-) -> anyhow::Result<TaskAgentPool> {
+) -> DbResult<TaskAgentPool> {
     ensure_task_agents(pool, project_id, task_id).await?;
     let rows = sqlx::query_as::<_, TaskAgentRow>(
         "SELECT * FROM task_agents WHERE task_id = ? ORDER BY role ASC, priority ASC, agent_id ASC",
@@ -1044,10 +1060,12 @@ pub async fn set_single_task_agent(
     task_id: &str,
     role: &str,
     agent_id: &str,
-) -> anyhow::Result<()> {
+) -> DbResult<()> {
     let agent = load_agent(pool, agent_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Agent {agent_id} 不存在"))?;
+        .ok_or_else(|| DbError::AgentNotFound {
+            agent_id: agent_id.to_string(),
+        })?;
     let timestamp = crate::domain::now();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     ensure_task_agents_tx(&mut tx, task_id).await?;
@@ -1089,7 +1107,7 @@ pub async fn reset_task_agent_role(
     project_id: &str,
     task_id: &str,
     role: &str,
-) -> anyhow::Result<()> {
+) -> DbResult<()> {
     ensure_project_agents(pool, project_id).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     ensure_task_agents_tx(&mut tx, task_id).await?;

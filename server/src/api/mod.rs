@@ -24,6 +24,14 @@ use crate::models::ErrorBody;
 use crate::state::AppState;
 use crate::version;
 
+use crate::agents::AgentError;
+use crate::artifacts::ArtifactsError;
+use crate::db::DbError;
+use crate::git::GitError;
+use crate::opencode::OpencodeError;
+use crate::platform::PlatformError;
+use crate::usage::UsageError;
+
 use self::agents::{
     create_agent, delete_agent, get_default_team, list_agents, reset_agent_usage, update_agent,
     update_default_team_agent,
@@ -89,6 +97,48 @@ impl From<anyhow::Error> for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<DbError> for ApiError {
+    fn from(error: DbError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<UsageError> for ApiError {
+    fn from(error: UsageError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<GitError> for ApiError {
+    fn from(error: GitError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<PlatformError> for ApiError {
+    fn from(error: PlatformError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<OpencodeError> for ApiError {
+    fn from(error: OpencodeError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<AgentError> for ApiError {
+    fn from(error: AgentError) -> Self {
+        Self::internal(error.into())
+    }
+}
+
+impl From<ArtifactsError> for ApiError {
+    fn from(error: ArtifactsError) -> Self {
         Self::internal(error.into())
     }
 }

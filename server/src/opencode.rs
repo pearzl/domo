@@ -7,11 +7,25 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 use crate::usage::UsageRecord;
+
+/// Failures raised while reading the OpenCode session ledger.
+#[derive(Debug, thiserror::Error)]
+pub enum OpencodeError {
+    #[error("打开 OpenCode 数据库失败: {path}")]
+    OpenDatabase {
+        path: String,
+        #[source]
+        cause: sqlx::Error,
+    },
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+}
+
+pub type OpencodeResult<T> = std::result::Result<T, OpencodeError>;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const DB_PATH_MISS_TTL: Duration = Duration::from_secs(30);
@@ -77,7 +91,7 @@ async fn db_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-async fn readonly_pool(path: &Path) -> Result<SqlitePool> {
+async fn readonly_pool(path: &Path) -> OpencodeResult<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .read_only(true)
@@ -86,10 +100,13 @@ async fn readonly_pool(path: &Path) -> Result<SqlitePool> {
         .max_connections(1)
         .connect_with(options)
         .await
-        .with_context(|| format!("打开 OpenCode 数据库失败: {}", path.display()))
+        .map_err(|cause| OpencodeError::OpenDatabase {
+            path: path.display().to_string(),
+            cause,
+        })
 }
 
-async fn fetch_usage_db(path: &Path, session_id: &str) -> Result<Option<UsageRecord>> {
+async fn fetch_usage_db(path: &Path, session_id: &str) -> OpencodeResult<Option<UsageRecord>> {
     let pool = readonly_pool(path).await?;
     let result = sqlx::query_as::<_, UsageRow>(
         "WITH RECURSIVE tree(id) AS ( \

@@ -170,7 +170,7 @@ pub(super) async fn handoff_merge_conflict(
     state: &AppState,
     project: &ProjectRow,
     task: &TaskRow,
-    merge_error: &anyhow::Error,
+    merge_error: &git::GitError,
     agent: &AgentRow,
 ) -> Result<()> {
     let reason = format!("验收通过但合并失败：{merge_error:#}");

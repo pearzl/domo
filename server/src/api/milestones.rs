@@ -187,7 +187,7 @@ pub(super) async fn accept_milestone(
             format!("任务 {} 人工验收合并失败：{reason}", task.key),
         )
         .await;
-        return Err(ApiError::internal(error));
+        return Err(ApiError::from(error));
     }
 
     {

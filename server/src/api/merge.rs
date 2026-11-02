@@ -150,9 +150,7 @@ pub(super) async fn ensure_base_worktree_clean(
     path: &std::path::Path,
     branch: &str,
 ) -> Result<(), ApiError> {
-    let status = git::status_porcelain(path)
-        .await
-        .map_err(ApiError::internal)?;
+    let status = git::status_porcelain(path).await.map_err(ApiError::from)?;
     if status.trim().is_empty() {
         return Ok(());
     }

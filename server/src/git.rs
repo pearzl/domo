@@ -3,10 +3,52 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
 use crate::platform;
+
+/// Failures raised by Git commands and worktree bookkeeping. Messages keep the
+/// wording callers already rely on, including the underlying I/O detail.
+#[derive(Debug, thiserror::Error)]
+pub enum GitError {
+    #[error("执行 git 失败: {args}: {cause}")]
+    CommandIo { args: String, cause: std::io::Error },
+    #[error("git {args} 失败: {stderr}")]
+    CommandFailed { args: String, stderr: String },
+    #[error("无法执行 git: {cause}")]
+    RepositoryProbeIo { cause: std::io::Error },
+    #[error("{path} 不是 Git 仓库")]
+    NotRepository { path: String },
+    #[error("无法识别 Git 仓库根目录")]
+    RepositoryRootUnknown,
+    #[error("无法识别当前分支")]
+    BranchUnknown,
+    #[error("执行 git merge --squash 失败: {cause}")]
+    SquashProbeIo { cause: std::io::Error },
+    #[error("合并失败: {detail}")]
+    SquashFailed { detail: String },
+    #[error("执行 git merge {branch} 失败: {cause}")]
+    MergeProbeIo {
+        branch: String,
+        cause: std::io::Error,
+    },
+    #[error("合并 {branch} 失败且没有文件冲突: {detail}")]
+    MergeWithoutConflicts { branch: String, detail: String },
+    #[error("执行 git merge-base --is-ancestor 失败: {cause}")]
+    AncestorProbeIo { cause: std::io::Error },
+    #[error("git merge-base --is-ancestor 失败: {stderr}")]
+    AncestorFailed { stderr: String },
+    #[error("执行 git rebase 失败: {cause}")]
+    RebaseProbeIo { cause: std::io::Error },
+    #[error("{message}")]
+    RebaseFailed { message: String },
+    #[error(transparent)]
+    Platform(#[from] platform::PlatformError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+pub type GitResult<T> = std::result::Result<T, GitError>;
 
 const GIT_IDENTITY: [&str; 6] = [
     "-c",
@@ -17,7 +59,7 @@ const GIT_IDENTITY: [&str; 6] = [
     "commit.gpgsign=false",
 ];
 
-pub async fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
+pub async fn run_git(dir: &Path, args: &[&str]) -> GitResult<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -27,45 +69,49 @@ pub async fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .await
-        .with_context(|| format!("执行 git 失败: {}", args.join(" ")))?;
+        .map_err(|cause| GitError::CommandIo {
+            args: args.join(" "),
+            cause,
+        })?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git {} 失败: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(GitError::CommandFailed {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-pub async fn repo_root(path: &Path) -> Result<PathBuf> {
+pub async fn repo_root(path: &Path) -> GitResult<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .await
-        .context("无法执行 git")?;
+        .map_err(|cause| GitError::RepositoryProbeIo { cause })?;
     if !output.status.success() {
-        return Err(anyhow!("{} 不是 Git 仓库", path.display()));
+        return Err(GitError::NotRepository {
+            path: path.display().to_string(),
+        });
     }
     let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if root.is_empty() {
-        return Err(anyhow!("无法识别 Git 仓库根目录"));
+        return Err(GitError::RepositoryRootUnknown);
     }
     Ok(PathBuf::from(root))
 }
 
-pub async fn current_branch(repo: &Path) -> Result<String> {
+pub async fn current_branch(repo: &Path) -> GitResult<String> {
     let branch = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     let branch = branch.trim().to_string();
     if branch.is_empty() || branch == "HEAD" {
-        return Err(anyhow!("无法识别当前分支"));
+        return Err(GitError::BranchUnknown);
     }
     Ok(branch)
 }
 
-pub async fn validate_base(repo: &Path, base: &str) -> Result<()> {
+pub async fn validate_base(repo: &Path, base: &str) -> GitResult<()> {
     run_git(
         repo,
         &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
@@ -79,7 +125,7 @@ pub async fn create_project_worktree(
     base: &str,
     dest: &Path,
     branch: &str,
-) -> Result<()> {
+) -> GitResult<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -93,7 +139,7 @@ pub async fn create_task_worktree(
     project_branch: &str,
     dest: &Path,
     branch: &str,
-) -> Result<()> {
+) -> GitResult<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -120,7 +166,7 @@ pub async fn create_verify_worktree(
     project_ws: &Path,
     task_branch: &str,
     dest: &Path,
-) -> Result<()> {
+) -> GitResult<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -136,7 +182,7 @@ pub async fn create_verify_worktree(
 /// Removes a worktree checkout together with its metadata. Git refuses to delete
 /// checkout contents that exceed the legacy Windows path limit, so a failed
 /// removal deletes the directory directly and prunes the stale metadata.
-pub async fn remove_worktree(project_ws: &Path, dest: &Path) -> Result<()> {
+pub async fn remove_worktree(project_ws: &Path, dest: &Path) -> GitResult<()> {
     let dest_s = dest.to_string_lossy().to_string();
     let result = run_git(project_ws, &["worktree", "remove", "--force", &dest_s]).await;
     let Err(error) = result else {
@@ -155,14 +201,14 @@ pub async fn remove_worktree(project_ws: &Path, dest: &Path) -> Result<()> {
     prune_worktrees(project_ws).await
 }
 
-pub async fn prune_worktrees(repo: &Path) -> Result<()> {
+pub async fn prune_worktrees(repo: &Path) -> GitResult<()> {
     run_git(repo, &["worktree", "prune"]).await?;
     Ok(())
 }
 
 /// Moves a branch tip into the archive namespace and removes its visible
 /// `refs/heads` entry only when the tip still matches `expected`.
-pub async fn archive_branch(repo: &Path, branch: &str, expected: &str) -> Result<()> {
+pub async fn archive_branch(repo: &Path, branch: &str, expected: &str) -> GitResult<()> {
     let archive = archive_ref(branch);
     run_git(
         repo,
@@ -208,11 +254,11 @@ pub async fn is_worktree(dir: &Path) -> bool {
     }
 }
 
-pub async fn status_porcelain(dir: &Path) -> Result<String> {
+pub async fn status_porcelain(dir: &Path) -> GitResult<String> {
     run_git(dir, &["status", "--porcelain"]).await
 }
 
-pub async fn commit_all(dir: &Path, message: &str) -> Result<bool> {
+pub async fn commit_all(dir: &Path, message: &str) -> GitResult<bool> {
     if status_porcelain(dir).await?.trim().is_empty() {
         return Ok(false);
     }
@@ -223,24 +269,24 @@ pub async fn commit_all(dir: &Path, message: &str) -> Result<bool> {
     Ok(true)
 }
 
-pub async fn diff_between(dir: &Path, from: &str, to: &str) -> Result<String> {
+pub async fn diff_between(dir: &Path, from: &str, to: &str) -> GitResult<String> {
     run_git(dir, &["diff", "--stat", &format!("{from}..{to}")]).await
 }
 
-pub async fn reset_hard(dir: &Path) -> Result<()> {
+pub async fn reset_hard(dir: &Path) -> GitResult<()> {
     run_git(dir, &["reset", "--hard", "HEAD"]).await?;
     run_git(dir, &["clean", "-fd"]).await?;
     Ok(())
 }
 
-pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -> Result<bool> {
+pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -> GitResult<bool> {
     let merge = Command::new("git")
         .arg("-C")
         .arg(project_ws)
         .args(["merge", "--squash", task_branch])
         .output()
         .await
-        .context("执行 git merge --squash 失败")?;
+        .map_err(|cause| GitError::SquashProbeIo { cause })?;
     if !merge.status.success() {
         let detail = format!(
             "{}{}",
@@ -248,7 +294,9 @@ pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -
             String::from_utf8_lossy(&merge.stderr)
         );
         let _ = reset_hard(project_ws).await;
-        return Err(anyhow!("合并失败: {}", detail.trim()));
+        return Err(GitError::SquashFailed {
+            detail: detail.trim().to_string(),
+        });
     }
     if status_porcelain(project_ws).await?.trim().is_empty() {
         return Ok(false);
@@ -260,14 +308,17 @@ pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -
 /// a commit. When the merge conflicts, the conflict markers and unmerged index
 /// entries stay in the worktree so an executor can resolve them. A clean merge
 /// or an unrelated failure is aborted so the worktree stays unchanged.
-pub async fn merge_conflict_files(worktree: &Path, branch: &str) -> Result<Vec<String>> {
+pub async fn merge_conflict_files(worktree: &Path, branch: &str) -> GitResult<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(worktree)
         .args(["merge", "--no-commit", "--no-ff", branch])
         .output()
         .await
-        .with_context(|| format!("执行 git merge {branch} 失败"))?;
+        .map_err(|cause| GitError::MergeProbeIo {
+            branch: branch.to_string(),
+            cause,
+        })?;
     if output.status.success() {
         abort_merge(worktree).await;
         return Ok(Vec::new());
@@ -288,11 +339,10 @@ pub async fn merge_conflict_files(worktree: &Path, branch: &str) -> Result<Vec<S
             String::from_utf8_lossy(&output.stderr)
         );
         abort_merge(worktree).await;
-        return Err(anyhow!(
-            "合并 {} 失败且没有文件冲突: {}",
-            branch,
-            detail.trim()
-        ));
+        return Err(GitError::MergeWithoutConflicts {
+            branch: branch.to_string(),
+            detail: detail.trim().to_string(),
+        });
     }
     Ok(files)
 }
@@ -312,7 +362,7 @@ pub async fn has_branch(repo: &Path, branch: &str) -> bool {
         .is_ok()
 }
 
-pub async fn commit_of(repo: &Path, rev: &str) -> Result<String> {
+pub async fn commit_of(repo: &Path, rev: &str) -> GitResult<String> {
     let out = run_git(
         repo,
         &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
@@ -321,25 +371,24 @@ pub async fn commit_of(repo: &Path, rev: &str) -> Result<String> {
     Ok(out.trim().to_string())
 }
 
-pub async fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+pub async fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> GitResult<bool> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .output()
         .await
-        .context("执行 git merge-base --is-ancestor 失败")?;
+        .map_err(|cause| GitError::AncestorProbeIo { cause })?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(anyhow!(
-            "git merge-base --is-ancestor 失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
+        _ => Err(GitError::AncestorFailed {
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
     }
 }
 
-pub async fn count_merge_commits(repo: &Path, from: &str, to: &str) -> Result<i64> {
+pub async fn count_merge_commits(repo: &Path, from: &str, to: &str) -> GitResult<i64> {
     let out = run_git(
         repo,
         &["rev-list", "--merges", "--count", &format!("{from}..{to}")],
@@ -386,7 +435,7 @@ pub fn parse_worktrees(text: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
-pub async fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
+pub async fn worktree_for_branch(repo: &Path, branch: &str) -> GitResult<Option<PathBuf>> {
     let out = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
     Ok(parse_worktrees(&out)
         .into_iter()
@@ -396,14 +445,14 @@ pub async fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<Pat
 
 /// Rebases the current branch onto `upstream`. A failed rebase is aborted so the
 /// branch ref and working tree return to the state before the call.
-pub async fn rebase_onto(dir: &Path, upstream: &str) -> Result<()> {
+pub async fn rebase_onto(dir: &Path, upstream: &str) -> GitResult<()> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["-c", "rebase.autoStash=false", "rebase", upstream])
         .output()
         .await
-        .context("执行 git rebase 失败")?;
+        .map_err(|cause| GitError::RebaseProbeIo { cause })?;
     if output.status.success() {
         return Ok(());
     }
@@ -421,7 +470,9 @@ pub async fn rebase_onto(dir: &Path, upstream: &str) -> Result<()> {
         .args(["rebase", "--abort"])
         .output()
         .await;
-    Err(anyhow!("{}", rebase_failure_message(&conflicts, &detail)))
+    Err(GitError::RebaseFailed {
+        message: rebase_failure_message(&conflicts, &detail),
+    })
 }
 
 fn rebase_failure_message(conflicts: &str, detail: &str) -> String {
@@ -451,7 +502,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
     truncated
 }
 
-pub async fn merge_ff_only(worktree: &Path, branch: &str) -> Result<()> {
+pub async fn merge_ff_only(worktree: &Path, branch: &str) -> GitResult<()> {
     run_git(worktree, &["merge", "--ff-only", branch]).await?;
     Ok(())
 }
@@ -462,7 +513,7 @@ pub async fn update_branch_ref(
     branch: &str,
     commit: &str,
     expected: &str,
-) -> Result<()> {
+) -> GitResult<()> {
     run_git(
         repo,
         &[
@@ -476,7 +527,7 @@ pub async fn update_branch_ref(
     Ok(())
 }
 
-pub async fn reset_hard_to(dir: &Path, commit: &str) -> Result<()> {
+pub async fn reset_hard_to(dir: &Path, commit: &str) -> GitResult<()> {
     run_git(dir, &["reset", "--hard", commit]).await?;
     Ok(())
 }

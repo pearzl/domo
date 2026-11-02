@@ -11,13 +11,21 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::domain::extract_json;
+
+/// Failures raised while reading usage rows from the database.
+#[derive(Debug, thiserror::Error)]
+pub enum UsageError {
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+}
+
+pub type UsageResult<T> = std::result::Result<T, UsageError>;
 
 pub const METRIC_TOKENS: &str = "tokens";
 pub const METRIC_INPUT_TOKENS: &str = "input_tokens";
@@ -141,7 +149,10 @@ pub struct UsageJobRow {
     pub created_at: String,
 }
 
-pub async fn load_jobs(pool: &SqlitePool, project_id: Option<&str>) -> Result<Vec<UsageJobRow>> {
+pub async fn load_jobs(
+    pool: &SqlitePool,
+    project_id: Option<&str>,
+) -> UsageResult<Vec<UsageJobRow>> {
     const COLUMNS: &str = "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
                           cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, \
                           duration_ms, usage_known, started_at, finished_at, created_at FROM jobs";
@@ -730,7 +741,7 @@ pub async fn agent_usage(
     usage_limit_json: Option<&str>,
     usage_reset_at: Option<&str>,
     at: DateTime<Utc>,
-) -> Result<Option<UsageWindow>> {
+) -> UsageResult<Option<UsageWindow>> {
     let Some(config) = parse_usage_limit(usage_limit_json) else {
         return Ok(None);
     };
@@ -779,7 +790,7 @@ pub async fn agent_gate(
     usage_limit_json: Option<&str>,
     usage_reset_at: Option<&str>,
     at: DateTime<Utc>,
-) -> Result<Option<AgentGate>> {
+) -> UsageResult<Option<AgentGate>> {
     let availability = parse_availability(availability_json);
     let status = availability_status(availability.as_ref(), at.with_timezone(&Local));
     if !status.available {

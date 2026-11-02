@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
@@ -20,7 +20,7 @@ use crate::state::AppState;
 use crate::usage;
 
 pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
-    if let Err(error) = recover(&state).await {
+    if let Err(error) = recover(&state).await.context("恢复启动状态失败") {
         tracing::error!(error = %error, "启动恢复失败");
     }
     let mut shutdown = state.shutdown_receiver();
@@ -40,7 +40,7 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
         }
         let jobs = {
             let _guard = state.schedule_lock.lock().await;
-            match reconcile(&state).await {
+            match reconcile(&state).await.context("调度轮次失败") {
                 Ok(jobs) => jobs,
                 Err(error) => {
                     tracing::error!(error = %error, "调度失败");
@@ -969,6 +969,8 @@ async fn agent_gate(state: &AppState, agent: &AgentRow) -> Result<Option<usage::
         Utc::now(),
     )
     .await
+    .map_err(anyhow::Error::from)
+    .context("读取 Agent 用量失败")
 }
 
 async fn running_jobs(state: &AppState, agent_id: &str) -> Result<i64> {

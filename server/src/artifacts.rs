@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
 use sqlx::SqlitePool;
 
 use crate::domain::now;
@@ -13,6 +12,23 @@ use crate::models::*;
 use crate::paths;
 use crate::platform;
 use crate::state::AppState;
+
+/// Failures raised while releasing task and project artifacts.
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactsError {
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Git(#[from] git::GitError),
+    #[error(transparent)]
+    Platform(#[from] platform::PlatformError),
+    #[error("项目工作区不在 DOMO 工作区根目录下")]
+    WorkspaceOutsideRoot,
+    #[error("项目主仓库不存在: {path}")]
+    MissingRepository { path: String },
+}
+
+pub type ArtifactsResult<T> = std::result::Result<T, ArtifactsError>;
 
 pub const ARTIFACTS_RELEASING: &str = "releasing";
 
@@ -24,14 +40,14 @@ pub async fn cleanup_task(
     project: &ProjectRow,
     task: &TaskRow,
     force: bool,
-) -> Result<bool> {
+) -> ArtifactsResult<bool> {
     if !force && has_unfinished_children(&state.db, &task.id).await? {
         return Ok(false);
     }
 
     let workspace = PathBuf::from(&project.workspace);
     if !managed_child(&state.cfg.workspace_root, &workspace) {
-        return Err(anyhow!("项目工作区不在 DOMO 工作区根目录下"));
+        return Err(ArtifactsError::WorkspaceOutsideRoot);
     }
     let repo = project_repo(project)?;
     let branch = task.branch.as_deref().filter(|value| !value.is_empty());
@@ -124,10 +140,14 @@ pub async fn cleanup_task(
 /// Releases every task artifact together with the project checkout and branch.
 /// Job directories remain because they back the audit view of archived projects.
 /// Commits are preserved under `refs/domo-archive/`.
-pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool) -> Result<bool> {
+pub async fn cleanup_project(
+    state: &AppState,
+    project: &ProjectRow,
+    force: bool,
+) -> ArtifactsResult<bool> {
     let workspace = PathBuf::from(&project.workspace);
     if !managed_child(&state.cfg.workspace_root, &workspace) {
-        return Err(anyhow!("项目工作区不在 DOMO 工作区根目录下"));
+        return Err(ArtifactsError::WorkspaceOutsideRoot);
     }
     let repo = project_repo(project)?;
     let tasks =
@@ -215,7 +235,10 @@ pub async fn cleanup_project(state: &AppState, project: &ProjectRow, force: bool
 
 /// Releases artifacts left behind by completed tasks. Used after project merges
 /// and during startup recovery.
-pub async fn cleanup_completed_tasks(state: &AppState, project: &ProjectRow) -> Result<()> {
+pub async fn cleanup_completed_tasks(
+    state: &AppState,
+    project: &ProjectRow,
+) -> ArtifactsResult<()> {
     let tasks = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks WHERE project_id = ? AND stage = ? \
          AND (artifacts_released_at IS NULL OR artifacts_released_at = ?) \
@@ -285,15 +308,17 @@ pub async fn recover(state: &AppState) {
     }
 }
 
-fn project_repo(project: &ProjectRow) -> Result<PathBuf> {
+fn project_repo(project: &ProjectRow) -> ArtifactsResult<PathBuf> {
     let repo = PathBuf::from(&project.repo_path);
     if !repo.exists() {
-        return Err(anyhow!("项目主仓库不存在: {}", repo.display()));
+        return Err(ArtifactsError::MissingRepository {
+            path: repo.display().to_string(),
+        });
     }
     Ok(repo)
 }
 
-async fn has_unfinished_children(pool: &SqlitePool, task_id: &str) -> Result<bool> {
+async fn has_unfinished_children(pool: &SqlitePool, task_id: &str) -> ArtifactsResult<bool> {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND stage != ? \
          AND COALESCE(status, '') != ?",
@@ -312,7 +337,7 @@ fn release_pending(value: Option<&str>) -> bool {
     matches!(value, None | Some(ARTIFACTS_RELEASING))
 }
 
-async fn mark_releasing(pool: &SqlitePool, task_id: &str) -> Result<()> {
+async fn mark_releasing(pool: &SqlitePool, task_id: &str) -> ArtifactsResult<()> {
     sqlx::query("UPDATE tasks SET artifacts_released_at = ? WHERE id = ?")
         .bind(ARTIFACTS_RELEASING)
         .bind(task_id)
@@ -321,7 +346,7 @@ async fn mark_releasing(pool: &SqlitePool, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn finalize_release(pool: &SqlitePool, task_id: &str) -> Result<()> {
+async fn finalize_release(pool: &SqlitePool, task_id: &str) -> ArtifactsResult<()> {
     let timestamp = now();
     sqlx::query("UPDATE tasks SET artifacts_released_at = ?, updated_at = ? WHERE id = ?")
         .bind(&timestamp)
@@ -342,7 +367,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// Releases the checkout directories of an archived project. Job directories
 /// stay in place because they hold the prompt, result, and transcript context
 /// that backs later audit views.
-async fn remove_project_layout(workspace: &Path) -> Result<()> {
+async fn remove_project_layout(workspace: &Path) -> ArtifactsResult<()> {
     for name in ["repo", "tasks", "verify"] {
         let path = workspace.join(name);
         if path.exists() {
