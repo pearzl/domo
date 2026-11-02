@@ -181,6 +181,7 @@ describe("LiveActivitySummary 渲染", () => {
   function render(overrides: Partial<Parameters<typeof LiveActivitySummary>[0]> = {}) {
     return renderToStaticMarkup(
       <LiveActivitySummary
+        jobId="job-live"
         activity={activity([reasoning("正在梳理项目结构")])}
         running
         now={1_000_000}

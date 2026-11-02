@@ -12,6 +12,7 @@ export function AnalysisLiveActivity({ jobId }: { jobId: string }) {
   const now = useAlignedNow();
   return (
     <LiveActivitySummary
+      jobId={jobId}
       activity={activity}
       loading={loading}
       error={error}
@@ -25,6 +26,7 @@ export function AnalysisLiveActivity({ jobId }: { jobId: string }) {
 /// 实时区的纯展示部分：思维链默认展开并自动跟随最新内容，
 /// 工具与步骤收进紧凑分组；不提供 stdout/stderr 入口。
 export function LiveActivitySummary({
+  jobId,
   activity,
   running,
   now,
@@ -32,6 +34,7 @@ export function LiveActivitySummary({
   loading,
   error,
 }: {
+  jobId: string;
   activity: JobActivity | null;
   running: boolean;
   now: number;
@@ -44,11 +47,17 @@ export function LiveActivitySummary({
   const followingRef = useRef(true);
   const signature = useMemo(() => activitySignature(activity), [activity]);
 
+  // 切换作业时先恢复跟随，再执行贴底滚动，保证新作业从最新内容开始展示。
+  useLayoutEffect(() => {
+    followingRef.current = true;
+    setFollowing(true);
+  }, [jobId]);
+
   useLayoutEffect(() => {
     if (!followingRef.current) return;
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [signature]);
+  }, [signature, jobId]);
 
   function handleScroll() {
     const element = scrollRef.current;

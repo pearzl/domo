@@ -74,7 +74,7 @@ export function formatClockTime(timestamp: number): string {
   return date.toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-/// 活动内容的可见指纹：条数、类型、文本长度与状态变化都会改变指纹，
+/// 活动内容的可见指纹：条数、类型、文本长度、工具名、目标与状态变化都会改变指纹，
 /// 仅字节数增长不改变指纹，避免把不可见的心跳当成一次内容更新。
 export function activitySignature(activity: JobActivity | null): string {
   if (!activity) return "";
@@ -85,7 +85,7 @@ export function activitySignature(activity: JobActivity | null): string {
   const items = activity.items
     .map(
       (item) =>
-        `${item.kind}:${item.text?.length ?? 0}:${item.status ?? ""}:${item.error?.length ?? 0}`,
+        `${item.kind}:${item.text?.length ?? 0}:${item.tool ?? ""}:${item.target ?? ""}:${item.status ?? ""}:${item.error?.length ?? 0}`,
     )
     .join(",");
   return `${activity.format}|${counts}|${activity.items.length}|${items}`;

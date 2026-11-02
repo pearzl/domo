@@ -304,4 +304,16 @@ describe("稳定时间显示", () => {
     expect(activitySignature(grownText)).not.toBe(activitySignature(base));
     expect(activitySignature(null)).toBe("");
   });
+
+  it("新增条目与工具目标补齐都会改变活动指纹", () => {
+    const base = activity([tool("read", "running", null)]);
+    const appended = activity([tool("read", "running", null), message("新输出")]);
+    const filledTarget = activity([tool("read", "running", "src/a.ts")]);
+    expect(activitySignature(appended)).not.toBe(activitySignature(base));
+    expect(activitySignature(filledTarget)).not.toBe(activitySignature(base));
+    const replacedTarget = activity([tool("read", "running", "src/b.ts")]);
+    expect(activitySignature(replacedTarget)).not.toBe(
+      activitySignature(filledTarget),
+    );
+  });
 });

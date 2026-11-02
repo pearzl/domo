@@ -146,6 +146,7 @@ describe("实时进展区：思维链主视图", () => {
   it("渲染思维链且不提供原始输出入口", () => {
     const markup = renderToStaticMarkup(
       <LiveActivitySummary
+        jobId="job-live"
         activity={activity([reasoning("正在梳理项目结构")])}
         running
         now={1_000_000}
@@ -163,6 +164,7 @@ describe("实时进展区：思维链主视图", () => {
   it("没有活动时展示等待文案", () => {
     const markup = renderToStaticMarkup(
       <LiveActivitySummary
+        jobId="job-live"
         activity={activity([])}
         running
         now={1_000_000}

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type {
   JobActivity as JobActivityData,
@@ -54,7 +54,8 @@ export function JobActivity({
   const followingRef = useRef(true);
   const signature = activitySignature(activity);
 
-  useEffect(() => {
+  // 切换作业时先恢复跟随，再执行贴底滚动，保证新作业从最新内容开始展示。
+  useLayoutEffect(() => {
     followingRef.current = true;
     setFollowing(true);
     setExpanded(false);
@@ -64,7 +65,7 @@ export function JobActivity({
     if (!followingRef.current) return;
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [signature, expanded, running]);
+  }, [signature, expanded, running, jobId]);
 
   function handleScroll() {
     const element = scrollRef.current;
