@@ -1869,7 +1869,7 @@ input[aria-invalid="true"] {
   font-size: 0.8rem;
 }
 
-/* 依赖图沿用既有滚动容器；仅提示可横向滚动并强化键盘焦点，不新增缩放/拖拽。 */
+/* 依赖图沿用既有滚动容器；缩放与适应窗口按钮固定在滚动容器左上角，滚到任何位置都可用。 */
 .dag-scroll-hint {
   display: flex;
   align-items: center;
@@ -1892,6 +1892,7 @@ input[aria-invalid="true"] {
 }
 
 .dag-scroll {
+  position: relative;
   max-width: 100%;
   max-height: 600px;
   overflow: auto;
@@ -1908,8 +1909,95 @@ input[aria-invalid="true"] {
   outline-offset: 1px;
 }
 
-.dag-canvas {
+.dag-toolbar {
+  position: sticky;
+  top: 6px;
+  left: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  margin: 6px 0 0 8px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2px 8px rgba(18, 32, 56, 0.08);
+  backdrop-filter: blur(4px);
+}
+
+button.dag-zoom-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+button.dag-zoom-btn:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #f2f5fa;
+}
+
+button.dag-zoom-btn:disabled {
+  color: #c0c8d2;
+  cursor: not-allowed;
+}
+
+button.dag-fit-btn {
+  font-size: 0.78rem;
+}
+
+.dag-zoom-level {
+  min-width: 40px;
+  text-align: center;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.dag-zoom-space {
   position: relative;
+}
+
+.dag-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transition: transform 0.18s ease;
+}
+
+.dag-level-header {
+  position: absolute;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 2px 2px;
+  border-bottom: 1px dashed var(--line-strong);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.dag-level-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #eef2f8;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: #475467;
 }
 
 .dag-edges {
@@ -1922,6 +2010,7 @@ input[aria-invalid="true"] {
 .dag-edge {
   fill: none;
   stroke-width: 1.6;
+  transition: opacity 0.15s ease, stroke-width 0.15s ease;
 }
 
 .dag-edge-dependency {
@@ -1932,6 +2021,20 @@ input[aria-invalid="true"] {
   stroke: #b07a2a;
   stroke-dasharray: 6 5;
   opacity: 0.85;
+}
+
+.dag-edge-highlight {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  opacity: 1;
+}
+
+.dag-edge-derived.dag-edge-highlight {
+  stroke: #c26b00;
+}
+
+.dag-edge-dimmed {
+  opacity: 0.16;
 }
 
 .dag-node {
@@ -1947,12 +2050,17 @@ input[aria-invalid="true"] {
   text-align: left;
   cursor: pointer;
   overflow: hidden;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
 
-.dag-node:hover {
+.dag-node:hover,
+.dag-node.dag-node-related {
   border-color: var(--accent);
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+}
+
+.dag-node.dag-node-dimmed {
+  opacity: 0.55;
 }
 
 .dag-node.selected {
@@ -1963,6 +2071,15 @@ input[aria-invalid="true"] {
 .dag-node:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dag-canvas,
+  .dag-edge,
+  .dag-node,
+  button.dag-zoom-btn {
+    transition: none;
+  }
 }
 
 .dag-node-head {
