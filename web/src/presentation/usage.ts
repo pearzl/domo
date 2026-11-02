@@ -5,7 +5,12 @@ import type {
   UsageReport,
   UsageTotals,
 } from "../types";
-import { ROLE_LABELS } from "../ui";
+import {
+  ROLE_LABELS,
+  formatCost,
+  formatMillis,
+  formatTokens,
+} from "../ui";
 
 /// 用量页的分组维度；页面一次只展示一个维度的一张表。
 export type UsageDimension = "project" | "agent" | "role";
@@ -178,4 +183,50 @@ function usageTotalsOf(groups: UsageGroup[]): UsageTotals {
       unknown_jobs: 0,
     },
   );
+}
+
+/// 没有作业时汇总无从计算，所有指标都显示为“—”。
+export const USAGE_UNKNOWN_VALUE = "—";
+
+/// 全部作业都没有用量记录：token 与费用无法合计。
+export function usageAllUnknown(totals: UsageTotals): boolean {
+  return totals.jobs > 0 && totals.known_jobs === 0;
+}
+
+/// 部分作业有用量记录：合计只覆盖已记录部分。
+export function usagePartial(totals: UsageTotals): boolean {
+  return totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
+}
+
+/// 用量记录覆盖：已记录作业数 / 作业总数；没有作业时为空。
+export function usageCoverageLabel(totals: UsageTotals): string | null {
+  if (totals.jobs === 0) return null;
+  return `${totals.known_jobs}/${totals.jobs}`;
+}
+
+/// 覆盖说明：解释“—”与部分覆盖的来源，没有作业或全部覆盖时为空。
+export function usageCoverageNote(totals: UsageTotals): string {
+  if (totals.jobs === 0) return "还没有作业，暂时没有用量记录。";
+  if (totals.known_jobs === 0) {
+    return `全部 ${totals.jobs} 个作业未记录用量：token 与费用无法合计，显示为“—”；作业数与时长仍包含这些作业。`;
+  }
+  if (totals.known_jobs < totals.jobs) {
+    return `已记录 ${totals.known_jobs}/${totals.jobs} 个作业的用量，合计只含已记录部分；其余 ${totals.unknown_jobs} 个作业未提供 token 或费用。`;
+  }
+  return "";
+}
+
+/// 汇总指标的取值：没有作业或无法合计时统一为“—”，与用量页同口径。
+/// 时长来自作业记录本身，只在完全没有作业时归为未知。
+export function usageMetricValue(
+  value: number | null | undefined,
+  totals: UsageTotals,
+  metric: "tokens" | "cost" | "duration",
+): string {
+  if (totals.jobs === 0) return USAGE_UNKNOWN_VALUE;
+  if (metric !== "duration" && usageAllUnknown(totals)) return USAGE_UNKNOWN_VALUE;
+  if (value === null || value === undefined) return USAGE_UNKNOWN_VALUE;
+  if (metric === "cost") return formatCost(value);
+  if (metric === "duration") return formatMillis(value);
+  return formatTokens(value);
 }

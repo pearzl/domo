@@ -9,6 +9,7 @@ import type {
   Project,
   ProjectDetail,
   Task,
+  UsageTotals,
 } from "../types";
 import { ProjectOverview } from "../components/ProjectOverview";
 import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
@@ -349,6 +350,27 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
   } as unknown as ProjectDetail;
 }
 
+function usageTotals(overrides: Partial<UsageTotals> = {}): UsageTotals {
+  return {
+    jobs: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    cost: 0,
+    duration_ms: 0,
+    known_jobs: 0,
+    unknown_jobs: 0,
+    ...overrides,
+  };
+}
+
+function withUsage(overrides: Partial<UsageTotals>): ProjectDetail {
+  const totals = usageTotals(overrides);
+  return detail({ usage: { totals, by_agent: [], by_role: [] } });
+}
+
 function renderOverview(input: ProjectDetail): string {
   return renderToStaticMarkup(
     createElement(ProjectOverview, { detail: input }),
@@ -445,6 +467,74 @@ describe("分析阶段无方案时的待办跳转", () => {
       }),
     );
     expect(idle).toContain("去项目分析");
+  });
+});
+
+describe("概览内嵌用量摘要", () => {
+  it("概览包含用量摘要与明细链接，页面不再有独立的项目用量面板", () => {
+    const markup = renderOverview(
+      withUsage({
+        jobs: 4,
+        input_tokens: 12000,
+        output_tokens: 3400,
+        cost: 0.42,
+        duration_ms: 65000,
+        known_jobs: 4,
+      }),
+    );
+    expect(markup).toContain('data-block="usage-summary"');
+    expect(markup).toContain("用量");
+    expect(markup).toContain('href="/usage?project_id=p1"');
+    expect(markup).toContain("查看用量明细");
+    expect(markup).toContain("输入 token");
+    expect(markup).toContain("12,000");
+    expect(markup).toContain("3,400");
+    expect(markup).toContain("0.4200");
+    expect(markup).toContain("1 分 5 秒");
+    expect(markup).toContain("用量记录覆盖 4/4");
+    // 摘要与待办同处概览网格；待办保持“当前需要你处理”。
+    expect(markup).toContain("当前需要你处理");
+    expect(markup.indexOf("当前需要你处理")).toBeLessThan(
+      markup.indexOf('data-block="usage-summary"'),
+    );
+    // 独立的用量面板（标题与折叠块）不再出现在项目中。
+    expect(markup).not.toContain("项目用量（");
+    expect(projectPageSource).not.toContain("项目用量（");
+    expect(projectPageSource).not.toContain("<UsagePanel");
+  });
+
+  it("完全不知道用量的项目显示“—”并附覆盖说明", () => {
+    const markup = renderOverview(
+      withUsage({
+        jobs: 3,
+        duration_ms: 90000,
+        known_jobs: 0,
+        unknown_jobs: 3,
+      }),
+    );
+    expect(markup).toContain("—");
+    expect(markup).toContain("用量记录覆盖 0/3");
+    expect(markup).toContain("全部 3 个作业未记录用量");
+    // 作业数与时长照常显示，不当作未知。
+    expect(markup).toContain("3 个");
+    expect(markup).toContain("1 分 30 秒");
+  });
+
+  it("部分覆盖时合计只含已记录部分并标注作业数", () => {
+    const markup = renderOverview(
+      withUsage({
+        jobs: 4,
+        input_tokens: 500,
+        output_tokens: 60,
+        cost: 0.1,
+        duration_ms: 1000,
+        known_jobs: 2,
+        unknown_jobs: 2,
+      }),
+    );
+    expect(markup).toContain("用量记录覆盖 2/4");
+    expect(markup).toContain("已记录 2/4 个作业的用量");
+    expect(markup.match(/（2\/4 个作业）/g) ?? []).toHaveLength(3);    expect(markup).not.toContain("全部 4 个作业未记录用量");
   });
 });
 

@@ -8,6 +8,8 @@
  * 3. 成功发送后输入框清空，刷新后仍为空。
  * 4. 打开任务抽屉或切换主体选项卡，地址栏出现 tab/task 参数；刷新与后退后视图一致。
  * 5. 方向键在选项卡内左右切换，Home/End 跳到首尾；每项徽标随任务、方案与报告状态更新。
+ * 6. 概览里的用量摘要显示作业数、token、费用、时长与覆盖；没有记录的指标显示“—”，
+ *    “查看用量明细”带着项目过滤跳到用量页；项目页不再有独立的用量面板。
  */
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -17,10 +19,8 @@ import type {
   JobSummary,
   ProjectArchiveRefs,
   ProjectDetail,
-  ProjectUsage,
   Task,
   TaskAgentPool,
-  UsageTotals,
 } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
@@ -36,7 +36,6 @@ import { ProjectTabs, tabButtonId, tabPanelId } from "../components/ProjectTabs"
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
-import { usagePath } from "../router";
 import {
   ACTIVITY_WAITING_TEXT,
   activityDigest,
@@ -80,10 +79,7 @@ import {
   FAILURE_KIND_LABELS,
   ROLE_LABELS,
   TaskStateBadge,
-  formatCost,
-  formatMillis as formatUsageDuration,
   formatTime,
-  formatTokens as formatUsageAmount,
   failureSummaryLabel,
   jobStatusLabel,
   shortText,
@@ -1187,8 +1183,6 @@ export function ProjectPage({
         </section>
       ) : null}
 
-      <UsagePanel projectId={project.id} usage={detail.usage} />
-
       {projectJobs.length > 0 ? (
         <section className="panel">
           <h2>项目分析 / 直接完成 / 总结作业</h2>
@@ -1661,142 +1655,6 @@ function QueueControls({
         下移
       </button>
     </span>
-  );
-}
-
-function usageAllUnknown(totals: UsageTotals): boolean {
-  return totals.jobs > 0 && totals.known_jobs === 0;
-}
-
-function usagePartial(totals: UsageTotals): boolean {
-  return totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
-}
-
-function UsageCoverageBadge({ totals }: { totals: UsageTotals }) {
-  if (totals.jobs === 0) return null;
-  const tone =
-    totals.known_jobs === 0
-      ? "warn"
-      : totals.known_jobs < totals.jobs
-        ? "info"
-        : "muted";
-  return (
-    <Badge
-      tone={tone}
-      title="已记录 token 或费用的作业数 / 作业总数；未知作业不参与 token 与费用合计"
-    >
-      用量记录覆盖 {totals.known_jobs}/{totals.jobs} 个作业
-    </Badge>
-  );
-}
-
-function UsageAmount({
-  value,
-  totals,
-  cost = false,
-}: {
-  value: number;
-  totals: UsageTotals;
-  cost?: boolean;
-}) {
-  if (usageAllUnknown(totals)) {
-    return (
-      <span className="muted" title="全部作业未记录用量">
-        —
-      </span>
-    );
-  }
-  return (
-    <>
-      {cost ? formatCost(value) : formatUsageAmount(value)}
-      {usagePartial(totals) ? (
-        <span className="muted usage-coverage-note">
-          （{totals.known_jobs}/{totals.jobs} 个作业）
-        </span>
-      ) : null}
-    </>
-  );
-}
-
-/// 项目用量只保留汇总卡片与覆盖率；分组明细统一由用量页按项目过滤查看。
-function UsagePanel({
-  projectId,
-  usage,
-}: {
-  projectId: string;
-  usage: ProjectUsage;
-}) {
-  return (
-    <details className="panel usage-panel">
-      <summary>
-        项目用量（{usage.totals.jobs} 个作业）
-        <UsageCoverageBadge totals={usage.totals} />
-      </summary>
-      <div className="usage-cards">
-        <div>
-          <span className="meta-label">输入 token</span>
-          <strong>
-            <UsageAmount value={usage.totals.input_tokens} totals={usage.totals} />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">输出 token</span>
-          <strong>
-            <UsageAmount value={usage.totals.output_tokens} totals={usage.totals} />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">缓存读</span>
-          <strong>
-            <UsageAmount value={usage.totals.cache_read_tokens} totals={usage.totals} />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">缓存写</span>
-          <strong>
-            <UsageAmount value={usage.totals.cache_write_tokens} totals={usage.totals} />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">推理</span>
-          <strong>
-            <UsageAmount value={usage.totals.reasoning_tokens} totals={usage.totals} />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">费用</span>
-          <strong>
-            <UsageAmount value={usage.totals.cost} totals={usage.totals} cost />
-          </strong>
-        </div>
-        <div>
-          <span className="meta-label">时长</span>
-          <strong>{formatUsageDuration(usage.totals.duration_ms)}</strong>
-        </div>
-        <div>
-          <span className="meta-label">未知用量</span>
-          <strong>{usage.totals.unknown_jobs} 个作业</strong>
-        </div>
-      </div>
-      {usage.totals.jobs > 0 && usage.totals.known_jobs === 0 ? (
-        <div className="warn-banner">
-          全部作业未记录用量：token 与费用无法合计，显示为“—”。作业数与时长仍包含这些作业。
-        </div>
-      ) : usage.totals.unknown_jobs > 0 ? (
-        <div className="warn-banner">
-          已记录 {usage.totals.known_jobs}/{usage.totals.jobs} 个作业的用量；其余{" "}
-          {usage.totals.unknown_jobs} 个作业未提供 token 或费用，已单独计数，不参与限额扣减。作业数与时长仍包含未知作业。
-        </div>
-      ) : null}
-      <div className="button-row usage-panel-actions">
-        <a className="button-link" href={usagePath(projectId)}>
-          查看用量明细
-        </a>
-        <span className="muted">
-          明细按 Agent 与角色分组，只统计本项目，可按维度切换。
-        </span>
-      </div>
-    </details>
   );
 }
 

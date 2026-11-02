@@ -1200,13 +1200,19 @@ small {
 .overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-areas:
+    "stats todo"
+    "stats usage";
   gap: 16px;
   align-items: stretch;
 }
 
+/* 统计在左纵向铺满；待办与用量摘要上下排布在右列。 */
 .overview-stats {
+  grid-area: stats;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
   gap: 10px;
 }
 
@@ -1271,6 +1277,7 @@ small {
 }
 
 .overview-todo {
+  grid-area: todo;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1406,9 +1413,79 @@ small {
   font-size: 0.82rem;
 }
 
+/* 概览内嵌用量摘要：独立的紧凑小卡片，贴在待办下方。 */
+.usage-summary {
+  grid-area: usage;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fbfcfe;
+}
+
+.usage-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.usage-summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.usage-summary-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fafbfd;
+}
+
+.usage-summary-value {
+  font-size: 1rem;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.usage-summary-partial {
+  font-size: 0.72rem;
+}
+
+.usage-summary-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.usage-summary-note-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.usage-summary-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 窄屏：统计、待办与用量摘要依次纵向堆叠，待办在前。 */
 @media (max-width: 900px) {
   .overview-grid {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "todo"
+      "usage"
+      "stats";
   }
 }
 
@@ -3037,10 +3114,6 @@ summary {
   white-space: nowrap;
 }
 
-.usage-panel summary .badge {
-  margin-left: 8px;
-}
-
 .usage-cards > div {
   display: flex;
   flex-direction: column;
@@ -3131,13 +3204,8 @@ summary {
   color: var(--accent);
 }
 
-/* 项目页用量入口：链接按按钮样式呈现。 */
-.usage-panel-actions {
-  margin-top: 12px;
-  align-items: center;
-}
-
-.usage-panel-actions .button-link {
+/* 用量明细入口：链接按按钮样式呈现。 */
+.usage-summary-actions .button-link {
   display: inline-flex;
   align-items: center;
   padding: 6px 14px;
@@ -3146,10 +3214,11 @@ summary {
   background: white;
   color: var(--accent);
   font-weight: 600;
+  font-size: 0.82rem;
   text-decoration: none;
 }
 
-.usage-panel-actions .button-link:hover {
+.usage-summary-actions .button-link:hover {
   background: var(--accent-soft);
 }
 

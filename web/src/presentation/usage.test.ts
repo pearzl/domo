@@ -10,9 +10,15 @@ import type {
 } from "../types";
 import {
   EMPTY_USAGE_FILTERS,
+  USAGE_UNKNOWN_VALUE,
   currentUsageReport,
   restrictUsageToProject,
+  usageAllUnknown,
+  usageCoverageLabel,
+  usageCoverageNote,
   usageGroupName,
+  usageMetricValue,
+  usagePartial,
   usageProjectOptions,
   usageRequestParams,
 } from "./usage";
@@ -250,5 +256,63 @@ describe("项目过滤在项目页与用量页之间传递", () => {
     expect(markup.match(/<table/g) ?? []).toHaveLength(1);
     expect(markup).toContain("项目一");
     expect(markup).not.toContain("项目二");
+  });
+});
+
+describe("概览用量摘要的取值与覆盖口径", () => {
+  it("有记录时按统一格式化函数展示 token、费用与时长", () => {
+    const base = totals({ input_tokens: 12345, output_tokens: 678, cost: 0.5, duration_ms: 125000 });
+    expect(usageMetricValue(base.input_tokens, base, "tokens")).toBe("12,345");
+    expect(usageMetricValue(base.output_tokens, base, "tokens")).toBe("678");
+    expect(usageMetricValue(base.cost, base, "cost")).toBe("0.5000");
+    expect(usageMetricValue(base.duration_ms, base, "duration")).toBe("2 分 5 秒");
+    expect(usagePartial(base)).toBe(false);
+    expect(usageCoverageLabel(base)).toBe("2/2");
+    expect(usageCoverageNote(base)).toBe("");
+  });
+
+  it("全部未知时所有合计显示“—”并给出覆盖说明", () => {
+    const unknown = totals({
+      jobs: 3,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost: 0,
+      duration_ms: 30000,
+      known_jobs: 0,
+      unknown_jobs: 3,
+    });
+    expect(usageAllUnknown(unknown)).toBe(true);
+    expect(usageMetricValue(unknown.input_tokens, unknown, "tokens")).toBe(
+      USAGE_UNKNOWN_VALUE,
+    );
+    expect(usageMetricValue(unknown.cost, unknown, "cost")).toBe(USAGE_UNKNOWN_VALUE);
+    // 时长来自作业记录本身，不受用量覆盖影响。
+    expect(usageMetricValue(unknown.duration_ms, unknown, "duration")).toBe("30 秒");
+    expect(usageCoverageLabel(unknown)).toBe("0/3");
+    expect(usageCoverageNote(unknown)).toContain("全部 3 个作业未记录用量");
+  });
+
+  it("部分覆盖时合计只含已记录部分，并说明覆盖比例", () => {
+    const partial = totals({ jobs: 4, known_jobs: 1, unknown_jobs: 3 });
+    expect(usagePartial(partial)).toBe(true);
+    expect(usageCoverageLabel(partial)).toBe("1/4");
+    expect(usageCoverageNote(partial)).toContain("已记录 1/4 个作业的用量");
+    expect(usageCoverageNote(partial)).toContain("其余 3 个作业");
+  });
+
+  it("没有作业时显示“—”而不是 0", () => {
+    const empty = totals({
+      jobs: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost: 0,
+      duration_ms: 0,
+      known_jobs: 0,
+      unknown_jobs: 0,
+    });
+    expect(usageMetricValue(empty.input_tokens, empty, "tokens")).toBe(USAGE_UNKNOWN_VALUE);
+    expect(usageMetricValue(empty.duration_ms, empty, "duration")).toBe(USAGE_UNKNOWN_VALUE);
+    expect(usageCoverageLabel(empty)).toBeNull();
+    expect(usageCoverageNote(empty)).toContain("还没有作业");
   });
 });

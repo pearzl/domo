@@ -18,6 +18,7 @@ import {
   type ExecutionQueueItem,
 } from "../presentation/execution";
 import { Badge } from "../ui";
+import { UsageSummary } from "./UsageSummary";
 
 /// 项目标题下的目标文本固定为三行，超出时由用户主动展开。
 export function ProjectGoal({ goal }: { goal: string }) {
@@ -67,8 +68,9 @@ export function ProjectGoal({ goal }: { goal: string }) {
   );
 }
 
-/// 项目概览只保留“当前需要你处理”与统计，不提供操作；
-/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接。
+/// 项目概览只保留“当前需要你处理”、统计与用量摘要，不提供操作；
+/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接；
+/// 用量摘要贴在待办下方，窄屏时与待办纵向堆叠。
 export function ProjectOverview({
   detail,
   onOpenTab,
@@ -139,6 +141,7 @@ export function ProjectOverview({
           activity={activity}
           onOpenTab={onOpenTab}
         />
+        <UsageSummary projectId={project.id} usage={detail.usage} />
       </div>
     </section>
   );
