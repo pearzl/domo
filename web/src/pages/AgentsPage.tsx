@@ -12,9 +12,9 @@ import type {
   UsageWindowKind,
 } from "../types";
 import { api, errorMessage } from "../api";
+import { AgentCard } from "../components/AgentCard";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
 import { InputBox } from "../components/InputBox";
-import { RichContent } from "../components/RichContent";
 import {
   browserDraftStorage,
   clearDraft,
@@ -22,16 +22,10 @@ import {
   readDraft,
   writeDraftJson,
 } from "../presentation/draft";
-import {
-  Badge,
-  Empty,
-  ErrorBox,
-  FAILURE_KIND_LABELS,
-  failureSummaryLabel,
-  formatTime,
-  formatUsageAmount,
-  shortText,
-} from "../ui";
+import { Empty, ErrorBox } from "../ui";
+
+// 供其它模块与测试直接从页面取到卡片组件。
+export { AgentCard } from "../components/AgentCard";
 
 const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
 const ROLE_TEXT: Record<Role, string> = {
@@ -40,16 +34,6 @@ const ROLE_TEXT: Record<Role, string> = {
   verifier: "验收者",
 };
 const DAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const METRIC_LABELS: Record<UsageMetric, string> = {
-  tokens: "token（输入+输出）",
-  input_tokens: "输入 token",
-  output_tokens: "输出 token",
-  cost: "费用",
-};
-const WINDOW_LABELS: Record<UsageWindowKind, string> = {
-  day: "每日",
-  month: "每月",
-};
 
 interface SlotState {
   enabled: boolean;
@@ -636,124 +620,15 @@ export function AgentsPage() {
           />
         ) : (
           agents.map((agent) => (
-          <article key={agent.id} className={`agent-card panel ${agent.enabled ? "" : "disabled"}`}>
-            <div className="agent-head">
-              <div>
-                <h2>{agent.name}</h2>
-                <div className="badge-row">
-                  <Badge tone="info">{agent.kind}</Badge>
-                  <Badge tone={agent.enabled ? "success" : "muted"}>
-                    {agent.enabled ? "全局已启用" : "全局已停用"}
-                  </Badge>
-                  <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
-                  {agent.allow_priority_fallback ? (
-                    <Badge
-                      tone="info"
-                      title="该 Agent 并发已满时，新作业交给同角色下一优先级 Agent"
-                    >
-                      可让位
-                    </Badge>
-                  ) : null}
-                  {agent.usage_window?.exceeded ? (
-                    <Badge tone="danger">用量限额已触发</Badge>
-                  ) : null}
-                </div>
-              </div>
-              <div className="button-row">
-                <button className="ghost" onClick={() => startEdit(agent)}>
-                  编辑
-                </button>
-                <button
-                  className="ghost"
-                  title="全局开关：影响所有项目和任务"
-                  onClick={() => void toggle(agent)}
-                >
-                  {agent.enabled ? "全局停用" : "全局启用"}
-                </button>
-                <button
-                  className="ghost danger-text"
-                  disabled={busyId === agent.id}
-                  onClick={() => void removeAgent(agent)}
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-            <div className="agent-meta">
-              <div>
-                <span className="meta-label">模型</span>
-                <span className="mono">{agent.model || "CLI 默认"}</span>
-              </div>
-              <div>
-                <span className="meta-label">角色</span>
-                <span>{agent.roles.map((role) => ROLE_TEXT[role] ?? role).join(" / ")}</span>
-              </div>
-              <div>
-                <span className="meta-label">更新</span>
-                <span>{formatTime(agent.updated_at)}</span>
-              </div>
-            </div>
-            {agent.availability?.enabled ? (
-              <div className="usage-line">
-                <span className="meta-label">可用时段</span>
-                <span>{scheduleSummary(agent.availability)}</span>
-              </div>
-            ) : null}
-            {agent.usage_limit?.enabled && agent.usage_window ? (
-              <div className={agent.usage_window.exceeded ? "warn-banner" : "usage-line"}>
-                <span>
-                  {WINDOW_LABELS[agent.usage_window.window]} ·
-                  {METRIC_LABELS[agent.usage_window.metric]} 用量{" "}
-                  <strong>
-                    {formatUsageAmount(agent.usage_window.used, agent.usage_window.metric)}
-                  </strong>{" "}
-                  /{" "}
-                  {formatUsageAmount(agent.usage_window.limit, agent.usage_window.metric)}
-                  {agent.usage_window.exceeded
-                    ? ` · 已跳过，${formatTime(agent.usage_window.window_end)} 后自动恢复`
-                    : ""}
-                </span>
-                <button
-                  className="ghost"
-                  disabled={busyId === agent.id}
-                  onClick={() => void resetUsage(agent)}
-                >
-                  重置窗口用量
-                </button>
-              </div>
-            ) : null}
-            {agent.failure_kind ? (
-              <div className="warn-banner">
-                最近失败分类：
-                {FAILURE_KIND_LABELS[agent.failure_kind] ?? agent.failure_kind}
-                {agent.transient_failures
-                  ? ` · 供应商波动 ${agent.transient_failures} 次`
-                  : ""}
-              </div>
-            ) : null}
-            {agent.cooldown_until ? (
-              <div className="warn-banner">
-                冷却至 {formatTime(agent.cooldown_until)}
-              </div>
-            ) : null}
-            {agent.failure_summary ? (
-              <div className="warn-banner">
-                <strong>{failureSummaryLabel(agent.failure_summary.kind)}</strong>
-                <span> · {shortText(agent.failure_summary.message, 160)}</span>
-                {agent.failure_summary.status !== null
-                  ? ` · HTTP ${agent.failure_summary.status}`
-                  : ""}
-              </div>
-            ) : null}
-            {agent.last_error ? (
-              <details className="raw-error">
-                <summary>查看原始错误</summary>
-                <div className="error-box">
-                  <RichContent content={agent.last_error} />
-                </div>
-              </details>
-            ) : null}
-          </article>
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              busy={busyId === agent.id}
+              onEdit={() => startEdit(agent)}
+              onToggle={() => void toggle(agent)}
+              onRemove={() => void removeAgent(agent)}
+              onResetUsage={() => void resetUsage(agent)}
+            />
           ))
         )}
       </div>
@@ -786,16 +661,6 @@ function buildUsageLimit(form: FormState): AgentUsageLimit | null {
     window: form.usageWindow,
     limit,
   };
-}
-
-function scheduleSummary(availability: AgentAvailability): string {
-  if (availability.slots.length === 0) return "未设置任何时段（始终不可用）";
-  return availability.slots
-    .map(
-      (slot) =>
-        `${DAY_LABELS[slot.weekday - 1] ?? `周${slot.weekday}`} ${slot.start}-${slot.end}`,
-    )
-    .join("、");
 }
 
 function parseJsonArray(raw: string): string[] {

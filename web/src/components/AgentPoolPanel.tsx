@@ -4,12 +4,10 @@ import type { ProjectRolePool, Role } from "../types";
 import {
   Badge,
   ErrorBox,
-  FAILURE_KIND_LABELS,
-  failureSummaryLabel,
   formatTime,
   formatUsageAmount,
-  shortText,
 } from "../ui";
+import { agentFailureStatus } from "../presentation/agentFailure";
 import { nextRoleTab, resolveActiveRole, roleTabs } from "../presentation/agentPool";
 
 export interface AgentPoolPanelProps {
@@ -310,14 +308,16 @@ export function AgentPoolPanel({
                           冷却中 · {formatTime(entry.cooldown_until)}
                         </Badge>
                       ) : null}
-                      {entry.failure_kind ? (
-                        <Badge tone="danger">
-                          {FAILURE_KIND_LABELS[entry.failure_kind] ?? entry.failure_kind}
-                          {entry.transient_failures
-                            ? ` · 波动 ${entry.transient_failures} 次`
-                            : ""}
-                        </Badge>
-                      ) : null}
+                      {(() => {
+                        const status = agentFailureStatus(entry, {
+                          cooldown: false,
+                        });
+                        return status ? (
+                          <Badge tone={status.tone} title={status.title}>
+                            {status.label}
+                          </Badge>
+                        ) : null;
+                      })()}
                       {entry.availability_reason ? (
                         <Badge tone="warn" title={entry.availability_reason}>
                           不在可用时段
@@ -386,11 +386,6 @@ export function AgentPoolPanel({
                     {entry.unavailable_reason ? (
                       <span className="agent-pool-reason muted">
                         {entry.unavailable_reason}
-                      </span>
-                    ) : entry.failure_summary ? (
-                      <span className="agent-pool-reason muted">
-                        {failureSummaryLabel(entry.failure_summary.kind)} ·{" "}
-                        {shortText(entry.failure_summary.message, 100)}
                       </span>
                     ) : null}
                   </div>
