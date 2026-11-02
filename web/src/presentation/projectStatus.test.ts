@@ -294,6 +294,8 @@ describe("projectGuidance", () => {
     );
     expect(guidance.tone).toBe("success");
     expect(guidance.label).toBe("待确认");
+    expect(guidance.tab).toBe("analysis");
+    expect(guidance.action).toBe("去确认方案");
   });
 
   it("规划者最后发言时提示回复", () => {
@@ -319,11 +321,14 @@ describe("projectGuidance", () => {
     expect(ready.tone).toBe("success");
     expect(ready.label).toBe("待验收");
     expect(ready.title).toBe("验收报告");
+    expect(ready.tab).toBe("report");
+    expect(ready.action).toBe("去验收报告");
 
     const pending = projectGuidance(
       input({ project: project({ stage: "summarizing" }) }),
     );
     expect(pending.title).toBe("等待报告");
+    expect(pending.action).toBeUndefined();
   });
 
   it("已合入项目显示已交付与提交短哈希", () => {

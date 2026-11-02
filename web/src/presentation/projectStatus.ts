@@ -34,6 +34,9 @@ export interface ProjectStats {
 
 export type GuidanceTone = "muted" | "info" | "warn" | "danger" | "success";
 
+/// 概览待办里可直接跳到的主体选项卡。
+export type GuidanceTab = "analysis" | "tasks" | "report";
+
 export interface ExecutionTaskItem {
   key: string;
   stage: string;
@@ -52,6 +55,10 @@ export interface ProjectGuidance {
   title: string;
   detail: string | null;
   tasks: ExecutionTaskGroups | null;
+  /// 待办对应的主体选项卡；没有明确去处时为 null。
+  tab?: GuidanceTab;
+  /// 跳转按钮文案；与 tab 同时出现。
+  action?: string;
 }
 
 export interface ProjectStatus {
@@ -152,6 +159,8 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
         "待验收",
         "验收报告",
         "项目报告已生成，请阅读后通过、提交意见、要求重写或重新规划。",
+        null,
+        { tab: "report", action: "去验收报告" },
       );
     }
     return guidance(
@@ -287,7 +296,10 @@ function analysisGuidance(
       proposal.kind === "direct"
         ? "方案建议直接完成：确认后开始直接完成，或回复规划者继续讨论。"
         : "方案已生成：确认后开始执行，或回复规划者继续讨论。";
-    return guidance("success", "待确认", "确认或继续讨论方案", detail);
+    return guidance("success", "待确认", "确认或继续讨论方案", detail, null, {
+      tab: "analysis",
+      action: "去确认方案",
+    });
   }
   if (lastMessage?.role === "planner") {
     return guidance(
@@ -295,6 +307,8 @@ function analysisGuidance(
       "待回复",
       "回复规划者",
       `规划者在等待你的回复：${firstLine(lastMessage.content, 160) ?? "请查看项目分析中的提问。"}`,
+      null,
+      { tab: "analysis", action: "去项目分析" },
     );
   }
   return guidance(
@@ -302,6 +316,8 @@ function analysisGuidance(
     "分析中",
     "等待分析",
     "目标已提交，等待规划者开始分析。",
+    null,
+    { tab: "analysis", action: "去项目分析" },
   );
 }
 
@@ -391,6 +407,19 @@ function guidance(
   title: string,
   detail: string | null,
   tasks: ExecutionTaskGroups | null = null,
+  jump: GuidanceJump | null = null,
 ): ProjectGuidance {
-  return { tone, label, title, detail, tasks };
+  return {
+    tone,
+    label,
+    title,
+    detail,
+    tasks,
+    ...(jump ? { tab: jump.tab, action: jump.action } : {}),
+  };
+}
+
+interface GuidanceJump {
+  tab: GuidanceTab;
+  action: string;
 }

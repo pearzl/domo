@@ -7,8 +7,9 @@
  * 2. 输入文字后离开项目页，再后退/前进回到项目页，内容仍在。
  * 3. 成功发送后输入框清空，刷新后仍为空。
  * 4. 打开任务抽屉或切换主体选项卡，地址栏出现 tab/task 参数；刷新与后退后视图一致。
+ * 5. 方向键在选项卡内左右切换，Home/End 跳到首尾；每项徽标随任务、方案与报告状态更新。
  */
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
@@ -29,7 +30,9 @@ import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView, JobRecordList } from "../components/JobDetailView";
 import { LiveOutput } from "../components/LiveOutput";
 import { ProjectOverview } from "../components/ProjectOverview";
+import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
 import { ProjectHeader } from "../components/ProjectHeader";
+import { ProjectTabs, tabButtonId, tabPanelId } from "../components/ProjectTabs";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
@@ -59,7 +62,12 @@ import {
   rawErrorEntry,
   type DrawerTailSection,
 } from "../presentation/taskDrawer";
-import { projectBlockOrder } from "../presentation/projectLayout";
+import {
+  projectBlockOrder,
+  projectTabBadge,
+  resolveProjectTab,
+} from "../presentation/projectLayout";
+import type { GuidanceTab } from "../presentation/projectStatus";
 import {
   readProjectView,
   updateProjectView,
@@ -101,12 +109,6 @@ const EMPTY_TASK_DRAFT: AddTaskDraft = {
   acceptance: "",
   deps: [],
   milestone: false,
-};
-
-const TAB_LABELS: Record<string, string> = {
-  analysis: "项目分析",
-  tasks: "任务",
-  report: "项目报告",
 };
 
 function isAddTaskDraft(value: unknown): value is AddTaskDraft {
@@ -281,11 +283,7 @@ export function ProjectPage({
   // 选项卡必须属于当前阶段；URL 中缺失或失效时回退到阶段默认值并写回地址栏。
   useEffect(() => {
     if (!detail) return;
-    const order = projectBlockOrder(detail.project.stage);
-    const next =
-      activeTab && order.includes(activeTab as (typeof order)[number])
-        ? activeTab
-        : order[0];
+    const next = resolveProjectTab(detail.project.stage, activeTab);
     if (next !== activeTab) setActiveTab(next);
     applyProjectView({ tab: next, taskId: selectedTaskId }, "replace");
   }, [detail, activeTab, selectedTaskId]);
@@ -414,10 +412,21 @@ export function ProjectPage({
   const depOptions = dependencyOptions(activeTasks);
   const replanPreview = replanSummary(tasks);
   const blockOrder = projectBlockOrder(project.stage);
-  const activeBlock =
-    activeTab && blockOrder.includes(activeTab as (typeof blockOrder)[number])
-      ? activeTab
-      : blockOrder[0];
+  const activeBlock = resolveProjectTab(project.stage, activeTab);
+  // 选项卡徽标：任务数、待确认方案与报告就绪标记。
+  const reportReady =
+    !!project.report &&
+    (project.stage === "summarizing" || project.stage === "completed");
+  const badgeInput = {
+    taskCount: activeTasks.length,
+    proposalPending: !!proposal,
+    reportReady,
+  };
+
+  // 概览里的待办跳转：直接切到待办指向的选项卡（分析或报告）。
+  function openAnalysisTab(tab?: GuidanceTab) {
+    selectTab(tab ?? "analysis");
+  }
 
   // 打开添加任务表单：切到任务选项卡，key 为空时自动填入下一个可用的 T 编号。
   function openAddTaskForm() {
@@ -1150,144 +1159,17 @@ export function ProjectPage({
     </section>
   ) : null;
 
-  return (
-    <div className="page">
-      <div className="back-row">
-        <button className="ghost" onClick={onBack}>
-          ← 返回项目
-        </button>
-      </div>
-
-      <ProjectHeader
-        detail={detail}
-        canReplan={canReplan}
-        busy={busy}
-        merging={merging}
-        mergeNotice={mergeNotice}
-        onResume={() => void run(() => api.resumeProject(project.id))}
-        onPause={() => void run(() => api.pauseProject(project.id))}
-        onForcePause={() => {
-          if (
-            window.confirm(
-              "强制暂停会立即终止所有在途作业，任务进入已暂停；之后点“恢复”继续推进。确认继续？",
-            )
-          ) {
-            void run(() => api.pauseProject(project.id, true));
-          }
-        }}
-        onToggleReplan={() => setReplanOpen((value) => !value)}
-        onArchive={() => void handleArchive()}
-        onMerge={() => void handleMerge()}
-      />
-
-      <ProjectOverview detail={detail} />
-
-      {error ? <ErrorBox message={error} /> : null}
-
-      {replanOpen && canReplan ? (
-        <section className="panel">
-          <h2>重新规划</h2>
-          <p className="subtitle">
-            已完成任务会保留；未完成任务会退出当前 DAG 并停止派发。提交后规划者重新给出方案，确认方案后才继续执行。请说明需要重新规划的原因。
-          </p>
-          <div className="replan-preview">
-            <div className="replan-preview-group">
-              <strong>将取消 {replanPreview.cancelCount} 个未完成任务</strong>
-              {replanPreview.cancelKeys.length ? (
-                <span className="mono replan-keys">
-                  {replanPreview.cancelKeys.join("、")}
-                </span>
-              ) : (
-                <span className="muted">没有未完成任务</span>
-              )}
-            </div>
-            <div className="replan-preview-group">
-              <strong>保留 {replanPreview.keepCount} 个已完成任务</strong>
-              {replanPreview.keepKeys.length ? (
-                <span className="mono replan-keys">
-                  {replanPreview.keepKeys.join("、")}
-                </span>
-              ) : (
-                <span className="muted">没有已完成任务</span>
-              )}
-            </div>
-          </div>
-          <div className="confirm-row">
-            <InputBox
-              value={replanReason}
-              onChange={setReplanReason}
-              draftKey={replanDraft.key}
-              rows={3}
-              maxAutoGrowChars={520}
-              placeholder="例如：原计划遗漏了必要的数据迁移步骤，需要调整为……"
-              actions={
-                <div className="button-row">
-                  <button
-                    className="primary"
-                    disabled={busy || !replanReason.trim()}
-                    onClick={async () => {
-                      const ok = await run(() =>
-                        api.replanProject(project.id, replanReason),
-                      );
-                      if (!ok) return;
-                      replanDraft.clear();
-                      setReplanOpen(false);
-                    }}
-                  >
-                    提交重规划
-                  </button>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() => {
-                      setReplanOpen(false);
-                      replanDraft.clear();
-                    }}
-                  >
-                    取消
-                  </button>
-                </div>
-              }
-            />
-          </div>
-        </section>
-      ) : null}
-
-      <nav className="project-tabs" role="tablist" aria-label="项目主体视图">
-        {projectBlockOrder(project.stage).map((block) => (
-          <button
-            key={block}
-            type="button"
-            role="tab"
-            aria-selected={block === activeBlock}
-            className={block === activeBlock ? "active" : undefined}
-            onClick={() => selectTab(block)}
-          >
-            {TAB_LABELS[block]}
-          </button>
-        ))}
-      </nav>
-
-      {projectBlockOrder(project.stage).map((block) => (
-        <Fragment key={block}>
-          {block === activeBlock
-            ? block === "analysis"
-              ? analysisBlock
-              : block === "tasks"
-                ? tasksBlock
-                : block === "report"
-                  ? reportBlock
-                  : null
-            : null}
-        </Fragment>
-      ))}
-
+  // 信息页：参考类信息（重规划记录、用量、项目作业、归档）集中在信息选项卡。
+  const infoBlock = (
+    <div className="project-info">
       {project.replan_reason || replanEvents.length > 0 ? (
         <section className="panel">
           <h2>重规划记录</h2>
           {project.replan_reason ? (
             <div className="blocked-banner">
-              <strong>最近一次重规划（来源：{replanSourceLabel(project.replan_source)}）</strong>
+              <strong>
+                最近一次重规划（来源：{replanSourceLabel(project.replan_source)}）
+              </strong>
               <RichContent content={project.replan_reason} />
               {project.replan_requested_at ? (
                 <div className="muted">{formatTime(project.replan_requested_at)}</div>
@@ -1367,31 +1249,142 @@ export function ProjectPage({
           </div>
         </details>
       ) : null}
+    </div>
+  );
 
-      <section className="panel">
-        <details>
-          <summary>活动与审计（{events.length}）</summary>
-          <EventTimeline events={events} tasks={tasks} jobs={jobs} />
-        </details>
+  return (
+    <div className="page">
+      <div className="back-row">
+        <button className="ghost" onClick={onBack}>
+          ← 返回项目
+        </button>
+      </div>
+
+      <ProjectHeader
+        detail={detail}
+        canReplan={canReplan}
+        busy={busy}
+        merging={merging}
+        mergeNotice={mergeNotice}
+        onResume={() => void run(() => api.resumeProject(project.id))}
+        onPause={() => void run(() => api.pauseProject(project.id))}
+        onForcePause={() => {
+          if (
+            window.confirm(
+              "强制暂停会立即终止所有在途作业，任务进入已暂停；之后点“恢复”继续推进。确认继续？",
+            )
+          ) {
+            void run(() => api.pauseProject(project.id, true));
+          }
+        }}
+        onToggleReplan={() => setReplanOpen((value) => !value)}
+        onArchive={() => void handleArchive()}
+        onMerge={() => void handleMerge()}
+      />
+
+      {error ? <ErrorBox message={error} /> : null}
+
+      {replanOpen && canReplan ? (
+        <section className="panel">
+          <h2>重新规划</h2>
+          <p className="subtitle">
+            已完成任务会保留；未完成任务会退出当前 DAG 并停止派发。提交后规划者重新给出方案，确认方案后才继续执行。请说明需要重新规划的原因。
+          </p>
+          <div className="replan-preview">
+            <div className="replan-preview-group">
+              <strong>将取消 {replanPreview.cancelCount} 个未完成任务</strong>
+              {replanPreview.cancelKeys.length ? (
+                <span className="mono replan-keys">
+                  {replanPreview.cancelKeys.join("、")}
+                </span>
+              ) : (
+                <span className="muted">没有未完成任务</span>
+              )}
+            </div>
+            <div className="replan-preview-group">
+              <strong>保留 {replanPreview.keepCount} 个已完成任务</strong>
+              {replanPreview.keepKeys.length ? (
+                <span className="mono replan-keys">
+                  {replanPreview.keepKeys.join("、")}
+                </span>
+              ) : (
+                <span className="muted">没有已完成任务</span>
+              )}
+            </div>
+          </div>
+          <div className="confirm-row">
+            <InputBox
+              value={replanReason}
+              onChange={setReplanReason}
+              draftKey={replanDraft.key}
+              rows={3}
+              maxAutoGrowChars={520}
+              placeholder="例如：原计划遗漏了必要的数据迁移步骤，需要调整为……"
+              actions={
+                <div className="button-row">
+                  <button
+                    className="primary"
+                    disabled={busy || !replanReason.trim()}
+                    onClick={async () => {
+                      const ok = await run(() =>
+                        api.replanProject(project.id, replanReason),
+                      );
+                      if (!ok) return;
+                      replanDraft.clear();
+                      setReplanOpen(false);
+                    }}
+                  >
+                    提交重规划
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setReplanOpen(false);
+                      replanDraft.clear();
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              }
+            />
+          </div>
+        </section>
+      ) : null}
+
+      <ProjectTabs
+        order={blockOrder}
+        active={activeBlock}
+        badges={{
+          analysis: projectTabBadge("analysis", badgeInput),
+          tasks: projectTabBadge("tasks", badgeInput),
+          report: projectTabBadge("report", badgeInput),
+        }}
+        onSelect={(block) => selectTab(block)}
+      />
+
+      <section
+        className="project-panel"
+        role="tabpanel"
+        id={tabPanelId(activeBlock)}
+        aria-labelledby={tabButtonId(activeBlock)}
+        tabIndex={0}
+      >
+        {activeBlock === "overview" ? (
+          <ProjectOverview detail={detail} onOpenTab={openAnalysisTab} />
+        ) : activeBlock === "analysis" ? (
+          analysisBlock
+        ) : activeBlock === "tasks" ? (
+          tasksBlock
+        ) : activeBlock === "report" ? (
+          reportBlock
+        ) : (
+          infoBlock
+        )}
       </section>
 
-      <AgentPoolPanel
-        title="项目 Agent 池"
-        subtitle="每个角色按顺序排列 Agent，顺序越靠前优先级越高。项目池在创建时继承默认团队配置，之后独立维护；角色启停只影响当前项目，项目池停用会屏蔽已有任务。"
-        roles={detail.agent_pool.roles}
-        disabled={archived}
-        scope="project"
-        onReorder={(role, agentId, position) =>
-          api.updateProjectAgent(project.id, role, agentId, { position })
-        }
-        onMove={(role, agentId, direction) =>
-          api.updateProjectAgent(project.id, role, agentId, { direction })
-        }
-        onToggle={(role, agentId, enabled) =>
-          api.updateProjectAgent(project.id, role, agentId, { enabled })
-        }
-        onRefresh={() => refresh()}
-      />
+      <ProjectTopBlocks detail={detail} onRefresh={() => refresh()} />
 
       {selectedTask ? (
         <TaskDrawer

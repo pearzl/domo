@@ -579,7 +579,10 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
-.project-tabs button {
+.project-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -589,14 +592,78 @@ button:disabled {
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.project-tabs button:hover {
+.project-tab:hover {
   background: #eef2f7;
   color: var(--text);
 }
 
-.project-tabs button.active {
+.project-tab.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.project-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.project-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #e6ebf2;
+  color: #475467;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.project-tab.active .project-tab-badge {
+  background: white;
+  color: var(--accent);
+}
+
+.project-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.project-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+
+.project-panel > .panel,
+.project-info > .panel,
+.project-blocks > .panel {
+  margin: 0;
+}
+
+.project-panel > .panel:first-child {
+  animation: project-panel-in 0.18s ease-out;
+}
+
+@keyframes project-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.project-info,
+.project-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
 }
 
 .confirm-row .input-box,
@@ -1047,6 +1114,10 @@ small {
   .project-status-fade {
     animation: none;
   }
+
+  .project-panel > .panel:first-child {
+    animation: none;
+  }
 }
 
 /* 项目源信息贴在标题区，默认折叠；展开后逐项展示并可单独复制。 */
@@ -1295,195 +1366,56 @@ small {
   font-size: 0.76rem;
 }
 
+/* 待办里的执行现场摘要：运行中作业、排队任务与最近关键事件，紧凑成行。 */
+.overview-now {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.overview-now-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.8rem;
+  min-width: 0;
+}
+
+.overview-now-label {
+  flex: 0 0 auto;
+  min-width: 5.6em;
+  color: var(--muted);
+}
+
+.overview-now-value {
+  min-width: 0;
+  color: #475467;
+  overflow-wrap: anywhere;
+}
+
+.overview-jump-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.overview-jump {
+  font-size: 0.82rem;
+}
+
 @media (max-width: 900px) {
   .overview-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }
 
-/* 执行现场：运行中作业、排队任务与最近关键事件。 */
-.execution-now {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 13px 15px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: #fbfcfe;
-}
-
-.execution-now-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 0.8rem;
-}
-
-.execution-jobs {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 8px;
-}
-
-.execution-job {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-  padding: 9px 11px;
-  border: 1px solid #d4e1fb;
-  border-left: 3px solid var(--accent);
-  border-radius: 9px;
-  background: white;
-}
-
-.execution-job-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-  font-size: 0.82rem;
-}
-
-.execution-job-target {
-  min-width: 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.execution-job-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  font-size: 0.75rem;
-}
-
-.execution-idle {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 9px 11px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 9px;
-  background: white;
-  font-size: 0.84rem;
-}
-
-.execution-idle span {
-  color: #475467;
-  overflow-wrap: anywhere;
-}
-
-.execution-idle-info {
-  border-color: #c5d8f7;
-  background: #f7faff;
-}
-
-.execution-idle-warn {
-  border-color: #f0ddb5;
-  background: #fffaf0;
-}
-
-.execution-idle-danger {
-  border-color: #f1c8c2;
-  background: #fff7f6;
-  color: var(--danger);
-}
-
-.execution-section-title {
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--muted);
-}
-
-.execution-queue,
-.execution-events {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-.execution-queue-list,
-.execution-event-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  min-width: 0;
-}
-
-.execution-queue-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: white;
-  font-size: 0.8rem;
-}
-
-.execution-queue-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-
-.execution-queue-title {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.execution-queue-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  font-size: 0.75rem;
-}
-
-.execution-event {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-  font-size: 0.8rem;
-}
-
-.execution-event-message {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.execution-event-meta {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 6px;
-  font-size: 0.75rem;
-}
-
 
 @media (max-width: 560px) {
   .overview-stats {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .execution-jobs {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .execution-event {
-    flex-direction: column;
-    gap: 2px;
   }
 
   .agent-pool-tabs {

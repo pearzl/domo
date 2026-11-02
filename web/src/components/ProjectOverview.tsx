@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ProjectDetail } from "../types";
 import {
   formatElapsed,
@@ -7,11 +7,17 @@ import {
 import type {
   ExecutionTaskGroups,
   ExecutionTaskItem,
+  GuidanceTab,
   ProjectGuidance,
   ProjectStats,
 } from "../presentation/projectStatus";
+import {
+  executionNow,
+  type ExecutionEventItem,
+  type ExecutionJobItem,
+  type ExecutionQueueItem,
+} from "../presentation/execution";
 import { Badge } from "../ui";
-import { ExecutionNow } from "./ExecutionNow";
 
 /// 项目标题下的目标文本固定为三行，超出时由用户主动展开。
 export function ProjectGoal({ goal }: { goal: string }) {
@@ -61,9 +67,17 @@ export function ProjectGoal({ goal }: { goal: string }) {
   );
 }
 
-/// 项目概览只汇总已加载的项目详情，不提供操作，也不写入视图状态。
-export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
-  const { project, tasks, jobs, messages, proposal } = detail;
+/// 项目概览只保留“当前需要你处理”与统计，不提供操作；
+/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接。
+export function ProjectOverview({
+  detail,
+  onOpenTab,
+}: {
+  detail: ProjectDetail;
+  onOpenTab?: (tab: GuidanceTab) => void;
+}) {
+  const { project, tasks, jobs, messages, events, proposal } = detail;
+  const now = Date.now();
   const status = projectStatus({
     project,
     tasks,
@@ -71,8 +85,14 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
     messages,
     proposal,
     mergedIntoBase: detail.merged_into_base,
-    now: Date.now(),
+    now,
   });
+  // 执行现场：运行中作业、排队任务与最近关键事件，供待办摘要按需展示。
+  const activity = useMemo(
+    () => executionNow({ project, tasks, jobs, events, now }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project, tasks, jobs, events],
+  );
 
   return (
     <section className="panel project-overview">
@@ -114,9 +134,12 @@ export function ProjectOverview({ detail }: { detail: ProjectDetail }) {
             tone="muted"
           />
         </div>
-        <Guidance guidance={status.guidance} />
+        <Guidance
+          guidance={status.guidance}
+          activity={activity}
+          onOpenTab={onOpenTab}
+        />
       </div>
-      <ExecutionNow detail={detail} />
     </section>
   );
 }
@@ -158,9 +181,29 @@ function Stat({
   );
 }
 
-function Guidance({ guidance }: { guidance: ProjectGuidance }) {
+interface ActivitySummary {
+  running: ExecutionJobItem[];
+  queue: ExecutionQueueItem[];
+  events: ExecutionEventItem[];
+}
+
+function Guidance({
+  guidance,
+  activity,
+  onOpenTab,
+}: {
+  guidance: ProjectGuidance;
+  activity: ActivitySummary;
+  onOpenTab?: (tab: GuidanceTab) => void;
+}) {
   const groups = guidance.tasks;
   const taskCount = groups ? groupCount(groups) : 0;
+  const hasNow =
+    activity.running.length > 0 ||
+    activity.queue.length > 0 ||
+    activity.events.length > 0;
+  const jump = Boolean(guidance.tab && guidance.action);
+
   return (
     <div className={`overview-todo overview-tone-${guidance.tone}`}>
       <div className="overview-todo-head">
@@ -183,6 +226,55 @@ function Guidance({ guidance }: { guidance: ProjectGuidance }) {
             没有运行、排队或待启动的任务。
           </span>
         )
+      ) : null}
+      {hasNow ? (
+        <div className="overview-now" aria-label="执行现场摘要">
+          {activity.running.length > 0 ? (
+            <div className="overview-now-row">
+              <span className="overview-now-label">运行中作业</span>
+              <span className="overview-now-value">
+                {activity.running
+                  .map((job) =>
+                    job.taskKey
+                      ? `${job.taskKey} · ${job.roleLabel}`
+                      : `${job.roleLabel}作业`,
+                  )
+                  .join("，")}
+              </span>
+            </div>
+          ) : null}
+          {activity.queue.length > 0 ? (
+            <div className="overview-now-row">
+              <span className="overview-now-label">排队任务</span>
+              <span className="overview-now-value">
+                {activity.queue.map((item) => item.key).join("，")}
+              </span>
+            </div>
+          ) : null}
+          {activity.events.length > 0 ? (
+            <div className="overview-now-row">
+              <span className="overview-now-label">最近关键事件</span>
+              <span className="overview-now-value">
+                {activity.events[0].message}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {jump ? (
+        <div className="overview-jump-row">
+          <button
+            type="button"
+            className="secondary overview-jump"
+            onClick={() =>
+              onOpenTab?.(
+                (guidance.tab ?? "analysis") as GuidanceTab,
+              )
+            }
+          >
+            {guidance.action}
+          </button>
+        </div>
       ) : null}
     </div>
   );
