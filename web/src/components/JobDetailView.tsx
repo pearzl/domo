@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode, SyntheticEvent } from "react";
 import type { JobDetail, JobSummary } from "../types";
 import { api, errorMessage } from "../api";
@@ -27,15 +27,34 @@ export function JobDetailView({
   job,
   retryable = false,
   onRetry,
+  focusNonce = 0,
 }: {
   job: JobSummary;
   retryable?: boolean;
   onRetry?: () => void;
+  /** 大于 0 时展开该作业并滚动到可见位置；用于从执行历史跳转。 */
+  focusNonce?: number;
 }) {
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [open, setOpen] = useState(job.status === "running");
+  const [open, setOpen] = useState(job.status === "running" || focusNonce > 0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (focusNonce <= 0) return;
+    setOpen(true);
+    const element = containerRef.current;
+    element?.scrollIntoView?.({
+      block: "start",
+      behavior:
+        typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+    });
+  }, [focusNonce]);
+
 
   async function loadDetail() {
     setLoading(true);
@@ -68,7 +87,7 @@ export function JobDetailView({
   const failure = job.failure_summary;
 
   return (
-    <div className="job">
+    <div className="job" ref={containerRef}>
       <details open={open} onToggle={handleToggle}>
         <summary className="job-summary">
           <span className="job-role">{ROLE_LABELS[job.role] ?? job.role}</span>
@@ -188,25 +207,33 @@ export function recentJobs(
 
 /**
  * 作业记录列表：默认只渲染最近 limit 条，更早的记录通过“展开全部”显示，
- * 已展示条数始终可达。
+ * 已展示条数始终可达。revealJobId 指定的作业（执行历史跳转目标）始终可见。
  */
 export function JobRecordList({
   jobs,
   limit = RECENT_JOB_LIMIT,
   renderJob,
   emptyText = "还没有作业。",
+  revealJobId = null,
 }: {
   jobs: JobSummary[];
   limit?: number;
   renderJob: (job: JobSummary) => ReactNode;
   emptyText?: string;
+  /** 需要展示的作业：在最近 limit 条之外时自动展开全部。 */
+  revealJobId?: string | null;
 }) {
   const [showAll, setShowAll] = useState(false);
   useEffect(() => {
     setShowAll(false);
   }, [jobs.length, limit]);
   if (jobs.length === 0) return <div className="muted">{emptyText}</div>;
-  const visible = recentJobs(jobs, limit, showAll);
+  // 跳转目标不在最近的可见切片里时展开全部，保证目标作业可达。
+  const revealed =
+    revealJobId !== null &&
+    recentJobs(jobs, limit, false).every((job) => job.id !== revealJobId) &&
+    jobs.some((job) => job.id === revealJobId);
+  const visible = recentJobs(jobs, limit, showAll || revealed);
   const hiddenCount = jobs.length - visible.length;
   return (
     <>

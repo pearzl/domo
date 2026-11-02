@@ -37,6 +37,8 @@ import { InputBox } from "../components/InputBox";
 import { useDraftJson, useDraftValue } from "../components/useDraft";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView, JobRecordList } from "../components/JobDetailView";
+import { TaskHistoryBlock, useJobResults } from "../components/TaskHistory";
+import type { JobResults } from "../components/TaskHistory";
 import { ActivityStream } from "../components/JobActivity";
 import { ProjectOverview } from "../components/ProjectOverview";
 import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
@@ -60,6 +62,7 @@ import {
   useVerificationHistory,
 } from "../components/TaskVerification";
 import { analysisThread } from "../presentation/analysisThread";
+import { taskHistory } from "../presentation/taskHistory";
 import { activitySignature, isNearBottom } from "../presentation/activity";
 import {
   TASK_FILTERS,
@@ -1482,6 +1485,28 @@ export function TaskDrawer({
     task.id,
     snapshotVersion,
   );
+  // 执行与验收历史按轮次对齐；结果摘要首行只在需要时读取作业详情，并缓存已读结果。
+  // 结果缓存按抽屉实例保存；抽屉按任务重建（见打开抽屉的 key），不会串任务。
+  const [jobResults, setJobResults] = useState<JobResults>({});
+  const historyResults = useJobResults(
+    jobs.filter((job) => job.role === "executor").map((job) => job.id),
+    jobResults,
+    setJobResults,
+    snapshotVersion,
+  );
+  const history = taskHistory(
+    jobs,
+    verificationHistory.history,
+    verificationHistory.state,
+    historyResults,
+  );
+  // 跳转到作业详情：记录目标作业与跳转序号，作业记录列表据此展示并展开该作业。
+  const [focusJob, setFocusJob] = useState<{ jobId: string; nonce: number }>({
+    jobId: "",
+    nonce: 0,
+  });
+  const jumpToJob = (jobId: string) =>
+    setFocusJob((current) => ({ jobId, nonce: current.nonce + 1 }));
 
   const artifactsReleasing = task.artifacts_released_at === ARTIFACTS_RELEASING;
   const artifactsReleased = Boolean(task.artifacts_released_at);
@@ -1606,21 +1631,27 @@ export function TaskDrawer({
     <ResultSummary taskId={task.id} summary={task.result_summary} jobs={jobs} />
   );
   const verificationSection = <VerificationRecapBlock recap={verificationRecapValue} />;
+  // 作业记录：从执行历史跳转时，目标作业即使不在最近几条也保持可见并展开。
   const jobsSection = (
     <section>
       <h3>作业（{jobs.length}）</h3>
       <JobRecordList
         jobs={jobs}
+        revealJobId={focusJob.jobId || null}
         renderJob={(job) => (
           <JobDetailView
             key={job.id}
             job={job}
             retryable={job.id === retryableJobId}
             onRetry={() => onRetryJob(job.id)}
+            focusNonce={job.id === focusJob.jobId ? focusJob.nonce : 0}
           />
         )}
       />
     </section>
+  );
+  const historySection = (
+    <TaskHistoryBlock history={history} onJumpToJob={jumpToJob} />
   );
   const feedbackSection =
     hasVerifierFeedback(task) ? (
@@ -1992,6 +2023,8 @@ export function TaskDrawer({
         return <div key={key}>{controlBlock}</div>;
       case "verification":
         return <div key={key}>{verificationSection}</div>;
+      case "history":
+        return <div key={key}>{historySection}</div>;
       case "milestone":
         return <div key={key}>{milestoneSection}</div>;
       case "result":

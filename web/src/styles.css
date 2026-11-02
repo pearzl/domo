@@ -3291,6 +3291,145 @@ button.event-job-title:hover:not(:disabled) {
   font-size: 0.8rem;
 }
 
+/* 执行与验收历史：按轮次纵向时间线排列，失败轮次带红色左侧标记。 */
+.drawer .task-history {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--bg);
+}
+
+.drawer .task-history .task-history-source,
+.drawer .task-history .task-history-count {
+  font-size: 0.8rem;
+}
+
+.drawer .task-history .task-history-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.drawer .task-history .task-history-filter[aria-pressed="true"] {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
+.drawer .task-history .task-history-note {
+  margin: 6px 0 0;
+  font-size: 0.82rem;
+}
+
+.drawer .task-history .task-history-rounds {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 14px;
+  position: relative;
+}
+
+/* 时间线主干：每轮一个圆点。 */
+.drawer .task-history .task-history-rounds::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--line);
+}
+
+.drawer .task-history .task-history-round {
+  position: relative;
+  padding: 4px 0 8px;
+  animation: motion-fade-in var(--motion-base) var(--motion-ease) both;
+}
+
+.drawer .task-history .task-history-round::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 12px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success, #2f855a);
+}
+
+.drawer .task-history .task-history-round.task-history-failed::before {
+  background: var(--danger, #c0392b);
+}
+
+.drawer .task-history .task-history-round-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-color) var(--motion-ease),
+    border-color var(--motion-color) var(--motion-ease);
+}
+
+.drawer .task-history .task-history-round-head:hover:not(:disabled) {
+  border-color: var(--line);
+  background: #fcfdff;
+}
+
+.drawer .task-history .task-history-round-head:disabled {
+  cursor: default;
+}
+
+.drawer .task-history .task-history-round-no {
+  font-weight: 600;
+}
+
+.drawer .task-history .task-history-result {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.drawer .task-history .task-history-body {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 0 10px;
+}
+
+.drawer .task-history .task-history-job {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 4px 8px;
+  font-size: 0.82rem;
+}
+
+.drawer .task-history .task-history-job-role {
+  font-weight: 600;
+}
+
+.drawer .task-history .task-history-job-line {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.drawer .task-history .task-history-reason {
+  margin: 4px 8px 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 /* 首区块与末尾配置区单独成组，避免与普通信息区块混排。 */
 .drawer-lead {
   border-top: 1px solid var(--line);
@@ -4835,6 +4974,7 @@ summary {
 
   /* 新条目：只淡入。 */
   .motion-fade,
+  .task-history-round,
   .activity-list > [data-activity-kind],
   .activity-list > [data-activity-block],
   .activity-reasoning-item,

@@ -23,7 +23,7 @@ import {
 const STDOUT_MARKER = "STDOUT_MARKER_a1b2c3";
 const STDERR_MARKER = "STDERR_MARKER_d4e5f6";
 
-function job(index: number): JobSummary {
+function job(index: number): JobSummary & { result?: string | null } {
   return {
     id: `job-${index}`,
     project_id: "p1",
@@ -48,6 +48,7 @@ function job(index: number): JobSummary {
     started_at: null,
     finished_at: null,
     created_at: "2026-01-10T10:00:00Z",
+    result: `第 ${index} 次执行结果`,
   };
 }
 

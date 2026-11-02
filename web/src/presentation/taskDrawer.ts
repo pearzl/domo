@@ -6,6 +6,7 @@ export type DrawerTailSection =
   | "control"
   | "result"
   | "verification"
+  | "history"
   | "milestone"
   | "description"
   | "acceptance"
@@ -81,6 +82,8 @@ export function drawerLayout(task: DrawerTaskInput): DrawerLayout {
   tail.push("verification");
   // 验收反馈只在验收者留下问题时出现，与验收标准分开并列。
   if (hasVerifierFeedback(task)) tail.push("feedback");
+  // 执行与验收历史汇总逐轮执行与验收作业，回答“每一轮发生了什么”。
+  tail.push("history");
   tail.push("derive", "deps");
 
   // 原始错误只保留一个默认收起的入口；有 gate 时由 gate 面板承载。

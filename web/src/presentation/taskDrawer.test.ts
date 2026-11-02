@@ -197,6 +197,18 @@ describe("drawerLayout 区块顺序", () => {
     expect(feedback).toBeLessThan(layout.tail.indexOf("deps"));
   });
 
+  it("执行与验收历史紧跟在验收摘要之后，且先于派生与依赖信息", () => {
+    for (const item of cases) {
+      const layout = drawerLayout(item.input);
+      expect(layout.tail.filter((entry) => entry === "history")).toHaveLength(1);
+      expect(layout.tail.indexOf("history")).toBeGreaterThan(
+        layout.tail.indexOf("verification"),
+      );
+      expect(layout.tail.indexOf("history")).toBeLessThan(layout.tail.indexOf("derive"));
+      expect(layout.tail.indexOf("history")).toBeLessThan(layout.tail.indexOf("deps"));
+    }
+  });
+
   it("结果摘要不重复：result 首区块时 tail 不再含 result", () => {
     expect(drawerLayout({ ...base, stage: "completed" }).tail).not.toContain("result");
   });
