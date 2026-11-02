@@ -5,15 +5,22 @@ import { TaskDrawer } from "./pages/ProjectPage";
 import { JobDetailView, JobRecordList, RECENT_JOB_LIMIT } from "./components/JobDetailView";
 import { TaskHistoryBlock } from "./components/TaskHistory";
 import {
+  TASK_HISTORY_EMPTY,
+  TASK_HISTORY_EXECUTION_EMPTY,
   TASK_HISTORY_FILTER_LABEL,
   TASK_HISTORY_FILTER_EMPTY,
   TASK_HISTORY_TITLE,
   taskHistory,
+  unlinkedVerifiersLabel,
 } from "./presentation/taskHistory";
 import type { VerificationHistory, VerificationRecord } from "./types";
 
 function at(minute: number): string {
   return `2026-01-10T10:${String(minute).padStart(2, "0")}:00Z`;
+}
+
+function beforeFirst(minute: number): string {
+  return `2026-01-10T09:${String(minute).padStart(2, "0")}:00Z`;
 }
 
 function job(
@@ -49,20 +56,6 @@ function job(
     ...overrides,
   };
 }
-
-/// 3 轮执行 2 轮验收：第 1 轮通过，第 2 轮拒绝，第 3 轮待验收。
-const HISTORY_JOBS: JobSummary[] = [
-  job("e1", "executor", 0),
-  job("v1", "verifier", 2),
-  job("e2", "executor", 5, { usage_known: false, duration_ms: null }),
-  job("v2", "verifier", 7, { status: "failed", error: "验收进程退出" }),
-  job("e3", "executor", 10),
-];
-
-const HISTORY_RESULTS = {
-  e1: "## 第一轮\n\n- 完成 A",
-  e2: "第二轮执行结果首行\n细节",
-};
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -135,7 +128,7 @@ function detail(tasks: Task[], jobs: JobSummary[] = []): ProjectDetail {
   } as unknown as ProjectDetail;
 }
 
-/// 验收记录：第 1 轮通过，第 2 轮拒绝。
+/// 验收记录：默认通过，可按需改为拒绝或未关联执行轮。
 function record(
   overrides: Partial<VerificationRecord> & { id: string; round: number },
 ): VerificationRecord {
@@ -149,7 +142,7 @@ function record(
     parse_error: null,
     raw_excerpt: null,
     agent_id: null,
-    agent_name: "验收者2",
+    agent_name: "验收者",
     started_at: null,
     finished_at: null,
     usage_known: true,
@@ -157,93 +150,201 @@ function record(
   };
 }
 
-const HISTORY_RECORDS: VerificationHistory = {
-  project_id: "p1",
-  task_id: "t1",
-  total: 2,
-  limit: 50,
-  truncated: false,
-  verifications: [
-    record({ id: "v1", round: 1 }),
-    record({ id: "v2", round: 2, passed: false, reason: "验收进程退出" }),
-  ],
-};
-
-function renderHistory(
-  history = taskHistory(HISTORY_JOBS, HISTORY_RECORDS, "ready", HISTORY_RESULTS),
-) {
-  return renderToStaticMarkup(<TaskHistoryBlock history={history} onJumpToJob={() => {}} />);
+function history(verifications: VerificationRecord[]): VerificationHistory {
+  return {
+    project_id: "p1",
+    task_id: "t1",
+    total: verifications.length,
+    limit: 50,
+    truncated: false,
+    verifications,
+  };
 }
 
-describe("TaskHistoryBlock 渲染", () => {
-  it("3 轮执行 2 轮验收渲染出 3 条轮次记录与“只看失败”筛选按钮", () => {
+const EXECUTION_RESULT = "第一轮执行结果首行\n更多细节";
+
+/// 一次执行 + 三次验收：拒绝、验收进程异常、最终通过，全部归入第 1 轮。
+function oneRoundHistory() {
+  return taskHistory(
+    [
+      job("e1", "executor", 0),
+      job("v1", "verifier", 2),
+      job("v2", "verifier", 3, {
+        status: "failed",
+        error: "验收进程异常退出",
+      }),
+      job("v3", "verifier", 4),
+    ],
+    history([
+      record({ id: "v1", round: 1, passed: false, reason: "缺少测试" }),
+      record({ id: "v3", round: 1, passed: true, reason: "补充测试后通过" }),
+    ]),
+    "ready",
+    { e1: EXECUTION_RESULT },
+  );
+}
+
+function renderHistory(value = oneRoundHistory()) {
+  return renderToStaticMarkup(<TaskHistoryBlock history={value} onJumpToJob={() => {}} />);
+}
+
+describe("TaskHistoryBlock 按执行轮渲染", () => {
+  it("一次执行 + 三次验收（两次失败）只渲染 1 个轮次并汇总本轮验收", () => {
     const markup = renderHistory();
     expect(markup).toContain(TASK_HISTORY_TITLE);
-    expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(3);
-    expect((markup.match(/class="task-history-round[ "]/g) ?? [])).toHaveLength(3);
-    expect(markup).toContain("第 1 轮");
-    expect(markup).toContain("第 2 轮");
-    expect(markup).toContain("第 3 轮");
+    expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(1);
+    expect((markup.match(/class="task-history-round[ "]/g) ?? [])).toHaveLength(1);
+    expect(markup).not.toContain("第 2 轮");
+    expect(markup).not.toContain("尚未产出结果");
+    expect(markup).toContain("1 个执行轮次 · 失败 1 轮");
+    expect(markup).toContain("验收 3 次");
+    expect(markup).toContain("失败 2 次");
+    expect(markup).toContain("最近通过");
+    expect(markup).toContain("第一轮执行结果首行");
+    expect(markup).not.toContain("## 第一轮");
     expect(markup).toContain(TASK_HISTORY_FILTER_LABEL);
-    expect(markup).toContain("<button");
-    expect(markup).toContain('aria-pressed="false"');
-    expect(markup).toContain("3 轮 · 失败 1 轮");
   });
 
-  it("每轮展示 Agent、状态、时长、用量是否已知、结果摘要首行与验收结论", () => {
+  it("轮内展开“本轮验收”，逐条展示验收者、尝试序号、状态与原因首行", () => {
     const markup = renderHistory();
+    expect(markup).toContain("本轮验收");
+    expect(markup).toContain("3 次尝试");
+    expect(markup).toContain("尝试 1");
+    expect(markup).toContain("尝试 2");
+    expect(markup).toContain("尝试 3");
+    expect((markup.match(/class="task-history-attempt"/g) ?? [])).toHaveLength(3);
+
+    const [first, second, third] = markup
+      .split('<li class="task-history-attempt"')
+      .slice(1);
+    expect(first).toContain("尝试 1");
+    expect(first).toContain("验收者2");
+    expect(first).toContain("拒绝");
+    expect(first).toContain("缺少测试");
+    expect(first).toContain("badge-danger");
+    expect(first).toContain('data-failed="true"');
+    expect(second).toContain("尝试 2");
+    expect(second).toContain("验收者3");
+    expect(second).toContain("验收异常");
+    expect(second).toContain("验收进程异常退出");
+    expect(second).toContain("badge-danger");
+    expect(second).toContain('data-failed="true"');
+    expect(third).toContain("尝试 3");
+    expect(third).toContain("验收者4");
+    expect(third).toContain("通过");
+    expect(third).toContain("badge-success");
+    expect(third).toContain('data-failed="false"');
+    expect(third).not.toContain("待验收");
+  });
+
+  it("执行结果首行缺失时使用“本次执行未产出结果”", () => {
+    const markup = renderHistory(taskHistory([job("e1", "executor", 0)], null, "loading"));
+    expect(markup).toContain(TASK_HISTORY_EXECUTION_EMPTY);
+    expect(markup).toContain("本次执行未产出结果");
+    expect(markup).not.toContain("尚未产出结果");
+    expect(markup).toContain("未验收");
+  });
+
+  it("两次执行两次验收渲染出第 1 轮与第 2 轮", () => {
+    const markup = renderHistory(
+      taskHistory(
+        [
+          job("e1", "executor", 0),
+          job("v1", "verifier", 2),
+          job("e2", "executor", 5),
+          job("v2", "verifier", 7),
+        ],
+        history([
+          record({ id: "v1", round: 1 }),
+          record({ id: "v2", round: 2, passed: false, reason: "缺少测试" }),
+        ]),
+        "ready",
+        { e1: "第一轮结果", e2: "第二轮结果" },
+      ),
+    );
+    expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(2);
+    expect(markup).toContain("第 1 轮");
+    expect(markup).toContain("第 2 轮");
+    expect(markup).toContain("2 个执行轮次 · 失败 1 轮");
+
     const first = markup.slice(
       markup.indexOf('id="task-round-1"'),
       markup.indexOf('id="task-round-2"'),
     );
-    expect(first).toContain("执行者0");
-    expect(first).toContain("成功");
-    expect(first).toContain("1 分");
-    expect(first).toContain("用量已知");
-    expect(first).toContain("第一轮");
-    expect(first).not.toContain("## 第一轮");
-    expect(first).toContain("通过");
-    expect(first).toContain("验收者2");
-
-    const second = markup.slice(
-      markup.indexOf('id="task-round-2"'),
-      markup.indexOf('id="task-round-3"'),
-    );
-    expect(second).toContain("用量未知");
-    expect(second).toContain("时长未知");
-    expect(second).toContain("第二轮执行结果首行");
-    expect(second).toContain("拒绝");
-    expect(second).toContain("验收原因：验收进程退出");
-
-    const third = markup.slice(markup.indexOf('id="task-round-3"'));
-    expect(third).toContain("未验收");
-    expect(third).toContain("尚未产出结果");
+    const second = markup.slice(markup.indexOf('id="task-round-2"'));
+    expect(first).toContain("第一轮结果");
+    expect(first).toContain("最近通过");
+    expect(second).toContain("第二轮结果");
+    expect(second).toContain("最近拒绝");
+    expect(second).toContain("缺少测试");
   });
 
-  it("没有失败轮次时筛选按钮不可用", () => {
-    const markup = renderToStaticMarkup(
-      <TaskHistoryBlock
-        history={taskHistory([HISTORY_JOBS[0], HISTORY_JOBS[1]], null, "loading")}
-        onJumpToJob={() => {}}
-      />,
+  it("未关联执行轮的验收作业在轮次列表上方给出数量与最近状态提示", () => {
+    const early = job("v0", "verifier", 0, { created_at: beforeFirst(59) });
+    const unanchored = job("v1", "verifier", 6, {
+      status: "failed",
+      error: "验收进程异常退出",
+    });
+    const value = taskHistory(
+      [job("e1", "executor", 5), early, unanchored],
+      history([record({ id: "v1", round: 0, passed: false, reason: "缺少测试" })]),
+      "ready",
     );
-    expect(markup).toContain(TASK_HISTORY_FILTER_LABEL);
-    expect(markup).toContain("disabled");
-    expect(markup).toContain("失败 0 轮");
+    expect(value.unlinkedVerifiers).toBe(2);
+    expect(value.unlinkedJobs.map((entry) => entry.id)).toEqual(["v0", "v1"]);
+
+    const markup = renderHistory(value);
+    expect(markup).toContain(unlinkedVerifiersLabel(2));
+    expect(markup).toContain("最近一次");
+    expect(markup).toContain("失败");
+    expect(markup).toContain("拒绝");
+    expect(markup).toContain("task-history-unlinked");
+    expect(markup.indexOf("task-history-unlinked")).toBeLessThan(
+      markup.indexOf('id="task-round-1"'),
+    );
   });
 
-  it("筛选后为空时给出空状态文案", () => {
+  it("没有作业时保留空状态且不显示筛选按钮", () => {
+    const markup = renderHistory(taskHistory([], null, "loading"));
+    expect(markup).toContain(TASK_HISTORY_EMPTY);
+    expect(markup).not.toContain(TASK_HISTORY_FILTER_LABEL);
+    expect(markup).not.toContain("task-history-round");
+  });
+
+  it("问题轮筛选按钮沿用“只看问题轮”并在没有问题时不可用", () => {
+    const failed = renderHistory();
+    expect(failed).toContain(TASK_HISTORY_FILTER_LABEL);
+    expect(failed).toContain('aria-pressed="false"');
+    expect(failed).not.toContain('disabled=""');
+
+    const passed = renderHistory(
+      taskHistory(
+        [job("e1", "executor", 0), job("v1", "verifier", 2)],
+        history([record({ id: "v1", round: 1 })]),
+        "ready",
+      ),
+    );
+    expect(passed).toContain("失败 0 轮");
+    expect(passed).toContain("disabled");
     expect(TASK_HISTORY_FILTER_EMPTY).toBe("没有失败的轮次。");
   });
 });
 
 describe("TaskDrawer 执行与验收历史", () => {
-  it("执行历史位于验收摘要之后，渲染出 3 轮记录", () => {
+  it("执行历史位于验收摘要之后，按执行轮渲染", () => {
     const current = task({ stage: "verifying" });
     const markup = renderToStaticMarkup(
       <TaskDrawer
         task={current}
-        detail={detail([current], HISTORY_JOBS)}
+        detail={detail(
+          [current],
+          [
+            job("e1", "executor", 0),
+            job("v1", "verifier", 2),
+            job("v2", "verifier", 3, { status: "failed", error: "验收进程异常退出" }),
+            job("v3", "verifier", 4),
+          ],
+        )}
         onClose={() => {}}
         onRetry={() => {}}
         onRetryJob={() => {}}
@@ -259,12 +360,12 @@ describe("TaskDrawer 执行与验收历史", () => {
     expect(markup.indexOf('data-drawer-block="history"')).toBeGreaterThan(
       markup.indexOf('data-drawer-block="verification"'),
     );
-    expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(3);
+    expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(1);
+    expect(markup).toContain("验收 3 次");
     expect(markup).toContain(TASK_HISTORY_FILTER_LABEL);
     // 不新增写操作：执行历史区块内只有筛选与跳转按钮。
     const start = markup.indexOf('data-drawer-block="history"');
     const section = markup.slice(start, markup.indexOf("</section>", start));
-    // 唯一的写操作入口是“只看失败”筛选；跳转只改变本地展开状态。
     expect((section.match(/<button/g) ?? []).length).toBeGreaterThan(0);
     expect(section).not.toContain("保存");
     expect(section).not.toContain("重试");
@@ -331,7 +432,10 @@ describe("从执行历史跳转到作业详情", () => {
         )}
       />,
     );
-    const details = markup.slice(markup.indexOf("<details"), markup.indexOf(">", markup.indexOf("<details")) + 1);
+    const details = markup.slice(
+      markup.indexOf("<details"),
+      markup.indexOf(">", markup.indexOf("<details")) + 1,
+    );
     expect(details).toContain("open");
     expect(markup).toContain("作业活动");
   });

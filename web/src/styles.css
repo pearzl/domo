@@ -3309,6 +3309,41 @@ button.event-job-title:hover:not(:disabled) {
   color: var(--danger, #c0392b);
 }
 
+.drawer .task-history .task-history-unlinked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--motion-color) var(--motion-ease);
+}
+
+.drawer .task-history .task-history-unlinked:hover {
+  border-color: var(--warn);
+}
+
+.drawer .task-history .task-history-unlinked-text {
+  font-size: 0.82rem;
+  color: var(--warn);
+}
+
+.drawer .task-history .task-history-unlinked-state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 0.8rem;
+}
+
 .drawer .task-history .task-history-note {
   margin: 6px 0 0;
   font-size: 0.82rem;
@@ -3353,12 +3388,14 @@ button.event-job-title:hover:not(:disabled) {
   background: var(--danger, #c0392b);
 }
 
+/* 轮次头两行：首行编号、徽标与验收汇总，次行执行结果首行。 */
 .drawer .task-history .task-history-round-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   width: 100%;
+  min-width: 0;
   padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -3381,13 +3418,28 @@ button.event-job-title:hover:not(:disabled) {
   cursor: default;
 }
 
+.drawer .task-history .task-history-round-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
 .drawer .task-history .task-history-round-no {
   font-weight: 600;
 }
 
-.drawer .task-history .task-history-result {
+.drawer .task-history .task-history-round-summary {
   flex: 1 1 220px;
   min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.drawer .task-history .task-history-round-result {
+  min-width: 0;
+  font-size: 0.84rem;
   overflow-wrap: anywhere;
 }
 
@@ -3395,31 +3447,98 @@ button.event-job-title:hover:not(:disabled) {
   display: grid;
   gap: 4px;
   margin: 2px 0 0 10px;
+  min-width: 0;
 }
 
-.drawer .task-history .task-history-job {
+.drawer .task-history .task-history-attempts-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 10px;
-  padding: 4px 8px;
-  font-size: 0.82rem;
+  gap: 4px 8px;
+  padding: 0 8px;
+  font-size: 0.8rem;
 }
 
-.drawer .task-history .task-history-job-role {
+.drawer .task-history .task-history-attempts-title {
   font-weight: 600;
 }
 
-.drawer .task-history .task-history-job-line {
-  flex: 1 1 200px;
+.drawer .task-history .task-history-attempts {
+  display: grid;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.drawer .task-history .task-history-attempt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
   min-width: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+.drawer .task-history .task-history-attempt[data-failed="true"] {
+  background: var(--danger-soft);
+}
+
+.drawer .task-history .task-history-attempt-no {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.drawer .task-history .task-history-attempt-agent {
+  min-width: 0;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
-.drawer .task-history .task-history-reason {
-  margin: 4px 8px 0;
-  font-size: 0.82rem;
+.drawer .task-history .task-history-attempt-reason {
+  flex: 1 1 200px;
+  min-width: 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.drawer .task-history .task-history-attempt-empty {
+  margin: 0 8px;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 720px) {
+  .drawer .task-history {
+    padding: 12px;
+  }
+
+  .drawer .task-history .task-history-round-head {
+    padding: 6px 8px;
+  }
+
+  .drawer .task-history .task-history-round-title {
+    gap: 4px 6px;
+  }
+
+  .drawer .task-history .task-history-round-summary,
+  .drawer .task-history .task-history-attempt-reason {
+    flex-basis: 100%;
+  }
+
+  .drawer .task-history .task-history-body {
+    margin-left: 6px;
+  }
+
+  .drawer .task-history .task-history-attempt {
+    padding: 4px 6px;
+  }
+
+  .drawer .task-history .task-history-unlinked {
+    padding: 6px 8px;
+  }
 }
 
 /* 首区块与末尾配置区单独成组，避免与普通信息区块混排。 */
