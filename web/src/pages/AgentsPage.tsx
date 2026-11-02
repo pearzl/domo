@@ -1,20 +1,30 @@
+/**
+ * Agent 团队页。列表承载全部 Agent 卡片，新建与编辑共用一个侧滑编辑面板，
+ * 面板浮在视口上，列表再长也不会把表单挤出可见范围。
+ *
+ * 人工核对清单（编辑面板始终可得）：
+ * 1. 进入 Agent 团队页，创建 6 个以上 Agent，使列表超出一屏。
+ * 2. 滚动到列表底部，点击最后一个 Agent 卡片上的「编辑」。
+ * 3. 编辑面板从右侧浮出并完整可见，顶部为「基本/调度/限额/命令」四个分段。
+ * 4. 直接修改字段并保存，卡片数据立即更新；关闭面板后焦点回到刚才的「编辑」按钮。
+ * 5. 点击右上角「添加 Agent」，打开的是同一个面板，分段与字段一致，保存后新增卡片。
+ * 6. 面板内按 Tab 只在面板内环绕，Esc 或点击遮罩关闭面板。
+ */
 import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import type {
-  Agent,
-  AgentAvailability,
-  AgentInput,
-  AgentKind,
-  AgentUsageLimit,
-  DefaultTeamPool,
-  Role,
-  UsageMetric,
-  UsageWindowKind,
-} from "../types";
+import type { Agent, AgentInput, DefaultTeamPool } from "../types";
 import { api, errorMessage } from "../api";
 import { AgentCard } from "../components/AgentCard";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
-import { InputBox } from "../components/InputBox";
+import {
+  AgentFormPanel,
+  buildAvailability,
+  buildUsageLimit,
+  emptyForm,
+  formForAgent,
+  isAgentFormDraft,
+  parseJsonArray,
+} from "../components/AgentFormPanel";
+import type { AgentFormState } from "../components/AgentFormPanel";
 import {
   browserDraftStorage,
   clearDraft,
@@ -24,68 +34,9 @@ import {
 } from "../presentation/draft";
 import { Empty, ErrorBox } from "../ui";
 
-// 供其它模块与测试直接从页面取到卡片组件。
+// 供其它模块与测试直接从页面取到卡片与编辑面板组件。
 export { AgentCard } from "../components/AgentCard";
-
-const ALL_ROLES: Role[] = ["planner", "executor", "verifier"];
-const ROLE_TEXT: Record<Role, string> = {
-  planner: "规划者",
-  executor: "执行者",
-  verifier: "验收者",
-};
-const DAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-
-interface SlotState {
-  enabled: boolean;
-  start: string;
-  end: string;
-}
-
-interface FormState {
-  name: string;
-  kind: AgentKind;
-  model: string;
-  roles: Role[];
-  maxConcurrency: string;
-  allowPriorityFallback: boolean;
-  enabled: boolean;
-  command: string;
-  modelArgs: string;
-  availabilityEnabled: boolean;
-  slots: SlotState[];
-  usageLimitEnabled: boolean;
-  usageMetric: UsageMetric;
-  usageWindow: UsageWindowKind;
-  usageLimit: string;
-}
-
-function emptySlots(): SlotState[] {
-  return DAY_LABELS.map((_, index) => ({
-    enabled: false,
-    start: index < 5 ? "09:00" : "10:00",
-    end: index < 5 ? "18:00" : "16:00",
-  }));
-}
-
-function emptyForm(): FormState {
-  return {
-    name: "",
-    kind: "opencode",
-    model: "",
-    roles: [...ALL_ROLES],
-    maxConcurrency: "2",
-    allowPriorityFallback: false,
-    enabled: true,
-    command: "",
-    modelArgs: "",
-    availabilityEnabled: false,
-    slots: emptySlots(),
-    usageLimitEnabled: false,
-    usageMetric: "tokens",
-    usageWindow: "day",
-    usageLimit: "100000",
-  };
-}
+export { AgentFormPanel } from "../components/AgentFormPanel";
 
 function newAgentDraftKey(): string {
   return draftStorageKey({ field: "agent-form:new" });
@@ -96,42 +47,7 @@ function agentDraftKey(agentId: string): string {
   return draftStorageKey({ field: `agent-form:${agentId}` });
 }
 
-function isSlotState(value: unknown): value is SlotState {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.enabled === "boolean" &&
-    typeof record.start === "string" &&
-    typeof record.end === "string"
-  );
-}
-
-function isAgentFormDraft(value: unknown): value is FormState {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.name === "string" &&
-    typeof record.kind === "string" &&
-    typeof record.model === "string" &&
-    Array.isArray(record.roles) &&
-    record.roles.every((role) => ALL_ROLES.includes(role as Role)) &&
-    typeof record.maxConcurrency === "string" &&
-    typeof record.allowPriorityFallback === "boolean" &&
-    typeof record.enabled === "boolean" &&
-    typeof record.command === "string" &&
-    typeof record.modelArgs === "string" &&
-    typeof record.availabilityEnabled === "boolean" &&
-    Array.isArray(record.slots) &&
-    record.slots.length === DAY_LABELS.length &&
-    record.slots.every(isSlotState) &&
-    typeof record.usageLimitEnabled === "boolean" &&
-    typeof record.usageMetric === "string" &&
-    typeof record.usageWindow === "string" &&
-    typeof record.usageLimit === "string"
-  );
-}
-
-function readAgentFormDraft(key: string): FormState | null {
+function readAgentFormDraft(key: string): AgentFormState | null {
   const raw = readDraft(browserDraftStorage(), key);
   if (raw === null) return null;
   try {
@@ -142,42 +58,13 @@ function readAgentFormDraft(key: string): FormState | null {
   }
 }
 
-function formForAgent(agent: Agent): FormState {
-  const slots = emptySlots();
-  agent.availability?.slots.forEach((slot) => {
-    if (slot.weekday >= 1 && slot.weekday <= 7) {
-      slots[slot.weekday - 1] = {
-        enabled: true,
-        start: slot.start,
-        end: slot.end,
-      };
-    }
-  });
-  return {
-    name: agent.name,
-    kind: agent.kind,
-    model: agent.model,
-    roles: agent.roles,
-    maxConcurrency: String(agent.max_concurrency),
-    allowPriorityFallback: Boolean(agent.allow_priority_fallback),
-    enabled: agent.enabled,
-    command: agent.command.length ? JSON.stringify(agent.command) : "",
-    modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
-    availabilityEnabled: Boolean(agent.availability?.enabled),
-    slots,
-    usageLimitEnabled: Boolean(agent.usage_limit?.enabled),
-    usageMetric: agent.usage_limit?.metric ?? "tokens",
-    usageWindow: agent.usage_limit?.window ?? "day",
-    usageLimit: agent.usage_limit ? String(agent.usage_limit.limit) : "100000",
-  };
-}
-
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [team, setTeam] = useState<DefaultTeamPool | null>(null);
-  const [error, setError] = useState("");
+  const [pageError, setPageError] = useState("");
+  const [formError, setFormError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState<FormState>(emptyForm);
+  const [form, setForm] = useState<AgentFormState>(emptyForm);
   const [editing, setEditing] = useState<Agent | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -191,9 +78,9 @@ export function AgentsPage() {
       ]);
       setAgents(agentList);
       setTeam(defaultTeam);
-      setError("");
+      setPageError("");
     } catch (err) {
-      setError(errorMessage(err));
+      setPageError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -205,17 +92,19 @@ export function AgentsPage() {
 
   function startCreate() {
     setEditing(null);
+    setFormError("");
     setForm(readAgentFormDraft(newAgentDraftKey()) ?? emptyForm());
     setShowForm(true);
   }
 
   function startEdit(agent: Agent) {
     setEditing(agent);
+    setFormError("");
     setForm(readAgentFormDraft(agentDraftKey(agent.id)) ?? formForAgent(agent));
     setShowForm(true);
   }
 
-  // 表单打开期间持续保存草稿；提交成功或取消后不再写入。
+  // 面板打开期间持续保存草稿；提交成功或取消后不再写入。
   useEffect(() => {
     if (!showForm) return;
     writeDraftJson(
@@ -230,10 +119,9 @@ export function AgentsPage() {
     setShowForm(false);
   }
 
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
+  async function handleSubmit() {
     setSaving(true);
-    setError("");
+    setFormError("");
     try {
       const availability = buildAvailability(form);
       const usageLimit = buildUsageLimit(form);
@@ -262,7 +150,7 @@ export function AgentsPage() {
       setShowForm(false);
       await refresh();
     } catch (err) {
-      setError(errorMessage(err));
+      setFormError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -273,18 +161,18 @@ export function AgentsPage() {
       await api.updateAgent(agent.id, { enabled: !agent.enabled });
       await refresh();
     } catch (err) {
-      setError(errorMessage(err));
+      setPageError(errorMessage(err));
     }
   }
 
   async function resetUsage(agent: Agent) {
     setBusyId(agent.id);
-    setError("");
+    setPageError("");
     try {
       await api.resetAgentUsage(agent.id);
       await refresh();
     } catch (err) {
-      setError(errorMessage(err));
+      setPageError(errorMessage(err));
     } finally {
       setBusyId("");
     }
@@ -293,33 +181,15 @@ export function AgentsPage() {
   async function removeAgent(agent: Agent) {
     if (!window.confirm(`删除 Agent「${agent.name}」？`)) return;
     setBusyId(agent.id);
-    setError("");
+    setPageError("");
     try {
       await api.deleteAgent(agent.id);
       await refresh();
     } catch (err) {
-      setError(errorMessage(err));
+      setPageError(errorMessage(err));
     } finally {
       setBusyId("");
     }
-  }
-
-  function toggleRole(role: Role) {
-    setForm((current) => ({
-      ...current,
-      roles: current.roles.includes(role)
-        ? current.roles.filter((item) => item !== role)
-        : [...current.roles, role],
-    }));
-  }
-
-  function updateSlot(index: number, patch: Partial<SlotState>) {
-    setForm((current) => ({
-      ...current,
-      slots: current.slots.map((slot, position) =>
-        position === index ? { ...slot, ...patch } : slot,
-      ),
-    }));
   }
 
   return (
@@ -337,7 +207,7 @@ export function AgentsPage() {
         </button>
       </header>
 
-      {error ? <ErrorBox message={error} /> : null}
+      {pageError ? <ErrorBox message={pageError} /> : null}
 
       {loading ? (
         <section className="panel">
@@ -365,253 +235,6 @@ export function AgentsPage() {
         />
       ) : null}
 
-      {showForm ? (
-        <form className="panel form" onSubmit={handleSubmit}>
-          <div className="form-grid">
-            <label>
-              <span>名称</span>
-              <input
-                value={form.name}
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-                required
-              />
-            </label>
-            <label>
-              <span>类型</span>
-              <select
-                value={form.kind}
-                onChange={(event) =>
-                  setForm({ ...form, kind: event.target.value as AgentKind })
-                }
-              >
-                <option value="opencode">opencode CLI</option>
-                <option value="codex">Codex CLI</option>
-                <option value="workbuddy">WorkBuddy CLI</option>
-                <option value="mock">mock（测试）</option>
-                <option value="cli">自定义 CLI</option>
-              </select>
-            </label>
-            <label>
-              <span>模型（可留空使用 CLI 默认）</span>
-              <input
-                value={form.model}
-                onChange={(event) => setForm({ ...form, model: event.target.value })}
-                placeholder="例如 gpt-5-codex、deepseek-v4-pro；留空使用 CLI 默认"
-              />
-            </label>
-            <label>
-              <span>最大并发</span>
-              <input
-                type="number"
-                min={1}
-                value={form.maxConcurrency}
-                onChange={(event) =>
-                  setForm({ ...form, maxConcurrency: event.target.value })
-                }
-              />
-            </label>
-            <label className="checkbox-label">
-              <span>启用</span>
-              <input
-                type="checkbox"
-                checked={form.enabled}
-                onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-              />
-            </label>
-          </div>
-
-          <div className="field">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.allowPriorityFallback}
-                onChange={(event) =>
-                  setForm({ ...form, allowPriorityFallback: event.target.checked })
-                }
-              />
-              <span>并发已满时让位</span>
-            </label>
-            <small className="muted">
-              开启后该 Agent 达到最大并发时，新作业交给同角色下一优先级 Agent；默认关闭，关闭时排队等待该 Agent 释放。
-            </small>
-          </div>
-
-          <div className="field">
-            <span className="field-label">角色</span>
-            <div className="checkbox-row">
-              {ALL_ROLES.map((role) => (
-                <label key={role} className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={form.roles.includes(role)}
-                    onChange={() => toggleRole(role)}
-                  />
-                  <span>{ROLE_TEXT[role]}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="field">
-            <span className="field-label">可用时段（本地时区）</span>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.availabilityEnabled}
-                onChange={(event) =>
-                  setForm({ ...form, availabilityEnabled: event.target.checked })
-                }
-              />
-              <span>按每周时段限制派发</span>
-            </label>
-            {form.availabilityEnabled ? (
-              <div className="schedule-grid">
-                {DAY_LABELS.map((day, index) => {
-                  const slot = form.slots[index];
-                  return (
-                    <div className="schedule-row" key={day}>
-                      <label className="checkbox-label">
-                        <input
-                          type="checkbox"
-                          checked={slot.enabled}
-                          onChange={(event) =>
-                            updateSlot(index, { enabled: event.target.checked })
-                          }
-                        />
-                        <span>{day}</span>
-                      </label>
-                      <input
-                        type="time"
-                        value={slot.start}
-                        disabled={!slot.enabled}
-                        onChange={(event) =>
-                          updateSlot(index, { start: event.target.value })
-                        }
-                      />
-                      <span className="muted">至</span>
-                      <input
-                        type="time"
-                        value={slot.end}
-                        disabled={!slot.enabled}
-                        onChange={(event) =>
-                          updateSlot(index, { end: event.target.value })
-                        }
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <small className="muted">未配置时段时全天可用。</small>
-            )}
-          </div>
-
-          <div className="field">
-            <span className="field-label">用量限额</span>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.usageLimitEnabled}
-                onChange={(event) =>
-                  setForm({ ...form, usageLimitEnabled: event.target.checked })
-                }
-              />
-              <span>达到限额后自动暂停派发</span>
-            </label>
-            {form.usageLimitEnabled ? (
-              <div className="form-grid usage-form-grid">
-                <label>
-                  <span>计量维度</span>
-                  <select
-                    value={form.usageMetric}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        usageMetric: event.target.value as UsageMetric,
-                      })
-                    }
-                  >
-                    <option value="tokens">token（输入+输出）</option>
-                    <option value="input_tokens">输入 token</option>
-                    <option value="output_tokens">输出 token</option>
-                    <option value="cost">费用</option>
-                  </select>
-                </label>
-                <label>
-                  <span>统计窗口</span>
-                  <select
-                    value={form.usageWindow}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        usageWindow: event.target.value as UsageWindowKind,
-                      })
-                    }
-                  >
-                    <option value="day">每日</option>
-                    <option value="month">每月</option>
-                  </select>
-                </label>
-                <label>
-                  <span>限额</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={form.usageLimit}
-                    onChange={(event) =>
-                      setForm({ ...form, usageLimit: event.target.value })
-                    }
-                  />
-                </label>
-              </div>
-            ) : (
-              <small className="muted">
-                未记录用量的作业不会扣减限额。
-              </small>
-            )}
-          </div>
-
-          {form.kind === "cli" ? (
-            <div className="form-grid">
-              <div className="field">
-                <span className="field-label">命令模板（JSON 数组）</span>
-                <InputBox
-                  value={form.command}
-                  onChange={(next) => setForm({ ...form, command: next })}
-                  rows={3}
-                  maxAutoGrowChars={420}
-                  placeholder={'["codex","exec","--json","{model_args}","-"]'}
-                />
-                <small>
-                  支持占位符：{"{prompt}"}、{"{job_dir}"}、{"{cwd}"}、{"{model}"}、
-                  {"{model_args}"}。没有 {"{prompt}"} 时提示词走 stdin。
-                </small>
-              </div>
-              <div className="field">
-                <span className="field-label">模型参数模板（JSON 数组）</span>
-                <InputBox
-                  value={form.modelArgs}
-                  onChange={(next) => setForm({ ...form, modelArgs: next })}
-                  rows={3}
-                  maxAutoGrowChars={320}
-                  placeholder={'["-m","{model}"]'}
-                />
-              </div>
-            </div>
-          ) : null}
-
-          <div className="form-actions">
-            <button className="primary" type="submit" disabled={saving}>
-              {saving ? "保存中…" : "保存"}
-            </button>
-            <button className="ghost" type="button" onClick={closeForm}>
-              取消
-            </button>
-          </div>
-        </form>
-      ) : null}
-
       <div className="agent-grid">
         {!loading && agents.length === 0 ? (
           <Empty
@@ -632,43 +255,18 @@ export function AgentsPage() {
           ))
         )}
       </div>
+
+      {showForm ? (
+        <AgentFormPanel
+          agent={editing}
+          form={form}
+          saving={saving}
+          error={formError}
+          onChange={setForm}
+          onSubmit={() => void handleSubmit()}
+          onClose={closeForm}
+        />
+      ) : null}
     </div>
   );
-}
-
-function buildAvailability(form: FormState): AgentAvailability | null {
-  if (!form.availabilityEnabled) return null;
-  const slots = form.slots.flatMap((slot, index) =>
-    slot.enabled
-      ? [{ weekday: index + 1, start: slot.start, end: slot.end }]
-      : [],
-  );
-  if (slots.length === 0) {
-    throw new Error("启用可用时段时至少选择一天");
-  }
-  return { enabled: true, slots };
-}
-
-function buildUsageLimit(form: FormState): AgentUsageLimit | null {
-  if (!form.usageLimitEnabled) return null;
-  const limit = Number(form.usageLimit);
-  if (!Number.isFinite(limit) || limit <= 0) {
-    throw new Error("启用用量限额时限额必须大于 0");
-  }
-  return {
-    enabled: true,
-    metric: form.usageMetric,
-    window: form.usageWindow,
-    limit,
-  };
-}
-
-function parseJsonArray(raw: string): string[] {
-  const value = raw.trim();
-  if (!value) return [];
-  const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
-    throw new Error("命令模板必须是字符串数组");
-  }
-  return parsed;
 }

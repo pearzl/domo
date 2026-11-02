@@ -3252,6 +3252,72 @@ summary {
   width: 120px;
 }
 
+/* Agent 编辑面板：贴靠视口右侧的浮层，内容区自行滚动，保存按钮固定在底部。 */
+.agent-form-drawer {
+  width: min(560px, 100%);
+}
+
+.agent-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent-form-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.agent-form-section {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--surface-soft, rgba(15, 23, 42, 0.02));
+}
+
+.agent-form-section > summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-form-section > summary::before {
+  content: "▸";
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--muted);
+}
+
+.agent-form-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.agent-form-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.agent-form-actions {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-form-section > summary::before {
+    transition: none;
+  }
+}
+
 .usage-form-grid {
   margin-top: 8px;
 }
