@@ -11,7 +11,7 @@
  * 6. 概览里的用量摘要显示作业数、token、费用、时长与覆盖；没有记录的指标显示“—”，
  *    “查看用量明细”带着项目过滤跳到用量页；项目页不再有独立的用量面板。
  */
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   ArbitrationContext,
@@ -28,7 +28,7 @@ import { InputBox } from "../components/InputBox";
 import { useDraftJson, useDraftValue } from "../components/useDraft";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobDetailView, JobRecordList } from "../components/JobDetailView";
-import { LiveOutput } from "../components/LiveOutput";
+import { ActivityStream } from "../components/JobActivity";
 import { ProjectOverview } from "../components/ProjectOverview";
 import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
 import { ProjectHeader } from "../components/ProjectHeader";
@@ -36,12 +36,10 @@ import { ProjectTabs, tabButtonId, tabPanelId } from "../components/ProjectTabs"
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import { isReordableQueueTask, reordableQueueIds } from "../taskQueue";
-import {
-  ACTIVITY_WAITING_TEXT,
-  activityDigest,
-  type ActivityDigestItem,
-} from "../presentation/activity";
+import { useAlignedNow } from "../clock";
+import { useJobActivity } from "../useJobActivity";
 import { analysisThread } from "../presentation/analysisThread";
+import { activitySignature, isNearBottom } from "../presentation/activity";
 import {
   TASK_FILTERS,
   type TaskFilter,
@@ -1432,189 +1430,91 @@ function latestFailedJobId(jobs: JobSummary[]): string | null {
   return last?.status === "failed" ? last.id : null;
 }
 
-/// 实时区默认展示的消息条数；关键状态（失败与进行中的工具）另计。
-export const LIVE_MESSAGE_LIMIT = 4;
-const LIVE_ACTIVITY_REFRESH_MS = 1500;
-
-export interface LiveActivityFeed {
-  /// 最新一条可读活动，用于“正在做什么”的一句话摘要。
-  headline: string | null;
-  /// 最近的消息，最新在后。
-  messages: ActivityDigestItem[];
-  /// 最近的关键状态：失败与进行中的工具，最新在后。
-  keys: ActivityDigestItem[];
-  /// 未展开时被省略的条数；0 表示全部可见。
-  hidden: number;
-  /// 没有任何可读摘要时展示的等待文案。
-  waiting: string | null;
-}
-
-/// 从活动摘要派生实时区内容：消息给读者看，失败与进行中的工具作为关键状态。
-/// 纯派生，不发请求，不改变事件轮询频率。
-export function liveActivityFeed(
-  items: ActivityDigestItem[],
-  expanded = false,
-  limit: number = LIVE_MESSAGE_LIMIT,
-): LiveActivityFeed {
-  const messages = items.filter((entry) => entry.kind === "message");
-  const keys = items.filter((entry) => entry.tone !== "normal");
-  const all = expanded || limit <= 0;
-  const visibleMessages = all
-    ? messages
-    : messages.slice(Math.max(0, messages.length - limit));
-  const visibleKeys = all ? keys : keys.slice(Math.max(0, keys.length - limit));
-  const shown = visibleMessages.length + visibleKeys.length;
-  return {
-    // 优先取最新消息；只有工具活动时退回到最新一条活动，避免误报“等待活动”。
-    headline: messages.at(-1)?.text ?? items.at(-1)?.text ?? null,
-    messages: visibleMessages,
-    keys: visibleKeys,
-    hidden: Math.max(0, items.length - shown),
-    waiting: items.length === 0 ? ACTIVITY_WAITING_TEXT : null,
-  };
-}
-
 /**
- * 项目分析运行中的实时区：展示 JobActivity 的可读摘要，而不是原始 stdout。
- * 原始输出收在默认收起的“原始输出”折叠里，展开才加载完整 stdout / stderr。
+ * 项目分析运行中的实时区：与作业活动共享思维链主视图、固定节拍时间与紧凑分组。
+ * 只读取活动投影，不改接口与 stdout/stderr 存储。
  */
 function AnalysisLiveActivity({ jobId }: { jobId: string }) {
-  const [activity, setActivity] = useState<JobActivity | null>(null);
-  const [error, setError] = useState("");
-  const [expanded, setExpanded] = useState(false);
-  const [rawOpen, setRawOpen] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-
-    async function tick() {
-      try {
-        const next = await api.getJobActivity(jobId);
-        if (cancelled) return;
-        setActivity(next);
-        setError("");
-      } catch (err) {
-        if (cancelled) return;
-        setError(errorMessage(err));
-      }
-      if (!cancelled) {
-        timer = window.setTimeout(() => void tick(), LIVE_ACTIVITY_REFRESH_MS);
-      }
-    }
-
-    void tick();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [jobId]);
-
-  const items = useMemo(
-    () => activityDigest(activity, { limit: 0 }).items,
-    [activity],
-  );
-  const feed = useMemo(() => liveActivityFeed(items, expanded), [items, expanded]);
-  const summary = activity?.summary ?? null;
-
+  const { activity, loading, error, lastUpdatedAt } = useJobActivity(jobId, true);
+  const now = useAlignedNow();
   return (
     <LiveActivitySummary
-      feed={feed}
-      summary={summary}
-      loading={activity === null && !error}
+      activity={activity}
+      loading={loading}
       error={error}
-      rawOpen={rawOpen}
-      onRawToggle={(open) => setRawOpen(open)}
-      onExpand={() => setExpanded(true)}
-      jobId={jobId}
+      lastUpdatedAt={lastUpdatedAt}
+      now={now}
+      running
     />
   );
 }
 
 /**
- * 实时区的纯展示部分：可读摘要列表 + 默认收起的“原始输出”折叠。
- * 折叠未展开时不挂载 LiveOutput，DOM 里不会出现 stdout / stderr。
+ * 实时区的纯展示部分：思维链默认展开并自动跟随最新内容，
+ * 工具与步骤收进紧凑分组；不提供 stdout/stderr 入口。
  */
 export function LiveActivitySummary({
-  feed,
-  summary,
+  activity,
+  running,
+  now,
+  lastUpdatedAt,
   loading,
   error,
-  rawOpen,
-  onRawToggle,
-  onExpand,
-  jobId,
 }: {
-  feed: LiveActivityFeed;
-  summary: JobActivity["summary"] | null;
+  activity: JobActivity | null;
+  running: boolean;
+  now: number;
+  lastUpdatedAt: number | null;
   loading: boolean;
   error: string;
-  rawOpen: boolean;
-  onRawToggle: (open: boolean) => void;
-  onExpand: () => void;
-  jobId: string;
 }) {
+  const [following, setFollowing] = useState(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followingRef = useRef(true);
+  const signature = useMemo(() => activitySignature(activity), [activity]);
+
+  useLayoutEffect(() => {
+    if (!followingRef.current) return;
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [signature]);
+
+  function handleScroll() {
+    const element = scrollRef.current;
+    if (!element) return;
+    const atBottom = isNearBottom(
+      element.scrollHeight,
+      element.scrollTop,
+      element.clientHeight,
+    );
+    followingRef.current = atBottom;
+    setFollowing(atBottom);
+  }
+
+  function followLatest() {
+    followingRef.current = true;
+    setFollowing(true);
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }
+
   return (
     <div className="message message-planner live-message">
       <div className="message-role">规划者（实时进展）</div>
-      <div className="live-activity">
-        <div className="live-activity-head">
-          {feed.headline ? (
-            <div className="live-activity-headline">{feed.headline}</div>
-          ) : (
-            <div className="muted">{feed.waiting ?? ACTIVITY_WAITING_TEXT}</div>
-          )}
-          <span className="live-activity-meta muted">
-            运行中 · 每 1.5 秒刷新
-            {summary
-              ? ` · 消息 ${summary.messages} · 工具 ${summary.tool_calls} · 失败 ${summary.tool_failures}`
-              : ""}
-          </span>
-        </div>
-        {loading ? <div className="muted">加载活动…</div> : null}
-        {error ? <div className="error-box">读取活动失败：{error}</div> : null}
-        {feed.messages.length > 0 || feed.keys.length > 0 ? (
-          <ul className="live-activity-list">
-            {feed.keys.map((entry) => (
-              <li
-                key={`key-${entry.index}`}
-                className={`live-activity-item live-activity-${entry.tone}`}
-              >
-                <Badge tone={entry.tone === "failure" ? "danger" : "info"}>
-                  {entry.tone === "failure" ? "失败" : "进行中"}
-                </Badge>
-                <span>{entry.text}</span>
-              </li>
-            ))}
-            {feed.messages.map((entry) => (
-              <li key={`msg-${entry.index}`} className="live-activity-item">
-                <span className="live-activity-index">消息</span>
-                <span>{entry.text}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {feed.hidden > 0 ? (
-          <div className="button-row live-activity-more">
-            <button className="ghost" type="button" onClick={onExpand}>
-              展开全部（还有 {feed.hidden} 条）
-            </button>
-          </div>
-        ) : null}
-        <details
-          className="activity-raw live-activity-raw"
-          onToggle={(event) => onRawToggle(event.currentTarget.open)}
-        >
-          <summary>原始输出</summary>
-          <div className="activity-raw-body">
-            {rawOpen ? (
-              <LiveOutput jobId={jobId} running />
-            ) : (
-              <div className="muted">展开后加载完整 stdout / stderr。</div>
-            )}
-          </div>
-        </details>
-      </div>
+      <ActivityStream
+        activity={activity}
+        running={running}
+        following={following}
+        now={now}
+        lastUpdatedAt={lastUpdatedAt}
+        loading={loading}
+        error={error}
+        limit={0}
+        variant="live"
+        scrollRef={scrollRef}
+        onScroll={handleScroll}
+        onFollow={followLatest}
+      />
     </div>
   );
 }

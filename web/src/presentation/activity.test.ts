@@ -1,14 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type { JobActivity, JobActivityItem } from "../types";
 import {
+  ACTIVITY_CLOCK_MS,
   ACTIVITY_DIGEST_LIMIT,
   ACTIVITY_HEADLINE_MAX,
+  ACTIVITY_POLL_MS,
   ACTIVITY_WAITING_TEXT,
+  activityBlocks,
   activityDigest,
   activityHeadline,
+  activityProgressText,
+  activitySignature,
   filterActivityItems,
+  formatClockTime,
   isKeyActivity,
+  isNearBottom,
   isToolFailure,
+  nextBeatDelay,
+  relativeTimeLabel,
 } from "./activity";
 
 function item(overrides: Partial<JobActivityItem> = {}): JobActivityItem {
@@ -25,6 +34,10 @@ function item(overrides: Partial<JobActivityItem> = {}): JobActivityItem {
 
 function message(text: string): JobActivityItem {
   return item({ kind: "message", text });
+}
+
+function reasoning(text: string): JobActivityItem {
+  return item({ kind: "reasoning", text });
 }
 
 function tool(
@@ -178,5 +191,117 @@ describe("关键模式过滤", () => {
     expect(isToolFailure(tool("bash", "completed", null, "boom"))).toBe(true);
     expect(isKeyActivity(tool("bash", "completed", null, "boom"))).toBe(true);
     expect(isKeyActivity(item({ kind: "line", text: "raw stdout" }))).toBe(false);
+  });
+});
+
+describe("思维链摘要与关键模式", () => {
+  it("思维链取首个有内容的行并标记为思考", () => {
+    const headline = activityHeadline(reasoning("## 先梳理目标\n\n然后拆解任务"));
+    expect(headline).toBe("思考 · 先梳理目标");
+  });
+
+  it("思维链条目在关键模式下保留", () => {
+    const entries = [reasoning("检查依赖"), tool("read", "completed", "a.ts")];
+    expect(isKeyActivity(entries[0])).toBe(true);
+    expect(isKeyActivity(entries[1])).toBe(false);
+    const digest = activityDigest(activity(entries), { keyOnly: true, limit: 0 });
+    expect(digest.items.map((entry) => entry.kind)).toEqual(["reasoning"]);
+    expect(digest.items[0]?.text).toBe("思考 · 检查依赖");
+    expect(digest.items[0]?.tone).toBe("normal");
+  });
+
+  it("思维链中的结构化内容同样不直接输出", () => {
+    const headline = activityHeadline(reasoning(JSON.stringify({ step: 1 })));
+    expect(headline).not.toContain("{");
+    expect(headline).toContain("结构化内容");
+  });
+
+  it("空思维链不进入摘要", () => {
+    expect(activityHeadline(reasoning("   "))).toBe("");
+    expect(activityDigest(activity([reasoning("")])).waiting).toBe(
+      ACTIVITY_WAITING_TEXT,
+    );
+  });
+
+  it("进展文案优先最新思维链，其次消息", () => {
+    expect(
+      activityProgressText([
+        message("旧消息"),
+        reasoning("检查依赖"),
+        tool("read", "completed", "a.ts"),
+      ]),
+    ).toBe("思考 · 检查依赖");
+    expect(activityProgressText([message("开始执行")])).toBe("开始执行");
+    expect(activityProgressText([])).toBe("正在思考…");
+  });
+});
+
+describe("活动分块", () => {
+  it("连续思维链独立成块，工具与步骤合并为一组", () => {
+    const blocks = activityBlocks([
+      reasoning("一"),
+      reasoning("二"),
+      tool("read", "completed", "a.ts"),
+      item({ kind: "step", text: "准备" }),
+      tool("bash", "error", "npm test", "exit 1"),
+      message("继续"),
+    ]);
+    expect(blocks.map((block) => block.type)).toEqual([
+      "reasoning",
+      "compact",
+      "message",
+    ]);
+    expect(blocks[0]?.type === "reasoning" && blocks[0].items).toHaveLength(2);
+    expect(blocks[1]?.type === "compact" && blocks[1].items).toHaveLength(3);
+    expect(blocks[2] && blocks[2].start).toBe(5);
+  });
+
+  it("分块保留原列表偏移", () => {
+    const blocks = activityBlocks([message("只有消息")], 12);
+    expect(blocks[0]?.start).toBe(12);
+  });
+});
+
+describe("跟随最新内容", () => {
+  it("贴底时继续跟随，上滚后停止，重新贴底恢复", () => {
+    expect(isNearBottom(1_000, 580, 400)).toBe(true);
+    expect(isNearBottom(1_000, 400, 400)).toBe(false);
+    expect(isNearBottom(1_000, 576, 400)).toBe(true);
+  });
+});
+
+describe("稳定时间显示", () => {
+  it("相对时间按整秒向下取整，不会回跳", () => {
+    expect(relativeTimeLabel(1_000, 1_000)).toBe("刚刚");
+    expect(relativeTimeLabel(1_000, 1_999)).toBe("刚刚");
+    expect(relativeTimeLabel(1_000, 4_400)).toBe("3 秒前");
+    expect(relativeTimeLabel(1_000, 62_000)).toBe("1 分钟前");
+    expect(relativeTimeLabel(1_000, 3_600_000)).toBe("59 分钟前");
+  });
+
+  it("节拍延迟总是落在下一个边界", () => {
+    for (const now of [0, 1, 999, 1_000, 1_499, 1_500, 1_501]) {
+      const delay = nextBeatDelay(now, ACTIVITY_POLL_MS);
+      expect(delay).toBeGreaterThan(0);
+      expect((now + delay) % ACTIVITY_POLL_MS).toBe(0);
+    }
+    expect(nextBeatDelay(500, ACTIVITY_CLOCK_MS)).toBe(500);
+    expect(nextBeatDelay(1_000, ACTIVITY_CLOCK_MS)).toBe(ACTIVITY_CLOCK_MS);
+  });
+
+  it("时钟格式包含时分秒且非法值有占位", () => {
+    expect(formatClockTime(Date.parse("2026-01-10T10:20:30"))).toMatch(
+      /\d{1,2}:\d{2}:\d{2}/,
+    );
+    expect(formatClockTime(Number.NaN)).toBe("—");
+  });
+
+  it("活动指纹只在可见内容变化时改变", () => {
+    const base = activity([reasoning("思考")]);
+    const grownBytes = { ...base, bytes: base.bytes + 100 };
+    expect(activitySignature(base)).toBe(activitySignature(grownBytes));
+    const grownText = activity([reasoning("思考更多")]);
+    expect(activitySignature(grownText)).not.toBe(activitySignature(base));
+    expect(activitySignature(null)).toBe("");
   });
 });

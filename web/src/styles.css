@@ -2290,18 +2290,15 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* 运行中作业的活动区限高跟随，读到底部时自动滚到最新一条。 */
 .activity-scroll {
   position: relative;
   min-width: 0;
-}
-
-.activity-scroll-live .activity-list {
-  max-height: 420px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .activity-follow {
@@ -2316,6 +2313,125 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   border: 1px solid var(--line-strong);
   border-radius: 999px;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+}
+
+/* 运行中的进展提示：状态点脉冲 + 单行字符滚动，减少动效时保持静态。 */
+.activity-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 320px;
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+.activity-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.activity-dot-live {
+  animation: activity-dot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes activity-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.activity-progress-window {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+}
+
+.activity-progress-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: activity-marquee 9s linear infinite;
+}
+
+.activity-progress-text {
+  padding-right: 24px;
+}
+
+@keyframes activity-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.activity-updated,
+.activity-counts {
+  font-size: 0.75rem;
+}
+
+.activity-updated {
+  white-space: nowrap;
+}
+
+.activity-reasoning {
+  border: 1px solid #dbe6f6;
+  border-left: 3px solid #8fb4f0;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.activity-reasoning > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  list-style: none;
+}
+
+.activity-reasoning > summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-reasoning-title {
+  font-weight: 600;
+  color: #2f5fae;
+}
+
+.activity-reasoning-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #dbe6f6;
+}
+
+.activity-reasoning-item {
+  padding: 7px 10px 7px 12px;
+  border-top: 1px solid #e8eef8;
+  color: #2c3a4d;
+  font-size: 0.84rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.activity-reasoning-item:first-child {
+  border-top: 0;
+}
+
+.activity-step-item {
+  padding: 7px 10px;
 }
 
 .activity-message {
@@ -2427,153 +2543,18 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   overflow-wrap: anywhere;
 }
 
-.activity-raw {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-}
-
-.activity-raw > summary {
-  cursor: pointer;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-.activity-raw-body {
-  margin-top: 8px;
-}
-
-.live-output {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  position: relative;
-}
-
-.live-output-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.live-output-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: live-output-pulse 1.4s ease-in-out infinite;
-}
-
-.live-output-bytes {
-  margin-left: auto;
-  font-weight: 500;
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-@keyframes live-output-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.live-output-scroll {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 280px;
-  overflow: auto;
-}
-
-.live-output-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.live-output-empty {
-  padding: 6px 0;
-  font-size: 0.82rem;
-}
-
-.live-output-error {
-  font-size: 0.8rem;
-  color: var(--danger);
-}
-
-.live-output-follow {
-  align-self: flex-end;
-  font-size: 0.78rem;
-  padding: 2px 8px;
-}
-
 .live-message {
   border-color: #d4e1fb;
   background: #f7faff;
 }
 
-/* 项目分析实时区：可读摘要列表 + 默认收起的原始输出折叠。 */
-.live-activity {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* 项目分析实时区复用活动流，消息气泡只负责外框。 */
+.live-message .job-activity {
+  border-top: 0;
+  padding-top: 0;
   width: 100%;
 }
 
-.live-activity-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  align-items: baseline;
-}
-
-.live-activity-headline {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.live-activity-meta {
-  font-size: 0.75rem;
-}
-
-.live-activity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.live-activity-item {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  font-size: 0.85rem;
-  overflow-wrap: anywhere;
-}
-
-.live-activity-index {
-  flex: none;
-  font-size: 0.72rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.live-activity-failure {
-  color: var(--danger);
-}
-
-.live-activity-more,
 .activity-more,
 .job-records-more {
   font-size: 0.8rem;
@@ -4037,4 +4018,23 @@ summary {
   border: 0;
   background: transparent;
   color: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-progress-track,
+  .activity-dot-live {
+    animation: none;
+  }
+
+  .activity-progress-window {
+    mask-image: none;
+  }
+
+  .activity-progress-track {
+    white-space: normal;
+  }
+
+  .activity-progress-dup {
+    display: none;
+  }
 }

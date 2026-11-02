@@ -9,20 +9,15 @@ import {
   recentJobs,
 } from "./components/JobDetailView";
 import {
+  ActivityStream,
   JobActivity as JobActivityView,
   RECENT_ACTIVITY_LIMIT,
   recentActivityItems,
 } from "./components/JobActivity";
-import {
-  LIVE_MESSAGE_LIMIT,
-  LiveActivitySummary,
-  liveActivityFeed,
-  type LiveActivityFeed,
-} from "./pages/ProjectPage";
+import { LiveActivitySummary } from "./pages/ProjectPage";
 import {
   ACTIVITY_WAITING_TEXT,
-  activityDigest,
-  isKeyActivity,
+  activityProgressText,
 } from "./presentation/activity";
 
 const STDOUT_MARKER = "STDOUT_MARKER_a1b2c3";
@@ -71,6 +66,10 @@ function message(text: string): JobActivityItem {
   };
 }
 
+function reasoning(text: string): JobActivityItem {
+  return { kind: "reasoning", text, tool: null, target: null, status: null, error: null };
+}
+
 function tool(
   name: string,
   status: string,
@@ -97,14 +96,10 @@ function activity(items: JobActivityItem[]): JobActivity {
   };
 }
 
-function emptyFeed(): LiveActivityFeed {
-  return liveActivityFeed([]);
-}
-
-describe("实时区摘要（liveActivityFeed）", () => {
+describe("ActivityStream 思维链主视图", () => {
   const sample = activity([
-    ...Array.from({ length: 6 }, (_, index) => message(`消息 ${index + 1}`)),
-    tool("bash", "error", "npm test", "exit 1"),
+    reasoning("先梳理目标与边界"),
+    tool("read", "completed", "README.md"),
     {
       kind: "step",
       text: "准备工具",
@@ -113,62 +108,71 @@ describe("实时区摘要（liveActivityFeed）", () => {
       status: null,
       error: null,
     },
-    tool("read", "completed", "a.ts"),
+    reasoning("## 下一步\n\n检查依赖关系"),
+    message("开始实现"),
   ]);
-  const items = activityDigest(sample, { limit: 0 }).items;
 
-  it("有消息时以最新消息为摘要，并限制默认条数", () => {
-    const collapsed = liveActivityFeed(items);
-    expect(collapsed.headline).toBe("消息 6");
-    expect(collapsed.messages).toHaveLength(LIVE_MESSAGE_LIMIT);
-    expect(collapsed.messages.at(-1)?.text).toBe("消息 6");
-    expect(collapsed.hidden).toBe(4);
+  function render(overrides: Partial<Parameters<typeof ActivityStream>[0]> = {}) {
+    return renderToStaticMarkup(
+      <ActivityStream
+        activity={sample}
+        running={false}
+        now={1_000_000}
+        lastUpdatedAt={null}
+        {...overrides}
+      />,
+    );
+  }
+
+  it("思维链条目渲染为独立元素且默认展开", () => {
+    const markup = render();
+    expect((markup.match(/data-activity-kind="reasoning"/g) ?? []).length).toBe(2);
+    expect(markup).toContain("先梳理目标与边界");
+    expect(markup).toContain("检查依赖关系");
+    expect(markup).toContain('class="activity-reasoning" open');
+    expect(markup).toContain("思维链");
   });
 
-  it("只有工具时取工具摘要", () => {
-    // 关键模式隐去成功工具，只有工具的活动需要直接看完整摘要。
-    const onlyTools = activityDigest(
-      activity([tool("read", "completed", "b.ts")]),
-      { limit: 0 },
-    ).items;
-    const feed = liveActivityFeed(onlyTools);
-    expect(feed.headline).toBe("read · b.ts");
-    expect(feed.waiting).toBeNull();
-    // 成功工具不属于关键状态，但摘要仍然可读。
-    expect(feed.keys).toHaveLength(0);
-    expect(feed.messages).toHaveLength(0);
+  it("工具与步骤合并为可折叠的紧凑分组并保留失败高亮", () => {
+    const markup = render({
+      activity: activity([
+        tool("bash", "error", "npm test", "exit 1"),
+        { kind: "step", text: "准备工具", tool: null, target: null, status: null, error: null },
+        tool("read", "completed", "a.ts"),
+      ]),
+    });
+    expect(markup).toContain('class="activity-tool-group activity-compact"');
+    expect(markup).toContain("工具与步骤 ×3");
+    expect(markup).toContain("1 失败");
+    expect(markup).toContain("activity-tool-failed");
+    expect(markup).toContain("npm test");
   });
 
-  it("空活动返回等待文案", () => {
-    const feed = emptyFeed();
-    expect(feed.headline).toBeNull();
-    expect(feed.messages).toHaveLength(0);
-    expect(feed.keys).toHaveLength(0);
-    expect(feed.hidden).toBe(0);
-    expect(feed.waiting).toBe(ACTIVITY_WAITING_TEXT);
+  it("页面标记中不出现“原始输出”入口", () => {
+    const markup = render();
+    expect(markup).not.toContain("原始输出");
+    expect(markup).not.toContain("live-output");
   });
 
-  it("关键状态只保留失败与进行中的工具", () => {
-    const feed = liveActivityFeed(items, true);
-    expect(feed.keys.map((entry) => entry.text)).toEqual(["bash · npm test · exit 1"]);
-    // 步骤与成功工具明细不进入实时区，展开后仍被省略。
-    expect(feed.hidden).toBe(2);
-    expect(items.some((entry) => entry.text === "准备工具")).toBe(false);
-    // 成功工具仍可作为可读消息保留，但不计入关键状态。
-    expect(feed.keys.some((entry) => entry.tool === "read")).toBe(false);
-    expect(feed.messages.every((entry) => entry.kind === "message")).toBe(true);
+  it("上滚后出现“回到最新”按钮，跟随时不出现", () => {
+    const following = render({ following: true, onFollow: () => {} });
+    expect(following).not.toContain("回到最新");
+    const scrolledUp = render({ following: false, onFollow: () => {} });
+    expect(scrolledUp).toContain("回到最新");
   });
 
-  it("失败工具被关键模式保留", () => {
-    expect(isKeyActivity(tool("bash", "error", "npm test"))).toBe(true);
-    expect(isKeyActivity(tool("read", "completed", "a.ts"))).toBe(false);
+  it("头部展示最近更新时间与相对时间，不使用已运行秒数", () => {
+    const markup = render({ lastUpdatedAt: 1_000_000, now: 1_003_400 });
+    expect(markup).toContain("最近更新");
+    expect(markup).toContain("3 秒前");
+    expect(markup).not.toContain("已运行");
   });
 
-  it("展开后可见全部消息", () => {
-    const expanded = liveActivityFeed(items, true);
-    expect(expanded.messages).toHaveLength(6);
-    expect(expanded.messages.at(0)?.text).toBe("消息 1");
-    expect(expanded.hidden).toBe(2);
+  it("运行中展示字符滚动的进展提示与状态点", () => {
+    const markup = render({ running: true });
+    expect(markup).toContain("activity-progress-track");
+    expect(markup).toContain("进展 ·");
+    expect(markup).toContain("activity-dot-live");
   });
 });
 
@@ -176,48 +180,42 @@ describe("LiveActivitySummary 渲染", () => {
   function render(overrides: Partial<Parameters<typeof LiveActivitySummary>[0]> = {}) {
     return renderToStaticMarkup(
       <LiveActivitySummary
-        feed={emptyFeed()}
-        summary={null}
+        activity={activity([reasoning("正在梳理项目结构")])}
+        running
+        now={1_000_000}
+        lastUpdatedAt={1_000_000}
         loading={false}
         error=""
-        rawOpen={false}
-        onRawToggle={() => {}}
-        onExpand={() => {}}
-        jobId="job-1"
         {...overrides}
       />,
     );
   }
 
-  it("展示可读摘要而默认不包含原始输出", () => {
-    const items = activityDigest(
-      activity([message("开始读取项目结构"), tool("bash", "error", "npm test", "exit 1")]),
-      { limit: 0 },
-    ).items;
-    const markup = render({ feed: liveActivityFeed(items) });
+  it("以思维链为主视图且不提供原始输出入口", () => {
+    const markup = render();
     expect(markup).toContain("规划者（实时进展）");
-    expect(markup).toContain("开始读取项目结构");
-    expect(markup).toContain("bash · npm test · exit 1");
-    expect(markup).toContain("<details");
-    expect(markup).toContain("原始输出");
-    expect(markup).not.toContain(STDOUT_MARKER);
-    expect(markup).not.toContain(STDERR_MARKER);
-    expect(markup).not.toContain("live-output");
+    expect(markup).toContain("正在梳理项目结构");
+    expect(markup).toContain("思维链");
+    expect(markup).not.toContain("原始输出");
   });
 
   it("没有活动时展示等待文案", () => {
-    const markup = render();
+    const markup = render({ activity: activity([]) });
     expect(markup).toContain(ACTIVITY_WAITING_TEXT);
   });
+});
 
-  it("被省略时提供展开全部入口", () => {
-    const items = activityDigest(
-      activity(Array.from({ length: 7 }, (_, index) => message(`m${index}`))),
-      { limit: 0 },
-    ).items;
-    const markup = render({ feed: liveActivityFeed(items) });
-    expect(markup).toContain("展开全部");
-    expect(markup).toContain("还有 3 条");
+describe("活动进展文案", () => {
+  it("优先取最新思维链，其次消息", () => {
+    expect(
+      activityProgressText([
+        message("旧消息"),
+        reasoning("先检查依赖"),
+        tool("read", "completed", "a.ts"),
+      ]),
+    ).toBe("思考 · 先检查依赖");
+    expect(activityProgressText([message("开始执行")])).toBe("开始执行");
+    expect(activityProgressText([])).toBe("正在思考…");
   });
 });
 
@@ -243,13 +241,15 @@ describe("记录可见切片", () => {
 });
 
 describe("JobActivityView 渲染", () => {
-  it("原始输出折叠默认收起，未展开时不出现 LiveOutput", () => {
+  it("不再提供原始输出入口，也不挂载 stdout / stderr", () => {
     const markup = renderToStaticMarkup(
       <JobActivityView jobId="job-1" running={false} />,
     );
-    expect(markup).toContain("原始输出");
+    expect(markup).toContain("作业活动");
+    expect(markup).not.toContain("原始输出");
     expect(markup).not.toContain("live-output");
     expect(markup).not.toContain(STDOUT_MARKER);
+    expect(markup).not.toContain(STDERR_MARKER);
   });
 });
 
@@ -267,7 +267,7 @@ describe("JobDetailView 折叠", () => {
       <JobDetailView job={{ ...job(1), status: "running" }} />,
     );
     expect(markup).toContain("作业活动");
-    expect(markup).toContain("原始输出");
+    expect(markup).not.toContain("原始输出");
   });
 });
 
