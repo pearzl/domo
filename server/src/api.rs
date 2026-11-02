@@ -10,7 +10,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, patch, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 use tokio_stream::StreamExt;
@@ -163,6 +163,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/{id}/tasks/{task_id}/arbitration",
             get(task_arbitration).post(submit_arbitration),
+        )
+        .route(
+            "/api/projects/{id}/tasks/{task_id}/verifications",
+            get(task_verifications),
         )
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/retry", post(retry_job))
@@ -3291,6 +3295,162 @@ async fn replan_rejected_milestone(
     load_detail(state, &project.id).await.map(Json)
 }
 
+/// 任务验收历史固定保留最新这么多条，响应中的 `truncated` 说明是否还有更早的记录。
+const VERIFICATION_HISTORY_LIMIT: i64 = 50;
+/// 验收结果无法解析时回传的原文摘要长度（按字符计，避免截断多字节字符）。
+const VERIFICATION_EXCERPT_CHARS: usize = 500;
+
+#[derive(Debug, Serialize)]
+struct VerificationSummary {
+    id: String,
+    /// 该验收到当前任务验收序列中的轮次，从 1 开始。
+    round: i64,
+    attempt: i64,
+    status: String,
+    passed: Option<bool>,
+    reason: Option<String>,
+    issues: Vec<String>,
+    parsed: bool,
+    /// 无法解析时为“无法解析：原因”，供界面直接展示。
+    parse_error: Option<String>,
+    /// 无法解析时保留的结果原文摘要。
+    raw_excerpt: Option<String>,
+    agent_id: Option<String>,
+    agent_name: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    usage_known: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskVerificationsResponse {
+    project_id: String,
+    task_id: String,
+    total: i64,
+    limit: i64,
+    truncated: bool,
+    verifications: Vec<VerificationSummary>,
+}
+
+struct VerificationVerdict {
+    passed: Option<bool>,
+    reason: Option<String>,
+    issues: Vec<String>,
+    parsed: bool,
+    parse_error: Option<String>,
+    raw_excerpt: Option<String>,
+}
+
+async fn task_verifications(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<Json<TaskVerificationsResponse>, ApiError> {
+    let task = load_project_task(&state, &project_id, &task_id).await?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE task_id = ? AND role = ?")
+        .bind(&task.id)
+        .bind(JOB_ROLE_VERIFIER)
+        .fetch_one(&state.db)
+        .await?;
+    let offset = (total - VERIFICATION_HISTORY_LIMIT).max(0);
+    let jobs = sqlx::query_as::<_, JobRow>(
+        "SELECT * FROM jobs WHERE task_id = ? AND role = ? \
+         ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
+    )
+    .bind(&task.id)
+    .bind(JOB_ROLE_VERIFIER)
+    .bind(VERIFICATION_HISTORY_LIMIT)
+    .bind(offset)
+    .fetch_all(&state.db)
+    .await?;
+    let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+        .fetch_all(&state.db)
+        .await?;
+    let agent_names: HashMap<String, String> = agents
+        .into_iter()
+        .map(|agent| (agent.id, agent.name))
+        .collect();
+    let verifications = jobs
+        .into_iter()
+        .enumerate()
+        .map(|(index, job)| {
+            let verdict = verification_verdict(job.result.as_deref());
+            VerificationSummary {
+                id: job.id,
+                round: offset + index as i64 + 1,
+                attempt: job.attempt,
+                status: job.status,
+                passed: verdict.passed,
+                reason: verdict.reason,
+                issues: verdict.issues,
+                parsed: verdict.parsed,
+                parse_error: verdict.parse_error,
+                raw_excerpt: verdict.raw_excerpt,
+                agent_name: job
+                    .agent_id
+                    .as_ref()
+                    .and_then(|agent_id| agent_names.get(agent_id).cloned()),
+                agent_id: job.agent_id,
+                started_at: job.started_at,
+                finished_at: job.finished_at,
+                usage_known: job.usage_known != 0,
+            }
+        })
+        .collect();
+    Ok(Json(TaskVerificationsResponse {
+        project_id,
+        task_id: task.id,
+        total,
+        limit: VERIFICATION_HISTORY_LIMIT,
+        truncated: total > VERIFICATION_HISTORY_LIMIT,
+        verifications,
+    }))
+}
+
+fn verification_verdict(result: Option<&str>) -> VerificationVerdict {
+    let Some(raw) = result else {
+        return unparsed_verdict(None, "验收作业没有结果");
+    };
+    match domain::parse_result(ROLE_VERIFIER, raw) {
+        Ok(domain::ParsedResult::Verdict {
+            pass,
+            reason,
+            issues,
+        }) => VerificationVerdict {
+            passed: Some(pass),
+            reason: Some(reason),
+            issues,
+            parsed: true,
+            parse_error: None,
+            raw_excerpt: None,
+        },
+        Ok(_) => unparsed_verdict(Some(raw), "结果不是验收结论"),
+        Err(error) => unparsed_verdict(Some(raw), &error),
+    }
+}
+
+fn unparsed_verdict(raw: Option<&str>, error: &str) -> VerificationVerdict {
+    VerificationVerdict {
+        passed: None,
+        reason: None,
+        issues: Vec::new(),
+        parsed: false,
+        parse_error: Some(format!("无法解析：{error}")),
+        raw_excerpt: raw.and_then(|value| excerpt(value, VERIFICATION_EXCERPT_CHARS)),
+    }
+}
+
+fn excerpt(value: &str, max: usize) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut excerpt: String = trimmed.chars().take(max).collect();
+    if trimmed.chars().count() > max {
+        excerpt.push('…');
+    }
+    Some(excerpt)
+}
+
 async fn task_arbitration(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
@@ -4248,5 +4408,310 @@ mod tests {
     fn custom_cli_accepts_non_empty_command_template() {
         let command = vec!["codex".to_string(), "exec".to_string()];
         assert!(require_command_if_needed(cli_kind(), &command).is_ok());
+    }
+
+    async fn verification_test_state() -> (AppState, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("domo-verifications-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::connect(&root.join("data/domo.db"))
+            .await
+            .unwrap();
+        let timestamp = "2026-01-01T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
+             stage, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("prj_test")
+        .bind("test")
+        .bind("goal")
+        .bind("/tmp/repo")
+        .bind("main")
+        .bind("domo/p-test")
+        .bind("/tmp/workspace")
+        .bind(STAGE_EXECUTING)
+        .bind(STATUS_RUNNING)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&db)
+        .await
+        .unwrap();
+        for (id, key) in [("tsk_a", "T1"), ("tsk_empty", "T2")] {
+            sqlx::query(
+                "INSERT INTO tasks (id, project_id, seq, queue_order, key, title, description, \
+                 acceptance, deps, stage, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind("prj_test")
+            .bind(1)
+            .bind(1)
+            .bind(key)
+            .bind(key)
+            .bind("description")
+            .bind("[]")
+            .bind("[]")
+            .bind(TASK_STAGE_EXECUTING)
+            .bind(timestamp)
+            .bind(timestamp)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, kind, model, roles, created_at, updated_at) \
+             VALUES (?, ?, ?, '', ?, ?, ?)",
+        )
+        .bind("agt_verifier")
+        .bind("验收 Agent")
+        .bind(AGENT_MOCK)
+        .bind(string_list_json(&[ROLE_VERIFIER.to_string()]))
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&db)
+        .await
+        .unwrap();
+        let cfg = crate::config::Config {
+            data_root: root.join("data"),
+            workspace_root: root.join("workspace"),
+            log_root: root.join("log"),
+            web_dist: root.join("web"),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            port_explicit: false,
+            job_timeout: std::time::Duration::ZERO,
+            stall_timeout: std::time::Duration::ZERO,
+        };
+        let (notify, _receiver) = tokio::sync::mpsc::channel(1);
+        let state = AppState::new(db, cfg, crate::events::EventBus::new(), notify);
+        (state, root)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_verification_job(
+        state: &AppState,
+        id: &str,
+        task_id: &str,
+        role: &str,
+        status: &str,
+        attempt: i64,
+        result: Option<&str>,
+        usage_known: bool,
+        created_at: &str,
+        agent_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+             result, usage_known, started_at, finished_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind("prj_test")
+        .bind(task_id)
+        .bind(role)
+        .bind(agent_id)
+        .bind(status)
+        .bind(attempt)
+        .bind(result)
+        .bind(i64::from(usage_known))
+        .bind(created_at)
+        .bind(created_at)
+        .bind(created_at)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn verification_history_parses_orders_and_reports_unknown_results() {
+        let (state, root) = verification_test_state().await;
+        insert_verification_job(
+            &state,
+            "job_v1",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_SUCCEEDED,
+            1,
+            Some(r#"{"pass":true,"reason":"符合验收标准","issues":[]}"#),
+            true,
+            "2026-01-01T00:00:01Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_executor",
+            "tsk_a",
+            JOB_ROLE_EXECUTOR,
+            JOB_STATUS_SUCCEEDED,
+            1,
+            Some(r#"{"kind":"done","summary":"执行完成"}"#),
+            true,
+            "2026-01-01T00:00:02Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_v2",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_SUCCEEDED,
+            1,
+            Some("不是 JSON"),
+            false,
+            "2026-01-01T00:00:03Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_v3",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_FAILED,
+            2,
+            Some(r#"{"reason":"验收作业超时"}"#),
+            false,
+            "2026-01-01T00:00:04Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_v4",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_SUCCEEDED,
+            2,
+            Some(r#"{"pass":false,"reason":"测试失败","issues":["a","b"]}"#),
+            true,
+            "2026-01-01T00:00:05Z",
+            None,
+        )
+        .await;
+
+        let response = task_verifications(
+            State(state.clone()),
+            Path(("prj_test".to_string(), "tsk_a".to_string())),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.total, 4);
+        assert!(!response.truncated);
+        let ids: Vec<&str> = response
+            .verifications
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["job_v1", "job_v2", "job_v3", "job_v4"]);
+        let rounds: Vec<i64> = response
+            .verifications
+            .iter()
+            .map(|item| item.round)
+            .collect();
+        assert_eq!(rounds, vec![1, 2, 3, 4]);
+        let attempts: Vec<i64> = response
+            .verifications
+            .iter()
+            .map(|item| item.attempt)
+            .collect();
+        assert_eq!(attempts, vec![1, 1, 2, 2]);
+
+        let passed = &response.verifications[0];
+        assert_eq!(passed.passed, Some(true));
+        assert_eq!(passed.reason.as_deref(), Some("符合验收标准"));
+        assert!(passed.parsed);
+        assert!(passed.parse_error.is_none());
+        assert_eq!(passed.agent_name.as_deref(), Some("验收 Agent"));
+        assert!(passed.usage_known);
+
+        let unparsed = &response.verifications[1];
+        assert_eq!(unparsed.passed, None);
+        assert!(!unparsed.parsed);
+        assert_eq!(unparsed.raw_excerpt.as_deref(), Some("不是 JSON"));
+        assert!(unparsed
+            .parse_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("无法解析"));
+        assert!(!unparsed.usage_known);
+        assert_eq!(unparsed.agent_name.as_deref(), Some("验收 Agent"));
+
+        let missing_pass = &response.verifications[2];
+        assert_eq!(missing_pass.status, JOB_STATUS_FAILED);
+        assert!(!missing_pass.parsed);
+        assert_eq!(
+            missing_pass.raw_excerpt.as_deref(),
+            Some(r#"{"reason":"验收作业超时"}"#)
+        );
+
+        let rejected = &response.verifications[3];
+        assert_eq!(rejected.passed, Some(false));
+        assert_eq!(rejected.reason.as_deref(), Some("测试失败"));
+        assert_eq!(rejected.issues, vec!["a", "b"]);
+        assert_eq!(rejected.agent_name, None);
+
+        let empty = task_verifications(
+            State(state.clone()),
+            Path(("prj_test".to_string(), "tsk_empty".to_string())),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(empty.total, 0);
+        assert!(empty.verifications.is_empty());
+
+        let missing = task_verifications(
+            State(state.clone()),
+            Path(("prj_test".to_string(), "tsk_missing".to_string())),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn verification_history_keeps_the_newest_entries_and_marks_truncation() {
+        let (state, root) = verification_test_state().await;
+        for index in 1..=55 {
+            insert_verification_job(
+                &state,
+                &format!("job_{index:02}"),
+                "tsk_a",
+                JOB_ROLE_VERIFIER,
+                JOB_STATUS_SUCCEEDED,
+                index,
+                None,
+                false,
+                &format!("2026-01-01T00:{index:02}:00Z"),
+                None,
+            )
+            .await;
+        }
+
+        let response = task_verifications(
+            State(state.clone()),
+            Path(("prj_test".to_string(), "tsk_a".to_string())),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.total, 55);
+        assert_eq!(response.limit, VERIFICATION_HISTORY_LIMIT);
+        assert!(response.truncated);
+        assert_eq!(
+            response.verifications.len(),
+            VERIFICATION_HISTORY_LIMIT as usize
+        );
+        assert_eq!(response.verifications[0].id, "job_06");
+        assert_eq!(response.verifications[0].round, 6);
+        assert_eq!(response.verifications[49].id, "job_55");
+        assert_eq!(response.verifications[49].round, 55);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
