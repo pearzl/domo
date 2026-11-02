@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 /// 直接读源文件：样式表不是 JS 模块，?raw 在 CSS 上取到的是空串。
 const stylesSource = readFileSync(
-  new URL("../styles.css", import.meta.url).pathname,
+  new URL("../styles.css", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
   "utf8",
 );
 

@@ -589,7 +589,7 @@ describe("概览内嵌用量摘要", () => {
 
 /// 样式表不是 JS 模块，?raw 取到的是空串，直接读源文件原文。
 const STYLES = readFileSync(
-  new URL("../styles.css", import.meta.url).pathname,
+  new URL("../styles.css", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
   "utf8",
 );
 

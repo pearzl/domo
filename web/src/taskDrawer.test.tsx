@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { JobSummary, ProjectDetail, Task } from "./types";
 import { TaskDrawer } from "./pages/ProjectPage";
-import projectPageSource from "./pages/ProjectPage.tsx?raw";
+import projectPageSource from "./components/TaskDrawer.tsx?raw";
 import { JobPrompt, RECENT_JOB_LIMIT } from "./components/JobDetailView";
 import {
   DRAWER_ACCEPTANCE_TITLE,
