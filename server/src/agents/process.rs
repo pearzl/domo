@@ -58,8 +58,8 @@ pub(super) async fn run_process(
             });
         }
     }
-    let stdout = child.stdout.take().expect("stdout pipe");
-    let stderr = child.stderr.take().expect("stderr pipe");
+    let stdout = child.stdout.take().context("Agent 进程缺少 stdout 管道")?;
+    let stderr = child.stderr.take().context("Agent 进程缺少 stderr 管道")?;
     let stdout_log = spec.job_dir.join("stdout.log");
     let stderr_log = spec.job_dir.join("stderr.log");
     let stdout_task = tokio::spawn(read_capped(stdout, spec.progress.clone(), true, stdout_log));

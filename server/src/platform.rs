@@ -272,6 +272,8 @@ fn shim_program(path: &Path, depth: usize) -> Option<ResolvedProgram> {
         if let Some(position) = tokens.iter().rposition(|token| token == "(") {
             tokens.drain(..=position);
         } else if let Some(position) = tokens.iter().rposition(|token| token.starts_with('(')) {
+            // The matched token stays in the list after the drain, so index 0
+            // exists; it starts with the ASCII '(' and byte 1 is a boundary.
             tokens.drain(..position);
             tokens[0] = tokens[0][1..].to_string();
         }

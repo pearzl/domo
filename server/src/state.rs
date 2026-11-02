@@ -1,9 +1,16 @@
 //! Shared runtime state.
+//!
+//! Locks that guard short, synchronous critical sections use
+//! `parking_lot::Mutex`: it has no poisoning, so a panic elsewhere cannot turn
+//! every later state access into an error. Locks held across `.await`
+//! (`schedule_lock`, `git_lock`) stay on `tokio::sync::Mutex` so waiting never
+//! blocks the runtime.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex as SyncMutex;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch, Mutex};
 
@@ -24,7 +31,7 @@ pub struct AppState {
     shutdown: watch::Sender<bool>,
     /// Job directories of agents started by this process. Shutdown uses it to
     /// terminate child processes without waiting for the database.
-    active_jobs: Arc<StdMutex<HashSet<PathBuf>>>,
+    active_jobs: Arc<SyncMutex<HashSet<PathBuf>>>,
 }
 
 impl AppState {
@@ -38,7 +45,7 @@ impl AppState {
             schedule_lock: Arc::new(Mutex::new(())),
             git_lock: Arc::new(Mutex::new(())),
             shutdown,
-            active_jobs: Arc::new(StdMutex::new(HashSet::new())),
+            active_jobs: Arc::new(SyncMutex::new(HashSet::new())),
         }
     }
 
@@ -65,29 +72,17 @@ impl AppState {
     }
 
     pub fn register_job(&self, job_dir: PathBuf) {
-        self.active_jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(job_dir);
+        self.active_jobs.lock().insert(job_dir);
     }
 
     pub fn unregister_job(&self, job_dir: &Path) {
-        self.active_jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(job_dir);
+        self.active_jobs.lock().remove(job_dir);
     }
 
     /// Kills every agent process group started by this process. Entries are
     /// validated against the recorded start time, so stale pid files are safe.
     pub fn kill_active_jobs(&self) {
-        let job_dirs: Vec<PathBuf> = self
-            .active_jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .iter()
-            .cloned()
-            .collect();
+        let job_dirs: Vec<PathBuf> = self.active_jobs.lock().iter().cloned().collect();
         for job_dir in job_dirs {
             crate::agents::kill_job_dir(&job_dir);
         }

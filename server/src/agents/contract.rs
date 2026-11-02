@@ -1,6 +1,7 @@
 //! Structural contract tests for the agent extension point. The registry, the
 //! adapter trait surface, and the per-kind behaviour are fixed here so that
-//! adding an agent type cannot silently change them.
+//! adding an agent type cannot silently change them. The module is declared
+//! under `#[cfg(test)]`, so this file is never part of a production build.
 
 use std::collections::HashSet;
 

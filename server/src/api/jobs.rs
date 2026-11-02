@@ -532,14 +532,11 @@ pub(super) async fn stream_events(
     });
     // The broadcast bus outlives every connection, so the response only ends
     // when shutdown is requested. Without this the graceful drain would wait
-    // for an event stream that can never finish.
+    // for an event stream that can never finish. `map_while` stops at the
+    // `None` sentinel, so the stream never yields an absent item.
     let shutdown = WatchStream::new(state.shutdown_receiver())
         .filter(|stopping| *stopping)
         .map(|_| None::<Result<Event, Infallible>>);
-    let stream = events
-        .map(Some)
-        .merge(shutdown)
-        .take_while(Option::is_some)
-        .map(|item| item.expect("event stream item passes the shutdown guard"));
+    let stream = events.map(Some).merge(shutdown).map_while(|item| item);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
