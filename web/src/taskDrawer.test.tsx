@@ -4,6 +4,12 @@ import type { JobSummary, ProjectDetail, Task } from "./types";
 import { TaskDrawer } from "./pages/ProjectPage";
 import projectPageSource from "./pages/ProjectPage.tsx?raw";
 import { JobPrompt, RECENT_JOB_LIMIT } from "./components/JobDetailView";
+import {
+  DRAWER_ACCEPTANCE_TITLE,
+  DRAWER_CONTENT_SECTION_CLASS,
+  DRAWER_DESCRIPTION_TITLE,
+  DRAWER_FEEDBACK_TITLE,
+} from "./presentation/taskDrawer";
 
 const RAW = "RAW_ERROR_MARKER_9f3c";
 
@@ -209,13 +215,88 @@ describe("TaskDrawer 信息去重", () => {
     expect(leadMarkup(markup)).toContain(RAW);
   });
 
-  it("只用“验收”区块合并验收标准与验收反馈", () => {
+  it("任务描述与验收标准同级并列、使用同一容器类，不再有单独的“验收”标题", () => {
     const markup = renderDrawer(task({ verifier_issues: ["FEEDBACK_MARKER"] }));
-    expect((markup.match(/<h3>验收<\/h3>/g) ?? []).length).toBe(1);
-    expect((markup.match(/<h3>验收标准<\/h3>/g) ?? []).length).toBe(0);
-    expect((markup.match(/<h3>验收反馈<\/h3>/g) ?? []).length).toBe(0);
+    expect((markup.match(/<h3>验收<\/h3>/g) ?? []).length).toBe(0);
+    expect((markup.match(/<h4>/g) ?? []).length).toBe(0);
+    const sections = Array.from(
+      markup.matchAll(/<section class="([^"]+)" data-drawer-block="(description|acceptance)">([\s\S]*?)<\/section>/g),
+    );
+    expect(sections.map((match) => match[2])).toEqual(["description", "acceptance"]);
+    expect(sections.map((match) => match[1])).toEqual([
+      DRAWER_CONTENT_SECTION_CLASS,
+      DRAWER_CONTENT_SECTION_CLASS,
+    ]);
+    const [description, acceptance] = sections;
+    expect(description[3]).toContain(`<h3>${DRAWER_DESCRIPTION_TITLE}</h3>`);
+    expect(acceptance[3]).toContain(`<h3>${DRAWER_ACCEPTANCE_TITLE}</h3>`);
+    // 两者正文都走同一个 Markdown 渲染器与同一套排版类。
+    for (const match of sections) {
+      expect(match[3]).toContain('class="rich-content rich-content-markdown"');
+      expect(match[3]).toContain('class="rich-markdown"');
+    }
+    expect(acceptance[3]).toContain("<li>验收项一</li>");
     expect(markup).toContain("FEEDBACK_MARKER");
-    expect(markup).toContain("验收项一");
+  });
+
+  it("验收标准不再嵌套在其它区块内，且与描述相邻", () => {
+    const markup = renderDrawer(task());
+    const descriptionIndex = markup.indexOf("data-drawer-block=\"description\"");
+    const acceptanceIndex = markup.indexOf("data-drawer-block=\"acceptance\"");
+    expect(descriptionIndex).toBeGreaterThan(0);
+    expect(acceptanceIndex).toBeGreaterThan(descriptionIndex);
+    const between = markup.slice(descriptionIndex, acceptanceIndex);
+    expect(between).toContain("</section></div>");
+    expect((markup.match(/验收标准/g) ?? []).length).toBe(1);
+  });
+
+  it("验收反馈单独成区块，只在存在反馈时展示", () => {
+    const withFeedback = renderDrawer(task({ verifier_issues: ["FEEDBACK_MARKER"] }));
+    expect((withFeedback.match(new RegExp(`<h3>${DRAWER_FEEDBACK_TITLE}</h3>`, "g")) ?? []).length).toBe(1);
+    expect(withFeedback).toContain('data-drawer-block="feedback"');
+    expect(withFeedback).toContain("FEEDBACK_MARKER");
+
+    for (const issues of [[], ["  ", ""]]) {
+      const withoutFeedback = renderDrawer(task({ verifier_issues: issues }));
+      expect(withoutFeedback).not.toContain(DRAWER_FEEDBACK_TITLE);
+      expect(withoutFeedback).not.toContain('data-drawer-block="feedback"');
+    }
+  });
+
+  it("依赖与位置：关键字段常显，其余字段折叠在默认收起的 details 中", () => {
+    const markup = renderDrawer(task({ deps: ["T0"], branch: "domo/t1", worktree: "/ws/t1" }));
+    const start = markup.indexOf('class="task-deps');
+    expect(start).toBeGreaterThan(0);
+    const section = markup.slice(start, markup.indexOf("</section>", start));
+    const primary = section.slice(0, section.indexOf('<details class="drawer-fold deps-fold">'));
+    for (const label of ["依赖", "排队位置", "等待原因"]) {
+      expect(primary).toContain(`<span>${label}</span>`);
+    }
+    for (const label of ["分支", "工作区", "失败分类", "Agent"]) {
+      expect(primary).not.toContain(`<span>${label}</span>`);
+    }
+    const detailsTag = section.slice(
+      section.indexOf('<details class="drawer-fold deps-fold">'),
+      section.indexOf(">", section.indexOf('<details class="drawer-fold deps-fold">')),
+    );
+    expect(detailsTag).not.toContain("open");
+    const folded = section.slice(section.indexOf("更多位置信息"));
+    for (const label of ["分支", "工作区", "失败分类", "Agent"]) {
+      expect(folded).toContain(`<span>${label}</span>`);
+    }
+    expect(folded).toContain("/ws/t1");
+    expect(primary).toContain("T0");
+  });
+
+  it("依赖与位置：归档后才出现的字段也落在折叠区", () => {
+    const markup = renderDrawer(
+      task({ branch: "domo/t1", artifacts_released_at: "2026-01-11T00:00:00Z" }),
+    );
+    const start = markup.indexOf('class="task-deps');
+    const section = markup.slice(start, markup.indexOf("</section>", start));
+    const folded = section.slice(section.indexOf("更多位置信息"));
+    expect(folded).toContain("归档 ref");
+    expect(folded).toContain("恢复命令");
   });
 
   it("Agent 池配置区位于作业记录之后且位于抽屉末尾", () => {

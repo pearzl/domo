@@ -2888,9 +2888,37 @@ button.event-job-title:hover:not(:disabled) {
   margin: 0 0 8px;
 }
 
-.drawer .task-acceptance h4 {
-  margin: 12px 0 6px;
-  font-size: 0.92rem;
+/* 任务描述与验收标准同级并列：同一容器类、同一级标题、同一套 Markdown 排版。 */
+.drawer .drawer-content-section > h3 {
+  margin: 0 0 8px;
+}
+
+.drawer .drawer-content-section .rich-content {
+  margin: 0;
+}
+
+/* 验收反馈独立成区块，每条反馈自带渲染视图。 */
+.drawer .task-feedback h3 {
+  margin: 0 0 8px;
+}
+
+.drawer .task-feedback li > .rich-content {
+  margin: 0;
+}
+
+.drawer-layout-section {
+  padding-bottom: 2px;
+}
+
+/* 依赖与位置的折叠区从属于所在区块，不再重复画区块分隔线。 */
+.drawer .deps-fold {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+
+.drawer .deps-fold > summary {
+  font-size: 0.85rem;
   color: var(--muted);
 }
 

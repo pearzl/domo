@@ -56,9 +56,20 @@ import {
   validateTaskDraft,
 } from "../presentation/taskList";
 import {
+  DRAWER_ACCEPTANCE_TITLE,
+  DRAWER_CONTENT_SECTION_CLASS,
+  DRAWER_DESCRIPTION_TITLE,
+  DRAWER_FEEDBACK_TITLE,
   DRAWER_LEAD_TITLES,
+  DEPS_FIELD_LABELS,
+  DEPS_PRIMARY_FIELDS,
+  acceptanceMarkdown,
+  depsFoldedFields,
   drawerLayout,
+  hasVerifierFeedback,
   rawErrorEntry,
+  verifierFeedback,
+  type DepsField,
   type DrawerTailSection,
 } from "../presentation/taskDrawer";
 import {
@@ -1813,33 +1824,38 @@ export function TaskDrawer({
       />
     </section>
   );
-  const acceptanceSection = (
-    <section className="task-acceptance">
-      <h3>验收</h3>
-      <h4>验收标准</h4>
-      <ul>
-        {task.acceptance.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
-      {task.verifier_issues.length > 0 ? (
-        <>
-          <h4>验收反馈</h4>
-          <ul>
-            {task.verifier_issues.map((issue) => (
-              <li key={issue}>
-                <RichContent content={issue} />
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : null}
+  const feedbackSection =
+    hasVerifierFeedback(task) ? (
+      <section className="task-feedback" data-drawer-block="feedback">
+        <h3>{DRAWER_FEEDBACK_TITLE}</h3>
+        <ul>
+          {verifierFeedback(task.verifier_issues).map((issue, index) => (
+            <li key={`${index}-${issue}`}>
+              <RichContent content={issue} />
+            </li>
+          ))}
+        </ul>
+      </section>
+    ) : null;
+  // 任务描述与验收标准同级并列：同一个容器类、同一级标题、同一套 Markdown 排版。
+  const descriptionSection = (
+    <section className={DRAWER_CONTENT_SECTION_CLASS} data-drawer-block="description">
+      <h3>{DRAWER_DESCRIPTION_TITLE}</h3>
+      <RichContent
+        content={task.description}
+        format="markdown"
+        emptyText="没有记录任务描述。"
+      />
     </section>
   );
-  const descriptionSection = (
-    <section>
-      <h3>任务描述</h3>
-      <RichContent content={task.description} />
+  const acceptanceSection = (
+    <section className={DRAWER_CONTENT_SECTION_CLASS} data-drawer-block="acceptance">
+      <h3>{DRAWER_ACCEPTANCE_TITLE}</h3>
+      <RichContent
+        content={acceptanceMarkdown(task.acceptance)}
+        format="markdown"
+        emptyText="没有记录验收标准。"
+      />
     </section>
   );
   const deriveSection =
@@ -1889,76 +1905,114 @@ export function TaskDrawer({
         ) : null}
       </section>
     ) : null;
+  // 依赖与位置分层：依赖、排队位置与等待原因常显，其余字段折叠在“更多位置信息”中。
+  const depsRow = (field: DepsField) => {
+    const label = DEPS_FIELD_LABELS[field];
+    switch (field) {
+      case "deps":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span>{task.deps.length ? task.deps.join(", ") : "无"}</span>
+          </div>
+        );
+      case "queue":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span>
+              {edge.position > 0
+                ? `可调整队列第 ${edge.position}/${edge.total} 位`
+                : task.queue_position !== null
+                  ? `派发队列第 ${task.queue_position} 位`
+                  : "未在队列中"}
+            </span>
+          </div>
+        );
+      case "waitingReason":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span>{task.waiting_reason ?? "—"}</span>
+          </div>
+        );
+      case "failureKind":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span>
+              {task.last_failure_kind
+                ? FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind
+                : "—"}
+            </span>
+          </div>
+        );
+      case "agent":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span>{agentName(task.agent_id)}</span>
+          </div>
+        );
+      case "branch":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span className="mono">{task.branch ?? "—"}</span>
+          </div>
+        );
+      case "worktree":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span className="badge-row">
+              <span className="mono">
+                {task.worktree ??
+                  (artifactsReleasing
+                    ? "回收中"
+                    : artifactsReleased
+                      ? "已回收"
+                      : "尚未创建")}
+              </span>
+              {task.worktree && artifactsReleased ? (
+                <Badge
+                  tone="muted"
+                  title="工作区已回收，分支提交保留在 refs/domo-archive"
+                >
+                  {artifactsReleasing ? "回收中" : "已回收"}
+                </Badge>
+              ) : null}
+            </span>
+          </div>
+        );
+      case "archiveRef":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span className="mono">{archiveReference}</span>
+          </div>
+        );
+      case "archiveRecovery":
+        return (
+          <div className="kv" key={field}>
+            <span>{label}</span>
+            <span className="mono">{archiveRecovery}</span>
+          </div>
+        );
+    }
+  };
+  const depsFolded = depsFoldedFields({
+    archiveReference: Boolean(archiveReference && artifactsReleased && !artifactsReleasing),
+    archiveRecovery: Boolean(artifactsReleased && !artifactsReleasing && archiveRecovery),
+  });
   const depsSection = (
-    <section>
+    <section className="task-deps drawer-layout-section">
       <h3>依赖与位置</h3>
-      <div className="kv">
-        <span>依赖</span>
-        <span>{task.deps.length ? task.deps.join(", ") : "无"}</span>
-      </div>
-      <div className="kv">
-        <span>分支</span>
-        <span className="mono">{task.branch ?? "—"}</span>
-      </div>
-      <div className="kv">
-        <span>工作区</span>
-        <span className="badge-row">
-          <span className="mono">
-            {task.worktree ??
-              (artifactsReleasing
-                ? "回收中"
-                : artifactsReleased
-                  ? "已回收"
-                  : "尚未创建")}
-          </span>
-          {task.worktree && artifactsReleased ? (
-            <Badge
-              tone="muted"
-              title="工作区已回收，分支提交保留在 refs/domo-archive"
-            >
-              {artifactsReleasing ? "回收中" : "已回收"}
-            </Badge>
-          ) : null}
-        </span>
-      </div>
-      {archiveReference && artifactsReleased && !artifactsReleasing ? (
-        <div className="kv">
-          <span>归档 ref</span>
-          <span className="mono">{archiveReference}</span>
-        </div>
-      ) : null}
-      {artifactsReleased && !artifactsReleasing && archiveRecovery ? (
-        <div className="kv">
-          <span>恢复命令</span>
-          <span className="mono">{archiveRecovery}</span>
-        </div>
-      ) : null}
-      <div className="kv">
-        <span>排队位置</span>
-        <span>
-          {edge.position > 0
-            ? `可调整队列第 ${edge.position}/${edge.total} 位`
-            : task.queue_position !== null
-              ? `派发队列第 ${task.queue_position} 位`
-              : "未在队列中"}
-        </span>
-      </div>
-      <div className="kv">
-        <span>等待原因</span>
-        <span>{task.waiting_reason ?? "—"}</span>
-      </div>
-      <div className="kv">
-        <span>失败分类</span>
-        <span>
-          {task.last_failure_kind
-            ? FAILURE_KIND_LABELS[task.last_failure_kind] ?? task.last_failure_kind
-            : "—"}
-        </span>
-      </div>
-      <div className="kv">
-        <span>Agent</span>
-        <span>{agentName(task.agent_id)}</span>
-      </div>
+      {DEPS_PRIMARY_FIELDS.map(depsRow)}
+      <details className="drawer-fold deps-fold">
+        <summary>更多位置信息</summary>
+        {depsFolded.map(depsRow)}
+      </details>
     </section>
   );
   const rawErrorSection =
@@ -2142,10 +2196,12 @@ export function TaskDrawer({
         return <div key={key}>{milestoneSection}</div>;
       case "result":
         return <div key={key}>{resultSection}</div>;
-      case "acceptance":
-        return <div key={key}>{acceptanceSection}</div>;
       case "description":
         return <div key={key}>{descriptionSection}</div>;
+      case "acceptance":
+        return <div key={key}>{acceptanceSection}</div>;
+      case "feedback":
+        return feedbackSection ? <div key={key}>{feedbackSection}</div> : null;
       case "derive":
         return deriveSection ? <div key={key}>{deriveSection}</div> : null;
       case "deps":

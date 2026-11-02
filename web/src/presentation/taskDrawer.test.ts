@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  DRAWER_ACCEPTANCE_TITLE,
+  DRAWER_CONTENT_SECTION_CLASS,
+  DRAWER_DESCRIPTION_TITLE,
+  DRAWER_FEEDBACK_TITLE,
   DRAWER_LEAD_TITLES,
+  DEPS_FOLDED_FIELDS,
+  DEPS_PRIMARY_FIELDS,
+  acceptanceMarkdown,
   canControlTask,
+  depsFoldedFields,
   drawerLayout,
   drawerLead,
+  hasVerifierFeedback,
   rawErrorEntry,
+  verifierFeedback,
 } from "./taskDrawer";
 
 const base = { stage: "running", status: null, human_gate: null };
@@ -61,6 +71,55 @@ describe("DRAWER_LEAD_TITLES", () => {
   });
 });
 
+describe("描述与验收标准的同级区块", () => {
+  it("两者共用一个容器类名，标题各自独立", () => {
+    expect(DRAWER_CONTENT_SECTION_CLASS).toBe("drawer-content-section");
+    expect(DRAWER_DESCRIPTION_TITLE).toBe("任务描述");
+    expect(DRAWER_ACCEPTANCE_TITLE).toBe("验收标准");
+    expect(DRAWER_FEEDBACK_TITLE).toBe("验收反馈");
+  });
+
+  it("验收标准按 Markdown 列表排版，空白项被丢弃", () => {
+    expect(acceptanceMarkdown(["验收项一", "  ", "验收项二 "])).toBe(
+      "- 验收项一\n- 验收项二",
+    );
+    expect(acceptanceMarkdown([])).toBe("");
+  });
+});
+
+describe("验收反馈", () => {
+  it("空白反馈不算反馈", () => {
+    expect(hasVerifierFeedback({ ...base })).toBe(false);
+    expect(hasVerifierFeedback({ ...base, verifier_issues: [] })).toBe(false);
+    expect(hasVerifierFeedback({ ...base, verifier_issues: ["", "  "] })).toBe(false);
+    expect(hasVerifierFeedback({ ...base, verifier_issues: ["需要补充边界"] })).toBe(true);
+    expect(verifierFeedback(["需要补充边界", " ", "缺少测试"])).toEqual([
+      "需要补充边界",
+      "缺少测试",
+    ]);
+    expect(verifierFeedback(undefined)).toEqual([]);
+  });
+});
+
+describe("依赖与位置分层", () => {
+  it("关键字段常显，其余字段在折叠区且不重复", () => {
+    expect(DEPS_PRIMARY_FIELDS).toEqual(["deps", "queue", "waitingReason"]);
+    const folded = depsFoldedFields({ archiveReference: false, archiveRecovery: false });
+    expect(folded).toEqual(DEPS_FOLDED_FIELDS);
+    expect(folded).toEqual(
+      expect.arrayContaining(["branch", "worktree", "failureKind", "agent"]),
+    );
+    for (const field of folded) {
+      expect(DEPS_PRIMARY_FIELDS).not.toContain(field);
+    }
+  });
+
+  it("归档 ref 与恢复命令只在可用时进入折叠区", () => {
+    const folded = depsFoldedFields({ archiveReference: true, archiveRecovery: true });
+    expect(folded).toEqual([...DEPS_FOLDED_FIELDS, "archiveRef", "archiveRecovery"]);
+  });
+});
+
 describe("drawerLayout 区块顺序", () => {
   it("agentPool 始终是 tail 的最后一项", () => {
     for (const item of cases) {
@@ -105,11 +164,37 @@ describe("drawerLayout 区块顺序", () => {
     expect(rawErrorEntry(drawerLayout(base))).toBe("none");
   });
 
-  it("验收只出现一次", () => {
+  it("验收标准只出现一次，且紧跟任务描述之后", () => {
     for (const item of cases) {
       const layout = drawerLayout(item.input);
       expect(layout.tail.filter((entry) => entry === "acceptance")).toHaveLength(1);
+      expect(layout.tail.filter((entry) => entry === "description")).toHaveLength(1);
+      expect(layout.tail.indexOf("acceptance")).toBe(
+        layout.tail.indexOf("description") + 1,
+      );
     }
+  });
+
+  it("验收反馈只在存在反馈时出现一次", () => {
+    for (const item of cases) {
+      expect(drawerLayout(item.input).tail.filter((entry) => entry === "feedback")).toHaveLength(0);
+      expect(
+        drawerLayout({ ...item.input, verifier_issues: ["需要补充边界"] }).tail.filter(
+          (entry) => entry === "feedback",
+        ),
+      ).toHaveLength(1);
+    }
+    expect(drawerLayout({ ...base, verifier_issues: ["", "  "] }).tail).not.toContain(
+      "feedback",
+    );
+  });
+
+  it("验收反馈位于验收标准之后，并先于派生与依赖信息", () => {
+    const layout = drawerLayout({ ...base, verifier_issues: ["需要补充边界"] });
+    const feedback = layout.tail.indexOf("feedback");
+    expect(feedback).toBeGreaterThan(layout.tail.indexOf("acceptance"));
+    expect(feedback).toBeLessThan(layout.tail.indexOf("derive"));
+    expect(feedback).toBeLessThan(layout.tail.indexOf("deps"));
   });
 
   it("结果摘要不重复：result 首区块时 tail 不再含 result", () => {
