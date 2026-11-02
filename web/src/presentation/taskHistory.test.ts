@@ -3,17 +3,26 @@ import type { JobSummary, VerificationHistory, VerificationRecord } from "../typ
 import {
   HISTORY_VERDICT_LABELS,
   TASK_HISTORY_ALIGNED_LABEL,
+  TASK_HISTORY_EXECUTION_EMPTY,
+  TASK_HISTORY_FILTER_LABEL,
   TASK_HISTORY_JOBS_LABEL,
+  TASK_HISTORY_UNLINKED_VERIFIERS,
   alignHistory,
   filterFailedRounds,
+  groupExecutionRounds,
   recordRounds,
   roundAnchorId,
   summaryLine,
   taskHistory,
+  unlinkedVerifiersLabel,
 } from "./taskHistory";
 
 function at(minute: number): string {
   return `2026-01-10T10:${String(minute).padStart(2, "0")}:00Z`;
+}
+
+function beforeFirst(minute: number): string {
+  return `2026-01-10T09:${String(minute).padStart(2, "0")}:00Z`;
 }
 
 function job(overrides: Partial<JobSummary> & { id: string }): JobSummary {
@@ -44,9 +53,11 @@ function job(overrides: Partial<JobSummary> & { id: string }): JobSummary {
   };
 }
 
-function record(overrides: Partial<VerificationRecord> & { id: string; round: number }): VerificationRecord {
+function record(
+  overrides: Partial<VerificationRecord> & { id: string; round: number },
+): VerificationRecord {
   return {
-    attempt: overrides.round,
+    attempt: 1,
     status: "succeeded",
     passed: true,
     reason: "符合验收标准",
@@ -74,7 +85,6 @@ function history(verifications: VerificationRecord[], truncated = false): Verifi
   };
 }
 
-/// 三轮执行、两轮验收：第 1 轮验收通过，第 2 轮验收拒绝，第 3 轮待验收。
 const executor1 = job({ id: "e1", attempt: 1, created_at: at(0) });
 const executor2 = job({ id: "e2", attempt: 2, created_at: at(10) });
 const executor3 = job({ id: "e3", attempt: 3, created_at: at(20) });
@@ -88,7 +98,7 @@ const verifier1 = job({
 const verifier2 = job({
   id: "v2",
   role: "verifier",
-  attempt: 2,
+  attempt: 1,
   created_at: at(15),
   agent_name: "验收者二",
 });
@@ -114,97 +124,181 @@ describe("summaryLine 结果摘要首行", () => {
   });
 });
 
-describe("同一轮次执行与验收配对", () => {
-  it("三轮执行两轮验收对齐成三轮，验收归属各自执行轮", () => {
+describe("按执行轮聚合验收尝试", () => {
+  it("1 次执行 + 3 次验收（2 次失败）只产生 1 轮并汇总为 3 次尝试、2 次失败", () => {
+    const rejected = job({ id: "v1", role: "verifier", created_at: at(5) });
+    const crashed = job({
+      id: "v2",
+      role: "verifier",
+      created_at: at(6),
+      status: "failed",
+      error: "验收进程异常退出",
+    });
+    const passed = job({ id: "v3", role: "verifier", created_at: at(7) });
+    const result = taskHistory(
+      [executor1, rejected, crashed, passed],
+      history([
+        record({ id: "v1", round: 1, passed: false, reason: "缺少测试" }),
+        record({ id: "v3", round: 1, passed: true, reason: "符合验收标准" }),
+      ]),
+      "ready",
+    );
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].round).toBe(1);
+    expect(result.rounds[0].executor?.id).toBe("e1");
+    expect(result.rounds[0].verifiers.map((entry) => entry.id)).toEqual([
+      "v1",
+      "v2",
+      "v3",
+    ]);
+    expect(result.rounds[0].verifierAttempts.total).toBe(3);
+    expect(result.rounds[0].verifierAttempts.failed).toBe(2);
+    expect(result.rounds[0].verifierAttempts.latest?.id).toBe("v3");
+    expect(result.rounds[0].verdict).toBe("passed");
+    expect(result.rounds[0].failed).toBe(true);
+  });
+
+  it("拒绝后重新验收仍为同一轮，汇总 2 次尝试", () => {
+    const rejected = job({ id: "v1", role: "verifier", created_at: at(5) });
+    const retry = job({ id: "v2", role: "verifier", created_at: at(6) });
+    const rounds = alignHistory(
+      [executor1, rejected, retry],
+      history([
+        record({ id: "v1", round: 1, passed: false, reason: "缺少测试" }),
+        record({ id: "v2", round: 1, passed: true, reason: "补充测试后通过" }),
+      ]),
+    );
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1", "v2"]);
+    expect(rounds[0].verifierAttempts).toMatchObject({ total: 2, failed: 1 });
+    expect(rounds[0].verifierAttempts.latest?.id).toBe("v2");
+    expect(rounds[0].verdict).toBe("passed");
+    expect(rounds[0].reason).toBe("补充测试后通过");
+  });
+
+  it("2 次执行 + 2 次验收为 2 轮，验收各归其轮", () => {
+    const result = taskHistory(
+      [executor1, verifier1, executor2, verifier2],
+      history([
+        record({ id: "v1", round: 1 }),
+        record({ id: "v2", round: 2, passed: false, reason: "缺少测试" }),
+      ]),
+      "ready",
+    );
+    expect(result.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(result.rounds[0].executor?.id).toBe("e1");
+    expect(result.rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1"]);
+    expect(result.rounds[0].verifierAttempts.total).toBe(1);
+    expect(result.rounds[1].executor?.id).toBe("e2");
+    expect(result.rounds[1].verifiers.map((entry) => entry.id)).toEqual(["v2"]);
+    expect(result.rounds[1].verdict).toBe("rejected");
+    expect(result.rounds[1].verifierAttempts).toMatchObject({ total: 1, failed: 1 });
+  });
+
+  it("rounds 长度恒等于执行作业数", () => {
     const result = taskHistory(
       [executor1, verifier1, executor2, verifier2, executor3],
-      history([record({ id: "v1", round: 1 }), record({ id: "v2", round: 2, passed: false })]),
+      history([
+        record({ id: "v1", round: 1 }),
+        record({ id: "v2", round: 2, passed: false }),
+      ]),
       "ready",
     );
     expect(result.rounds.map((round) => round.round)).toEqual([1, 2, 3]);
-    expect(result.rounds[0].executor?.id).toBe("e1");
-    expect(result.rounds[0].verifier?.id).toBe("v1");
-    expect(result.rounds[1].executor?.id).toBe("e2");
-    expect(result.rounds[1].verifier?.id).toBe("v2");
-    expect(result.rounds[2].executor?.id).toBe("e3");
     expect(result.rounds[2].verifier).toBeNull();
-    expect(result.rounds.map((round) => round.verdict)).toEqual([
-      "passed",
-      "rejected",
-      "none",
-    ]);
-    expect(result.failedRounds).toBe(1);
-    expect(result.source).toBe("aligned");
-    expect(result.sourceLabel).toBe(TASK_HISTORY_ALIGNED_LABEL);
+    expect(result.rounds[2].verdict).toBe("none");
+    expect(result.rounds[2].verifierAttempts).toEqual({
+      total: 0,
+      failed: 0,
+      latest: null,
+    });
   });
 
-  it("每轮展示 Agent、状态、时长、用量已知与原因", () => {
-    const rounds = alignHistory(
-      [executor1, verifier1],
-      history([record({ id: "v1", round: 1 })]),
-      { e1: "完成第一轮\n更多说明" },
-    );
-    const [first] = rounds;
-    expect(first.executor?.agentName).toBe("执行者");
-    expect(first.executor?.statusLabel).toBe("成功");
-    expect(first.executor?.durationKnown).toBe(true);
-    expect(first.executor?.usageKnown).toBe(true);
-    expect(first.resultLine).toBe("完成第一轮");
-    expect(first.verifier?.agentName).toBe("验收者一");
-    expect(first.reason).toBe("符合验收标准");
-  });
-
-  it("用量未知与时长缺失在轮次里可行", () => {
-    const rounds = alignHistory([
-      job({ id: "e1", usage_known: false, duration_ms: null }),
-    ]);
-    expect(rounds[0].executor?.usageKnown).toBe(false);
-    expect(rounds[0].executor?.durationKnown).toBe(false);
+  it("本轮执行没有结果时使用“本次执行未产出结果”文案", () => {
+    const rounds = alignHistory([executor1]);
     expect(rounds[0].resultLine).toBeNull();
+    expect(rounds[0].resultText).toBe(TASK_HISTORY_EXECUTION_EMPTY);
+    expect(TASK_HISTORY_EXECUTION_EMPTY).toBe("本次执行未产出结果");
+
+    const withResult = alignHistory([executor1], null, { e1: "完成第一轮\n更多说明" });
+    expect(withResult[0].resultText).toBe("完成第一轮");
   });
 });
 
-describe("缺失验收", () => {
-  it("没有验收作业的轮次结论为未验收，不计入失败", () => {
-    const rounds = alignHistory([executor1, executor2]);
-    expect(rounds).toHaveLength(2);
-    expect(rounds.every((round) => round.verdict === "none")).toBe(true);
-    expect(rounds.every((round) => round.failed === false)).toBe(true);
-    expect(HISTORY_VERDICT_LABELS.none).toBe("未验收");
-  });
-
-  it("验收记录未读出时只按作业时间对齐，来源标注作业记录", () => {
+describe("未关联执行的验收作业", () => {
+  it("早于全部执行作业且接口 round=0 的验收作业计入 unlinked，不占用轮次", () => {
+    const early = job({
+      id: "v0",
+      role: "verifier",
+      created_at: beforeFirst(59),
+    });
+    const unanchored = job({ id: "v1", role: "verifier", created_at: at(5) });
     const result = taskHistory(
-      [executor1, verifier1, executor2, executor3],
-      null,
-      "loading",
+      [executor1, early, unanchored],
+      history([record({ id: "v1", round: 0 })]),
+      "ready",
     );
-    expect(result.source).toBe("jobs-only");
-    expect(result.sourceLabel).toBe(TASK_HISTORY_JOBS_LABEL);
-    expect(result.rounds.map((round) => round.round)).toEqual([1, 2, 3]);
-    expect(result.rounds[0].verifier?.id).toBe("v1");
-    expect(result.rounds[1].verifier).toBeNull();
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0].verifiers).toEqual([]);
+    expect(result.unlinkedVerifiers).toBe(2);
   });
 
-  it("验收作业没有结论时按状态判定：未结束待验收，失败计入失败轮次", () => {
-    const running = alignHistory([
+  it("没有验收作业时 unlinked 为零，筛选后为空", () => {
+    const result = taskHistory([executor1], null, "loading");
+    expect(result.rounds).toHaveLength(1);
+    expect(result.unlinkedVerifiers).toBe(0);
+    expect(filterFailedRounds(result.rounds, true)).toEqual([]);
+  });
+
+  it("未关联提示文案固定", () => {
+    expect(TASK_HISTORY_UNLINKED_VERIFIERS).toBe(
+      "有 {count} 次验收作业没有可关联的执行轮",
+    );
+    expect(unlinkedVerifiersLabel(2)).toBe("有 2 次验收作业没有可关联的执行轮");
+  });
+});
+
+describe("验收结论", () => {
+  it("验收作业全部失败且无结论时判为验收异常，原因取最近一次失败", () => {
+    const rounds = alignHistory([
+      executor1,
+      job({ id: "v1", role: "verifier", created_at: at(5), status: "failed", error: "第一次异常" }),
+      job({ id: "v2", role: "verifier", created_at: at(6), status: "failed", error: "第二次异常" }),
+    ]);
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0].verdict).toBe("error");
+    expect(HISTORY_VERDICT_LABELS.error).toBe("验收异常");
+    expect(rounds[0].failed).toBe(true);
+    expect(rounds[0].verifierAttempts).toMatchObject({ total: 2, failed: 2 });
+    expect(rounds[0].reason).toBe("第二次异常");
+  });
+
+  it("验收尚未结束时待验收，不计为失败", () => {
+    const rounds = alignHistory([
       executor1,
       job({ id: "v1", role: "verifier", created_at: at(5), status: "running" }),
     ]);
-    expect(running[0].verdict).toBe("pending");
-    expect(running[0].running).toBe(true);
-    expect(running[0].failed).toBe(false);
-
-    const failed = alignHistory([
-      executor1,
-      job({ id: "v1", role: "verifier", created_at: at(5), status: "failed", error: "验收进程退出" }),
-    ]);
-    expect(failed[0].verdict).toBe("rejected");
-    expect(failed[0].failed).toBe(true);
-    expect(failed[0].reason).toBe("验收进程退出");
+    expect(rounds[0].verdict).toBe("pending");
+    expect(rounds[0].failed).toBe(false);
+    expect(rounds[0].running).toBe(true);
+    expect(rounds[0].verifierAttempts).toMatchObject({ total: 1, failed: 0 });
   });
 
-  it("执行失败的轮次计入失败，验收通过也保留执行状态", () => {
+  it("最近一次有结论的验收决定本轮结论", () => {
+    const rounds = alignHistory(
+      [
+        executor1,
+        job({ id: "v1", role: "verifier", created_at: at(5) }),
+        job({ id: "v2", role: "verifier", created_at: at(6), status: "running" }),
+      ],
+      history([record({ id: "v1", round: 1 })]),
+    );
+    expect(rounds[0].verdict).toBe("passed");
+    expect(rounds[0].reason).toBe("符合验收标准");
+    expect(rounds[0].running).toBe(true);
+  });
+
+  it("执行失败的轮次计入问题轮", () => {
     const rounds = alignHistory([
       job({ id: "e1", status: "failed", error: "boom" }),
       job({ id: "v1", role: "verifier", created_at: at(5) }),
@@ -214,14 +308,14 @@ describe("缺失验收", () => {
   });
 });
 
-describe("乱序输入", () => {
-  const ordered = [executor1, executor2, executor3, verifier1, verifier2];
+describe("乱序、截断与筛选", () => {
+  const ordered = [executor1, verifier1, executor2, verifier2, executor3];
   const historyInput = history([
     record({ id: "v1", round: 1 }),
     record({ id: "v2", round: 2, passed: false }),
   ]);
 
-  it("同一组作业任意顺序得到同一组轮次", () => {
+  it("同一组作业任意顺序得到同一组轮次与尝试汇总", () => {
     const expected = alignHistory(ordered, historyInput);
     const permutations = [
       [...ordered].reverse(),
@@ -230,58 +324,83 @@ describe("乱序输入", () => {
     ];
     for (const input of permutations) {
       const rounds = alignHistory(input, historyInput);
-      expect(rounds.map((round) => [round.round, round.executor?.id, round.verifier?.id])).toEqual(
-        expected.map((round) => [round.round, round.executor?.id, round.verifier?.id]),
+      expect(
+        rounds.map((round) => [
+          round.round,
+          round.executor?.id,
+          round.verifiers.map((entry) => entry.id),
+          round.verifierAttempts.total,
+        ]),
+      ).toEqual(
+        expected.map((round) => [
+          round.round,
+          round.executor?.id,
+          round.verifiers.map((entry) => entry.id),
+          round.verifierAttempts.total,
+        ]),
       );
     }
   });
 
-  it("验收记录乱序与截断时按序号平移对齐", () => {
-    expect(
-      [...recordRounds(history([record({ id: "v2", round: 2 }), record({ id: "v1", round: 1 })]))],
-    ).toEqual([
-      ["v1", 1],
-      ["v2", 2],
-    ]);
-    // 接口只保留最近 3 条，序号从 3 开始：平移回任务轮次 3、4、5。
-    const truncated = recordRounds(
-      history(
-        [
-          record({ id: "v5", round: 5 }),
-          record({ id: "v3", round: 3 }),
-          record({ id: "v4", round: 4 }),
-        ],
-        true,
-      ),
+  it("验收记录截断缺少最早轮次的记录时编号不重排", () => {
+    const lateVerifier = job({ id: "v3", role: "verifier", created_at: at(25) });
+    const rounds = alignHistory(
+      [executor1, executor2, executor3, lateVerifier],
+      history([record({ id: "v3", round: 3 })], true),
     );
-    expect(truncated.get("v3")).toBe(3);
-    expect(truncated.get("v5")).toBe(5);
+    expect(rounds.map((round) => round.round)).toEqual([1, 2, 3]);
+    expect(rounds[0].verifiers).toEqual([]);
+    expect(rounds[2].verifiers.map((entry) => entry.id)).toEqual(["v3"]);
+    expect(recordRounds(history([record({ id: "v3", round: 3 })], true)).get("v3")).toBe(3);
   });
 
-  it("验收作业结果原文作为原因回退", () => {
-    const rounds = alignHistory(
-      [executor1, job({ id: "v1", role: "verifier", created_at: at(5) })],
-      null,
-      { v1: "结论：不通过\n原因是缺测试" },
+  it("执行作业被截断缺少最早轮次时编号顺延，验收仍归入对应轮", () => {
+    const lateExecutor1 = job({ id: "e3", created_at: at(20) });
+    const lateExecutor2 = job({ id: "e4", created_at: at(30) });
+    const lateVerifier1 = job({
+      id: "v3",
+      role: "verifier",
+      created_at: at(25),
+    });
+    const lateVerifier2 = job({
+      id: "v4",
+      role: "verifier",
+      created_at: at(35),
+    });
+    const records = history(
+      [
+        record({ id: "v3", round: 3 }),
+        record({ id: "v4", round: 4, passed: false }),
+      ],
+      true,
     );
-    expect(rounds[0].reason).toBe("结论：不通过");
-  });
-
-  it("接口序号把重试验收并回同一执行轮", () => {
-    const retry = job({ id: "v1b", role: "verifier", created_at: at(6) });
     const rounds = alignHistory(
-      [executor1, verifier1, retry, executor2],
-      history([record({ id: "v1", round: 1 })]),
+      [lateExecutor1, lateVerifier1, lateExecutor2, lateVerifier2],
+      records,
     );
     expect(rounds.map((round) => round.round)).toEqual([1, 2]);
-    expect(rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1", "v1b"]);
+    expect(rounds[0].executor?.id).toBe("e3");
+    expect(rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v3"]);
+    expect(rounds[1].executor?.id).toBe("e4");
+    expect(rounds[1].verifiers.map((entry) => entry.id)).toEqual(["v4"]);
+    // 接口轮次保持执行轮编号，本地轮次按现存执行作业顺延。
+    expect(recordRounds(records).get("v3")).toBe(3);
+    expect(recordRounds(records).get("v4")).toBe(4);
   });
 
-  it("只有验收作业时也成轮", () => {
-    const rounds = alignHistory([verifier1]);
-    expect(rounds).toHaveLength(1);
-    expect(rounds[0].executor).toBeNull();
-    expect(rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1"]);
+  it("分组纯函数只按执行作业成轮", () => {
+    const grouping = groupExecutionRounds(
+      [executor1, executor2],
+      [verifier1],
+      new Map(),
+    );
+    expect(grouping.rounds.map((entry) => entry.round)).toEqual([1, 2]);
+    expect(grouping.rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1"]);
+    expect(grouping.unlinked).toEqual([]);
+
+    const onlyVerifier = groupExecutionRounds([], [verifier1], new Map());
+    expect(onlyVerifier.rounds).toEqual([]);
+    expect(onlyVerifier.unlinked.map((entry) => entry.id)).toEqual(["v1"]);
   });
 
   it("非任务作业（规划、总结）不进入历史", () => {
@@ -294,24 +413,33 @@ describe("乱序输入", () => {
     expect(rounds[0].executors.map((entry) => entry.id)).toEqual(["e1"]);
   });
 
-  it("没有作业时来源为空，筛选后为空", () => {
+  it("没有作业时来源为空", () => {
     const result = taskHistory([], null, "loading");
     expect(result.rounds).toEqual([]);
+    expect(result.unlinkedVerifiers).toBe(0);
     expect(result.source).toBe("empty");
     expect(result.sourceLabel).toBe("");
-    expect(filterFailedRounds(result.rounds, true)).toEqual([]);
   });
-});
 
-describe("只看失败筛选", () => {
-  const rounds = alignHistory(
-    [executor1, verifier1, executor2, verifier2, executor3],
-    history([record({ id: "v1", round: 1 }), record({ id: "v2", round: 2, passed: false })]),
-  );
+  it("来源标注区分接口对齐与仅作业记录", () => {
+    const aligned = taskHistory(
+      [executor1, verifier1],
+      history([record({ id: "v1", round: 1 })]),
+      "ready",
+    );
+    expect(aligned.source).toBe("aligned");
+    expect(aligned.sourceLabel).toBe(TASK_HISTORY_ALIGNED_LABEL);
 
-  it("开启筛选时只保留失败轮次，关闭时原样返回", () => {
+    const jobsOnly = taskHistory([executor1, verifier1], null, "loading");
+    expect(jobsOnly.source).toBe("jobs-only");
+    expect(jobsOnly.sourceLabel).toBe(TASK_HISTORY_JOBS_LABEL);
+  });
+
+  it("只看问题轮筛选保留执行失败、验收拒绝与验收尝试失败的轮次", () => {
+    const rounds = alignHistory(ordered, historyInput);
     expect(filterFailedRounds(rounds, false)).toBe(rounds);
     expect(filterFailedRounds(rounds, true).map((round) => round.round)).toEqual([2]);
+    expect(TASK_HISTORY_FILTER_LABEL).toBe("只看问题轮");
   });
 
   it("轮次锚点固定可定位", () => {

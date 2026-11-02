@@ -1,16 +1,21 @@
 /// 执行与验收历史的呈现模型：纯数据推导，渲染层只负责排版。
 ///
-/// 数据来自项目详情 jobs（该任务全部执行者与验收者作业）与验收记录接口的逐轮记录，
-/// 两者按轮次对齐成纵向时间线。轮次对齐规则：
+/// 数据来自项目详情 jobs（该任务全部执行者与验收者作业）与验收记录接口的逐轮记录。
+/// 轮次对齐规则：
 ///
-/// - 一轮由一次执行作业与其后的验收作业组成；同一轮内的续跑与重试验收都保留，
-///   最近一次作为该轮代表。
-/// - 验收轮次优先取验收记录接口的序号：接口按创建顺序逐条编号，序号相对最早一条
-///   记录；记录被截断时更早的轮次没有接口记录，序号无从得知。
-/// - 缺少序号（接口未就绪、记录截断或作业缺失）时按时间顺序对齐：执行作业按创建
-///   时间依次进入新的一轮，验收作业归属最近一次尚未验收的执行轮。
-/// - 没有执行作业的验收作业单独成轮；只有执行的轮次验收结论为“未验收”。
+/// - 每一轮对应一个执行作业：执行作业按创建时间与 id 升序编号为第 N 轮，
+///   rounds.length 恒等于执行作业数。
+/// - 验收作业按创建时间归入创建时间不晚于它的最近一个执行轮；同一执行轮后的
+///   多次验收（异常重试、拒绝后重新验收）都归入该轮并保留全部尝试明细。
+/// - 验收记录接口的 round 是所属执行轮：>=1 时用于校正归属，0 表示没有可关联的
+///   执行作业，计入 unlinkedVerifiers，不占用轮次。
+/// - 早于全部执行作业的验收作业没有可关联的执行轮，同样计入 unlinkedVerifiers。
+/// - 作业列表缺少最早执行作业时，按接口轮次与本地位置之差推断偏移，剩余执行作业
+///   从第 1 轮继续编号，验收仍归入对应执行轮。
 /// - 输入顺序无关：函数内部按创建时间与 id 排序后再对齐。
+///
+/// 本轮结论取最近一次有结论的验收；验收作业全部失败且没有结论时判为验收异常。
+/// 本轮执行作业存在但没有结果时使用与验收文案区分的“本次执行未产出结果”。
 
 import type { JobSummary, VerificationHistory, VerificationRecord } from "../types";
 
@@ -40,29 +45,44 @@ export interface HistoryJob {
   finishedAt: string | null;
 }
 
-/// 验收结论：通过、拒绝、待验收（验收作业未结束或结论待定）、未验收（没有验收作业）。
-export type HistoryVerdict = "passed" | "rejected" | "pending" | "none";
+/// 验收结论：通过、拒绝、验收异常（全部尝试失败且无结论）、待验收（尚未结束或结论待定）、
+/// 未验收（没有验收作业）。
+export type HistoryVerdict = "passed" | "rejected" | "error" | "pending" | "none";
+
+/// 同一执行轮内多次验收尝试的汇总；明细仍保留在 verifiers。
+export interface VerifierAttempts {
+  /// 本轮验收尝试总次数。
+  total: number;
+  /// 未通过的尝试次数：验收拒绝或验收作业失败。
+  failed: number;
+  /// 最近一次尝试；没有验收作业时为 null。
+  latest: HistoryJob | null;
+}
 
 export interface HistoryRound {
-  /// 轮次序号，从 1 开始；只有验收的轮次也占用一个序号。
+  /// 执行轮次序号，从 1 开始，按执行作业创建顺序编号。
   round: number;
-  /// 本轮全部执行作业，最近的排在最后。
+  /// 本轮执行作业，最近的排在最后。
   executors: HistoryJob[];
-  /// 本轮全部验收作业，最近的排在最后。
+  /// 本轮全部验收尝试，按创建顺序排列。
   verifiers: HistoryJob[];
-  /// 最近一次执行为本轮代表；只有验收的轮次为 null。
+  /// 本轮最近一次执行作业。
   executor: HistoryJob | null;
-  /// 最近一次验收为本轮代表；没有验收作业时为 null。
+  /// 本轮最近一次验收尝试；没有验收作业时为 null。
   verifier: HistoryJob | null;
   /// 执行结果摘要首行；作业结果尚未读出或没有结果时为 null。
   resultLine: string | null;
+  /// 本轮结果展示文案：有结果取首行，没有结果时为“本次执行未产出结果”。
+  resultText: string;
   verdict: HistoryVerdict;
   /// 验收原因；没有可读原因时为 null。
   reason: string | null;
-  /// 本轮是否失败：执行失败、验收拒绝，或验收作业失败且没有结论。
+  /// 本轮是否出现问题：执行失败、验收拒绝或验收尝试失败。
   failed: boolean;
   /// 本轮是否有作业仍在排队或运行。
   running: boolean;
+  /// 本轮多次验收尝试的汇总。
+  verifierAttempts: VerifierAttempts;
 }
 
 export type TaskHistorySource = "aligned" | "jobs-only" | "empty";
@@ -74,25 +94,49 @@ export interface TaskHistory {
   /// 来源说明，直接展示给用户；没有轮次时为空。
   sourceLabel: string;
   failedRounds: number;
+  /// 没有可关联执行轮的验收作业数；这些作业不占用轮次。
+  unlinkedVerifiers: number;
 }
 
 /// 作业 id -> 作业结果原文；用于各轮的“结果摘要首行”。
 export type JobResultMap = Record<string, string | null | undefined>;
 
+/// 一个执行轮及其验收尝试；unlinked 中的验收作业没有可关联的执行轮。
+export interface ExecutionRoundGroup {
+  round: number;
+  executors: JobSummary[];
+  verifiers: JobSummary[];
+}
+
+export interface RoundGrouping {
+  rounds: ExecutionRoundGroup[];
+  unlinked: JobSummary[];
+}
+
 export const TASK_HISTORY_TITLE = "执行与验收历史";
-export const TASK_HISTORY_FILTER_LABEL = "只看失败";
+/// 筛选按钮：保留存在执行失败、验收拒绝或验收尝试失败的问题轮次。
+export const TASK_HISTORY_FILTER_LABEL = "只看问题轮";
 export const TASK_HISTORY_EMPTY = "还没有执行或验收作业。";
 export const TASK_HISTORY_FILTER_EMPTY = "没有失败的轮次。";
 export const TASK_HISTORY_ALIGNED_LABEL = "来源：作业与验收记录（按轮次对齐）";
 export const TASK_HISTORY_JOBS_LABEL = "来源：作业记录（验收记录未读出）";
 export const TASK_HISTORY_USAGE_UNKNOWN = "用量未知";
 export const TASK_HISTORY_RESULT_EMPTY = "尚未产出结果";
+export const TASK_HISTORY_EXECUTION_EMPTY = "本次执行未产出结果";
+/// 未关联执行轮的验收作业提示模板；{count} 由 unlinkedVerifiersLabel 填充。
+export const TASK_HISTORY_UNLINKED_VERIFIERS = "有 {count} 次验收作业没有可关联的执行轮";
 export const TASK_HISTORY_NO_AGENT = "无 Agent";
 export const TASK_HISTORY_JUMP_LABEL = "查看作业";
+
+/// 未关联执行轮的验收作业提示文案。
+export function unlinkedVerifiersLabel(count: number): string {
+  return TASK_HISTORY_UNLINKED_VERIFIERS.replace("{count}", String(count));
+}
 
 export const HISTORY_VERDICT_LABELS: Record<HistoryVerdict, string> = {
   passed: "通过",
   rejected: "拒绝",
+  error: "验收异常",
   pending: "待验收",
   none: "未验收",
 };
@@ -103,6 +147,7 @@ export const HISTORY_VERDICT_TONES: Record<
 > = {
   passed: "success",
   rejected: "danger",
+  error: "danger",
   pending: "info",
   none: "muted",
 };
@@ -188,18 +233,15 @@ export function summaryLine(
   return null;
 }
 
-function recordVerdict(record: VerificationRecord): HistoryVerdict {
-  if (!RUNNING_STATUSES.has(record.status)) {
-    if (record.passed === true) return "passed";
-    if (record.passed === false) return "rejected";
-  }
-  return "pending";
-}
-
-function jobVerdict(job: JobSummary): HistoryVerdict {
-  if (RUNNING_STATUSES.has(job.status)) return "pending";
-  if (FAILED_STATUSES.has(job.status)) return "rejected";
-  return "pending";
+/// 单个验收尝试的结论；只有验收结束且解析出通过或拒绝时才有结论。
+function conclusiveVerdict(
+  record: VerificationRecord | undefined,
+): "passed" | "rejected" | null {
+  if (!record) return null;
+  if (RUNNING_STATUSES.has(record.status)) return null;
+  if (record.passed === true) return "passed";
+  if (record.passed === false) return "rejected";
+  return null;
 }
 
 function cleanReason(value: string | null | undefined): string | null {
@@ -207,156 +249,48 @@ function cleanReason(value: string | null | undefined): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-/// 验收记录接口按创建顺序逐条编号，序号相对最早一条记录；记录被截断时更早的
-/// 轮次没有接口记录，它们的序号无从得知。返回作业 id -> 轮次序号。
+/// 验收记录接口的 round 是所属执行轮：>=1 直接作为轮次，0 表示没有可关联的执行作业。
+/// 返回作业 id -> 接口轮次。
 export function recordRounds(history: VerificationHistory | null): Map<string, number> {
   const rounds = new Map<string, number>();
-  if (!history) return rounds;
-  const ordered = [...history.verifications].sort((left, right) => {
-    if (left.round !== right.round) return left.round - right.round;
-    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
-  });
-  if (ordered.length === 0) return rounds;
-  const first = ordered[0].round;
-  // 序号逐条递增说明接口只截掉了前面的轮次，序号按偏移平移回任务轮次。
-  const offset = first - 1;
-  ordered.forEach((record, index) => {
-    const sequential = record.round === first + index;
-    rounds.set(record.id, sequential ? offset + index + 1 : record.round);
-  });
+  for (const record of history?.verifications ?? []) rounds.set(record.id, record.round);
   return rounds;
 }
 
-interface AlignedRound {
-  round: number;
-  executors: JobSummary[];
-  verifiers: JobSummary[];
+interface VerifierAttempt {
+  job: JobSummary;
+  record: VerificationRecord | undefined;
+  verdict: "passed" | "rejected" | null;
+  failed: boolean;
 }
 
-function newRound(round: number): AlignedRound {
-  return { round, executors: [], verifiers: [] };
+function toVerifierAttempt(
+  job: JobSummary,
+  record: VerificationRecord | undefined,
+): VerifierAttempt {
+  const verdict = conclusiveVerdict(record);
+  const failed =
+    verdict === "rejected" ||
+    (verdict === null &&
+      (FAILED_STATUSES.has(job.status) ||
+        (record !== undefined && FAILED_STATUSES.has(record.status))));
+  return { job, record, verdict, failed };
 }
 
-/// 执行作业成轮：已有序号的并入同号轮次，其余按时间顺序进入新轮次。
-function executorRounds(
-  executors: JobSummary[],
-  knownRounds: Map<string, number>,
-): AlignedRound[] {
-  const ordered: AlignedRound[] = [];
-  for (const executor of executors) {
-    const known = knownRounds.get(executor.id);
-    const target =
-      known === undefined ? undefined : ordered.find((entry) => entry.round === known);
-    if (target) {
-      target.executors.push(executor);
-    } else {
-      ordered.push({ round: known ?? 0, executors: [executor], verifiers: [] });
-    }
+/// 本轮最近一次有结论的验收尝试。
+function lastConclusion(attempts: VerifierAttempt[]): VerifierAttempt | null {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    if (attempts[index].verdict !== null) return attempts[index];
   }
-  const taken = new Set<string | number>(
-    ordered.filter((entry) => entry.round > 0).map((entry) => entry.round),
-  );
-  for (const entry of ordered) {
-    if (entry.round > 0) continue;
-    let next = 1;
-    while (taken.has(next)) next += 1;
-    entry.round = next;
-    taken.add(next);
-  }
-  ordered.sort((left, right) => left.round - right.round);
-  return ordered;
+  return null;
 }
 
-/// 验收作业归属：已有序号按序号；否则归属最近一次开始且尚未验收的执行轮，
-/// 早于所有执行作业时归入第 1 轮。
-function attachVerifiers(
-  rounds: AlignedRound[],
-  verifiers: JobSummary[],
-  knownRounds: Map<string, number>,
-): AlignedRound[] {
-  const byRound = new Map<number, AlignedRound>();
-  for (const entry of rounds) byRound.set(entry.round, entry);
-  const ordered = [...rounds];
-  for (const verifier of verifiers) {
-    const known = knownRounds.get(verifier.id);
-    if (known !== undefined) {
-      const target = byRound.get(known);
-      if (target) {
-        target.verifiers.push(verifier);
-      } else {
-        const created = newRound(known);
-        created.verifiers.push(verifier);
-        byRound.set(known, created);
-        ordered.push(created);
-      }
-      continue;
-    }
-    let candidate: AlignedRound | null = null;
-    for (const entry of ordered) {
-      if (entry.executors.length === 0) continue;
-      if (sortKey(entry.executors[0]) > sortKey(verifier)) break;
-      candidate = entry;
-    }
-    if (candidate === null) {
-      const first = byRound.get(1) ?? ordered[0];
-      if (first) {
-        first.verifiers.push(verifier);
-      } else {
-        const created = newRound(1);
-        created.verifiers.push(verifier);
-        byRound.set(1, created);
-        ordered.push(created);
-      }
-      continue;
-    }
-    // 同一执行轮已验收过时仍归入该轮，保留重试验收的历史。
-    candidate.verifiers.push(verifier);
-  }
-  return [...ordered].sort((left, right) => left.round - right.round);
-}
-
-function buildRound(
-  entry: AlignedRound,
-  records: Map<string, VerificationRecord>,
-  results: JobResultMap,
-): HistoryRound {
-  const executorJob = entry.executors[entry.executors.length - 1] ?? null;
-  const verifierJob = entry.verifiers[entry.verifiers.length - 1] ?? null;
-  const record = verifierJob ? records.get(verifierJob.id) : undefined;
-  const verdict: HistoryVerdict = verifierJob
-    ? record
-      ? recordVerdict(record)
-      : jobVerdict(verifierJob)
-    : "none";
-  const reason = verifierJob ? verifierReason(verifierJob, record, results) : null;
-  const executorFailed =
-    executorJob !== null && FAILED_STATUSES.has(executorJob.status);
-  const verifierFailed =
-    verifierJob !== null &&
-    FAILED_STATUSES.has(verifierJob.status) &&
-    verdict !== "rejected";
-  return {
-    round: entry.round,
-    executors: entry.executors.map((job) =>
-      toHistoryJob(job, summaryLine(results[job.id])),
-    ),
-    verifiers: entry.verifiers.map((job) =>
-      toHistoryJob(job, verifierReason(job, records.get(job.id), results)),
-    ),
-    executor: executorJob
-      ? toHistoryJob(executorJob, summaryLine(results[executorJob.id]))
-      : null,
-    verifier: verifierJob
-      ? toHistoryJob(verifierJob, verifierReason(verifierJob, record, results))
-      : null,
-    resultLine: executorJob ? summaryLine(results[executorJob.id]) : null,
-    verdict,
-    reason,
-    failed: verdict === "rejected" || executorFailed || verifierFailed,
-    running:
-      entry.executors.some((job) => RUNNING_STATUSES.has(job.status)) ||
-      entry.verifiers.some((job) => RUNNING_STATUSES.has(job.status)),
-  };
+function roundVerdict(attempts: VerifierAttempt[]): HistoryVerdict {
+  if (attempts.length === 0) return "none";
+  const conclusion = lastConclusion(attempts);
+  if (conclusion !== null && conclusion.verdict !== null) return conclusion.verdict;
+  if (attempts.every((attempt) => attempt.failed)) return "error";
+  return "pending";
 }
 
 /// 验收原因：优先取验收记录解析出的原因与原文摘要，其次取验收作业结果的首行，
@@ -375,29 +309,165 @@ function verifierReason(
   );
 }
 
+/// 本地执行作业中，创建时间不晚于该验收作业的作业数；0 表示验收早于全部执行作业。
+function verifierPosition(executors: JobSummary[], verifier: JobSummary): number {
+  const key = sortKey(verifier);
+  let position = 0;
+  for (const executor of executors) {
+    if (sortKey(executor) > key) break;
+    position += 1;
+  }
+  return position;
+}
+
+/// 作业列表缺少最早执行作业时，接口轮次与本地位置之差即为偏移；取出现最多的差值。
+function truncationOffset(
+  executors: JobSummary[],
+  verifiers: JobSummary[],
+  knownRounds: Map<string, number>,
+): number {
+  const counts = new Map<number, number>();
+  for (const verifier of verifiers) {
+    const known = knownRounds.get(verifier.id);
+    if (known === undefined || known < 1) continue;
+    const position = verifierPosition(executors, verifier);
+    if (position < 1) continue;
+    const offset = known - position;
+    counts.set(offset, (counts.get(offset) ?? 0) + 1);
+  }
+  let selected = 0;
+  let selectedCount = 0;
+  for (const [offset, count] of counts) {
+    const closer = Math.abs(offset) < Math.abs(selected);
+    if (count > selectedCount || (count === selectedCount && closer)) {
+      selected = offset;
+      selectedCount = count;
+    }
+  }
+  return selectedCount === 0 ? 0 : selected;
+}
+
+/// 按执行作业分组：执行作业按创建时间与 id 升序编号，验收作业以接口轮次校正、
+/// 缺少接口轮次时按创建时间归入最近一个执行轮；无法归属的验收作业进入 unlinked。
+export function groupExecutionRounds(
+  executors: JobSummary[],
+  verifiers: JobSummary[],
+  knownRounds: Map<string, number> = new Map(),
+): RoundGrouping {
+  const orderedExecutors = [...executors].sort(compareJobs);
+  const orderedVerifiers = [...verifiers].sort(compareJobs);
+  const offset = truncationOffset(orderedExecutors, orderedVerifiers, knownRounds);
+  const rounds: ExecutionRoundGroup[] = orderedExecutors.map((job, index) => ({
+    round: index + 1,
+    executors: [job],
+    verifiers: [],
+  }));
+  const unlinked: JobSummary[] = [];
+  for (const verifier of orderedVerifiers) {
+    const known = knownRounds.get(verifier.id);
+    const position = verifierPosition(orderedExecutors, verifier);
+    const target = known === undefined ? position : known >= 1 ? known - offset : 0;
+    if (target >= 1 && target <= rounds.length) {
+      rounds[target - 1].verifiers.push(verifier);
+    } else {
+      unlinked.push(verifier);
+    }
+  }
+  return { rounds, unlinked };
+}
+
+function buildRound(
+  entry: ExecutionRoundGroup,
+  records: Map<string, VerificationRecord>,
+  results: JobResultMap,
+): HistoryRound {
+  const executorJob = entry.executors[entry.executors.length - 1] ?? null;
+  const attempts = entry.verifiers.map((job) =>
+    toVerifierAttempt(job, records.get(job.id)),
+  );
+  const latestAttempt = attempts[attempts.length - 1] ?? null;
+  const conclusion = lastConclusion(attempts);
+  const latestFailed = [...attempts].reverse().find((attempt) => attempt.failed) ?? null;
+  const verdict = roundVerdict(attempts);
+  const reasonAttempt =
+    verdict === "error" ? latestFailed : conclusion ?? latestAttempt;
+  const reason =
+    reasonAttempt === null
+      ? null
+      : verdict === "error"
+        ? cleanReason(reasonAttempt.job.error) ??
+          verifierReason(reasonAttempt.job, reasonAttempt.record, results)
+        : verifierReason(reasonAttempt.job, reasonAttempt.record, results);
+  const resultLine = executorJob ? summaryLine(results[executorJob.id]) : null;
+  const executorFailed =
+    executorJob !== null && FAILED_STATUSES.has(executorJob.status);
+  const latestVerifier = latestAttempt
+    ? toHistoryJob(
+        latestAttempt.job,
+        verifierReason(latestAttempt.job, latestAttempt.record, results),
+      )
+    : null;
+  return {
+    round: entry.round,
+    executors: entry.executors.map((job) =>
+      toHistoryJob(job, summaryLine(results[job.id])),
+    ),
+    verifiers: entry.verifiers.map((job) =>
+      toHistoryJob(job, verifierReason(job, records.get(job.id), results)),
+    ),
+    executor: executorJob ? toHistoryJob(executorJob, resultLine) : null,
+    verifier: latestVerifier,
+    resultLine,
+    resultText: resultLine ?? TASK_HISTORY_EXECUTION_EMPTY,
+    verdict,
+    reason,
+    failed: executorFailed || attempts.some((attempt) => attempt.failed),
+    running:
+      entry.executors.some((job) => RUNNING_STATUSES.has(job.status)) ||
+      entry.verifiers.some((job) => RUNNING_STATUSES.has(job.status)),
+    verifierAttempts: {
+      total: attempts.length,
+      failed: attempts.filter((attempt) => attempt.failed).length,
+      latest: latestVerifier,
+    },
+  };
+}
+
+interface AlignedHistory {
+  rounds: HistoryRound[];
+  unlinkedVerifiers: number;
+}
+
 /// 对齐全部轮次。results 提供各作业的结果原文，只影响展示文本。
-export function alignHistory(
+function alignHistoryDetail(
   jobs: JobSummary[],
   history: VerificationHistory | null = null,
   results: JobResultMap = {},
-): HistoryRound[] {
+): AlignedHistory {
   const taskJobs = jobs.filter((job) => isTaskRole(job.role)).sort(compareJobs);
   const executors = taskJobs.filter((job) => job.role === "executor");
   const verifiers = taskJobs.filter((job) => job.role === "verifier");
   const records = new Map<string, VerificationRecord>();
   for (const record of history?.verifications ?? []) records.set(record.id, record);
-  const knownRounds = recordRounds(history);
-  const rounds = attachVerifiers(
-    executorRounds(executors, knownRounds),
-    verifiers,
-    knownRounds,
-  );
-  return rounds.map((entry) => buildRound(entry, records, results));
+  const grouping = groupExecutionRounds(executors, verifiers, recordRounds(history));
+  return {
+    rounds: grouping.rounds.map((entry) => buildRound(entry, records, results)),
+    unlinkedVerifiers: grouping.unlinked.length,
+  };
 }
 
-/// 执行与验收历史：把该任务全部执行者与验收者作业按轮次对齐。
+/// 对齐全部轮次，只返回轮次。
+export function alignHistory(
+  jobs: JobSummary[],
+  history: VerificationHistory | null = null,
+  results: JobResultMap = {},
+): HistoryRound[] {
+  return alignHistoryDetail(jobs, history, results).rounds;
+}
+
+/// 执行与验收历史：把该任务全部执行者与验收者作业按执行轮对齐。
 ///
-/// - state 为 ready 时用接口序号校正轮次；加载中或读取失败时只按作业时间对齐。
+/// - state 为 ready 时用接口轮次校正；加载中或读取失败时只按作业时间对齐。
 /// - jobs 只应包含该任务的作业，输入顺序不影响结果。
 /// - results 是作业 id 到结果原文的映射，用于各轮“结果摘要首行”。
 export function taskHistory(
@@ -406,7 +476,12 @@ export function taskHistory(
   state: "loading" | "ready" | "error",
   results: JobResultMap = {},
 ): TaskHistory {
-  const rounds = alignHistory(jobs, state === "ready" ? history : null, results);
+  const aligned = alignHistoryDetail(
+    jobs,
+    state === "ready" ? history : null,
+    results,
+  );
+  const rounds = aligned.rounds;
   const source: TaskHistorySource =
     rounds.length === 0 ? "empty" : state === "ready" ? "aligned" : "jobs-only";
   const sourceLabel =
@@ -420,10 +495,11 @@ export function taskHistory(
     source,
     sourceLabel,
     failedRounds: rounds.filter((round) => round.failed).length,
+    unlinkedVerifiers: aligned.unlinkedVerifiers,
   };
 }
 
-/// “只看失败”筛选：失败轮次包含执行失败、验收拒绝与验收作业失败。
+/// “只看问题轮”筛选：问题轮包含执行失败、验收拒绝与验收尝试失败。
 export function filterFailedRounds(
   rounds: HistoryRound[],
   failedOnly: boolean,
