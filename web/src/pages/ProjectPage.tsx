@@ -10,6 +10,7 @@
  * 5. 方向键在选项卡内左右切换，Home/End 跳到首尾；每项徽标随任务、方案与报告状态更新。
  * 6. 概览里的用量摘要显示作业数、token、费用、时长与覆盖；没有记录的指标显示“—”，
  *    “查看用量明细”带着项目过滤跳到用量页；项目页不再有独立的用量面板。
+ * 7. 自动确认开关行显示当前状态；方案卡片的各小节可折叠，确认按钮与“确认后”影响摘要同处卡片底部。
  *
  * 人工核对清单（动效）：
  * 1. 依次切换全部选项卡：面板淡入上移约 4px，上方选项卡与下方 Agent 池位置不动，无布局跳动。
@@ -41,6 +42,7 @@ import { ProjectOverview } from "../components/ProjectOverview";
 import { ProjectTopBlocks } from "../components/ProjectTopBlocks";
 import { ProjectHeader } from "../components/ProjectHeader";
 import { ProjectTabs, tabButtonId, tabPanelId } from "../components/ProjectTabs";
+import { AutoConfirmRow, ProposalCard } from "../components/ProposalCard";
 import { RichContent } from "../components/RichContent";
 import { TaskDag } from "../components/TaskDag";
 import {
@@ -171,6 +173,7 @@ export function ProjectPage({
   const feedback = feedbackDraft.value;
   const setFeedback = feedbackDraft.setValue;
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const initialView = readWindowView();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
     initialView.taskId,
@@ -517,30 +520,43 @@ export function ProjectPage({
     setTaskFilter("all");
   }
 
+  // 方案确认：有未发送的修改意见或直接完成冲突时，用提示说明确认被暂时挡住的原因。
+  const confirmBlockedReason = !proposal
+    ? null
+    : message.trim()
+      ? "输入框里有未发送的修改意见，发送或清空后再确认。"
+      : proposal.kind === "direct" && activeTasks.length > 0
+        ? "项目已有任务，不能直接完成。"
+        : null;
+  // 确认按钮与底部输入框共用 busy，避免重复提交。
+  const confirmBusy = busy || confirming;
+  async function sendAnalysis() {
+    const ok = await run(() =>
+      api.postAnalysisMessage(project.id, message, project.confirm_mode),
+    );
+    if (ok) analysisDraft.clear();
+  }
+  async function confirmProposal() {
+    setConfirming(true);
+    const ok = await run(() => api.confirmAnalysis(project.id));
+    setConfirming(false);
+    if (ok) analysisDraft.clear();
+  }
+
   const analysisBlock = project.stage === "analysis" ? (
     <section className="panel">
       <h2>项目分析</h2>
       <p className="subtitle">
         规划者会理解目标与现状，必要时澄清，给出可确认的方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
       </p>
-      <label className="goal-policy">
-        <input
-          type="checkbox"
-          checked={project.confirm_mode === "auto"}
-          disabled={busy || archived || paused || !!analysisJob}
-          onChange={(event) =>
-            run(() =>
-              api.updateAnalysisPolicy(
-                project.id,
-                event.target.checked ? "auto" : "manual",
-              ),
-            )
-          }
-        />
-        <span>
-          自动确认：方案足够明确时允许 AI 跳过人工确认，直接开始执行；关闭后每个方案都需要你点击确认。
-        </span>
-      </label>
+      <AutoConfirmRow
+        mode={project.confirm_mode}
+        busy={busy}
+        disabled={archived || paused || !!analysisJob}
+        onChange={(mode) =>
+          void run(() => api.updateAnalysisPolicy(project.id, mode))
+        }
+      />
       <div className="messages">
         {analysisConversation.messages.map((item) =>
           item.folded ? (
@@ -599,157 +615,69 @@ export function ProjectPage({
         </div>
       ) : null}
       {proposal ? (
-        <div className="goal-proposal">
-          <div className="goal-proposal-head">
-            <Badge tone={proposal.kind === "direct" ? "warn" : "success"}>
-              {proposal.kind === "direct" ? "建议直接完成" : "项目方案"}
-            </Badge>
-            <div className="goal-proposal-summary">
-              <RichContent content={proposal.summary} />
-            </div>
-          </div>
-          {proposal.goal ? (
-            <div>
-              <strong>确认后的目标：</strong>
-              <RichContent content={proposal.goal} />
-            </div>
-          ) : null}
-          {proposal.assumptions.length ? (
-            <div>
-              <strong>关键假设</strong>
-              <ul>
-                {proposal.assumptions.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {proposal.acceptance.length ? (
-            <div>
-              <strong>验收口径</strong>
-              <ul>
-                {proposal.acceptance.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {proposal.tasks.length ? (
-            <div>
-              <strong>任务方案</strong>
-              <ul>
-                {proposal.tasks.map((task) => (
-                  <li key={task.key}>
-                    <div>
-                      <strong>
-                        {task.key} {task.title}
-                      </strong>
-                      {task.deps.length ? (
-                        <span className="muted">
-                          （依赖 {task.deps.join("、")}）
-                        </span>
-                      ) : null}
-                    </div>
-                    <RichContent content={task.description} />
-                    {task.acceptance.length ? (
-                      <ul>
-                        {task.acceptance.map((item) => (
-                          <li key={item}>验收：{item}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {proposal.plan.length ? (
-            <div>
-              <strong>执行步骤</strong>
-              <ul>
-                {proposal.plan.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {proposal.verification.length ? (
-            <div>
-              <strong>自检方式</strong>
-              <ul>
-                {proposal.verification.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </div>
+        <ProposalCard
+          proposal={proposal}
+          activeTasks={activeTasks}
+          mode={project.confirm_mode}
+          busy={confirmBusy}
+          confirming={confirming}
+          disabled={paused || archived}
+          confirmDisabledReason={confirmBlockedReason}
+          onConfirm={confirmProposal}
+        />
       ) : null}
       {!analysisJob ? (
-        <div className="confirm-row">
-          <InputBox
-            value={message}
-            onChange={setMessage}
-            draftKey={analysisDraft.key}
-            disabled={busy || paused || archived}
-            rows={3}
-            maxAutoGrowChars={520}
-            placeholder={
-              goalMessages.length === 0
-                ? "描述项目目标、边界和验收预期。"
-                : "补充信息、回答规划者的问题，或对方案提出修改意见。"
-            }
-            actions={
-              <div className="button-row">
-                <button
-                  className="secondary"
-                  disabled={busy || paused || archived || !message.trim()}
-                  onClick={async () => {
-                    const ok = await run(() =>
-                      api.postAnalysisMessage(
-                        project.id,
-                        message,
-                        project.confirm_mode,
-                      ),
-                    );
-                    if (ok) analysisDraft.clear();
-                  }}
-                >
-                  {goalMessages.length === 0 ? "开始分析" : "发送"}
-                </button>
-                {proposal ? (
+        proposal ? (
+          <div className="confirm-row proposal-follow-up">
+            <InputBox
+              value={message}
+              onChange={setMessage}
+              draftKey={analysisDraft.key}
+              disabled={busy || paused || archived}
+              rows={3}
+              maxAutoGrowChars={520}
+              placeholder="对方案有不同意见时在这里补充，规划者会给出新的方案。"
+              actions={
+                <div className="button-row">
                   <button
-                    className="primary"
-                    disabled={
-                      busy ||
-                      paused ||
-                      archived ||
-                      !!message.trim() ||
-                      (proposal.kind === "direct" && activeTasks.length > 0)
-                    }
-                    title={
-                      message.trim()
-                        ? "请先发送修改意见或清空输入后再确认"
-                        : proposal.kind === "direct" && activeTasks.length > 0
-                          ? "项目已有任务，不能直接完成"
-                          : undefined
-                    }
-                    onClick={async () => {
-                      const ok = await run(() =>
-                        api.confirmAnalysis(project.id),
-                      );
-                      if (ok) analysisDraft.clear();
-                    }}
+                    className="secondary"
+                    disabled={busy || paused || archived || !message.trim()}
+                    onClick={sendAnalysis}
                   >
-                    {proposal.kind === "direct"
-                      ? "确认并直接完成"
-                      : "确认方案，开始执行"}
+                    发送修改意见
                   </button>
-                ) : null}
-              </div>
-            }
-          />
-        </div>
+                </div>
+              }
+            />
+          </div>
+        ) : (
+          <div className="confirm-row">
+            <InputBox
+              value={message}
+              onChange={setMessage}
+              draftKey={analysisDraft.key}
+              disabled={busy || paused || archived}
+              rows={3}
+              maxAutoGrowChars={520}
+              placeholder={
+                goalMessages.length === 0
+                  ? "描述项目目标、边界和验收预期。"
+                  : "补充信息、回答规划者的问题，或对方案提出修改意见。"
+              }
+              actions={
+                <div className="button-row">
+                  <button
+                    className="secondary"
+                    disabled={busy || paused || archived || !message.trim()}
+                    onClick={sendAnalysis}
+                  >
+                    {goalMessages.length === 0 ? "开始分析" : "发送"}
+                  </button>
+                </div>
+              }
+            />
+          </div>
+        )
       ) : null}
     </section>
   ) : goalMessages.length > 1 ? (

@@ -100,4 +100,13 @@ describe("项目分析区块", () => {
       "已收到你的反馈，等待规划者给出下一次分析结果…",
     );
   });
+
+  it("自动确认使用开关行，方案使用带确认底部的方案卡片", () => {
+    expect(projectPageSource).toContain("<AutoConfirmRow");
+    expect(projectPageSource).toContain("mode={project.confirm_mode}");
+    expect(projectPageSource).toContain("<ProposalCard");
+    expect(projectPageSource).not.toContain("goal-policy");
+    // 自动确认语义仍由确认模式驱动，未引入额外的绕过路径。
+    expect(projectPageSource).toContain("api.updateAnalysisPolicy(project.id, mode)");
+  });
 });
