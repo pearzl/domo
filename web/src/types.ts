@@ -153,9 +153,10 @@ export interface TaskAgentPool {
   roles: ProjectRolePool[];
 }
 
-/** 单条验收作业摘要：验收记录接口按轮次返回验收者的解析结论。 */
+/** 单条验收作业摘要：验收记录接口按所属执行轮返回验收者的解析结论。 */
 export interface VerificationRecord {
   id: string;
+  /** 所属执行轮，从 1 开始，0 表示没有可关联的执行作业。 */
   round: number;
   attempt: number;
   status: string;

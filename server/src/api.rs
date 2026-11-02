@@ -3303,7 +3303,7 @@ const VERIFICATION_EXCERPT_CHARS: usize = 500;
 #[derive(Debug, Serialize)]
 struct VerificationSummary {
     id: String,
-    /// 该验收到当前任务验收序列中的轮次，从 1 开始。
+    /// 所属执行轮，从 1 开始，0 表示没有可关联的执行作业。
     round: i64,
     attempt: i64,
     status: String,
@@ -3362,6 +3362,14 @@ async fn task_verifications(
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
+    let executions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT created_at, id FROM jobs WHERE task_id = ? AND role = ? \
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(&task.id)
+    .bind(JOB_ROLE_EXECUTOR)
+    .fetch_all(&state.db)
+    .await?;
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(&state.db)
         .await?;
@@ -3371,12 +3379,11 @@ async fn task_verifications(
         .collect();
     let verifications = jobs
         .into_iter()
-        .enumerate()
-        .map(|(index, job)| {
+        .map(|job| {
             let verdict = verification_verdict(job.result.as_deref());
             VerificationSummary {
                 id: job.id,
-                round: offset + index as i64 + 1,
+                round: execution_round(&executions, &job.created_at),
                 attempt: job.attempt,
                 status: job.status,
                 passed: verdict.passed,
@@ -3404,6 +3411,14 @@ async fn task_verifications(
         truncated: total > VERIFICATION_HISTORY_LIMIT,
         verifications,
     }))
+}
+
+/// 执行轮编号：`executions` 按 `(created_at, id)` 升序排列，验收归属创建时间不晚于它的最近一个执行作业。
+fn execution_round(executions: &[(String, String)], verified_at: &str) -> i64 {
+    executions
+        .iter()
+        .take_while(|(created_at, _)| created_at.as_str() <= verified_at)
+        .count() as i64
 }
 
 fn verification_verdict(result: Option<&str>) -> VerificationVerdict {
@@ -4527,6 +4542,19 @@ mod tests {
         let (state, root) = verification_test_state().await;
         insert_verification_job(
             &state,
+            "job_executor",
+            "tsk_a",
+            JOB_ROLE_EXECUTOR,
+            JOB_STATUS_SUCCEEDED,
+            1,
+            Some(r#"{"kind":"done","summary":"执行完成"}"#),
+            true,
+            "2026-01-01T00:00:00Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
             "job_v1",
             "tsk_a",
             JOB_ROLE_VERIFIER,
@@ -4535,19 +4563,6 @@ mod tests {
             Some(r#"{"pass":true,"reason":"符合验收标准","issues":[]}"#),
             true,
             "2026-01-01T00:00:01Z",
-            Some("agt_verifier"),
-        )
-        .await;
-        insert_verification_job(
-            &state,
-            "job_executor",
-            "tsk_a",
-            JOB_ROLE_EXECUTOR,
-            JOB_STATUS_SUCCEEDED,
-            1,
-            Some(r#"{"kind":"done","summary":"执行完成"}"#),
-            true,
-            "2026-01-01T00:00:02Z",
             Some("agt_verifier"),
         )
         .await;
@@ -4590,6 +4605,45 @@ mod tests {
             None,
         )
         .await;
+        insert_verification_job(
+            &state,
+            "job_v0",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_FAILED,
+            1,
+            None,
+            false,
+            "2025-12-31T23:59:59Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_executor_2",
+            "tsk_a",
+            JOB_ROLE_EXECUTOR,
+            JOB_STATUS_SUCCEEDED,
+            2,
+            Some(r#"{"kind":"done","summary":"再次执行完成"}"#),
+            true,
+            "2026-01-01T00:00:06Z",
+            Some("agt_verifier"),
+        )
+        .await;
+        insert_verification_job(
+            &state,
+            "job_v5",
+            "tsk_a",
+            JOB_ROLE_VERIFIER,
+            JOB_STATUS_SUCCEEDED,
+            3,
+            Some(r#"{"pass":true,"reason":"第二轮通过","issues":[]}"#),
+            true,
+            "2026-01-01T00:00:07Z",
+            Some("agt_verifier"),
+        )
+        .await;
 
         let response = task_verifications(
             State(state.clone()),
@@ -4598,28 +4652,36 @@ mod tests {
         .await
         .unwrap()
         .0;
-        assert_eq!(response.total, 4);
+        assert_eq!(response.total, 6);
         assert!(!response.truncated);
         let ids: Vec<&str> = response
             .verifications
             .iter()
             .map(|item| item.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["job_v1", "job_v2", "job_v3", "job_v4"]);
+        assert_eq!(
+            ids,
+            vec!["job_v0", "job_v1", "job_v2", "job_v3", "job_v4", "job_v5"]
+        );
         let rounds: Vec<i64> = response
             .verifications
             .iter()
             .map(|item| item.round)
             .collect();
-        assert_eq!(rounds, vec![1, 2, 3, 4]);
+        assert_eq!(rounds, vec![0, 1, 1, 1, 1, 2]);
         let attempts: Vec<i64> = response
             .verifications
             .iter()
             .map(|item| item.attempt)
             .collect();
-        assert_eq!(attempts, vec![1, 1, 2, 2]);
+        assert_eq!(attempts, vec![1, 1, 1, 2, 2, 3]);
 
-        let passed = &response.verifications[0];
+        let unanchored = &response.verifications[0];
+        assert_eq!(unanchored.round, 0);
+        assert_eq!(unanchored.status, JOB_STATUS_FAILED);
+        assert!(!unanchored.parsed);
+
+        let passed = &response.verifications[1];
         assert_eq!(passed.passed, Some(true));
         assert_eq!(passed.reason.as_deref(), Some("符合验收标准"));
         assert!(passed.parsed);
@@ -4627,7 +4689,7 @@ mod tests {
         assert_eq!(passed.agent_name.as_deref(), Some("验收 Agent"));
         assert!(passed.usage_known);
 
-        let unparsed = &response.verifications[1];
+        let unparsed = &response.verifications[2];
         assert_eq!(unparsed.passed, None);
         assert!(!unparsed.parsed);
         assert_eq!(unparsed.raw_excerpt.as_deref(), Some("不是 JSON"));
@@ -4639,7 +4701,7 @@ mod tests {
         assert!(!unparsed.usage_known);
         assert_eq!(unparsed.agent_name.as_deref(), Some("验收 Agent"));
 
-        let missing_pass = &response.verifications[2];
+        let missing_pass = &response.verifications[3];
         assert_eq!(missing_pass.status, JOB_STATUS_FAILED);
         assert!(!missing_pass.parsed);
         assert_eq!(
@@ -4647,11 +4709,16 @@ mod tests {
             Some(r#"{"reason":"验收作业超时"}"#)
         );
 
-        let rejected = &response.verifications[3];
+        let rejected = &response.verifications[4];
         assert_eq!(rejected.passed, Some(false));
         assert_eq!(rejected.reason.as_deref(), Some("测试失败"));
         assert_eq!(rejected.issues, vec!["a", "b"]);
         assert_eq!(rejected.agent_name, None);
+
+        let second_round = &response.verifications[5];
+        assert_eq!(second_round.round, 2);
+        assert_eq!(second_round.passed, Some(true));
+        assert_eq!(second_round.reason.as_deref(), Some("第二轮通过"));
 
         let empty = task_verifications(
             State(state.clone()),
@@ -4677,6 +4744,25 @@ mod tests {
     #[tokio::test]
     async fn verification_history_keeps_the_newest_entries_and_marks_truncation() {
         let (state, root) = verification_test_state().await;
+        for (index, created_at) in [
+            (1, "2025-12-31T23:00:00Z"),
+            (2, "2026-01-01T00:20:00Z"),
+            (3, "2026-01-01T00:40:00Z"),
+        ] {
+            insert_verification_job(
+                &state,
+                &format!("job_x{index}"),
+                "tsk_a",
+                JOB_ROLE_EXECUTOR,
+                JOB_STATUS_SUCCEEDED,
+                index,
+                Some(r#"{"kind":"done","summary":"执行完成"}"#),
+                true,
+                created_at,
+                None,
+            )
+            .await;
+        }
         for index in 1..=55 {
             insert_verification_job(
                 &state,
@@ -4708,9 +4794,24 @@ mod tests {
             VERIFICATION_HISTORY_LIMIT as usize
         );
         assert_eq!(response.verifications[0].id, "job_06");
-        assert_eq!(response.verifications[0].round, 6);
+        assert_eq!(response.verifications[0].round, 1);
+        assert_eq!(response.verifications[13].id, "job_19");
+        assert_eq!(response.verifications[13].round, 1);
+        assert_eq!(response.verifications[14].id, "job_20");
+        assert_eq!(response.verifications[14].round, 2);
+        assert_eq!(response.verifications[33].id, "job_39");
+        assert_eq!(response.verifications[33].round, 2);
+        assert_eq!(response.verifications[34].id, "job_40");
+        assert_eq!(response.verifications[34].round, 3);
         assert_eq!(response.verifications[49].id, "job_55");
-        assert_eq!(response.verifications[49].round, 55);
+        assert_eq!(response.verifications[49].round, 3);
+        let rounds: Vec<i64> = response
+            .verifications
+            .iter()
+            .map(|item| item.round)
+            .collect();
+        assert!(rounds.iter().all(|round| (1..=3).contains(round)));
+        assert!(rounds.windows(2).all(|pair| pair[0] <= pair[1]));
 
         let _ = std::fs::remove_dir_all(root);
     }
