@@ -274,7 +274,21 @@ fn adapters_do_not_call_runner_session_or_usage_decisions() {
 
 #[test]
 fn runner_defers_session_and_usage_decisions_to_the_registry() {
-    let runner = include_str!("../runner.rs");
+    let runner = [
+        include_str!("../runner/mod.rs"),
+        include_str!("../runner/agent.rs"),
+        include_str!("../runner/analysis.rs"),
+        include_str!("../runner/common.rs"),
+        include_str!("../runner/direct.rs"),
+        include_str!("../runner/executor.rs"),
+        include_str!("../runner/failure.rs"),
+        include_str!("../runner/lifecycle.rs"),
+        include_str!("../runner/project.rs"),
+        include_str!("../runner/prompt.rs"),
+        include_str!("../runner/verifier.rs"),
+        include_str!("../runner/worktree.rs"),
+    ]
+    .concat();
     assert!(runner.contains("agents::session_for_job"));
     assert!(runner.contains("agents::finish_job"));
     assert!(runner.contains("agents::apply_usage"));

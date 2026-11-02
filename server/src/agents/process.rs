@@ -268,6 +268,7 @@ fn process_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::models::JOB_ROLE_EXECUTOR;
 
     #[cfg(windows)]

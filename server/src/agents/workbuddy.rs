@@ -177,9 +177,12 @@ pub(super) fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    #[cfg(unix)]
     use std::time::Duration;
 
-    use super::super::adapter::{args_contain_pair, AgentSpec, JobProgress, TurnContext};
+    use super::super::adapter::args_contain_pair;
+    #[cfg(unix)]
+    use super::super::adapter::{AgentSpec, JobProgress, TurnContext};
     use super::*;
 
     #[cfg(unix)]

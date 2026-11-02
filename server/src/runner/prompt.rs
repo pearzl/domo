@@ -1,0 +1,272 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use serde_json::json;
+
+use crate::git;
+use crate::models::*;
+use crate::paths;
+use crate::prompts::{DependencyInfo, DerivedTaskInfo, PromptData, SummaryTaskInfo, TaskInfo};
+use crate::state::AppState;
+
+use super::common::{load_task, parse_json_list};
+
+pub(super) async fn build_prompt_data(
+    state: &AppState,
+    project: &ProjectRow,
+    task: Option<&TaskRow>,
+    job: &JobRow,
+    cwd: &Path,
+) -> Result<PromptData> {
+    let mut dependencies = Vec::new();
+    let mut task_info = None;
+    let mut verifier_issues = Vec::new();
+    let mut derived_from = None;
+    let mut derived_tasks = Vec::new();
+    if let Some(task) = task {
+        let deps = parse_json_list(&task.deps);
+        verifier_issues = parse_json_list(&task.verifier_issues);
+        for dep in &deps {
+            if let Some(row) = sqlx::query_as::<_, TaskRow>(
+                "SELECT * FROM tasks WHERE project_id = ? AND key = ? \
+                 AND COALESCE(status, '') != ? ORDER BY seq DESC LIMIT 1",
+            )
+            .bind(&project.id)
+            .bind(dep)
+            .bind(STATUS_CANCELED)
+            .fetch_optional(&state.db)
+            .await?
+            {
+                dependencies.push(DependencyInfo {
+                    key: row.key.clone(),
+                    title: row.title.clone(),
+                    summary: row.result_summary.unwrap_or_default(),
+                });
+            }
+        }
+        if let Some(parent_id) = &task.parent_id {
+            if let Some(row) = load_task(&state.db, parent_id).await? {
+                derived_from = Some(DependencyInfo {
+                    key: row.key.clone(),
+                    title: row.title.clone(),
+                    summary: row.result_summary.unwrap_or_default(),
+                });
+            }
+        }
+        let children = sqlx::query_as::<_, TaskRow>(
+            "SELECT * FROM tasks WHERE project_id = ? AND parent_id = ? ORDER BY seq ASC",
+        )
+        .bind(&project.id)
+        .bind(&task.id)
+        .fetch_all(&state.db)
+        .await?;
+        for row in children {
+            derived_tasks.push(DerivedTaskInfo {
+                key: row.key,
+                title: row.title,
+                stage: row.stage,
+                status: row.status,
+                summary: row.result_summary.unwrap_or_default(),
+            });
+        }
+        task_info = Some(TaskInfo {
+            key: task.key.clone(),
+            title: task.title.clone(),
+            description: task.description.clone(),
+            acceptance: parse_json_list(&task.acceptance),
+            guidance: task.guidance.clone(),
+        });
+    }
+    let messages = sqlx::query_as::<_, MessageRow>(
+        "SELECT * FROM messages WHERE project_id = ? ORDER BY created_at ASC",
+    )
+    .bind(&project.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut messages = messages;
+    if matches!(job.role.as_str(), JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT) {
+        // 报告评议记录只属于总结作业和直接重做反馈。
+        messages.retain(|message| message.role != REPORT_MESSAGE_ROLE);
+    }
+    let mut summary_tasks = Vec::new();
+    let mut completed_tasks = Vec::new();
+    let mut canceled_tasks = Vec::new();
+    let rows =
+        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE project_id = ? ORDER BY seq ASC")
+            .bind(&project.id)
+            .fetch_all(&state.db)
+            .await?;
+    for row in &rows {
+        if row.status.as_deref() == Some(STATUS_CANCELED) {
+            canceled_tasks.push(SummaryTaskInfo {
+                key: row.key.clone(),
+                title: row.title.clone(),
+                summary: row.last_error.clone().unwrap_or_default(),
+            });
+            continue;
+        }
+        let info = SummaryTaskInfo {
+            key: row.key.clone(),
+            title: row.title.clone(),
+            summary: row.result_summary.clone().unwrap_or_default(),
+        };
+        if row.stage == TASK_STAGE_COMPLETED {
+            completed_tasks.push(info.clone());
+        }
+        summary_tasks.push(info);
+    }
+    let workspace = PathBuf::from(&project.workspace);
+    let diff_stat = match job.role.as_str() {
+        JOB_ROLE_VERIFIER => {
+            let branch = task.and_then(|task| task.branch.clone());
+            if let Some(branch) = branch {
+                git::diff_between(
+                    &paths::project_repo(&workspace),
+                    &project.base_branch,
+                    &branch,
+                )
+                .await
+                .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        JOB_ROLE_SUMMARY => git::diff_between(
+            &paths::project_repo(&workspace),
+            &project.base_branch,
+            &project.branch,
+        )
+        .await
+        .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let job_dir = paths::job_dir(&workspace, &job.id);
+    let proposal = project
+        .proposal
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
+    let mut acceptance_criteria = proposal
+        .as_ref()
+        .map(|value| value.acceptance.clone())
+        .unwrap_or_default();
+    if acceptance_criteria.is_empty() {
+        acceptance_criteria = proposal
+            .as_ref()
+            .map(|value| value.verification.clone())
+            .unwrap_or_default();
+    }
+    let project_summary = proposal.as_ref().map(|value| value.summary.clone());
+    let project_assumptions = proposal
+        .as_ref()
+        .map(|value| value.assumptions.clone())
+        .unwrap_or_default();
+    Ok(PromptData {
+        role: job.role.clone(),
+        project_id: project.id.clone(),
+        project_name: project.name.clone(),
+        goal: project.goal.clone(),
+        cwd: cwd.to_string_lossy().to_string(),
+        repo_path: project.repo_path.clone(),
+        base_branch: project.base_branch.clone(),
+        project_branch: project.branch.clone(),
+        task: task_info,
+        dependencies,
+        derived_from,
+        derived_tasks,
+        messages,
+        verifier_issues,
+        summary_tasks,
+        completed_tasks,
+        canceled_tasks,
+        diff_stat,
+        job_dir: job_dir.to_string_lossy().to_string(),
+        result_path: job_dir.join("result.json").to_string_lossy().to_string(),
+        attempt: job.attempt,
+        report_feedback: project.report_feedback.clone(),
+        replan_reason: project.replan_reason.clone(),
+        replan_source: project.replan_source.clone(),
+        acceptance_criteria,
+        acceptance_result: project.acceptance.clone(),
+        project_summary,
+        project_assumptions,
+        confirm_mode: project.confirm_mode.clone(),
+    })
+}
+
+pub(super) fn build_context(
+    project: &ProjectRow,
+    task: Option<&TaskRow>,
+    job: &JobRow,
+    cwd: &Path,
+    job_dir: &Path,
+    data: &PromptData,
+    agent: &AgentRow,
+) -> serde_json::Value {
+    json!({
+        "job_id": job.id,
+        "role": job.role,
+        "agent": {
+            "id": agent.id,
+            "name": agent.name,
+            "kind": agent.kind,
+            "model": agent.model,
+        },
+        "cwd": cwd.to_string_lossy(),
+        "job_dir": job_dir.to_string_lossy(),
+        "project": {
+            "id": project.id,
+            "name": project.name,
+            "goal": project.goal,
+            "repo_path": project.repo_path,
+            "base_branch": project.base_branch,
+            "branch": project.branch,
+            "replan_reason": project.replan_reason,
+            "replan_source": project.replan_source,
+            "confirm_mode": project.confirm_mode,
+            "completion_mode": project.completion_mode,
+            "confirmed_at": project.confirmed_at,
+            "acceptance_at": project.acceptance_at,
+        },
+        "task": task.map(|task| json!({
+            "id": task.id,
+            "key": task.key,
+            "title": task.title,
+            "description": task.description,
+            "acceptance": parse_json_list(&task.acceptance),
+            "deps": parse_json_list(&task.deps),
+            "parent_id": task.parent_id,
+            "stage": task.stage,
+            "attempts": task.attempts,
+            "rejections": task.rejections,
+            "guidance": task.guidance,
+        })),
+        "parent_task": data.derived_from.as_ref().map(|parent| json!({
+            "key": parent.key, "title": parent.title, "summary": parent.summary,
+        })),
+        "derived_tasks": data.derived_tasks.iter().map(|task| json!({
+            "key": task.key, "title": task.title, "stage": task.stage,
+            "status": task.status, "summary": task.summary,
+        })).collect::<Vec<_>>(),
+        "dependencies": data.dependencies.iter().map(|dep| json!({
+            "key": dep.key, "title": dep.title, "summary": dep.summary,
+        })).collect::<Vec<_>>(),
+        "messages": data.messages.iter().map(|message| json!({
+            "role": message.role, "content": message.content,
+        })).collect::<Vec<_>>(),
+        "verifier_issues": data.verifier_issues,
+        "summary_tasks": data.summary_tasks.iter().map(|task| json!({
+            "key": task.key, "title": task.title, "summary": task.summary,
+        })).collect::<Vec<_>>(),
+        "completed_tasks": data.completed_tasks.iter().map(|task| json!({
+            "key": task.key, "title": task.title, "summary": task.summary,
+        })).collect::<Vec<_>>(),
+        "canceled_tasks": data.canceled_tasks.iter().map(|task| json!({
+            "key": task.key, "title": task.title, "summary": task.summary,
+        })).collect::<Vec<_>>(),
+        "diff_stat": data.diff_stat,
+        "acceptance_criteria": data.acceptance_criteria,
+        "acceptance_result": data.acceptance_result,
+        "project_summary": data.project_summary,
+        "project_assumptions": data.project_assumptions,
+    })
+}

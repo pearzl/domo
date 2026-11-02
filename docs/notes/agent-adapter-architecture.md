@@ -14,7 +14,7 @@
 | `server/src/agents/workbuddy.rs` | WorkBuddy CLI Agent。 |
 | `server/src/agents/cli.rs` | 自定义命令模板 Agent。 |
 | `server/src/agents/process.rs` | 外部进程启动、输出采集、超时与进程组终止。 |
-| `server/src/runner.rs` | 作业生命周期、续轮、看门狗、结果解析与持久化。 |
+| `server/src/runner/` | 作业生命周期、续轮、看门狗、结果解析与持久化。 |
 | `server/src/api.rs` | HTTP 请求校验与响应组装。 |
 | `server/src/activity.rs` | 作业活动流格式识别与投影。 |
 | `server/src/scheduler.rs` | 作业调度与 Agent 可用性判定。 |
@@ -28,9 +28,9 @@
 | 业务能力 | 平台需要解决的问题 | trait 方法 | 门面函数 | 调用方 |
 |---|---|---|---|---|
 | 配置可用性 | 该类型是否必须提供命令模板；当前配置能否启动 | `requires_command_template`、`validate` | `requires_command_template`、`validate_config` | `server/src/api.rs` 的 `require_command_if_needed`；`server/src/agents/mod.rs` 的 `run_with` |
-| 作业会话 | 新作业使用哪个会话标识；续轮是否沿用已有会话 | `session_for_job` | `session_for_job` | `server/src/runner.rs` 的 `run_job` |
-| 执行一轮 | 用什么参数、从哪个通道投递提示词、如何采集进程结果 | `run_turn` | `execute` | `server/src/runner.rs` 的 `run_agent_job` |
-| 作业用量结算 | 最后一轮结束后，用量取逐轮记录还是适配器账本 | `finish_job` | `finish_job` | `server/src/runner.rs` 的 `run_job` |
+| 作业会话 | 新作业使用哪个会话标识；续轮是否沿用已有会话 | `session_for_job` | `session_for_job` | `server/src/runner/mod.rs` 的 `run_job` |
+| 执行一轮 | 用什么参数、从哪个通道投递提示词、如何采集进程结果 | `run_turn` | `execute` | `server/src/runner/agent.rs` 的 `run_agent_job` |
+| 作业用量结算 | 最后一轮结束后，用量取逐轮记录还是适配器账本 | `finish_job` | `finish_job` | `server/src/runner/mod.rs` 的 `run_job` |
 
 ### 2.1 配置可用性
 
@@ -40,11 +40,11 @@
 
 ### 2.2 作业会话
 
-`session_for_job(job_id, existing)` 返回该作业应使用的会话标识。`existing` 是上一轮运行报告的会话；返回 `None` 表示该类型不需要会话标识。`server/src/runner.rs` 在作业开始时调用 `agents::session_for_job(&agent, &job.id)` 初始化 `AgentSpec.session_id`，续轮沿用上一轮 `AgentRun.session_id`。
+`session_for_job(job_id, existing)` 返回该作业应使用的会话标识。`existing` 是上一轮运行报告的会话；返回 `None` 表示该类型不需要会话标识。`server/src/runner/mod.rs` 在作业开始时调用 `agents::session_for_job(&agent, &job.id)` 初始化 `AgentSpec.session_id`，续轮沿用上一轮 `AgentRun.session_id`。
 
 ### 2.3 执行一轮
 
-`run_turn` 接收 `TurnContext`，完成参数展开、提示词投递、进程运行和结果采集，返回 `AgentRun`。适配器拥有本类型的参数与投递细节；`server/src/runner.rs` 只负责超时、卡死检测、续轮和结果文件解析。
+`run_turn` 接收 `TurnContext`，完成参数展开、提示词投递、进程运行和结果采集，返回 `AgentRun`。适配器拥有本类型的参数与投递细节；`server/src/runner/agent.rs` 只负责超时、卡死检测、续轮和结果文件解析。
 
 `TurnContext` 包含：
 
@@ -72,14 +72,14 @@
 
 | 取值 | 语义 |
 |---|---|
-| `JobUsage::PerTurn` | 保留逐轮 `AgentRun.usage`；`server/src/runner.rs` 在续轮之间用 `merge_usage` 合并。 |
+| `JobUsage::PerTurn` | 保留逐轮 `AgentRun.usage`；`server/src/runner/agent.rs` 在续轮之间用 `merge_usage` 合并。 |
 | `JobUsage::Authoritative(Option<UsageRecord>)` | 用适配器账本值替换逐轮记录；`None` 表示账本明确没有可用量。 |
 
 `finish_job` 的默认实现返回 `JobUsage::PerTurn`。`OpencodeAdapter` 覆盖该默认实现：`finalize_plan(process_failed, shutting_down)` 决定 `Skip`、`FetchOnly` 或 `SettleThenFetch`，再通过 `crate::opencode::fetch_usage` 与 `crate::opencode::settle` 取得 `Authoritative` 结果。
 
-`FinishContext` 包含 `agent`、`job_id`、`session_id`、`process_failed`、`shutting_down`。`server/src/runner.rs` 用 `FinishContext` 调用 `agents::finish_job`，遇到 `Authoritative` 时整体替换 `AgentRun.usage`，包括替换为 `None`。
+`FinishContext` 包含 `agent`、`job_id`、`session_id`、`process_failed`、`shutting_down`。`server/src/runner/mod.rs` 用 `FinishContext` 调用 `agents::finish_job`，遇到 `Authoritative` 时整体替换 `AgentRun.usage`，包括替换为 `None`。
 
-结算后的用量由 `server/src/runner.rs` 写入作业行：优先使用 `AgentRun.usage`，缺失时读取结果文件的 `usage` 字段（`UsageRecord::from_result`）。适配器不直接写数据库。
+结算后的用量由 `server/src/runner/lifecycle.rs` 写入作业行：优先使用 `AgentRun.usage`，缺失时读取结果文件的 `usage` 字段（`UsageRecord::from_result`）。适配器不直接写数据库。
 
 ## 3. AgentAdapter 契约
 
@@ -156,7 +156,7 @@ async fn run_with<A: AgentAdapter>(
 }
 ```
 
-分发不依赖 trait object，也不在 `server/src/runner.rs` 或 `server/src/api.rs` 中按类型写分支。`server/src/runner.rs` 只调用 `agents::session_for_job`、`agents::execute` 和 `agents::finish_job`；`server/src/api.rs` 只调用 `agents::kinds`、`agents::requires_command_template` 和 `agents::validate_config`。
+分发不依赖 trait object，也不在 `server/src/runner/mod.rs` 或 `server/src/api.rs` 中按类型写分支。`server/src/runner/mod.rs` 只调用 `agents::session_for_job`、`agents::execute` 和 `agents::finish_job`；`server/src/api.rs` 只调用 `agents::kinds`、`agents::requires_command_template` 和 `agents::validate_config`。
 
 `KINDS`、配置校验与执行分发由宏生成；`session_for_job` 和 `finish_job` 两个门面按同一份清单逐项匹配 `KIND`，位置同在 `server/src/agents/mod.rs`。适配器需要专门会话派生或非默认结算时，在该文件的对应门面中登记分支；其余类型沿用 `None` 或 `PerTurn`。
 
@@ -168,7 +168,7 @@ async fn run_with<A: AgentAdapter>(
 | 参数来源 | 进程内 `run_mock(spec)`；读取 `job_dir/context.json`；`DOMO_MOCK_DELAY_MS`、`DOMO_MOCK_EXECUTOR_DELAY_MS`、`DOMO_MOCK_USAGE` 等环境变量 | `opencode_args` 由 `AgentConfig.model` 和 `session_id` 生成；可执行文件来自 `crate::opencode::bin()` | `codex_args` 或 `codex_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `workbuddy_args` 或 `workbuddy_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `AgentConfig.command` 命令模板逐项展开，首项为可执行文件；`AgentConfig.model_args` 参与 `{model_args}` 展开 |
 | 提示词投递 | 不读取 `AgentSpec.prompt`，以 `context.json` 为输入 | stdin | stdin；续轮由 `prompt_for_run` 决定是否拼接原始提示词 | stdin；续轮由 `prompt_for_run` 决定是否拼接原始提示词 | 模板含 `{prompt}` 时作为位置参数，否则写入 stdin；续轮同样经 `prompt_for_run` |
 | 会话恢复 | `session_for_job` 返回 `None`，每作业独立 | `session_for_job` 优先沿用非空 `existing`，否则用 `crate::opencode::session_id(job_id)`；`run_turn` 以 `--session` 传入 | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `codex_resume_args` 的 `exec resume`；`parse_codex_session_id` 从 `thread.started` 读取 `thread_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `workbuddy_resume_args` 的 `--resume`；`parse_workbuddy_session_id` 从事件读取 `session_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；模板或模型参数含 `{session_id}` 时视为支持恢复，`AgentRun.session_id` 回填该值 |
-| usage 来源 | `DOMO_MOCK_USAGE=1` 时把 `usage` 写入 `result.json`；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn` | `finish_job` 按 `finalize_plan` 决策：`Skip` 返回 `PerTurn`；`FetchOnly` 只取账本；`SettleThenFetch` 先 `settle` 再取账本；结果为 `Authoritative` | `parse_codex_usage` 从 `turn.completed` 的 `usage` 生成 `UsageRecord`，写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | `parse_workbuddy_usage` 优先取 `result` 事件的 `usage`，缺失时取最后一条 `assistant` 消息的 `usage`，并读取 `total_cost_usd`；写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | 适配器不产生用量；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn`；结果文件的 `usage` 由 `server/src/runner.rs` 读取 |
+| usage 来源 | `DOMO_MOCK_USAGE=1` 时把 `usage` 写入 `result.json`；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn` | `finish_job` 按 `finalize_plan` 决策：`Skip` 返回 `PerTurn`；`FetchOnly` 只取账本；`SettleThenFetch` 先 `settle` 再取账本；结果为 `Authoritative` | `parse_codex_usage` 从 `turn.completed` 的 `usage` 生成 `UsageRecord`，写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | `parse_workbuddy_usage` 优先取 `result` 事件的 `usage`，缺失时取最后一条 `assistant` 消息的 `usage`，并读取 `total_cost_usd`；写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | 适配器不产生用量；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn`；结果文件的 `usage` 由 `server/src/runner/lifecycle.rs` 读取 |
 | 命令模板要求 | 否 | 否 | 否；配置非空时作为自定义模板执行 | 否；配置非空时作为自定义模板执行 | 是；`validate` 拒绝空模板，错误文案为“CLI Agent 必须配置命令模板” |
 | 内置二进制覆盖 | 无，进程内运行 | `DOMO_OPENCODE_BIN`，默认 `opencode` | `DOMO_CODEX_BIN`，默认 `codex` | `DOMO_WORKBUDDY_BIN`，默认 `codebuddy` | 无环境变量覆盖；可执行文件取自命令模板首项 |
 
@@ -181,7 +181,7 @@ async fn run_with<A: AgentAdapter>(
 
 ## 6. 接入新 Agent 类型
 
-以下步骤覆盖“实现适配器、登记、契约测试、端到端用例”。完成登记后，`execute`、API 类型校验和注册表契约测试都会识别该类型，`server/src/runner.rs` 与 `server/src/api.rs` 不需要按类型分支。
+以下步骤覆盖“实现适配器、登记、契约测试、端到端用例”。完成登记后，`execute`、API 类型校验和注册表契约测试都会识别该类型，`server/src/runner/mod.rs` 与 `server/src/api.rs` 不需要按类型分支。
 
 ### 6.1 实现 `AgentAdapter`
 
@@ -286,7 +286,7 @@ async fn run_with<A: AgentAdapter>(
 | 调度策略 | `server/src/scheduler.rs` | 作业排队、优先级、Agent 可用性窗口与用量上限由调度器判定；适配器只回答配置是否可用和单轮如何运行。 |
 | 数据库契约 | `server/src/db.rs`、`server/src/models.rs` | 表结构、`AgentRow` 字段与作业用量列由数据层维护；适配器通过 `AgentConfig::from_row` 读取配置，不直接访问数据库。 |
 | HTTP 契约 | `server/src/api.rs` | 请求字段、响应结构、状态码与错误文案由 API 层维护；适配层只提供类型清单与配置校验结果。 |
-| 作业生命周期 | `server/src/runner.rs` | 工作区准备、续轮、看门狗、结果文件解析、失败分类与用量持久化由 runner 维护；适配器不决定续轮次数，也不写作业状态。 |
+| 作业生命周期 | `server/src/runner/` | 工作区准备、续轮、看门狗、结果文件解析、失败分类与用量持久化由 runner 维护；适配器不决定续轮次数，也不写作业状态。 |
 | 进程监督 | `server/src/agents/process.rs` | 进程启动、输出上限、超时与进程组终止是共享机制；适配器只提供可执行文件、参数、工作目录和 stdin。 |
 
 ## 8. 契约定位
