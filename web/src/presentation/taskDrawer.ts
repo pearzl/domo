@@ -44,11 +44,16 @@ export interface DrawerLayout {
   gateCarriesError: boolean;
 }
 
+/// 任务终态：已完成与已取消的任务才展示最终结果摘要与验收摘要。
+export function isTaskTerminal(task: DrawerTaskInput): boolean {
+  return task.stage === "completed" || task.status === "canceled";
+}
+
 /// 首区块选择：blocked 与里程碑人工验收先裁决；已完成/已取消先给结果；其余进行中先给控制条。
 export function drawerLead(task: DrawerTaskInput): DrawerLead {
   if (task.human_gate === "milestone") return "gate";
   if (task.status === "blocked") return "gate";
-  if (task.stage === "completed" || task.status === "canceled") return "result";
+  if (isTaskTerminal(task)) return "result";
   return "control";
 }
 
@@ -69,17 +74,17 @@ export function drawerLayout(task: DrawerTaskInput): DrawerLayout {
   if (lead === "gate") {
     // 裁决之后先给可执行动作，再给结果；已完成里程碑的结果摘要是裁决依据。
     if (canControlTask(task)) tail.push("control");
-    if (task.result_summary) tail.push("result");
+    if (isTaskTerminal(task) && task.result_summary) tail.push("result");
   } else if (lead === "result") {
     // 结果摘要已在首区块，控制条只对少数仍可操作的状态补充。
     if (canControlTask(task)) tail.push("control");
   } else {
-    tail.push("milestone", "result");
+    tail.push("milestone");
   }
 
   tail.push("description", "acceptance");
-  // 验收摘要紧跟验收标准：没有验收作业时也呈现“未验收”结论，不留空区块。
-  tail.push("verification");
+  // 最终验收摘要只在任务终态呈现；进行中的验收过程由历史与各作业视图承载。
+  if (isTaskTerminal(task)) tail.push("verification");
   // 验收反馈只在验收者留下问题时出现，与验收标准分开并列。
   if (hasVerifierFeedback(task)) tail.push("feedback");
   // 执行与验收历史汇总逐轮执行与验收作业，回答“每一轮发生了什么”。

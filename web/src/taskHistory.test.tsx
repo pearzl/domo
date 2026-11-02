@@ -4,9 +4,9 @@ import type { JobSummary, ProjectDetail, Task } from "./types";
 import { TaskDrawer } from "./pages/ProjectPage";
 import { JobDetailView, JobRecordList, RECENT_JOB_LIMIT } from "./components/JobDetailView";
 import { TaskHistoryBlock } from "./components/TaskHistory";
+import taskHistorySource from "./components/TaskHistory.tsx?raw";
 import {
   TASK_HISTORY_EMPTY,
-  TASK_HISTORY_EXECUTION_EMPTY,
   TASK_HISTORY_FILTER_LABEL,
   TASK_HISTORY_FILTER_EMPTY,
   TASK_HISTORY_TITLE,
@@ -161,8 +161,6 @@ function history(verifications: VerificationRecord[]): VerificationHistory {
   };
 }
 
-const EXECUTION_RESULT = "第一轮执行结果首行\n更多细节";
-
 /// 一次执行 + 三次验收：拒绝、验收进程异常、最终通过，全部归入第 1 轮。
 function oneRoundHistory() {
   return taskHistory(
@@ -180,7 +178,6 @@ function oneRoundHistory() {
       record({ id: "v3", round: 1, passed: true, reason: "补充测试后通过" }),
     ]),
     "ready",
-    { e1: EXECUTION_RESULT },
   );
 }
 
@@ -200,12 +197,10 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
     expect(markup).toContain("验收 3 次");
     expect(markup).toContain("失败 2 次");
     expect(markup).toContain("最近通过");
-    expect(markup).toContain("第一轮执行结果首行");
-    expect(markup).not.toContain("## 第一轮");
     expect(markup).toContain(TASK_HISTORY_FILTER_LABEL);
   });
 
-  it("轮内展开“本轮验收”，逐条展示验收者、尝试序号、状态与原因首行", () => {
+  it("轮内展开“本轮验收”，逐条展示验收者、尝试序号与状态，不渲染原因长文本", () => {
     const markup = renderHistory();
     expect(markup).toContain("本轮验收");
     expect(markup).toContain("3 次尝试");
@@ -213,6 +208,8 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
     expect(markup).toContain("尝试 2");
     expect(markup).toContain("尝试 3");
     expect((markup.match(/class="task-history-attempt"/g) ?? [])).toHaveLength(3);
+    expect(markup).not.toContain("task-history-attempt-reason");
+    expect(markup).not.toContain("task-history-round-result");
 
     const [first, second, third] = markup
       .split('<li class="task-history-attempt"')
@@ -220,29 +217,36 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
     expect(first).toContain("尝试 1");
     expect(first).toContain("验收者2");
     expect(first).toContain("拒绝");
-    expect(first).toContain("缺少测试");
+    expect(first).not.toContain("缺少测试");
     expect(first).toContain("badge-danger");
     expect(first).toContain('data-failed="true"');
     expect(second).toContain("尝试 2");
     expect(second).toContain("验收者3");
     expect(second).toContain("验收异常");
-    expect(second).toContain("验收进程异常退出");
+    expect(second).not.toContain("验收进程异常退出");
     expect(second).toContain("badge-danger");
     expect(second).toContain('data-failed="true"');
     expect(third).toContain("尝试 3");
     expect(third).toContain("验收者4");
     expect(third).toContain("通过");
+    expect(third).not.toContain("补充测试后通过");
     expect(third).toContain("badge-success");
     expect(third).toContain('data-failed="false"');
     expect(third).not.toContain("待验收");
   });
 
-  it("执行结果首行缺失时使用“本次执行未产出结果”", () => {
-    const markup = renderHistory(taskHistory([job("e1", "executor", 0)], null, "loading"));
-    expect(markup).toContain(TASK_HISTORY_EXECUTION_EMPTY);
-    expect(markup).toContain("本次执行未产出结果");
-    expect(markup).not.toContain("尚未产出结果");
-    expect(markup).toContain("未验收");
+  it("历史不渲染执行结果文本，长文本只留在作业视图", () => {
+    const markup = renderHistory();
+    expect(markup).not.toContain("本次执行未产出结果");
+    expect(markup).not.toContain("更多细节");
+    expect(markup).not.toContain("task-history-round-result");
+  });
+
+  it("历史不再为结果首行读取作业详情", () => {
+    expect(taskHistorySource).not.toContain("getJob");
+    expect(taskHistorySource).not.toContain("useJobResults");
+    expect(taskHistorySource).not.toContain("resultText");
+    expect(taskHistorySource).not.toContain("resultLine");
   });
 
   it("两次执行两次验收渲染出第 1 轮与第 2 轮", () => {
@@ -259,7 +263,6 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
           record({ id: "v2", round: 2, passed: false, reason: "缺少测试" }),
         ]),
         "ready",
-        { e1: "第一轮结果", e2: "第二轮结果" },
       ),
     );
     expect((markup.match(/id="task-round-\d+"/g) ?? [])).toHaveLength(2);
@@ -272,11 +275,10 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
       markup.indexOf('id="task-round-2"'),
     );
     const second = markup.slice(markup.indexOf('id="task-round-2"'));
-    expect(first).toContain("第一轮结果");
     expect(first).toContain("最近通过");
-    expect(second).toContain("第二轮结果");
     expect(second).toContain("最近拒绝");
-    expect(second).toContain("缺少测试");
+    expect(second).toContain("拒绝");
+    expect(second).not.toContain("缺少测试");
   });
 
   it("未关联执行轮的验收作业在轮次列表上方给出数量与最近状态提示", () => {
@@ -332,7 +334,7 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
 
 describe("TaskDrawer 执行与验收历史", () => {
   it("执行历史位于验收摘要之后，按执行轮渲染", () => {
-    const current = task({ stage: "verifying" });
+    const current = task({ stage: "completed" });
     const markup = renderToStaticMarkup(
       <TaskDrawer
         task={current}

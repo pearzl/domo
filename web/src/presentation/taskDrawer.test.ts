@@ -13,6 +13,7 @@ import {
   drawerLayout,
   drawerLead,
   hasVerifierFeedback,
+  isTaskTerminal,
   rawErrorEntry,
   verifierFeedback,
 } from "./taskDrawer";
@@ -53,6 +54,18 @@ describe("drawerLead 首区块选择", () => {
     expect(drawerLead(base)).toBe("control");
     expect(drawerLead({ ...base, status: "paused" })).toBe("control");
     expect(drawerLead({ ...base, stage: "pending" })).toBe("control");
+  });
+});
+
+describe("isTaskTerminal 终态判断", () => {
+  it("只有 completed 与 canceled 是终态", () => {
+    expect(isTaskTerminal({ ...base, stage: "completed" })).toBe(true);
+    expect(isTaskTerminal({ ...base, status: "canceled" })).toBe(true);
+    expect(isTaskTerminal({ ...base, stage: "completed", human_gate: "milestone" })).toBe(true);
+    expect(isTaskTerminal(base)).toBe(false);
+    expect(isTaskTerminal({ ...base, stage: "verifying" })).toBe(false);
+    expect(isTaskTerminal({ ...base, status: "blocked" })).toBe(false);
+    expect(isTaskTerminal({ ...base, stage: "pending" })).toBe(false);
   });
 });
 
@@ -197,15 +210,46 @@ describe("drawerLayout 区块顺序", () => {
     expect(feedback).toBeLessThan(layout.tail.indexOf("deps"));
   });
 
-  it("执行与验收历史紧跟在验收摘要之后，且先于派生与依赖信息", () => {
+  it("执行与验收历史位于验收标准之后，且先于派生与依赖信息", () => {
     for (const item of cases) {
       const layout = drawerLayout(item.input);
       expect(layout.tail.filter((entry) => entry === "history")).toHaveLength(1);
       expect(layout.tail.indexOf("history")).toBeGreaterThan(
-        layout.tail.indexOf("verification"),
+        layout.tail.indexOf("acceptance"),
       );
       expect(layout.tail.indexOf("history")).toBeLessThan(layout.tail.indexOf("derive"));
       expect(layout.tail.indexOf("history")).toBeLessThan(layout.tail.indexOf("deps"));
+    }
+  });
+
+  it("结果摘要与验收摘要只在任务终态进入 tail", () => {
+    for (const item of cases) {
+      const layout = drawerLayout({ ...item.input, result_summary: "done" });
+      const terminal = isTaskTerminal(item.input);
+      expect(layout.tail.includes("verification")).toBe(terminal);
+      // 终态中 completed/canceled 由 result 首区块承载结果；已完成里程碑在 tail 补结果。
+      expect(layout.tail.includes("result")).toBe(
+        terminal && layout.lead === "gate",
+      );
+      if (terminal) {
+        expect(layout.tail.indexOf("history")).toBeGreaterThan(
+          layout.tail.indexOf("verification"),
+        );
+      }
+    }
+  });
+
+  it("进行中的任务不安排结果摘要与验收摘要区块", () => {
+    for (const input of [
+      base,
+      { ...base, stage: "verifying" },
+      { ...base, status: "paused" },
+      { ...base, status: "blocked" },
+      { ...base, stage: "pending" },
+    ]) {
+      const layout = drawerLayout({ ...input, result_summary: "done" });
+      expect(layout.tail).not.toContain("result");
+      expect(layout.tail).not.toContain("verification");
     }
   });
 

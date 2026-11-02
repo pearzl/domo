@@ -188,6 +188,21 @@ describe("TaskDrawer 首屏区块", () => {
     expect(lead).toContain("暂停");
   });
 
+  it("进行中的任务不渲染结果摘要与验收摘要", () => {
+    for (const current of [
+      task({ result_summary: "RESULT_MARKER" }),
+      task({ stage: "verifying", result_summary: "RESULT_MARKER" }),
+      task({ status: "paused", result_summary: "RESULT_MARKER" }),
+      task({ status: "blocked", result_summary: "RESULT_MARKER" }),
+    ]) {
+      const markup = renderDrawer(current);
+      expect(markup).not.toContain('data-drawer-block="result"');
+      expect(markup).not.toContain('data-drawer-block="verification"');
+      expect(markup).not.toContain("结果摘要");
+      expect(markup).not.toContain("验收摘要");
+    }
+  });
+
   it("抽屉内不重复展示项目级元信息", () => {
     const markup = renderDrawer(task({ status: "blocked" }));
     expect(markup).not.toContain("示例项目");
@@ -308,8 +323,8 @@ describe("TaskDrawer 信息去重", () => {
     expect(folded).toContain("恢复命令");
   });
 
-  it("验收摘要紧跟验收标准，无验收作业时显示未验收而非空区块", () => {
-    const markup = renderDrawer(task());
+  it("终态任务：验收摘要紧跟验收标准，无验收作业时显示未验收而非空区块", () => {
+    const markup = renderDrawer(task({ stage: "completed" }));
     const acceptanceIndex = markup.indexOf('data-drawer-block="acceptance"');
     const verificationIndex = markup.indexOf('data-drawer-block="verification"');
     expect(verificationIndex).toBeGreaterThan(acceptanceIndex);
@@ -325,7 +340,7 @@ describe("TaskDrawer 信息去重", () => {
   it("已完成且有验收反馈的任务渲染拒绝结论、原因与问题", () => {
     const markup = renderDrawer(
       task({
-        stage: "executing",
+        stage: "completed",
         attempts: 2,
         rejections: 1,
         verifier_issues: ["ISSUE_MARKER"],

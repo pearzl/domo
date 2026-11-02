@@ -1,6 +1,6 @@
 /**
  * 任务抽屉：控制、结果、验收、历史、依赖与配置的呈现顺序由布局模块决定。
- * 抽屉按任务重建，草稿、作业结果缓存与焦点还原都只作用于当前任务。
+ * 抽屉按任务重建，草稿与焦点还原都只作用于当前任务。
  */
 import { useEffect, useId, useRef, useState } from "react";
 import type { ProjectDetail, Task } from "../types";
@@ -8,8 +8,7 @@ import { api, errorMessage } from "../api";
 import { InputBox } from "./InputBox";
 import { useDraftValue } from "./useDraft";
 import { JobDetailView, JobRecordList } from "./JobDetailView";
-import { TaskHistoryBlock, useJobResults } from "./TaskHistory";
-import type { JobResults } from "./TaskHistory";
+import { TaskHistoryBlock } from "./TaskHistory";
 import { RichContent } from "./RichContent";
 import {
   ResultSummary,
@@ -85,20 +84,11 @@ export function TaskDrawer({
     task.id,
     snapshotVersion,
   );
-  // 执行与验收历史按轮次对齐；结果摘要首行只在需要时读取作业详情，并缓存已读结果。
-  // 结果缓存按抽屉实例保存；抽屉按任务重建（见打开抽屉的 key），不会串任务。
-  const [jobResults, setJobResults] = useState<JobResults>({});
-  const historyResults = useJobResults(
-    jobs.filter((job) => job.role === "executor").map((job) => job.id),
-    jobResults,
-    setJobResults,
-    snapshotVersion,
-  );
+  // 执行与验收历史只按轮次对齐作业元信息，结果与原因长文本在作业视图中查看。
   const history = taskHistory(
     jobs,
     verificationHistory.history,
     verificationHistory.state,
-    historyResults,
   );
   // 跳转到作业详情：记录目标作业与跳转序号，作业记录列表据此展示并展开该作业。
   const [focusJob, setFocusJob] = useState<{ jobId: string; nonce: number }>({

@@ -1,15 +1,13 @@
 /// 执行与验收历史：按执行轮展示，轮内展开本轮的全部验收尝试。
 ///
 /// 人工核对清单：
-/// - 用“一次执行多次验收异常”的任务记录打开任务抽屉：只有一个轮次，轮内列出 3 次验收尝试。
+/// - 用“一次执行多次验收异常”的任务记录打开任务抽屉：只有一个轮次，轮内列出全部验收尝试。
 /// - 轮次标题行显示“第 N 轮”、执行结论徽标与“验收 X 次 · 失败 Y 次 · 最近…”汇总。
-/// - 执行结果首行缺失时显示“本次执行未产出结果”，不出现与验收混淆的“尚未产出结果”。
-/// - 验收异常重试的尝试徽标为危险色调，原因首行逐条可读。
+/// - 轮次与验收尝试只显示轮次、角色、状态、Agent 等元信息，不显示结果或原因长文本。
 /// - 存在未关联执行轮的验收作业时，轮次列表上方出现数量与最近一次状态的提示，点击可跳转。
 /// - 720px 及以下窗口宽度下轮次头与尝试行不横向溢出。
 
-import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { useState } from "react";
 import {
   HISTORY_VERDICT_LABELS,
   HISTORY_VERDICT_TONES,
@@ -25,66 +23,6 @@ import {
 } from "../presentation/taskHistory";
 import type { HistoryJob, HistoryRound, TaskHistory } from "../presentation/taskHistory";
 import { Badge } from "../ui";
-
-/// 一次最多读取多少条作业详情，避免轮次很多时发起过多请求。
-const DETAIL_REQUEST_LIMIT = 24;
-const DETAIL_REQUEST_CONCURRENCY = 4;
-
-/// 作业结果原文缓存：作业 id -> 结果原文。
-export type JobResults = Record<string, string | null>;
-
-/**
- * 读取各轮执行作业的结果原文。结果只在作业详情接口里，按作业 id 缓存，
- * 缓存由抽屉持有以便重新渲染时复用；已知缓存不重复请求，读取失败的作业不写入，
- * 界面按“本次执行未产出结果”呈现。
- */
-export function useJobResults(
-  jobIds: string[],
-  known: JobResults,
-  onLoaded: (results: JobResults) => void,
-  version = 0,
-): JobResults {
-  const requestRef = useRef(0);
-  const signature = jobIds.join(",");
-
-  useEffect(() => {
-    requestRef.current += 1;
-    const token = requestRef.current;
-    // 没有结果原文的作业在快照刷新后重试，运行中作业结束时能补上结果。
-    const pending = jobIds
-      .filter((id) => id !== "" && known[id] == null)
-      .slice(0, DETAIL_REQUEST_LIMIT);
-    if (pending.length === 0) return;
-    let cancelled = false;
-    async function load(queue: string[]) {
-      const loaded: JobResults = {};
-      while (queue.length > 0 && !cancelled && token === requestRef.current) {
-        const batch = queue.splice(0, DETAIL_REQUEST_CONCURRENCY);
-        await Promise.all(
-          batch.map(async (id) => {
-            try {
-              const detail = await api.getJob(id);
-              loaded[id] = detail.result;
-            } catch {
-              // 读取失败按“本次执行未产出结果”呈现，不阻断历史。
-            }
-          }),
-        );
-      }
-      if (!cancelled && token === requestRef.current && Object.keys(loaded).length > 0) {
-        onLoaded(loaded);
-      }
-    }
-    void load([...pending]);
-    return () => {
-      cancelled = true;
-    };
-    // 缓存只作为“是否已读取”的判据，作业集合或项目快照变化才重新读取。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, version]);
-
-  return known;
-}
 
 /// 本轮验收汇总：尝试次数、失败次数与最近结论。
 function verifierSummary(round: HistoryRound): string {
@@ -108,7 +46,7 @@ function jumpTarget(round: HistoryRound): string | null {
 
 /**
  * 执行与验收历史：按执行轮纵向排列成时间线。每轮首行展示轮次编号、执行结论与验收汇总，
- * 次行展示本轮执行结果首行；展开后列出本轮全部验收尝试。“只看问题轮”只在存在问题时可用。
+ * 展开后列出本轮全部验收尝试。“只看问题轮”只在存在问题时可用；结果与原因长文本在对应作业视图中查看。
  */
 export function TaskHistoryBlock({
   history,
@@ -226,7 +164,6 @@ function RoundItem({
           {round.running ? <Badge tone="info">进行中</Badge> : null}
           <span className="task-history-round-summary">{verifierSummary(round)}</span>
         </span>
-        <span className="task-history-round-result">{round.resultText}</span>
       </button>
       <div className="task-history-body">
         <div className="task-history-attempts-head">
@@ -251,9 +188,6 @@ function RoundItem({
                   </Badge>
                   <span className="task-history-attempt-agent">
                     {job.agentName ?? TASK_HISTORY_NO_AGENT}
-                  </span>
-                  <span className="task-history-attempt-reason">
-                    {job.resultLine ?? "没有验收原因"}
                   </span>
                   <button
                     type="button"

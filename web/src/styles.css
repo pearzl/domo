@@ -3388,7 +3388,7 @@ button.event-job-title:hover:not(:disabled) {
   background: var(--danger, #c0392b);
 }
 
-/* 轮次头两行：首行编号、徽标与验收汇总，次行执行结果首行。 */
+/* 轮次头一行：编号、徽标与验收汇总在同一行内换行排版。 */
 .drawer .task-history .task-history-round-head {
   display: flex;
   flex-direction: column;

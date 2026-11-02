@@ -3,7 +3,6 @@ import type { JobSummary, VerificationHistory, VerificationRecord } from "../typ
 import {
   HISTORY_VERDICT_LABELS,
   TASK_HISTORY_ALIGNED_LABEL,
-  TASK_HISTORY_EXECUTION_EMPTY,
   TASK_HISTORY_FILTER_LABEL,
   TASK_HISTORY_JOBS_LABEL,
   TASK_HISTORY_UNLINKED_VERIFIERS,
@@ -12,7 +11,6 @@ import {
   groupExecutionRounds,
   recordRounds,
   roundAnchorId,
-  summaryLine,
   taskHistory,
   unlinkedVerifiersLabel,
 } from "./taskHistory";
@@ -103,27 +101,6 @@ const verifier2 = job({
   agent_name: "验收者二",
 });
 
-describe("summaryLine 结果摘要首行", () => {
-  it("取第一个非空行并折叠空白", () => {
-    expect(summaryLine("\n\n  第一行   有空格 \n第二行")).toBe("第一行 有空格");
-    expect(summaryLine("单行")).toBe("单行");
-    expect(summaryLine("   ")).toBeNull();
-    expect(summaryLine(null)).toBeNull();
-  });
-
-  it("去掉 Markdown 标题与列表标记", () => {
-    expect(summaryLine("## 完成内容\n\n细节")).toBe("完成内容");
-    expect(summaryLine("- 第一项")).toBe("第一项");
-    expect(summaryLine("1. 步骤")).toBe("步骤");
-  });
-
-  it("超长首行截断并保留省略号", () => {
-    const line = summaryLine("长".repeat(50), 10);
-    expect(Array.from(line ?? "")).toHaveLength(10);
-    expect(line?.endsWith("…")).toBe(true);
-  });
-});
-
 describe("按执行轮聚合验收尝试", () => {
   it("1 次执行 + 3 次验收（2 次失败）只产生 1 轮并汇总为 3 次尝试、2 次失败", () => {
     const rejected = job({ id: "v1", role: "verifier", created_at: at(5) });
@@ -173,7 +150,6 @@ describe("按执行轮聚合验收尝试", () => {
     expect(rounds[0].verifierAttempts).toMatchObject({ total: 2, failed: 1 });
     expect(rounds[0].verifierAttempts.latest?.id).toBe("v2");
     expect(rounds[0].verdict).toBe("passed");
-    expect(rounds[0].reason).toBe("补充测试后通过");
   });
 
   it("2 次执行 + 2 次验收为 2 轮，验收各归其轮", () => {
@@ -214,14 +190,23 @@ describe("按执行轮聚合验收尝试", () => {
     });
   });
 
-  it("本轮执行没有结果时使用“本次执行未产出结果”文案", () => {
+  it("历史只保留轮次与作业元信息，不携带结果或原因长文本", () => {
     const rounds = alignHistory([executor1]);
-    expect(rounds[0].resultLine).toBeNull();
-    expect(rounds[0].resultText).toBe(TASK_HISTORY_EXECUTION_EMPTY);
-    expect(TASK_HISTORY_EXECUTION_EMPTY).toBe("本次执行未产出结果");
+    expect("resultLine" in rounds[0]).toBe(false);
+    expect("resultText" in rounds[0]).toBe(false);
+    expect("reason" in rounds[0]).toBe(false);
+    expect(rounds[0].executor?.id).toBe("e1");
+    expect(rounds[0].executor?.statusLabel).toBe("成功");
+    expect(rounds[0].executor?.durationKnown).toBe(true);
+    expect(rounds[0].executor?.usageKnown).toBe(true);
 
-    const withResult = alignHistory([executor1], null, { e1: "完成第一轮\n更多说明" });
-    expect(withResult[0].resultText).toBe("完成第一轮");
+    const withRecord = alignHistory(
+      [executor1, verifier1],
+      history([record({ id: "v1", round: 1, passed: false, reason: "缺少测试" })]),
+    );
+    expect(withRecord[0].verifiers[0].verdict).toBe("rejected");
+    expect("resultLine" in withRecord[0].verifiers[0]).toBe(false);
+    expect("reason" in withRecord[0]).toBe(false);
   });
 });
 
@@ -259,7 +244,7 @@ describe("未关联执行的验收作业", () => {
 });
 
 describe("验收结论", () => {
-  it("验收作业全部失败且无结论时判为验收异常，原因取最近一次失败", () => {
+  it("验收作业全部失败且无结论时判为验收异常", () => {
     const rounds = alignHistory([
       executor1,
       job({ id: "v1", role: "verifier", created_at: at(5), status: "failed", error: "第一次异常" }),
@@ -270,7 +255,6 @@ describe("验收结论", () => {
     expect(HISTORY_VERDICT_LABELS.error).toBe("验收异常");
     expect(rounds[0].failed).toBe(true);
     expect(rounds[0].verifierAttempts).toMatchObject({ total: 2, failed: 2 });
-    expect(rounds[0].reason).toBe("第二次异常");
   });
 
   it("验收尚未结束时待验收，不计为失败", () => {
@@ -294,7 +278,6 @@ describe("验收结论", () => {
       history([record({ id: "v1", round: 1 })]),
     );
     expect(rounds[0].verdict).toBe("passed");
-    expect(rounds[0].reason).toBe("符合验收标准");
     expect(rounds[0].running).toBe(true);
   });
 
