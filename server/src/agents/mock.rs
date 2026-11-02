@@ -336,13 +336,38 @@ fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Va
                 .collect()
         })
         .unwrap_or_default();
-    let first_key = canceled
-        .first()
-        .cloned()
-        .unwrap_or_else(|| next_mock_key(&completed, &HashSet::new()));
-    let mut taken = completed.clone();
-    taken.insert(first_key.clone());
-    let second_key = next_mock_key(&taken, &HashSet::new());
+    let collide = std::env::var("DOMO_MOCK_REPLAN_COLLIDE")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+        && context
+            .get("project")
+            .and_then(|value| value.get("goal"))
+            .and_then(|value| value.as_str())
+            .map(|goal| goal.contains("[replan-collide]"))
+            .unwrap_or(false);
+    let (first_key, second_key) = if collide {
+        let mut completed_keys: Vec<String> = completed.iter().cloned().collect();
+        completed_keys.sort();
+        let first_key = completed_keys
+            .first()
+            .cloned()
+            .unwrap_or_else(|| next_mock_key(&completed, &HashSet::new()));
+        let second_key = completed_keys
+            .iter()
+            .find(|key| **key != first_key)
+            .cloned()
+            .unwrap_or_else(|| next_mock_key(&completed, &HashSet::new()));
+        (first_key, second_key)
+    } else {
+        let first_key = canceled
+            .first()
+            .cloned()
+            .unwrap_or_else(|| next_mock_key(&completed, &HashSet::new()));
+        let mut taken = completed.clone();
+        taken.insert(first_key.clone());
+        let second_key = next_mock_key(&taken, &HashSet::new());
+        (first_key, second_key)
+    };
     serde_json::json!({
         "kind": "plan",
         "summary": format!("mock 重规划：{reason}"),

@@ -32,6 +32,7 @@ REPLAN_ENV = {
     "DOMO_MOCK_REPLAN_ONCE": "1",
     "DOMO_MOCK_REPLAN_GOAL": "[replan]",
     "DOMO_MOCK_REPLAN_KEY": "T2",
+    "DOMO_MOCK_REPLAN_COLLIDE": "1",
 }
 
 
@@ -243,7 +244,7 @@ def main():
 
             # 2. 执行者请求重规划，旧计划作废并生成新计划。
             replan_project = new_project(
-                "Replan", "[replan] 验证执行者请求重新规划"
+                "Replan", "[replan] [replan-collide] 验证执行者请求重新规划"
             )
             detail = wait_project(
                 replan_project,
@@ -310,6 +311,12 @@ def main():
             assert any(
                 task["key"] == "T2" for task in new_tasks
             ), "新规划未能复用被取消任务的 key"
+            # 重规划方案复用已完成任务的 key 时，服务端为冲突任务重新编号。
+            assert all(
+                task["key"] != old_t1["key"] for task in new_tasks
+            ), new_tasks
+            active_keys = [task["key"] for task in active_tasks(detail)]
+            assert len(active_keys) == len(set(active_keys)), active_keys
             assert all(
                 task["stage"] == "completed" for task in active_tasks(detail)
             ), active_tasks(detail)

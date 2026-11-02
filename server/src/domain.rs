@@ -520,6 +520,64 @@ pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, St
     Ok(tasks)
 }
 
+/// Assigns globally unique keys to a plan. Keys that do not collide with the
+/// project's non-canceled tasks are kept; colliding keys move to the next free
+/// `T<n>` numbers. Dependency references are rewritten with the same mapping so
+/// the DAG stays consistent.
+pub fn reserve_plan_keys(
+    tasks: Vec<NormalizedTask>,
+    taken: &HashSet<String>,
+) -> (Vec<NormalizedTask>, HashMap<String, String>) {
+    let mut used = taken.clone();
+    let mut next = next_task_number(&used);
+    let mut mapping = HashMap::new();
+
+    for task in &tasks {
+        let key = if used.contains(&task.key) {
+            loop {
+                let candidate = format!("T{next}");
+                next += 1;
+                if !used.contains(&candidate) {
+                    break candidate;
+                }
+            }
+        } else {
+            task.key.clone()
+        };
+        used.insert(key.clone());
+        if key != task.key {
+            mapping.insert(task.key.clone(), key);
+        }
+    }
+
+    let remapped = tasks
+        .into_iter()
+        .map(|task| NormalizedTask {
+            key: mapping
+                .get(&task.key)
+                .cloned()
+                .unwrap_or_else(|| task.key.clone()),
+            deps: task
+                .deps
+                .into_iter()
+                .map(|dep| mapping.get(&dep).cloned().unwrap_or(dep))
+                .collect(),
+            ..task
+        })
+        .collect();
+
+    (remapped, mapping)
+}
+
+fn next_task_number(used: &HashSet<String>) -> u128 {
+    used.iter()
+        .filter_map(|key| key.strip_prefix('T'))
+        .filter_map(|number| number.parse::<u128>().ok())
+        .max()
+        .map(|max| max + 1)
+        .unwrap_or(1)
+}
+
 pub fn validate_derive(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, String> {
     if raw_tasks.is_empty() {
         return Err("派生请求至少需要 1 个子任务".into());
@@ -983,6 +1041,54 @@ mod tests {
         let result = validate_plan(vec![first, second]).unwrap();
         assert_eq!(result[0].key, "T1");
         assert_eq!(result[1].key, "T2");
+    }
+
+    #[test]
+    fn keeps_plan_keys_when_they_do_not_collide() {
+        let taken = HashSet::new();
+        let (tasks, mapping) = reserve_plan_keys(
+            vec![normalized("P1", &[]), normalized("P2", &["P1"])],
+            &taken,
+        );
+        assert_eq!(tasks[0].key, "P1");
+        assert_eq!(tasks[1].key, "P2");
+        assert_eq!(tasks[1].deps, vec!["P1"]);
+        assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn renames_colliding_plan_keys_and_rewrites_deps() {
+        let taken: HashSet<String> = ["T1", "T2", "T3"]
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        let (tasks, mapping) = reserve_plan_keys(
+            vec![normalized("T1", &[]), normalized("T2", &["T1"])],
+            &taken,
+        );
+        assert_eq!(tasks[0].key, "T4");
+        assert_eq!(tasks[1].key, "T5");
+        assert_eq!(tasks[1].deps, vec!["T4"]);
+        assert_eq!(mapping["T1"], "T4");
+        assert_eq!(mapping["T2"], "T5");
+    }
+
+    #[test]
+    fn renames_keys_reserved_by_earlier_tasks_in_the_same_plan() {
+        let taken: HashSet<String> = ["T1"].iter().map(|key| key.to_string()).collect();
+        let (tasks, mapping) =
+            reserve_plan_keys(vec![normalized("T1", &[]), normalized("T2", &[])], &taken);
+        assert_eq!(tasks[0].key, "T2");
+        assert_eq!(tasks[1].key, "T3");
+        assert_eq!(mapping["T1"], "T2");
+        assert_eq!(mapping["T2"], "T3");
+    }
+
+    #[test]
+    fn renames_non_numeric_collisions_to_the_next_t_number() {
+        let taken: HashSet<String> = ["setup"].iter().map(|key| key.to_string()).collect();
+        let (tasks, _) = reserve_plan_keys(vec![normalized("setup", &[])], &taken);
+        assert_eq!(tasks[0].key, "T1");
     }
 
     #[test]

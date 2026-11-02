@@ -1,7 +1,7 @@
 //! Job lifecycle. Long-running agent processes never hold the scheduler lock;
 //! state transitions are applied atomically after the process exits.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1337,6 +1337,41 @@ async fn handle_analysis_questions(
     Ok(())
 }
 
+/// Loads the keys that still occupy the project's unique-key namespace.
+/// Canceled tasks are excluded because their keys may be reused.
+async fn load_task_keys<'e, E>(executor: E, project_id: &str) -> Result<HashSet<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ?",
+    )
+    .bind(project_id)
+    .bind(STATUS_CANCELED)
+    .fetch_all(executor)
+    .await?;
+    Ok(keys.into_iter().collect())
+}
+
+/// Rewrites the task keys in a stored proposal after collisions were resolved.
+fn remap_proposal_keys(raw: &str, mapping: &HashMap<String, String>) -> Result<String> {
+    if mapping.is_empty() {
+        return Ok(raw.to_string());
+    }
+    let mut proposal: AnalysisProposal = serde_json::from_str(raw)?;
+    for task in &mut proposal.tasks {
+        if let Some(key) = mapping.get(&task.key) {
+            task.key = key.clone();
+        }
+        task.deps = task
+            .deps
+            .iter()
+            .map(|dep| mapping.get(dep).cloned().unwrap_or_else(|| dep.clone()))
+            .collect();
+    }
+    Ok(serde_json::to_string(&proposal)?)
+}
+
 pub(crate) async fn apply_analysis_plan(
     state: &AppState,
     project: &ProjectRow,
@@ -1347,6 +1382,9 @@ pub(crate) async fn apply_analysis_plan(
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let taken = load_task_keys(&mut *tx, &project.id).await?;
+    let (tasks, mapping) = domain::reserve_plan_keys(tasks.to_vec(), &taken);
+    let proposal_json = remap_proposal_keys(proposal_json, &mapping)?;
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
          AND COALESCE(status, '') != ?",
@@ -1500,6 +1538,8 @@ async fn handle_analysis_plan(
         .filter(|value| !value.is_empty())
         .unwrap_or(project.goal.trim())
         .to_string();
+    let taken = load_task_keys(&state.db, &project.id).await?;
+    let (tasks, _) = domain::reserve_plan_keys(tasks.to_vec(), &taken);
     let proposal = AnalysisProposal {
         kind: "plan".into(),
         summary: summary.to_string(),
@@ -1524,7 +1564,7 @@ async fn handle_analysis_plan(
     let auto = project.confirmed_at.is_some()
         || (skip_confirmation && project.confirm_mode == CONFIRM_AUTO);
     if auto {
-        return apply_analysis_plan(state, project, &goal, tasks, summary, &proposal_json).await;
+        return apply_analysis_plan(state, project, &goal, &tasks, summary, &proposal_json).await;
     }
     let _guard = state.schedule_lock.lock().await;
     let content = analysis_proposal_content(
@@ -1532,7 +1572,7 @@ async fn handle_analysis_plan(
         Some(&goal),
         assumptions,
         acceptance,
-        tasks,
+        &tasks,
         &[],
         &[],
     );
@@ -3509,4 +3549,34 @@ async fn load_task(pool: &SqlitePool, id: &str) -> Result<Option<TaskRow>> {
             .fetch_optional(pool)
             .await?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaps_proposal_keys_and_dependencies() {
+        let raw = r#"{"kind":"plan","summary":"s","tasks":[
+            {"key":"T1","title":"a","description":"b","acceptance":[],"deps":[]},
+            {"key":"T2","title":"c","description":"d","acceptance":[],"deps":["T1"]}
+        ]}"#;
+        let mapping = HashMap::from([
+            ("T1".to_string(), "T4".to_string()),
+            ("T2".to_string(), "T5".to_string()),
+        ]);
+
+        let rewritten = remap_proposal_keys(raw, &mapping).unwrap();
+        let proposal: AnalysisProposal = serde_json::from_str(&rewritten).unwrap();
+
+        assert_eq!(proposal.tasks[0].key, "T4");
+        assert_eq!(proposal.tasks[1].key, "T5");
+        assert_eq!(proposal.tasks[1].deps, vec!["T4"]);
+    }
+
+    #[test]
+    fn empty_mapping_keeps_proposal_raw() {
+        let raw = r#"{"kind":"plan","summary":"s","tasks":[]}"#;
+        assert_eq!(remap_proposal_keys(raw, &HashMap::new()).unwrap(), raw);
+    }
 }
