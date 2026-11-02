@@ -6,9 +6,9 @@
      模板缺少 {prompt} 时提示词走 stdin；{session_id}、{job_dir}、{cwd}、
      {model}、{model_args} 按适配器规则展开，模型参数在模板未引用时追加。
   2. 续跑轮次沿用首次运行派生的 session，继续提示词只包含继续指令。
-  3. kind=opencode 通过 stdin 接收提示词，参数固定为 run --auto --format json
-     --session <session> --title "DOMO <role> <job_id>"，配置模型时附带
-     --model；续跑使用同一 session，用量以该 session 的账本为准。
+  3. kind=opencode 通过 stdin 接收提示词，参数固定为 run --auto --thinking
+     --format json --session <session> --title "DOMO <role> <job_id>"，配置模型时
+     附带 --model；续跑使用同一 session，用量以该 session 的账本为准。
   4. 各适配器作业的 args、prompt_chars、session 与 usage 数值和既有契约一致。
 
 codex 与 workbuddy 的参数、stdin、会话与用量由 tests/test_agent_adapters.py 与
@@ -537,6 +537,7 @@ def run_opencode(temp, script):
         assert entry["args"] == [
             "run",
             "--auto",
+            "--thinking",
             "--format",
             "json",
             "--session",

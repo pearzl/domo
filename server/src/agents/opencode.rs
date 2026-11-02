@@ -75,6 +75,9 @@ pub(super) fn opencode_args(model: &str, session_id: &str, spec: &AgentSpec) -> 
     let mut args = vec!["run".to_string(), "--standalone".into()];
     args.extend([
         "--auto".into(),
+        // The activity view consumes reasoning parts, so reasoning is requested
+        // on every turn instead of depending on the CLI's own display settings.
+        "--thinking".into(),
         "--format".into(),
         "json".into(),
         "--session".into(),
@@ -117,6 +120,7 @@ mod tests {
         let args = opencode_args(" opencode/big ", &session_id, &spec);
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert!(args.contains(&"--standalone".to_string()));
+        assert!(args.contains(&"--thinking".to_string()));
         assert!(args_contain_pair(&args, "--format", "json"));
         assert!(args_contain_pair(&args, "--session", &session_id));
         assert!(args_contain_pair(&args, "--model", "opencode/big"));
