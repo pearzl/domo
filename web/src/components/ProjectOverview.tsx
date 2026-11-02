@@ -69,8 +69,15 @@ export function ProjectGoal({ goal }: { goal: string }) {
 }
 
 /// 项目概览只保留“当前需要你处理”、统计与用量摘要，不提供操作；
-/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接；
-/// 用量摘要贴在待办下方，窄屏时与待办纵向堆叠。
+/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接。
+/// 宽屏布局为上排待办占满整行、下排统计区与用量摘要等宽并排；
+/// 960px 及以下依次纵向堆叠为待办、用量摘要、统计区。
+/// 作业数与用量记录覆盖只由用量摘要给出，统计区保留任务完成与项目用时。
+///
+/// 人工核对清单：
+/// - 1280px：用量摘要与统计区等宽并排，用量卡片不被拉伸，左侧无大面积空白。
+/// - 900px：待办、用量摘要、统计区依次纵向堆叠，用量卡片仍是两列自适应。
+/// - 两种宽度下作业数与用量记录覆盖都只出现一次。
 export function ProjectOverview({
   detail,
   onOpenTab,
@@ -107,40 +114,19 @@ export function ProjectOverview({
         </div>
       </div>
       <div className="overview-grid">
-        <div className="overview-stats">
-          <TaskStat stats={status.stats} />
-          <Stat
-            label="作业数"
-            value={`${status.stats.jobTotal} 个`}
-            note={
-              status.stats.jobFailed > 0
-                ? `${status.stats.jobFailed} 个失败`
-                : "无失败作业"
-            }
-            tone={status.stats.jobFailed > 0 ? "danger" : "muted"}
-          />
-          <Stat
-            label="用量记录覆盖"
-            value={`${status.stats.usageKnown}/${status.stats.jobTotal}`}
-            note={
-              status.stats.usageUnknown > 0
-                ? `${status.stats.usageUnknown} 个作业用量未知`
-                : "全部作业有用量记录"
-            }
-            tone={status.stats.usageUnknown > 0 ? "warn" : "muted"}
-          />
-          <Stat
-            label="项目用时"
-            value={formatElapsed(status.stats.elapsedMs)}
-            note="自项目创建起"
-            tone="muted"
-          />
-        </div>
         <Guidance
           guidance={status.guidance}
           activity={activity}
           onOpenTab={onOpenTab}
         />
+        <div className="overview-stats" aria-label="项目统计">
+          <TaskStat stats={status.stats} />
+          <Stat
+            label="项目用时"
+            value={formatElapsed(status.stats.elapsedMs)}
+            note="自项目创建起"
+          />
+        </div>
         <UsageSummary projectId={project.id} usage={detail.usage} />
       </div>
     </section>
@@ -164,22 +150,21 @@ function TaskStat({ stats }: { stats: ProjectStats }) {
   );
 }
 
+/// 统计卡只展示数值与一句说明；说明为空时不留空行。
 function Stat({
   label,
   value,
   note,
-  tone,
 }: {
   label: string;
   value: string;
   note: string;
-  tone: "muted" | "warn" | "danger";
 }) {
   return (
     <div className="overview-stat">
       <span className="meta-label">{label}</span>
       <strong className="overview-value">{value}</strong>
-      <span className={`overview-note overview-note-${tone}`}>{note}</span>
+      {note ? <span className="overview-note">{note}</span> : null}
     </div>
   );
 }

@@ -1413,23 +1413,25 @@ small {
   gap: 16px;
 }
 
+/* 概览网格：上排待办占满整行，下排统计与用量摘要等宽并排。 */
 .overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-areas:
-    "stats todo"
+    "todo todo"
     "stats usage";
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
-/* 统计在左纵向铺满；待办与用量摘要上下排布在右列。 */
+/* 统计卡在宽屏按两列紧凑排布，窄屏单列；列宽等分不撑破容器。 */
 .overview-stats {
   grid-area: stats;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
   gap: 10px;
+  min-width: 0;
 }
 
 .overview-stat {
@@ -1476,16 +1478,6 @@ small {
 .overview-note {
   font-size: 0.78rem;
   color: var(--muted);
-}
-
-.overview-note-warn {
-  color: var(--warn);
-  font-weight: 600;
-}
-
-.overview-note-danger {
-  color: var(--danger);
-  font-weight: 600;
 }
 
 .overview-note-muted {
@@ -1650,9 +1642,10 @@ small {
   flex-wrap: wrap;
 }
 
+/* 用量摘要卡片：宽屏按 2 列自适应等分，窄屏同样保持两列，不撑破容器。 */
 .usage-summary-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
   gap: 8px;
 }
 
@@ -1694,8 +1687,8 @@ small {
   justify-content: flex-end;
 }
 
-/* 窄屏：统计、待办与用量摘要依次纵向堆叠，待办在前。 */
-@media (max-width: 900px) {
+/* 960px 及以下：待办、用量摘要、统计区依次纵向堆叠，统计卡改为单列。 */
+@media (max-width: 960px) {
   .overview-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
@@ -1703,14 +1696,13 @@ small {
       "usage"
       "stats";
   }
-}
 
-
-@media (max-width: 560px) {
   .overview-stats {
     grid-template-columns: minmax(0, 1fr);
   }
+}
 
+@media (max-width: 560px) {
   .agent-pool-tabs {
     flex-direction: column;
     flex-wrap: nowrap;

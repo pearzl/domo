@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type {
@@ -25,6 +26,8 @@ import {
 } from "./projectLayout";
 import projectPageSource from "../pages/ProjectPage.tsx?raw";
 import projectHeaderSource from "../components/ProjectHeader.tsx?raw";
+import overviewSource from "../components/ProjectOverview.tsx?raw";
+import usageSummarySource from "../components/UsageSummary.tsx?raw";
 
 const STAGES = ["analysis", "executing", "summarizing", "completed"] as const;
 
@@ -435,13 +438,59 @@ describe("ProjectOverview 当前需要你处理", () => {
     expect(withCallback).toContain("去验收报告");
   });
 
-  it("保留状态、任务与统计，不渲染术语卡片", () => {
+  it("保留状态与任务、项目用时统计，不渲染术语卡片", () => {
     const markup = renderOverview(detail());
     expect(markup).not.toContain("术语说明");
     expect(markup).toContain("项目概览");
     expect(markup).toContain("任务完成");
-    expect(markup).toContain("作业数");
     expect(markup).toContain("项目用时");
+  });
+
+  it("统计区与用量摘要并排于待办下方，作业数与用量覆盖各只出现一次", () => {
+    const markup = renderOverview(
+      withUsage({
+        jobs: 4,
+        input_tokens: 12000,
+        output_tokens: 3400,
+        cost: 0.42,
+        duration_ms: 65000,
+        known_jobs: 3,
+        unknown_jobs: 1,
+      }),
+    );
+    expect(markup).toContain('class="overview-stats"');
+    expect(markup).toContain('data-block="usage-summary"');
+    expect(markup).toContain("当前需要你处理");
+    // 待办占整行在上，统计与用量摘要同处其下。
+    const todo = markup.indexOf('class="overview-todo');
+    const stats = markup.indexOf('class="overview-stats"');
+    const usage = markup.indexOf('data-block="usage-summary"');
+    expect(todo).toBeGreaterThan(0);
+    expect(stats).toBeGreaterThan(todo);
+    expect(usage).toBeGreaterThan(todo);
+    // 作业数与用量记录覆盖只由用量摘要给出。
+    const usageSummary = markup.slice(usage, markup.indexOf("</section>", usage));
+    expect(usageSummary).toContain("作业数");
+    expect(usageSummary).toContain("用量记录覆盖 3/4");
+    for (const label of ["作业数", "用量记录覆盖"]) {
+      const total = (markup.match(new RegExp(label, "g")) ?? []).length;
+      const inside =
+        (usageSummary.match(new RegExp(label, "g")) ?? []).length;
+      expect(inside, `${label} 应出现在用量摘要内`).toBeGreaterThan(0);
+      expect(total, `${label} 在概览中重复出现`).toBe(inside);
+    }
+    // 统计区保留任务完成与项目用时，不再重复作业失败与用量未知说明。
+    const statsBlock = markup.slice(
+      stats,
+      markup.indexOf('class="usage-summary"', stats),
+    );
+    expect(statsBlock).toContain("任务完成");
+    expect(statsBlock).toContain("项目用时");
+    expect(statsBlock).not.toContain("作业数");
+    expect(statsBlock).not.toContain("用量记录覆盖");
+    expect(overviewSource).not.toContain("无失败作业");
+    expect(overviewSource).not.toContain("个作业用量未知");
+    expect(usageSummarySource).toContain("作业数");
   });
 });
 
@@ -535,6 +584,67 @@ describe("概览内嵌用量摘要", () => {
     expect(markup).toContain("用量记录覆盖 2/4");
     expect(markup).toContain("已记录 2/4 个作业的用量");
     expect(markup.match(/（2\/4 个作业）/g) ?? []).toHaveLength(3);    expect(markup).not.toContain("全部 4 个作业未记录用量");
+  });
+});
+
+/// 样式表不是 JS 模块，?raw 取到的是空串，直接读源文件原文。
+const STYLES = readFileSync(
+  new URL("../styles.css", import.meta.url).pathname,
+  "utf8",
+);
+
+describe("概览网格样式", () => {
+  const styles = STYLES.replace(/\s+/g, " ");
+
+  /// 取出 `.selector { … }` 的声明块，选择器需完整匹配。
+  function block(selector: string): string {
+    const start = styles.indexOf(`${selector} {`);
+    expect(start, `缺少 ${selector} 规则`).toBeGreaterThanOrEqual(0);
+    return styles.slice(start, styles.indexOf("}", start) + 1);
+  }
+
+  /// 媒体查询块内的文本，按大括号配对闭合。
+  function media(maxWidth: number): string {
+    const marker = `@media (max-width: ${maxWidth}px) {`;
+    const start = styles.indexOf(marker);
+    expect(start, `缺少 ${marker} 媒体查询`).toBeGreaterThanOrEqual(0);
+    let depth = 0;
+    for (let index = start + marker.length - 1; index < styles.length; index += 1) {
+      if (styles[index] === "{") depth += 1;
+      if (styles[index] === "}") {
+        depth -= 1;
+        if (depth === 0) return styles.slice(start, index + 1);
+      }
+    }
+    return styles.slice(start);
+  }
+
+  it("宽屏待办占整行，统计与用量摘要同行等宽", () => {
+    const grid = block(".overview-grid");
+    expect(grid).toContain(
+      'grid-template-areas: "todo todo" "stats usage";',
+    );
+    expect(grid).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    );
+    // 旧的统计列跨两行布局已删除：全文件 grid-template-areas 只剩概览两处与任务行一处。
+    expect(styles.match(/grid-template-areas/g) ?? []).toHaveLength(3);
+    expect(styles).not.toContain('"stats todo"');
+    expect(styles).not.toContain('grid-template-areas: "stats usage"');
+    // 统计卡宽屏 2×2 紧凑排布，用量卡片按小宽度两列自适应。
+    expect(block(".overview-stats")).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    );
+    expect(block(".usage-summary-cards")).toContain(
+      "repeat(auto-fit, minmax(80px, 1fr))",
+    );
+  });
+
+  it("960px 及以下依次堆叠待办、用量摘要与统计区", () => {
+    const narrow = media(960);
+    expect(narrow).toContain('grid-template-areas: "todo" "usage" "stats";');
+    expect(narrow).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(narrow).toContain(".overview-stats { grid-template-columns: minmax(0, 1fr); }");
   });
 });
 
