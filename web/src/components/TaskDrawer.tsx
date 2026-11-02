@@ -425,7 +425,7 @@ export function TaskDrawer({
     archiveRecovery: Boolean(artifactsReleased && !artifactsReleasing && archiveRecovery),
   });
   const depsSection = (
-    <section className="task-deps drawer-layout-section">
+    <section className="task-deps">
       <h3>依赖与位置</h3>
       {DEPS_PRIMARY_FIELDS.map(depsRow)}
       <details className="drawer-fold deps-fold">

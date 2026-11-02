@@ -2641,12 +2641,13 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   padding: 5px 8px;
 }
 
+/* 活动列表是唯一滚动容器：高度随视口放大，列表条目自身保持完整展开。 */
 .activity-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  max-height: 420px;
+  max-height: clamp(480px, 70vh, 1100px);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -2795,8 +2796,6 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   border: 1px solid #d9e6fa;
   border-radius: 8px;
   padding: 8px 10px;
-  max-height: 420px;
-  overflow: auto;
   overflow-wrap: anywhere;
   font-size: 0.86rem;
 }
@@ -2806,7 +2805,8 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   color: var(--text);
   border-radius: 6px;
   padding: 6px 8px;
-  max-height: 120px;
+  max-height: none;
+  overflow: visible;
   font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
@@ -3198,19 +3198,7 @@ button.event-job-title:hover:not(:disabled) {
   flex: 0 0 auto;
 }
 
-/* 已完成任务的执行摘要优先展示，使用柔和底色与后续明细区分。 */
-.drawer .task-result {
-  border: 1px solid #bfe6d6;
-  border-radius: 12px;
-  padding: 14px 16px;
-  background: var(--success-soft);
-}
-
-.drawer .task-result h3 {
-  color: var(--success);
-}
-
-/* 结果摘要与验收摘要的标题行：标题与来源说明同行，窄宽度下换行。 */
+/* 结果摘要与其它文本区块共用抽屉卡片容器，只用标题行区分来源与提示。 */
 .drawer .task-result-head {
   display: flex;
   flex-wrap: wrap;
@@ -3234,13 +3222,6 @@ button.event-job-title:hover:not(:disabled) {
 }
 
 /* 验收摘要：结论徽标、计数与最近一轮原因并列。 */
-.drawer .task-verification {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
-  background: var(--bg);
-}
-
 .drawer .task-verification .verification-verdict {
   display: flex;
   flex-wrap: wrap;
@@ -3272,25 +3253,12 @@ button.event-job-title:hover:not(:disabled) {
   margin: 0;
 }
 
-.drawer .task-verification .verification-unparsed pre {
-  margin: 0;
-  max-height: 200px;
-  overflow: auto;
-}
-
 .drawer .task-verification .verification-note {
   margin: 8px 0 0;
   font-size: 0.8rem;
 }
 
 /* 执行与验收历史：按轮次纵向时间线排列，失败轮次带红色左侧标记。 */
-.drawer .task-history {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
-  background: var(--bg);
-}
-
 .drawer .task-history .task-history-source,
 .drawer .task-history .task-history-count {
   font-size: 0.8rem;
@@ -3543,8 +3511,7 @@ button.event-job-title:hover:not(:disabled) {
 
 /* 首区块与末尾配置区单独成组，避免与普通信息区块混排。 */
 .drawer-lead {
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
+  margin-top: 12px;
 }
 
 .drawer-lead .task-control {
@@ -3576,10 +3543,6 @@ button.event-job-title:hover:not(:disabled) {
   margin: 0;
 }
 
-.drawer-layout-section {
-  padding-bottom: 2px;
-}
-
 /* 依赖与位置的折叠区从属于所在区块，不单独画区块分隔线。 */
 .drawer .deps-fold {
   margin-top: 8px;
@@ -3606,9 +3569,24 @@ button.event-job-title:hover:not(:disabled) {
   margin-top: 8px;
 }
 
-.drawer section {
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
+/* 抽屉文本区块：任务描述、验收标准、结果摘要、验收摘要、验收反馈、
+   执行与验收历史、作业列表共用同一套卡片容器。 */
+.drawer-body > section,
+.drawer-body > div > section,
+.drawer-body > .drawer-lead > section,
+.drawer-body > details.drawer-fold,
+.drawer-body > div > details.drawer-fold {
+  margin: 0 0 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.drawer-body > section > h3,
+.drawer-body > div > section > h3,
+.drawer-body > .drawer-lead > section > h3 {
+  margin: 0 0 8px;
 }
 
 .drawer ul {
@@ -4724,7 +4702,7 @@ summary {
 
 .rich-content-raw {
   margin: 0;
-  max-height: 420px;
+  max-height: clamp(420px, 60vh, 960px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -4854,7 +4832,7 @@ summary {
 
 .rich-code {
   margin: 0;
-  max-height: 360px;
+  max-height: clamp(420px, 55vh, 900px);
   border-radius: 0;
   background: #0f172a;
   overflow: auto;
@@ -5001,9 +4979,12 @@ summary {
 
 @media (max-width: 840px) {
   .rich-code,
-  .rich-content-raw,
+  .rich-content-raw {
+    max-height: 56vh;
+  }
+
   .report .rich-content-body {
-    max-height: 320px;
+    max-height: 56vh;
   }
 }
 
