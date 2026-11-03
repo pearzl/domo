@@ -128,9 +128,85 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
         .started_at
         .as_deref()
         .and_then(|started| crate::usage::elapsed_ms(Some(started), &finished_at));
-    sqlx::query(
+    let project_id = job.project_id.clone();
+    let job_agent = match &job.agent_id {
+        Some(agent_id) => crate::db::load_agent(&state.db, agent_id).await?,
+        None => None,
+    };
+    if let Some(delay) = std::env::var("DOMO_MOCK_FAILURE_CALLBACK_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+    }
+    let Some(current_job) = load_job(&state.db, job_id).await? else {
+        return Ok(());
+    };
+    if current_job.status != JOB_STATUS_RUNNING {
+        return Ok(());
+    }
+    if let Some(current_project) = load_project(&state.db, &project_id).await? {
+        if current_project.goal_locked_at.is_some()
+            && current_project.replan_generation != job.replan_generation
+        {
+            mark_canceled_job(state, &job, "项目代际已变化，取消过期运行时结算").await?;
+            return Ok(());
+        }
+        if job.replan_generation > 0 && current_project.replan_active == 0 {
+            mark_canceled_job(state, &job, "重规划已结束，取消过期运行时结算").await?;
+            return Ok(());
+        }
+    }
+    let transition: Result<()> = async {
+        if let Some(project) = load_project(&state.db, &project_id).await? {
+            if let Some(task_id) = &job.task_id {
+                if let Some(task) = load_task(&state.db, task_id).await? {
+                    let agent = job_agent.as_ref();
+                    match job.role.as_str() {
+                        JOB_ROLE_EXECUTOR => {
+                            if let Some(agent) = agent {
+                                handle_executor_failure(
+                                    state, &project, &task, reason, agent, true,
+                                )
+                                .await?;
+                            } else {
+                                block_task(state, &project, &task, reason).await?;
+                            }
+                        }
+                        JOB_ROLE_VERIFIER => {
+                            if let Some(agent) = agent {
+                                handle_verifier_failure(
+                                    state, &project, &task, reason, agent, true,
+                                )
+                                .await?;
+                            } else {
+                                block_task(state, &project, &task, reason).await?;
+                            }
+                        }
+                        JOB_ROLE_ANALYSIS => {
+                            handle_analysis_failure(state, &project, reason, agent, true).await?
+                        }
+                        _ => {}
+                    }
+                }
+            } else if job.role == JOB_ROLE_ANALYSIS {
+                handle_analysis_failure(state, &project, reason, job_agent.as_ref(), true).await?;
+            } else if job.role == JOB_ROLE_DIRECT {
+                handle_direct_failure(state, &project, reason, job_agent.as_ref(), true).await?;
+            } else if job.role == JOB_ROLE_ACCEPTANCE {
+                handle_acceptance_failure(state, &project, reason, job_agent.as_ref(), true)
+                    .await?;
+            } else if job.role == JOB_ROLE_SUMMARY {
+                handle_summary_failure(state, &project, reason, job_agent.as_ref(), true).await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    // The running row keeps replan's quiet handoff closed until business callbacks settle.
+    let updated = sqlx::query(
         "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \
-         finished_at = ? WHERE id = ?",
+         finished_at = ? WHERE id = ? AND status = 'running'",
     )
     .bind(JOB_STATUS_FAILED)
     .bind(reason)
@@ -139,47 +215,8 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
     .bind(job_id)
     .execute(&state.db)
     .await?;
-    let project_id = job.project_id.clone();
-    let job_agent = match &job.agent_id {
-        Some(agent_id) => crate::db::load_agent(&state.db, agent_id).await?,
-        None => None,
-    };
-    if let Some(project) = load_project(&state.db, &project_id).await? {
-        if let Some(task_id) = &job.task_id {
-            if let Some(task) = load_task(&state.db, task_id).await? {
-                let agent = job_agent.as_ref();
-                match job.role.as_str() {
-                    JOB_ROLE_EXECUTOR => {
-                        if let Some(agent) = agent {
-                            handle_executor_failure(state, &project, &task, reason, agent, true)
-                                .await?;
-                        } else {
-                            block_task(state, &project, &task, reason).await?;
-                        }
-                    }
-                    JOB_ROLE_VERIFIER => {
-                        if let Some(agent) = agent {
-                            handle_verifier_failure(state, &project, &task, reason, agent, true)
-                                .await?;
-                        } else {
-                            block_task(state, &project, &task, reason).await?;
-                        }
-                    }
-                    JOB_ROLE_ANALYSIS => {
-                        handle_analysis_failure(state, &project, reason, agent, true).await?
-                    }
-                    _ => {}
-                }
-            }
-        } else if job.role == JOB_ROLE_ANALYSIS {
-            handle_analysis_failure(state, &project, reason, job_agent.as_ref(), true).await?;
-        } else if job.role == JOB_ROLE_DIRECT {
-            handle_direct_failure(state, &project, reason, job_agent.as_ref(), true).await?;
-        } else if job.role == JOB_ROLE_ACCEPTANCE {
-            handle_acceptance_failure(state, &project, reason, job_agent.as_ref(), true).await?;
-        } else if job.role == JOB_ROLE_SUMMARY {
-            handle_summary_failure(state, &project, reason, job_agent.as_ref(), true).await?;
-        }
+    if updated.rows_affected() == 0 {
+        return Ok(());
     }
     emit_job(
         &state.db,
@@ -191,6 +228,7 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
         format!("作业基础设施失败：{reason}"),
     )
     .await;
+    transition?;
     Ok(())
 }
 

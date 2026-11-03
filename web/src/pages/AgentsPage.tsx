@@ -62,7 +62,8 @@ function readAgentFormDraft(key: string): AgentFormState | null {
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [team, setTeam] = useState<DefaultTeamPool | null>(null);
-  const [pageError, setPageError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [formError, setFormError] = useState("");
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<AgentFormState>(emptyForm);
@@ -71,7 +72,8 @@ export function AgentsPage() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState("");
 
-  async function refresh() {
+  async function refresh(showLoading = false) {
+    if (showLoading) setLoading(true);
     try {
       const [agentList, defaultTeam] = await Promise.all([
         api.listAgents(),
@@ -79,16 +81,16 @@ export function AgentsPage() {
       ]);
       setAgents(agentList);
       setTeam(defaultTeam);
-      setPageError("");
+      setLoadError("");
     } catch (err) {
-      setPageError(errorMessage(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    void refresh();
+    void refresh(true);
   }, []);
 
   function startCreate() {
@@ -158,22 +160,23 @@ export function AgentsPage() {
   }
 
   async function toggle(agent: Agent) {
+    setActionError("");
     try {
       await api.updateAgent(agent.id, { enabled: !agent.enabled });
       await refresh();
     } catch (err) {
-      setPageError(errorMessage(err));
+      setActionError(errorMessage(err));
     }
   }
 
   async function resetUsage(agent: Agent) {
     setBusyId(agent.id);
-    setPageError("");
+    setActionError("");
     try {
       await api.resetAgentUsage(agent.id);
       await refresh();
     } catch (err) {
-      setPageError(errorMessage(err));
+      setActionError(errorMessage(err));
     } finally {
       setBusyId("");
     }
@@ -182,12 +185,12 @@ export function AgentsPage() {
   async function removeAgent(agent: Agent) {
     if (!window.confirm(`删除 Agent「${agent.name}」？`)) return;
     setBusyId(agent.id);
-    setPageError("");
+    setActionError("");
     try {
       await api.deleteAgent(agent.id);
       await refresh();
     } catch (err) {
-      setPageError(errorMessage(err));
+      setActionError(errorMessage(err));
     } finally {
       setBusyId("");
     }
@@ -208,7 +211,14 @@ export function AgentsPage() {
         </button>
       </header>
 
-      {pageError ? <ErrorBox message={pageError} /> : null}
+      {loadError ? (
+        <ErrorBox
+          message={loadError}
+          onRetry={() => void refresh(true)}
+          retrying={loading}
+        />
+      ) : null}
+      {actionError ? <ErrorBox message={actionError} /> : null}
 
       {loading ? (
         <section className="panel">
@@ -237,7 +247,7 @@ export function AgentsPage() {
       ) : null}
 
       <div className="agent-grid">
-        {!loading && agents.length === 0 ? (
+        {!loading && agents.length === 0 && !loadError ? (
           <Empty
             title="还没有 Agent"
             hint="点击右上角「添加 Agent」创建第一个 Agent，之后可在默认团队中调整顺序与启停，新建项目会自动继承。"

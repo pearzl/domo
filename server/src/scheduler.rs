@@ -279,6 +279,7 @@ async fn recover(state: &AppState) -> Result<()> {
         }
     }
     crate::artifacts::recover(state).await;
+    crate::replan::recover_cleanup(state).await;
     Ok(())
 }
 
@@ -345,6 +346,11 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
         }
         match project.stage.as_str() {
             STAGE_ANALYSIS => {
+                if project.replan_active != 0
+                    && crate::replan::running_non_analysis_jobs(&state.db, &project.id).await? > 0
+                {
+                    continue;
+                }
                 if has_project_job(&state.db, &project.id, JOB_ROLE_ANALYSIS).await? {
                     continue;
                 }
@@ -1005,8 +1011,8 @@ async fn spawn_task_job(
         && task.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
     sqlx::query(
-        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)",
+        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+         replan_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)",
     )
     .bind(&job_id)
     .bind(&project.id)
@@ -1015,6 +1021,11 @@ async fn spawn_task_job(
     .bind(&agent.id)
     .bind(JOB_STATUS_RUNNING)
     .bind(attempt)
+    .bind(if project.goal_locked_at.is_some() {
+        project.replan_generation
+    } else {
+        0
+    })
     .bind(&timestamp)
     .execute(&state.db)
     .await?;
@@ -1080,14 +1091,19 @@ async fn spawn_project_job(
         && project.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
     sqlx::query(
-        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, created_at) \
-         VALUES (?, ?, NULL, ?, ?, ?, 1, '', ?)",
+        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+         replan_generation, created_at) VALUES (?, ?, NULL, ?, ?, ?, 1, '', ?, ?)",
     )
     .bind(&job_id)
     .bind(&project.id)
     .bind(role)
     .bind(&agent.id)
     .bind(JOB_STATUS_RUNNING)
+    .bind(if project.goal_locked_at.is_some() {
+        project.replan_generation
+    } else {
+        0
+    })
     .bind(&timestamp)
     .execute(&state.db)
     .await?;

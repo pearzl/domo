@@ -183,6 +183,8 @@ export interface VerificationHistory {
   verifications: VerificationRecord[];
 }
 
+export type ProjectAttention = "confirm" | "review" | "failed" | "merge" | "blocked";
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -193,6 +195,7 @@ export interface ProjectSummary {
   stage: string;
   status: string | null;
   blocked_reason: string | null;
+  attention: ProjectAttention | null;
   task_total: number;
   task_completed: number;
   replan_reason: string | null;
@@ -221,6 +224,7 @@ export interface Project {
   replan_reason: string | null;
   replan_source: string | null;
   replan_requested_at: string | null;
+  replan_active?: number;
   confirm_mode: "manual" | "auto";
   confirmed_at: string | null;
   completion_mode: "tasks" | "direct";
@@ -388,6 +392,14 @@ export interface ProposalTask {
   deps: string[];
 }
 
+export interface ReplanImpact {
+  high_impact: boolean;
+  canceled_task_keys: string[];
+  retained_task_keys: string[];
+  added_task_keys: string[];
+  acceptance_changed: boolean;
+}
+
 export interface AnalysisProposal {
   kind: "plan" | "direct";
   summary: string;
@@ -398,6 +410,7 @@ export interface AnalysisProposal {
   plan: string[];
   verification: string[];
   skip_confirmation: boolean;
+  replan_impact?: ReplanImpact | null;
 }
 
 export interface ProjectDetail {

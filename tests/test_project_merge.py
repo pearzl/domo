@@ -229,6 +229,33 @@ def main():
             assert detail["project"]["merged_at"] == merged_at, detail["project"]
             assert detail["merged_into_base"] is True, detail
 
+            # 已记录合入后的分支提交不改变交付状态，列表无需重新检查分支包含关系。
+            with open(os.path.join(worktree, "post-merge.txt"), "w", encoding="utf-8") as handle:
+                handle.write("after recorded merge\n")
+            git(["add", "post-merge.txt"], worktree)
+            git(
+                [
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "post merge commit",
+                ],
+                worktree,
+            )
+            detail = server.call("GET", f"/api/projects/{project_id}")
+            assert detail["project"]["merged_at"] == merged_at, detail["project"]
+            assert detail["merged_into_base"] is False, detail
+            summary = next(
+                item for item in server.call("GET", "/api/projects")
+                if item["id"] == project_id
+            )
+            assert summary["merged_at"] == merged_at, summary
+            assert summary["attention"] is None, summary
+
             # ---- 合入后追加任务：旧合入记录失效，重新提供合入入口 ----------------
             print("--> 合入后追加任务")
             server.call(

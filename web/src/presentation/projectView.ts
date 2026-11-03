@@ -1,12 +1,14 @@
 /// 项目页视图状态与 URL 查询参数之间的纯转换。
-/// 选项卡与选中的任务都写在查询串里，刷新、复制链接与浏览器前进后退都能回到同一视图。
+/// 选项卡、选中的任务与定位作业都写在查询串里，刷新、复制链接与浏览器前进后退都能回到同一视图。
 
 export const PROJECT_TAB_PARAM = "tab";
 export const PROJECT_TASK_PARAM = "task";
+export const PROJECT_JOB_PARAM = "job";
 
 export interface ProjectViewState {
   tab: string | null;
   taskId: string | null;
+  jobId: string | null;
 }
 
 function entries(search: string): [string, string][] {
@@ -39,20 +41,22 @@ function readValue(search: string, name: string): string | null {
   return null;
 }
 
-/// 解析 URL 中的选项卡与任务；非法编码、缺失或空值都按未指定处理。
+/// 解析 URL 中的选项卡、任务与作业；非法编码、缺失或空值都按未指定处理。
 export function readProjectView(
   search: string,
   validTabs: readonly string[] = [],
 ): ProjectViewState {
   const tab = readValue(search, PROJECT_TAB_PARAM);
   const taskId = readValue(search, PROJECT_TASK_PARAM);
+  const jobId = readValue(search, PROJECT_JOB_PARAM);
   return {
     tab: tab && (validTabs.length === 0 || validTabs.includes(tab)) ? tab : null,
     taskId,
+    jobId,
   };
 }
 
-/// 生成新的查询串，保留无关参数与顺序，只替换选项卡与任务。
+/// 生成新的查询串，保留无关参数与顺序，只替换显式提供的视图字段。
 /// 值为 null 或空串时删除该参数。
 export function updateProjectView(
   search: string,
@@ -62,10 +66,12 @@ export function updateProjectView(
     /// 未提供的字段原样保留，只有显式给出 null 或空串时才删除。
     if (key === PROJECT_TAB_PARAM) return patch.tab === undefined;
     if (key === PROJECT_TASK_PARAM) return patch.taskId === undefined;
+    if (key === PROJECT_JOB_PARAM) return patch.jobId === undefined;
     return true;
   });
   if (patch.tab) kept.push([PROJECT_TAB_PARAM, patch.tab]);
   if (patch.taskId) kept.push([PROJECT_TASK_PARAM, patch.taskId]);
+  if (patch.jobId) kept.push([PROJECT_JOB_PARAM, patch.jobId]);
   if (kept.length === 0) return "";
   return `?${kept
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)

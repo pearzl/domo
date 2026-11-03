@@ -1613,7 +1613,9 @@ small {
 
 .overview-jump-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 8px;
   margin-top: 4px;
 }
 

@@ -1,11 +1,11 @@
 /// 项目详情页主体选项卡与顶层区块的布局规则。
 
-/// 主体选项卡：阶段优先区块按阶段排序，概览与信息页固定排在后面。
+/// 主体选项卡：概览承接当前状态与待办，阶段区块按阶段排序，信息页位于末尾。
 export const PROJECT_BLOCK_KEYS = [
+  "overview",
   "analysis",
   "tasks",
   "report",
-  "overview",
   "info",
 ] as const;
 
@@ -39,14 +39,13 @@ export function isProjectBlockKey(
 }
 
 /**
- * 阶段决定分析、任务与报告三块的先后，概览与信息页稳定排在末尾：
+ * 概览始终作为默认首屏；阶段决定分析、任务与报告三块的先后。
  * 分析阶段先给目标、方案与确认入口，执行阶段先给任务，总结与完成阶段先给报告。
- * 阶段值缺失或未知时回退到任务优先。
  */
 export function projectBlockOrder(
   stage: string | null | undefined,
 ): ProjectBlockKey[] {
-  return [...stageOrder(stage), "overview", "info"];
+  return ["overview", ...stageOrder(stage), "info"];
 }
 
 function stageOrder(stage: string | null | undefined): ProjectBlockKey[] {
@@ -63,7 +62,7 @@ function stageOrder(stage: string | null | undefined): ProjectBlockKey[] {
   }
 }
 
-/// 当前选项卡失效时回退到阶段默认选项卡（阶段优先区块的第一块）。
+/// 当前选项卡失效时回退到概览；URL 中明确指定的有效选项卡保持选中。
 export function resolveProjectTab(
   stage: string | null | undefined,
   current: string | null | undefined,

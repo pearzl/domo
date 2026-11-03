@@ -19,19 +19,33 @@ pub(super) async fn handle_direct_success(
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
     let timestamp = now();
-    sqlx::query(
-        "UPDATE projects SET report = ?, report_feedback = NULL, stage = ?, \
-         status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-         completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(report)
-    .bind(STAGE_SUMMARIZING)
-    .bind(STATUS_BLOCKED)
-    .bind(COMPLETION_DIRECT)
-    .bind(&timestamp)
-    .bind(&project.id)
-    .execute(&state.db)
-    .await?;
+    let current = crate::replan::load_project(&state.db, &project.id)
+        .await?
+        .unwrap_or_else(|| project.clone());
+    if current.replan_active != 0 {
+        sqlx::query(
+            "UPDATE projects SET report = ?, report_feedback = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(report)
+        .bind(&timestamp)
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE projects SET report = ?, report_feedback = NULL, stage = ?, \
+             status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
+             completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(report)
+        .bind(STAGE_SUMMARIZING)
+        .bind(STATUS_BLOCKED)
+        .bind(COMPLETION_DIRECT)
+        .bind(&timestamp)
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+    }
     emit(
         &state.db,
         &state.bus,
@@ -79,6 +93,34 @@ pub(super) async fn handle_direct_failure(
     )
     .await?;
     let _guard = state.schedule_lock.lock().await;
+    let current = crate::replan::load_project(&state.db, &project.id)
+        .await?
+        .unwrap_or_else(|| project.clone());
+    if current.replan_active != 0 {
+        sqlx::query(
+            "UPDATE projects SET avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+             avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(failure.switch)
+        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(failure.switch)
+        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            failure.event_kind("direct_failed"),
+            format!("旧直接完成{}：{reason}", failure.label()),
+        )
+        .await;
+        return Ok(());
+    }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
          THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, proposal = NULL, \

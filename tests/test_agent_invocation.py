@@ -6,9 +6,9 @@
      模板缺少 {prompt} 时提示词走 stdin；{session_id}、{job_dir}、{cwd}、
      {model}、{model_args} 按适配器规则展开，模型参数在模板未引用时追加。
   2. 续跑轮次沿用首次运行派生的 session，继续提示词只包含继续指令。
-  3. kind=opencode 通过 stdin 接收提示词，参数固定为 run --auto --thinking
-     --format json --session <session> --title "DOMO <role> <job_id>"，配置模型时
-     附带 --model；续跑使用同一 session，用量以该 session 的账本为准。
+  3. kind=opencode 通过 stdin 接收提示词，参数固定为 run --standalone --auto
+     --thinking --format json --session <session> --title "DOMO <role> <job_id>"，
+     配置模型时附带 --model；续跑使用同一 session，用量以该 session 的 SQLite 账本为准。
   4. 各适配器作业的 args、prompt_chars、session 与 usage 数值和既有契约一致。
 
 codex 与 workbuddy 的参数、stdin、会话与用量由 tests/test_agent_adapters.py 与
@@ -68,19 +68,20 @@ if usage:
 )
 '''
 
-# OpenCode 的账本查询通过 CLI 子命令完成：debug paths db 失败后回退到 API，
-# 根会话返回固定用量，子会话查询返回空数组。
+# OpenCode 的账本查询通过 debug paths db 定位 SQLite 数据库；根会话包含固定用量。
 OPENCODE_FAKE = '''\
 import json
 import os
 import pathlib
+import sqlite3
 import sys
 
 args = sys.argv[1:]
 log_path = pathlib.Path(os.environ["FAKE_LOG"])
 state_dir = pathlib.Path(os.environ["FAKE_STATE"])
-job_dir = pathlib.Path(os.environ["DOMO_JOB_DIR"])
+job_dir = pathlib.Path(os.environ.get("DOMO_JOB_DIR", ""))
 state_dir.mkdir(parents=True, exist_ok=True)
+db_path = state_dir / "opencode.db"
 
 
 def log(entry):
@@ -132,10 +133,29 @@ if args[:1] == ["run"]:
             "state": {"status": "completed", "input": {"filePath": "domo_mock/T1.txt"}},
         },
     }, ensure_ascii=False), flush=True)
+    db = sqlite3.connect(db_path)
+    db.execute("""CREATE TABLE IF NOT EXISTS session_v2 (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT,
+        cost REAL NOT NULL DEFAULT 0,
+        tokens_input INTEGER NOT NULL DEFAULT 0,
+        tokens_output INTEGER NOT NULL DEFAULT 0,
+        tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+        tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+        tokens_cache_write INTEGER NOT NULL DEFAULT 0
+    )""")
+    db.execute(
+        "INSERT OR REPLACE INTO session_v2 VALUES (?, NULL, 0.75, 1000, 200, 30, 40, 10)",
+        (session,),
+    )
+    db.commit()
+    db.close()
     sys.exit(0)
 
 if args[:2] == ["debug", "paths"]:
-    sys.exit(1)
+    log({"kind": "opencode-db", "path": str(db_path)})
+    print(db_path, flush=True)
+    sys.exit(0)
 
 if args[:2] == ["api", "get"]:
     path = args[2] if len(args) > 2 else ""
@@ -530,12 +550,13 @@ def run_opencode(temp, script):
 
     entries = read_log(log_path)
     runs = [entry for entry in entries if entry["kind"] == "opencode"]
-    usage_calls = [entry for entry in entries if entry["kind"] == "opencode-usage"]
+    usage_calls = [entry for entry in entries if entry["kind"] == "opencode-db"]
     assert len(runs) == 2, f"{key} 调用次数异常: {entries}"
     session = opencode_session_id(job["id"])
     for index, entry in enumerate(runs):
         assert entry["args"] == [
             "run",
+            "--standalone",
             "--auto",
             "--thinking",
             "--format",
@@ -563,7 +584,7 @@ def run_opencode(temp, script):
             assert "继续" in entry["prompt"], entry["prompt"]
             assert "INVOKE-OPENCODE" not in entry["prompt"], entry["prompt"]
     assert len(usage_calls) == 1, f"{key} 用量查询次数异常: {entries}"
-    assert usage_calls[0]["session"] == session, usage_calls
+    assert Path(usage_calls[0]["path"]).is_file(), usage_calls
     return job
 
 

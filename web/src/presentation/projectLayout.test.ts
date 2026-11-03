@@ -32,38 +32,38 @@ import usageSummarySource from "../components/UsageSummary.tsx?raw";
 const STAGES = ["analysis", "executing", "summarizing", "completed"] as const;
 
 describe("projectBlockOrder 阶段顺序", () => {
-  it("analysis 阶段默认选项卡为项目分析", () => {
-    const order = projectBlockOrder("analysis");
-    expect(order.slice(0, 2)).toEqual(["analysis", "tasks"]);
-    expect(resolveProjectTab("analysis", null)).toBe("analysis");
-  });
-
-  it("executing 阶段默认选项卡为任务", () => {
-    const order = projectBlockOrder("executing");
-    expect(order.slice(0, 2)).toEqual(["tasks", "analysis"]);
-    expect(resolveProjectTab("executing", null)).toBe("tasks");
-  });
-
-  it("summarizing 与 completed 阶段默认选项卡为项目报告", () => {
-    for (const stage of ["summarizing", "completed"] as const) {
-      const order = projectBlockOrder(stage);
-      expect(order.slice(0, 2)).toEqual(["report", "tasks"]);
-      expect(resolveProjectTab(stage, null)).toBe("report");
-    }
-  });
-
-  it("概览与信息页稳定排在阶段优先区块之后", () => {
+  it("所有阶段默认首屏都是概览", () => {
     for (const stage of [...STAGES, null, undefined, "unknown"] as const) {
       const order = projectBlockOrder(stage);
-      expect(order.slice(-2)).toEqual(["overview", "info"]);
+      expect(order[0]).toBe("overview");
+      expect(order.at(-1)).toBe("info");
+      expect(resolveProjectTab(stage, null)).toBe("overview");
     }
   });
 
-  it("阶段未知时回退到任务优先且不抛错", () => {
+  it("阶段顺序保留分析、执行与报告的工作路径", () => {
+    expect(projectBlockOrder("analysis").slice(1, 4)).toEqual([
+      "analysis",
+      "tasks",
+      "report",
+    ]);
+    expect(projectBlockOrder("executing").slice(1, 4)).toEqual([
+      "tasks",
+      "analysis",
+      "report",
+    ]);
+    expect(projectBlockOrder("summarizing").slice(1, 4)).toEqual([
+      "report",
+      "tasks",
+      "analysis",
+    ]);
+  });
+
+  it("阶段未知时回退到概览且不抛错", () => {
     for (const stage of [null, undefined, "", "archived", "running"]) {
       expect(() => projectBlockOrder(stage)).not.toThrow();
-      expect(projectBlockOrder(stage)[0]).toBe("tasks");
-      expect(resolveProjectTab(stage, null)).toBe("tasks");
+      expect(projectBlockOrder(stage)[0]).toBe("overview");
+      expect(resolveProjectTab(stage, null)).toBe("overview");
     }
   });
 
@@ -81,14 +81,14 @@ describe("projectBlockOrder 阶段顺序", () => {
 
   it("URL 中的失效选项卡回退到阶段默认值", () => {
     expect(resolveProjectTab("analysis", "overview")).toBe("overview");
-    expect(resolveProjectTab("analysis", "unknown")).toBe("analysis");
+    expect(resolveProjectTab("analysis", "unknown")).toBe("overview");
     expect(resolveProjectTab("executing", "report")).toBe("report");
   });
 
   it("返回的数组可安全修改，不影响下一次调用", () => {
     const first = projectBlockOrder("executing");
     first.reverse();
-    expect(projectBlockOrder("executing")[0]).toBe("tasks");
+    expect(projectBlockOrder("executing")[0]).toBe("overview");
   });
 });
 
@@ -118,12 +118,12 @@ describe("选项卡键盘方向", () => {
 
   it("左右方向键在顺序内移动并在两端循环", () => {
     expect(nextProjectTab(order, "analysis", "right")).toBe("tasks");
-    expect(nextProjectTab(order, "analysis", "left")).toBe("info");
-    expect(nextProjectTab(order, "info", "right")).toBe("analysis");
+    expect(nextProjectTab(order, "overview", "left")).toBe("info");
+    expect(nextProjectTab(order, "info", "right")).toBe("overview");
   });
 
   it("Home 与 End 直达首尾", () => {
-    expect(nextProjectTab(order, "report", "first")).toBe("analysis");
+    expect(nextProjectTab(order, "report", "first")).toBe("overview");
     expect(nextProjectTab(order, "report", "last")).toBe("info");
   });
 
@@ -180,6 +180,14 @@ describe("项目详情页区块布局", () => {
     );
     expect(openTag).not.toContain("open");
     expect(projectHeaderSource).toContain("<CopyButton");
+  });
+
+  it("失败作业深链在信息页展开并定位目标记录", () => {
+    expect(projectPageSource).toContain("revealJobId={selectedJobId}");
+    expect(projectPageSource).toContain(
+      "focusNonce={job.id === selectedJobId ? 1 : 0}",
+    );
+    expect(projectPageSource).toContain("selectTab(tab, jobId ?? null)");
   });
 
   it("项目作业区使用默认最近记录与展开入口", () => {
@@ -393,7 +401,7 @@ describe("ProjectOverview 当前需要你处理", () => {
       }),
     );
     expect(markup).not.toContain("现在在做什么");
-    expect(markup).toContain("当前需要你处理");
+    expect(markup).toContain("当前进展");
     expect(markup).toContain("运行中作业");
     expect(markup).toContain("排队任务");
     expect(markup).toContain("T2");
@@ -438,6 +446,36 @@ describe("ProjectOverview 当前需要你处理", () => {
     expect(withCallback).toContain("去验收报告");
   });
 
+  it("项目级失败显示重试与查看失败作业入口", () => {
+    const markup = renderOverview(
+      detail({
+        project: project("analysis", {
+          status: "blocked",
+          blocked_reason: "规划服务不可用",
+        }),
+        jobs: [job("failed", { id: "job-failed" })],
+      }),
+    );
+    expect(markup).toContain("当前需要你处理");
+    expect(markup).toContain("重试失败作业");
+    expect(markup).toContain("查看失败作业");
+  });
+
+  it("待合入显示审阅报告与合入入口，已交付不显示待办", () => {
+    const pending = renderOverview(detail({ project: project("completed") }));
+    expect(pending).toContain("审阅项目报告");
+    expect(pending).toContain("合入项目");
+
+    const delivered = renderOverview(
+      detail({
+        project: project("completed", { merged_at: "2026-01-10T11:00:00Z" }),
+      }),
+    );
+    expect(delivered).toContain("当前进展");
+    expect(delivered).not.toContain("合入项目");
+    expect(delivered).not.toContain("当前需要你处理");
+  });
+
   it("保留状态与任务、项目用时统计，不渲染术语卡片", () => {
     const markup = renderOverview(detail());
     expect(markup).not.toContain("术语说明");
@@ -460,7 +498,7 @@ describe("ProjectOverview 当前需要你处理", () => {
     );
     expect(markup).toContain('class="overview-stats"');
     expect(markup).toContain('data-block="usage-summary"');
-    expect(markup).toContain("当前需要你处理");
+    expect(markup).toContain("当前进展");
     // 待办占整行在上，统计与用量摘要同处其下。
     const todo = markup.indexOf('class="overview-todo');
     const stats = markup.indexOf('class="overview-stats"');
@@ -542,7 +580,7 @@ describe("概览内嵌用量摘要", () => {
     expect(markup).toContain("1 分 5 秒");
     expect(markup).toContain("用量记录覆盖 4/4");
     // 摘要与待办同处概览网格；待办保持“当前需要你处理”。
-    expect(markup).toContain("当前需要你处理");
+    expect(markup).toContain("当前进展");
     expect(markup.indexOf("当前需要你处理")).toBeLessThan(
       markup.indexOf('data-block="usage-summary"'),
     );
@@ -670,10 +708,10 @@ describe("选项卡键集合", () => {
   it("覆盖概览、项目分析、任务、项目报告与信息页", () => {
     const keys: ProjectBlockKey[] = [...PROJECT_BLOCK_KEYS];
     expect(keys).toEqual([
+      "overview",
       "analysis",
       "tasks",
       "report",
-      "overview",
       "info",
     ]);
   });

@@ -33,6 +33,17 @@ pub(super) async fn submit_report(
     let mut replan_reason: Option<String> = None;
     {
         let _guard = state.schedule_lock.lock().await;
+        let current = require_project(&state, &id).await?;
+        if current.replan_generation != project.replan_generation
+            || current.stage != project.stage
+            || current.report != project.report
+        {
+            return Err(ApiError::conflict("报告所属计划已变化，请刷新后重试"));
+        }
+        let project = current;
+        if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+            return Err(ApiError::bad("项目已归档"));
+        }
         match request.action.as_str() {
             // 多轮评议：先记录意见，由规划者在下一轮重写时参考。
             "comment" => {
@@ -124,10 +135,15 @@ pub(super) async fn submit_report(
             }
         }
     }
-    // replan::request 自己加调度锁并发出 replan_requested / plan_superseded 事件，
+    // replan::request 自己加调度锁并记录重规划请求，方案确认时才作废旧计划，
     // 因此放在锁外调用。
     if let Some(reason) = replan_reason {
-        replan::request(&state, &id, &reason, REPLAN_SOURCE_HUMAN).await?;
+        if replan::request_report(&state, &project, &reason)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::conflict("报告所属计划已变化，请刷新后重试"));
+        }
         state.notify_scheduler();
         return Ok(Json(json!({"ok": true, "action": "replan"})));
     }

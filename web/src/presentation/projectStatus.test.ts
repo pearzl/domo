@@ -9,6 +9,7 @@ import type {
 import {
   executionTaskGroups,
   formatElapsed,
+  projectAttention,
   projectElapsed,
   projectGuidance,
   projectStats,
@@ -257,6 +258,7 @@ describe("projectGuidance", () => {
       expect(guidance.tone).toBe("warn");
       expect(guidance.label).toBe("已暂停");
       expect(guidance.title).toBe("恢复项目");
+      expect(guidance.resume).toBe(true);
     }
   });
 
@@ -264,6 +266,8 @@ describe("projectGuidance", () => {
     const guidance = projectGuidance(input({ project: project({ goal: "  " }) }));
     expect(guidance.title).toBe("输入项目目标");
     expect(guidance.tone).toBe("warn");
+    expect(guidance.tab).toBe("analysis");
+    expect(guidance.action).toBe("去输入项目目标");
   });
 
   it("分析阶段阻塞且原因明确时需要人工处理", () => {
@@ -278,6 +282,25 @@ describe("projectGuidance", () => {
     expect(guidance.tone).toBe("danger");
     expect(guidance.label).toBe("需要处理");
     expect(guidance.detail).toBe("规划作业失败");
+    expect(guidance.tab).toBe("analysis");
+    expect(guidance.action).toBe("去处理阻塞");
+  });
+
+  it("项目级失败作业提供直接重试与作业深链", () => {
+    const guidance = projectGuidance(
+      input({
+        project: project({
+          status: "blocked",
+          blocked_reason: "规划服务不可用",
+        }),
+        jobs: [job({ id: "job-failed", status: "failed" })],
+      }),
+    );
+    expect(guidance.label).toBe("失败");
+    expect(guidance.retryJobId).toBe("job-failed");
+    expect(guidance.tab).toBe("info");
+    expect(guidance.jobId).toBe("job-failed");
+    expect(guidance.action).toBe("查看失败作业");
   });
 
   it("分析阶段有运行中的分析作业时等待分析", () => {
@@ -331,6 +354,22 @@ describe("projectGuidance", () => {
     expect(pending.action).toBeUndefined();
   });
 
+  it("总结作业失败且没有报告时提供恢复入口", () => {
+    const guidance = projectGuidance(
+      input({
+        project: project({
+          stage: "summarizing",
+          status: "blocked",
+          blocked_reason: "总结作业失败",
+        }),
+        jobs: [job({ id: "summary-failed", role: "summary", status: "failed" })],
+      }),
+    );
+    expect(guidance.title).toBe("重试失败作业");
+    expect(guidance.retryJobId).toBe("summary-failed");
+    expect(guidance.tab).toBe("info");
+  });
+
   it("已合入项目显示已交付与提交短哈希", () => {
     const guidance = projectGuidance(
       input({
@@ -359,6 +398,9 @@ describe("projectGuidance", () => {
     );
     expect(guidance.label).toBe("待合入");
     expect(guidance.title).toBe("审阅并合入");
+    expect(guidance.merge).toBe(true);
+    expect(guidance.tab).toBe("report");
+    expect(guidance.action).toBe("审阅项目报告");
   });
 
   it("执行阶段直接完成模式区分作业运行", () => {
@@ -388,6 +430,8 @@ describe("projectGuidance", () => {
     );
     expect(guidance.tone).toBe("danger");
     expect(guidance.detail).toBe("所有任务均失败");
+    expect(guidance.tab).toBe("tasks");
+    expect(guidance.action).toBe("去处理任务");
   });
 
   it("执行阶段无可用任务时给出检查提示", () => {
@@ -407,6 +451,91 @@ describe("projectGuidance", () => {
     );
     expect(guidance.tone).toBe("muted");
     expect(guidance.title).toBe("查看项目状态");
+  });
+});
+
+describe("projectAttention", () => {
+  it("按待确认、待验收、失败、待合入与一般阻塞分类", () => {
+    expect(
+      projectAttention(
+        input({
+          project: project({ status: "blocked" }),
+          proposal: proposal(),
+        }),
+      ),
+    ).toBe("confirm");
+    expect(
+      projectAttention(
+        input({
+          project: project({ stage: "summarizing", status: "blocked", report: "# 报告" }),
+        }),
+      ),
+    ).toBe("review");
+    expect(
+      projectAttention(
+        input({
+          project: project({ status: "blocked", blocked_reason: "分析失败" }),
+          jobs: [job({ status: "failed" })],
+        }),
+      ),
+    ).toBe("failed");
+    expect(
+      projectAttention(input({ project: project({ stage: "completed" }) })),
+    ).toBe("merge");
+    expect(
+      projectAttention(
+        input({
+          project: project({
+            stage: "executing",
+            status: "blocked",
+            blocked_reason: "需要人工裁决",
+          }),
+        }),
+      ),
+    ).toBe("blocked");
+  });
+
+  it("DOMO 已记录合入后，项目分支的新提交不重新产生待合入待办", () => {
+    const attention = projectAttention(
+      input({
+        project: project({
+          stage: "completed",
+          merged_at: "2026-01-10T11:00:00Z",
+          merged_commit: "0123456789abcdef",
+        }),
+        mergedIntoBase: false,
+      }),
+    );
+    expect(attention).toBeNull();
+  });
+
+  it("普通进展、历史失败、暂停、归档与已交付不误报待办", () => {
+    const inactive = [
+      input({ jobs: [job({ status: "running" })] }),
+      input({
+        project: project({ stage: "executing", status: "running" }),
+        jobs: [job({ status: "failed" })],
+      }),
+      input({
+        project: project({ status: "paused" }),
+        proposal: proposal(),
+      }),
+      input({
+        project: project({ stage: "completed", status: "archived" }),
+      }),
+      input({
+        project: project({ stage: "completed", merged_at: "2026-01-10T11:00:00Z" }),
+      }),
+      input({ project: project({ stage: "completed" }), mergedIntoBase: true }),
+    ];
+    expect(inactive.map(projectAttention)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
   });
 });
 

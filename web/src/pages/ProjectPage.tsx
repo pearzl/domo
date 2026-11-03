@@ -1,5 +1,5 @@
 /**
- * 项目详情页。主体选项卡与任务抽屉的选中状态同步到 URL 查询参数，
+ * 项目详情页。主体选项卡、任务抽屉与作业定位同步到 URL 查询参数，
  * 刷新、复制链接与浏览器前进后退都回到同一视图。
  *
  * 人工核对清单（输入持久化）：
@@ -37,6 +37,7 @@ import { RichContent } from "../components/RichContent";
 import { ProjectTasksSection } from "../components/ProjectTasksSection";
 import { ProjectReportPanel } from "../components/ProjectReportPanel";
 import { ReplanPanel } from "../components/ReplanPanel";
+import { GoalEditPanel } from "../components/GoalEditPanel";
 import {
   AnalysisLiveActivity,
 } from "../components/LiveActivitySummary";
@@ -79,10 +80,15 @@ export function ProjectPage({
     setFeedback,
     feedbackDraftKey,
     selectedTaskId,
+    selectedJobId,
     replanOpen,
     replanReason,
     setReplanReason,
     replanDraftKey,
+    goalEditOpen,
+    goalValue,
+    setGoalValue,
+    goalDraftKey,
     addTaskOpen,
     taskForm,
     setTaskField,
@@ -109,9 +115,14 @@ export function ProjectPage({
     sendAnalysis,
     confirmProposal,
     submitReport,
+    requestReportReplan,
+    abandonReplan,
     submitReplan,
     toggleReplan,
     cancelReplan,
+    toggleGoalEdit,
+    cancelGoalEdit,
+    submitGoalEdit,
   } = page;
 
   if (loading)
@@ -174,9 +185,9 @@ export function ProjectPage({
     confirmBusy,
   } = view;
 
-  // 概览里的待办跳转：直接切到待办指向的选项卡（分析或报告）。
-  function openAnalysisTab(tab?: GuidanceTab) {
-    selectTab(tab ?? "analysis");
+  // 待办跳转保留在 URL 中；失败作业在信息页展开并定位。
+  function openGuidanceTab(tab: GuidanceTab, jobId?: string) {
+    selectTab(tab, jobId ?? null);
   }
 
   const blockOrder = projectBlockOrder(project.stage);
@@ -187,6 +198,21 @@ export function ProjectPage({
       <p className="subtitle">
         规划者会理解目标与现状，必要时澄清，给出可确认的方案：任务拆分、依赖和验收标准。确认方案后才开始执行。
       </p>
+      {project.replan_active === 1 ? (
+        <div className="confirm-row">
+          <div className="button-row">
+            <button
+              className="secondary"
+              disabled={busy || !!analysisJob || archived}
+              title={analysisJob ? "规划者正在分析，完成后可放弃重规划" : undefined}
+              onClick={() => void abandonReplan()}
+            >
+              放弃重规划并恢复旧目标与旧计划
+            </button>
+          </div>
+          <span className="muted">旧目标、任务、报告和验收口径仍保留；恢复后继续原计划派发。</span>
+        </div>
+      ) : null}
       <AutoConfirmRow
         mode={project.confirm_mode}
         busy={busy}
@@ -366,11 +392,14 @@ export function ProjectPage({
           <h2>项目分析 / 直接完成 / 总结作业</h2>
           <JobRecordList
             jobs={projectJobs}
+            revealJobId={selectedJobId}
             renderJob={(job) => (
               <JobDetailView
                 key={job.id}
                 job={job}
                 retryable={job.id === retryableProjectJobId}
+                readOnly={archived}
+                focusNonce={job.id === selectedJobId ? 1 : 0}
                 onRetry={() => run(() => api.retryJob(job.id))}
               />
             )}
@@ -435,6 +464,7 @@ export function ProjectPage({
       <ProjectHeader
         detail={detail}
         canReplan={canReplan}
+        canEditGoal={!archived && project.stage !== "completed" && !!project.confirmed_at}
         busy={busy}
         merging={merging}
         mergeNotice={mergeNotice}
@@ -450,11 +480,23 @@ export function ProjectPage({
           }
         }}
         onToggleReplan={toggleReplan}
+        onToggleGoalEdit={toggleGoalEdit}
         onArchive={() => void handleArchive()}
         onMerge={() => void handleMerge()}
       />
 
       {error ? <ErrorBox message={error} /> : null}
+
+      {goalEditOpen ? (
+        <GoalEditPanel
+          goal={goalValue}
+          goalDraftKey={goalDraftKey}
+          busy={busy}
+          onGoalChange={setGoalValue}
+          onSubmit={() => void submitGoalEdit()}
+          onCancel={cancelGoalEdit}
+        />
+      ) : null}
 
       {replanOpen && canReplan ? (
         <ReplanPanel
@@ -489,7 +531,15 @@ export function ProjectPage({
         tabIndex={0}
       >
         {activeBlock === "overview" ? (
-          <ProjectOverview detail={detail} onOpenTab={openAnalysisTab} />
+          <ProjectOverview
+            detail={detail}
+            onOpenTab={openGuidanceTab}
+            onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
+            onMerge={() => void handleMerge()}
+            onResume={() => void run(() => api.resumeProject(project.id))}
+            busy={busy}
+            merging={merging}
+          />
         ) : activeBlock === "analysis" ? (
           analysisBlock
         ) : activeBlock === "tasks" ? (
@@ -537,6 +587,7 @@ export function ProjectPage({
             busy={busy}
             archived={archived}
             onSubmitReport={(action) => void submitReport(action)}
+            onRequestReplan={requestReportReplan}
             onAddTask={openAddTaskForm}
           />
         ) : (

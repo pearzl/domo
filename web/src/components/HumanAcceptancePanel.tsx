@@ -105,7 +105,7 @@ export function HumanAcceptancePanel({
         }
       />
       <small>
-        退回执行会把验收意见和指导交给执行者；要求重新规划会作废未完成任务，并把意见交给规划者。
+        退回执行会把验收意见和指导交给执行者；要求重新规划会保留旧计划并生成方案草稿，确认草稿时才取消未完成任务。
       </small>
       {error ? <div className="error-box">{error}</div> : null}
     </section>

@@ -199,25 +199,33 @@ export function UsagePage() {
     to: "",
   }));
   const [reloadKey, setReloadKey] = useState(0);
+  const [optionsReloadKey, setOptionsReloadKey] = useState(0);
   const [report, setReport] = useState<UsageReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [optionsLoading, setOptionsLoading] = useState(true);
+  const [reportError, setReportError] = useState("");
+  const [optionsError, setOptionsError] = useState("");
 
   useEffect(() => {
     let active = true;
+    setOptionsLoading(true);
     Promise.all([api.listProjects(), api.listAgents()])
       .then(([nextProjects, nextAgents]) => {
         if (!active) return;
         setProjects(nextProjects);
         setAgents(nextAgents);
+        setOptionsError("");
       })
       .catch((err) => {
-        if (active) setError(errorMessage(err));
+        if (active) setOptionsError(errorMessage(err));
+      })
+      .finally(() => {
+        if (active) setOptionsLoading(false);
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [optionsReloadKey]);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -239,10 +247,10 @@ export function UsagePage() {
       .then((next) => {
         if (!active) return;
         setReport(next);
-        setError("");
+        setReportError("");
       })
       .catch((err) => {
-        if (active) setError(errorMessage(err));
+        if (active) setReportError(errorMessage(err));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -292,7 +300,20 @@ export function UsagePage() {
         </button>
       </header>
 
-      {error ? <ErrorBox message={error} /> : null}
+      {optionsError ? (
+        <ErrorBox
+          message={optionsError}
+          onRetry={() => setOptionsReloadKey((value) => value + 1)}
+          retrying={optionsLoading}
+        />
+      ) : null}
+      {reportError ? (
+        <ErrorBox
+          message={reportError}
+          onRetry={() => setReloadKey((value) => value + 1)}
+          retrying={loading}
+        />
+      ) : null}
 
       <section className="panel">
         <h2>筛选</h2>
@@ -417,6 +438,7 @@ export function UsagePage() {
         projects={projects}
         agents={agents}
         loading={loading}
+        error={reportError}
       />
     </div>
   );

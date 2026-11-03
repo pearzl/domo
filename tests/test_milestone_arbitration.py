@@ -356,7 +356,7 @@ def main():
             assert replan_reason in (project["replan_reason"] or ""), project
             assert replan_guidance in (project["replan_reason"] or ""), project
             replan_t1 = task_by_key(rejected, "T1")
-            assert replan_t1["status"] == "canceled", replan_t1
+            assert replan_t1["status"] != "canceled", replan_t1
             assert replan_t1["human_gate"] is None, replan_t1
             assert not branch_has(
                 f"{replan_branch}:domo_mock/T1.txt"
@@ -383,6 +383,15 @@ def main():
             assert replan_guidance in prompt, prompt
             assert "人工" in prompt, prompt
 
+            detail = wait_project(
+                replan_id,
+                lambda item: item["project"]["stage"] == "analysis"
+                and item.get("proposal") is not None,
+                "里程碑重规划草稿等待确认",
+            )
+            assert task_by_key(detail, "T1")["status"] != "canceled", detail["tasks"]
+            detail = call("POST", f"/api/projects/{replan_id}/analysis/confirm", {})
+            assert task_by_key(detail, "T1")["status"] == "canceled", detail["tasks"]
             detail = wait_project(
                 replan_id,
                 lambda item: item["project"]["stage"] == "executing"

@@ -140,14 +140,19 @@ pub(super) async fn accept_milestone(
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
+    let _guard = state.schedule_lock.lock().await;
     let (project, task) = {
-        let _guard = state.schedule_lock.lock().await;
         let project = require_project(&state, &project_id).await?;
         if project.status.as_deref() == Some(STATUS_ARCHIVED) {
             return Err(ApiError::bad("项目已归档"));
         }
         if project.stage == STAGE_COMPLETED {
             return Err(ApiError::bad("项目已完成"));
+        }
+        if project.replan_active != 0 {
+            return Err(ApiError::conflict(
+                "重规划期间不能合入旧里程碑，请先确认或放弃草稿",
+            ));
         }
         let task = load_project_task(&state, &project_id, &task_id).await?;
         if task.status.as_deref() != Some(STATUS_BLOCKED)
@@ -166,18 +171,25 @@ pub(super) async fn accept_milestone(
     };
 
     let Some(branch) = task.branch.clone() else {
-        restore_milestone_gate(&state, &task.id, "任务缺少执行分支，无法完成人工验收").await?;
+        restore_milestone_gate_unlocked(&state, &task.id, "任务缺少执行分支，无法完成人工验收")
+            .await?;
         return Err(ApiError::bad("任务缺少执行分支，无法完成人工验收"));
     };
     let workspace = PathBuf::from(&project.workspace);
     let message = format!("domo(task-{}): {}", task.key, task.title);
+    if let Some(delay) = std::env::var("DOMO_MOCK_MILESTONE_MERGE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
     let merge = {
         let _guard = state.git_lock.lock().await;
         git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
     };
     if let Err(error) = merge {
         let reason = format!("人工验收通过但合并失败：{error:#}");
-        restore_milestone_gate(&state, &task.id, &reason).await?;
+        restore_milestone_gate_unlocked(&state, &task.id, &reason).await?;
         emit(
             &state.db,
             &state.bus,
@@ -191,7 +203,6 @@ pub(super) async fn accept_milestone(
     }
 
     {
-        let _guard = state.schedule_lock.lock().await;
         let fresh_project = require_project(&state, &project_id).await?;
         sqlx::query(
             "UPDATE tasks SET stage = ?, status = NULL, human_gate = NULL, last_error = NULL, \
@@ -243,6 +254,7 @@ pub(super) async fn accept_milestone(
             tracing::warn!(project_id = %project_id, "项目在人工验收合并期间被归档");
         }
     }
+    drop(_guard);
     state.notify_scheduler();
     load_detail(&state, &project_id).await.map(Json)
 }
@@ -253,6 +265,14 @@ pub(super) async fn restore_milestone_gate(
     reason: &str,
 ) -> Result<(), ApiError> {
     let _guard = state.schedule_lock.lock().await;
+    restore_milestone_gate_unlocked(state, task_id, reason).await
+}
+
+async fn restore_milestone_gate_unlocked(
+    state: &AppState,
+    task_id: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
     sqlx::query(
         "UPDATE tasks SET human_gate = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
     )

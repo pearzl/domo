@@ -336,6 +336,28 @@ export function EmptySteps({
   );
 }
 
-export function ErrorBox({ message }: { message: string }) {
-  return <div className="error-box">{message}</div>;
+export function ErrorBox({
+  message,
+  onRetry,
+  retrying = false,
+}: {
+  message: string;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
+  return (
+    <div className="error-box">
+      <span>{message}</span>
+      {onRetry ? (
+        <button
+          type="button"
+          className="secondary"
+          disabled={retrying}
+          onClick={onRetry}
+        >
+          {retrying ? "重试中…" : "重试"}
+        </button>
+      ) : null}
+    </div>
+  );
 }

@@ -27,6 +27,11 @@ pub(super) async fn create_task(
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档，不能再添加任务"));
     }
+    if project.replan_active != 0 {
+        return Err(ApiError::conflict(
+            "重规划期间不能添加任务，请先确认或放弃草稿",
+        ));
+    }
     crate::db::ensure_project_agents(&state.db, &id).await?;
     if !matches!(
         project.stage.as_str(),
@@ -486,6 +491,17 @@ pub(super) async fn post_analysis_message(
     }
     {
         let _guard = state.schedule_lock.lock().await;
+        let current = require_project(&state, &id).await?;
+        if current.stage != STAGE_ANALYSIS {
+            return Err(ApiError::conflict("项目阶段已变化，请刷新后重试"));
+        }
+        if current.replan_active != project.replan_active
+            || current.replan_generation != project.replan_generation
+            || current.replan_proposal != project.replan_proposal
+            || current.proposal != project.proposal
+        {
+            return Err(ApiError::conflict("项目方案已变化，请刷新后重试"));
+        }
         sqlx::query(
             "INSERT INTO messages (id, project_id, role, content, created_at) \
              VALUES (?, ?, 'user', ?, ?)",
@@ -499,9 +515,11 @@ pub(super) async fn post_analysis_message(
         // 项目目标只在首次输入时写入；后续消息属于分析对话或方案修订，
         // 目标由方案中的 goal 字段在确认时更新。
         sqlx::query(
-            "UPDATE projects SET goal = CASE WHEN TRIM(goal) = '' THEN ? ELSE goal END, \
-             confirm_mode = COALESCE(?, confirm_mode), proposal = NULL, confirmed_at = NULL, \
-             status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE projects SET goal = CASE WHEN goal_locked_at IS NULL AND TRIM(goal) = '' THEN ? ELSE goal END, \
+             confirm_mode = COALESCE(?, confirm_mode), \
+             proposal = CASE WHEN replan_active = 0 THEN NULL ELSE proposal END, \
+             confirmed_at = CASE WHEN replan_active = 0 THEN NULL ELSE confirmed_at END, \
+             replan_proposal = NULL, status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(message)
         .bind(mode)
@@ -592,10 +610,12 @@ pub(super) async fn confirm_analysis(
     if running_project_job(&state, &id, JOB_ROLE_ANALYSIS).await? {
         return Err(ApiError::bad("规划者正在更新项目方案，请稍后再确认"));
     }
-    let proposal_raw = project
-        .proposal
-        .as_deref()
-        .ok_or_else(|| ApiError::bad("规划者还没有给出可确认的项目方案"))?;
+    let proposal_raw = if project.replan_active != 0 {
+        project.replan_proposal.as_deref()
+    } else {
+        project.proposal.as_deref()
+    }
+    .ok_or_else(|| ApiError::bad("规划者还没有给出可确认的项目方案"))?;
     let proposal: AnalysisProposal =
         serde_json::from_str(proposal_raw).map_err(|_| ApiError::bad("项目方案格式不合法"))?;
     if !matches!(proposal.kind.as_str(), "plan" | "direct") {
@@ -612,31 +632,48 @@ pub(super) async fn confirm_analysis(
         return Err(ApiError::bad("目标内容为空"));
     }
     if proposal.kind == "direct" {
-        let active_tasks: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
-             AND COALESCE(status, '') != ?",
-        )
-        .bind(&id)
-        .bind(TASK_STAGE_COMPLETED)
-        .bind(STATUS_CANCELED)
-        .fetch_one(&state.db)
-        .await?;
+        let active_tasks: i64 = if project.replan_active != 0 {
+            0
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
+                 AND COALESCE(status, '') != ?",
+            )
+            .bind(&id)
+            .bind(TASK_STAGE_COMPLETED)
+            .bind(STATUS_CANCELED)
+            .fetch_one(&state.db)
+            .await?
+        };
         if active_tasks > 0 {
             return Err(ApiError::bad(
                 "项目已有任务，不能直接完成；请继续规划或删除任务",
             ));
         }
-        {
+        if project.replan_active != 0 {
+            crate::replan::apply_direct(&state, &project, proposal_raw)
+                .await
+                .map_err(replan_apply_error)?;
+        } else {
             let _guard = state.schedule_lock.lock().await;
+            let current = require_project(&state, &id).await?;
+            if current.goal_locked_at.is_some()
+                && (current.replan_generation != project.replan_generation
+                    || current.goal != project.goal
+                    || current.goal.trim() != goal.trim())
+            {
+                return Err(ApiError::conflict("已确认目标只能通过主动修改目标入口变更"));
+            }
             sqlx::query(
                 "UPDATE projects SET goal = ?, stage = ?, status = ?, completion_mode = ?, \
                  confirmed_at = ?, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
-                 updated_at = ? WHERE id = ?",
+                 goal_locked_at = COALESCE(goal_locked_at, ?), updated_at = ? WHERE id = ?",
             )
             .bind(&goal)
             .bind(STAGE_EXECUTING)
             .bind(STATUS_RUNNING)
             .bind(COMPLETION_DIRECT)
+            .bind(now())
             .bind(now())
             .bind(now())
             .bind(&id)
@@ -675,7 +712,8 @@ pub(super) async fn confirm_analysis(
             &proposal.summary,
             proposal_raw,
         )
-        .await?;
+        .await
+        .map_err(replan_apply_error)?;
         emit(
             &state.db,
             &state.bus,
@@ -688,6 +726,14 @@ pub(super) async fn confirm_analysis(
     }
     state.notify_scheduler();
     load_detail(&state, &id).await.map(Json)
+}
+
+fn replan_apply_error(error: anyhow::Error) -> ApiError {
+    if error.downcast_ref::<crate::replan::StaleReplan>().is_some() {
+        ApiError::conflict(error.to_string())
+    } else {
+        ApiError::internal(error)
+    }
 }
 
 pub(super) async fn pause_project(

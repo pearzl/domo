@@ -232,6 +232,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
+  abandonReplan: (id: string) =>
+    request<ProjectDetail>(`/api/projects/${id}/replan/abandon`, {
+      method: "POST",
+    }),
+  updateProjectGoal: (id: string, goal: string) =>
+    request<ProjectDetail>(`/api/projects/${id}/goal`, {
+      method: "POST",
+      body: JSON.stringify({ goal }),
+    }),
   submitReport: (
     id: string,
     action: "accept" | "reject" | "replan" | "comment",
@@ -249,7 +258,8 @@ export const api = {
       merged_commit: string;
       project: ProjectDetail;
     }>(`/api/projects/${id}/merge`, { method: "POST" }),
-  getJob: (id: string) => request<JobDetail>(`/api/jobs/${id}`),
+  getJob: (id: string) =>
+    request<JobDetail>(`/api/jobs/${id}`, { cache: "no-store" }),
   listEvents: (projectId?: string, after?: number) => {
     const params = new URLSearchParams();
     if (projectId) params.set("project_id", projectId);

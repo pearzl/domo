@@ -236,16 +236,23 @@ def main():
             )
             detail = wait_project(
                 pid_b,
-                lambda d: d["project"]["stage"] in ("analysis", "executing")
+                lambda d: d["project"]["stage"] == "analysis"
+                and d.get("proposal") is not None
                 and len([j for j in d["jobs"] if j["role"] == "analysis"])
                 > analysis_before,
-                "回到项目分析阶段",
+                "报告重规划草稿等待确认",
                 45,
             )
+            assert detail["project"]["report"], "确认前必须保留旧报告"
+            assert detail["proposal"]["replan_impact"]["high_impact"], detail["proposal"]
+            events = all_events(pid_b)
+            kinds = [e["kind"] for e in events]
+            assert "replan_requested" in kinds and "plan_superseded" not in kinds, kinds
+            detail = call("POST", f"/api/projects/{pid_b}/analysis/confirm", {})
             assert detail["project"]["report"] is None, detail["project"]
             events = all_events(pid_b)
             kinds = [e["kind"] for e in events]
-            assert "replan_requested" in kinds and "plan_superseded" in kinds, kinds
+            assert "plan_superseded" in kinds, kinds
             replan_event = next(e for e in events if e["kind"] == "replan_requested")
             assert "人工" in replan_event["message"] and "ReqC" in replan_event["message"], (
                 replan_event

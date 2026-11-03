@@ -146,6 +146,27 @@ export function confirmImpact(
   activeTasks: Pick<Task, "key">[],
   mode: "manual" | "auto",
 ): ConfirmImpact {
+  if (proposal.replan_impact) {
+    const replan = proposal.replan_impact;
+    const items = [
+      replan.canceled_task_keys.length
+        ? `取消 ${replan.canceled_task_keys.length} 个未完成任务（${replan.canceled_task_keys.join("、")}）`
+        : "没有未完成任务需要取消",
+      `保留 ${replan.retained_task_keys.length} 个已完成任务`,
+    ];
+    if (replan.added_task_keys.length) {
+      items.push(`扩大任务范围（${replan.added_task_keys.join("、")}）`);
+    }
+    items.push("已确认目标保持不变");
+    if (replan.acceptance_changed) items.push("修改项目或任务验收标准");
+    items.push("确认时一次性切换计划；分析失败不会破坏当前计划");
+    return {
+      items,
+      note: replan.high_impact
+        ? "这是高影响重规划，自动确认不会应用它，必须在这里明确确认。"
+        : "这是低影响重规划；符合自动确认条件时可应用，也可在这里明确确认。",
+    };
+  }
   if (proposal.kind === "direct") {
     return {
       items: [

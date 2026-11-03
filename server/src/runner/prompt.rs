@@ -96,24 +96,37 @@ pub(super) async fn build_prompt_data(
             .bind(&project.id)
             .fetch_all(&state.db)
             .await?;
-    for row in &rows {
-        if row.status.as_deref() == Some(STATUS_CANCELED) {
-            canceled_tasks.push(SummaryTaskInfo {
-                key: row.key.clone(),
-                title: row.title.clone(),
-                summary: row.last_error.clone().unwrap_or_default(),
-            });
-            continue;
-        }
-        let info = SummaryTaskInfo {
+    for row in rows
+        .iter()
+        .filter(|row| row.status.as_deref() == Some(STATUS_CANCELED))
+    {
+        canceled_tasks.push(SummaryTaskInfo {
+            key: row.key.clone(),
+            title: row.title.clone(),
+            summary: row.last_error.clone().unwrap_or_default(),
+        });
+    }
+    let partition = crate::replan::partition_tasks(rows);
+    for row in partition.retained.iter().chain(partition.canceled.iter()) {
+        summary_tasks.push(SummaryTaskInfo {
             key: row.key.clone(),
             title: row.title.clone(),
             summary: row.result_summary.clone().unwrap_or_default(),
-        };
-        if row.stage == TASK_STAGE_COMPLETED {
-            completed_tasks.push(info.clone());
-        }
-        summary_tasks.push(info);
+        });
+    }
+    for row in partition.retained {
+        completed_tasks.push(SummaryTaskInfo {
+            key: row.key,
+            title: row.title,
+            summary: row.result_summary.unwrap_or_default(),
+        });
+    }
+    for row in partition.canceled {
+        canceled_tasks.push(SummaryTaskInfo {
+            key: row.key,
+            title: row.title,
+            summary: row.result_summary.unwrap_or_default(),
+        });
     }
     let workspace = PathBuf::from(&project.workspace);
     let diff_stat = match job.role.as_str() {

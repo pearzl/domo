@@ -3,10 +3,12 @@ import type {
   JobSummary,
   Message,
   Project,
+  ProjectAttention,
   Task,
 } from "../types";
 /// 任务阶段文案统一取自 ui.tsx，概览与任务列表不会出现两套措辞。
 import { taskStageLabel } from "../ui";
+import { retryableProjectJobId } from "./jobSelection";
 
 /// 概览只读取项目详情中已有的数据，不触发额外请求。
 export interface ProjectStatusInput {
@@ -35,7 +37,7 @@ export interface ProjectStats {
 export type GuidanceTone = "muted" | "info" | "warn" | "danger" | "success";
 
 /// 概览待办里可直接跳到的主体选项卡。
-export type GuidanceTab = "analysis" | "tasks" | "report";
+export type GuidanceTab = "analysis" | "tasks" | "report" | "info";
 
 export interface ExecutionTaskItem {
   key: string;
@@ -59,11 +61,20 @@ export interface ProjectGuidance {
   tab?: GuidanceTab;
   /// 跳转按钮文案；与 tab 同时出现。
   action?: string;
+  /// 信息页需要展开并定位的作业。
+  jobId?: string;
+  /// 可直接重试的项目级失败作业。
+  retryJobId?: string;
+  /// 待合入项目提供直接合入动作。
+  merge?: boolean;
+  /// 暂停项目提供直接恢复动作。
+  resume?: boolean;
 }
 
 export interface ProjectStatus {
   stats: ProjectStats;
   guidance: ProjectGuidance;
+  attention: ProjectAttention | null;
 }
 
 /// 已取消任务不计入任务总数与完成数。
@@ -114,7 +125,40 @@ export function projectStatus(input: ProjectStatusInput): ProjectStatus {
   return {
     stats: projectStats(input),
     guidance: projectGuidance(input),
+    attention: projectAttention(input),
   };
+}
+
+/// 列表与详情共用的待办分类口径；普通推进、暂停、归档与已交付项目不产生待办。
+export function projectAttention(
+  input: ProjectStatusInput,
+): ProjectAttention | null {
+  const { project } = input;
+  if (
+    project.status === "archived" ||
+    project.status === "paused" ||
+    project.status === "pausing"
+  ) {
+    return null;
+  }
+  if (project.stage === "analysis") {
+    if (analysisNeedsManualHandling(project)) return blockedAttention(input);
+    if (projectHasRunningJob(input.jobs, "analysis")) return null;
+    if (input.proposal) return "confirm";
+    return project.status === "blocked" ? "blocked" : null;
+  }
+  if (project.stage === "summarizing") {
+    if (project.report) return "review";
+    return project.status === "blocked" ? blockedAttention(input) : null;
+  }
+  if (project.stage === "completed") {
+    return project.merged_at || input.mergedIntoBase ? null : "merge";
+  }
+  return project.status === "blocked" ? blockedAttention(input) : null;
+}
+
+function blockedAttention(input: ProjectStatusInput): ProjectAttention {
+  return retryableProjectJobId(input.project, input.jobs) ? "failed" : "blocked";
 }
 
 /// 概览的“当前需要你处理”只描述现状与下一步，不执行任何项目操作。
@@ -132,13 +176,15 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
       "已暂停",
       "恢复项目",
       "项目已暂停；恢复后继续派发任务。",
+      null,
+      { resume: true },
     );
   }
 
   // 分析阶段的阻塞来自等待目标、提问、方案确认或无法自动处理的失败。
   if (project.stage === "analysis") {
     if (analysisNeedsManualHandling(project)) {
-      return blockedGuidance(project);
+      return blockedGuidance(input);
     }
     if (projectHasRunningJob(input.jobs, "analysis")) {
       return guidance(
@@ -163,6 +209,7 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
         { tab: "report", action: "去验收报告" },
       );
     }
+    if (project.status === "blocked") return blockedGuidance(input);
     return guidance(
       "info",
       "总结中",
@@ -193,12 +240,14 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
       "待合入",
       "审阅并合入",
       `改动位于 ${project.branch}，审阅后合入 ${project.base_branch}。`,
+      null,
+      { tab: "report", action: "审阅项目报告", merge: true },
     );
   }
 
   if (project.stage === "executing") {
     if (project.status === "blocked") {
-      return blockedGuidance(project);
+      return blockedGuidance(input);
     }
     return executingGuidance(
       input,
@@ -207,7 +256,7 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
   }
 
   if (project.status === "blocked") {
-    return blockedGuidance(project);
+    return blockedGuidance(input);
   }
 
   return guidance("muted", "状态未知", "查看项目状态", null);
@@ -282,6 +331,8 @@ function analysisGuidance(
       "待输入",
       "输入项目目标",
       "在项目分析中输入目标、边界和验收预期。",
+      null,
+      { tab: "analysis", action: "去输入项目目标" },
     );
   }
 
@@ -366,12 +417,38 @@ function projectHasRunningJob(
   );
 }
 
-function blockedGuidance(project: Project): ProjectGuidance {
+function blockedGuidance(input: ProjectStatusInput): ProjectGuidance {
+  const { project } = input;
+  const reason = firstLine(project.blocked_reason) ?? "查看阻塞原因并处理。";
+  const retryJobId = retryableProjectJobId(project, input.jobs);
+  if (retryJobId) {
+    return guidance(
+      "danger",
+      "失败",
+      "重试失败作业",
+      `${reason} 可重试最近的项目级失败作业，或查看失败详情。`,
+      null,
+      {
+        tab: "info",
+        action: "查看失败作业",
+        jobId: retryJobId,
+        retryJobId,
+      },
+    );
+  }
+  const jump: GuidanceJump =
+    project.stage === "analysis"
+      ? { tab: "analysis", action: "去处理阻塞" }
+      : project.stage === "executing"
+        ? { tab: "tasks", action: "去处理任务" }
+        : { tab: "info", action: "查看项目作业" };
   return guidance(
     "danger",
     "需要处理",
     "需要人工处理",
-    firstLine(project.blocked_reason) ?? "查看阻塞原因并处理。",
+    reason,
+    null,
+    jump,
   );
 }
 
@@ -415,11 +492,15 @@ function guidance(
     title,
     detail,
     tasks,
-    ...(jump ? { tab: jump.tab, action: jump.action } : {}),
+    ...(jump ?? {}),
   };
 }
 
 interface GuidanceJump {
-  tab: GuidanceTab;
-  action: string;
+  tab?: GuidanceTab;
+  action?: string;
+  jobId?: string;
+  retryJobId?: string;
+  merge?: boolean;
+  resume?: boolean;
 }

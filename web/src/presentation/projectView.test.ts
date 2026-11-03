@@ -9,10 +9,20 @@ describe("readProjectView", () => {
     expect(readProjectView("?tab=tasks&task=tsk_1")).toEqual({
       tab: "tasks",
       taskId: "tsk_1",
+      jobId: null,
     });
     expect(readProjectView("?tab=&tab=report&task=%20%20&task=tsk_2")).toEqual({
       tab: "report",
       taskId: "tsk_2",
+      jobId: null,
+    });
+  });
+
+  it("读取失败作业深链", () => {
+    expect(readProjectView("?tab=info&job=job%2Ffailed")).toEqual({
+      tab: "info",
+      taskId: null,
+      jobId: "job/failed",
     });
   });
 
@@ -20,10 +30,12 @@ describe("readProjectView", () => {
     expect(readProjectView("?tab=unknown", ["analysis", "tasks"])).toEqual({
       tab: null,
       taskId: null,
+      jobId: null,
     });
     expect(readProjectView("?tab=%E0%A4%A&task=%ZZ")).toEqual({
       tab: null,
       taskId: null,
+      jobId: null,
     });
   });
 });
@@ -34,14 +46,18 @@ describe("updateProjectView", () => {
       updateProjectView("?foo=1&tab=analysis&task=tsk_1", {
         tab: "report",
         taskId: "tsk/2",
+        jobId: "job/2",
       }),
-    ).toBe("?foo=1&tab=report&task=tsk%2F2");
+    ).toBe("?foo=1&tab=report&task=tsk%2F2&job=job%2F2");
   });
 
   it("null 表示删除参数，全部删除后返回空串", () => {
     expect(updateProjectView("?tab=analysis", { tab: null })).toBe("");
     expect(updateProjectView("?tab=analysis&task=tsk_1", { taskId: null })).toBe(
       "?tab=analysis",
+    );
+    expect(updateProjectView("?tab=info&job=job_1", { jobId: null })).toBe(
+      "?tab=info",
     );
   });
 

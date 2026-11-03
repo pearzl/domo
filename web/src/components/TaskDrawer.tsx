@@ -108,7 +108,7 @@ export function TaskDrawer({
       ? `git branch ${task.branch} ${archiveReference}`
       : null;
   const retryableJobId =
-    task.status === "blocked" && task.human_gate !== "milestone"
+    !archived && task.status === "blocked" && task.human_gate !== "milestone"
       ? latestFailedJobId(jobs)
       : null;
   const children = detail.tasks.filter((item) => item.parent_id === task.id);
@@ -233,6 +233,7 @@ export function TaskDrawer({
             key={job.id}
             job={job}
             retryable={job.id === retryableJobId}
+            readOnly={archived}
             onRetry={() => onRetryJob(job.id)}
             focusNonce={job.id === focusJob.jobId ? focusJob.nonce : 0}
           />

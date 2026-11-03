@@ -3,6 +3,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
+use crate::attention::{project_attention, ProjectAttentionState};
 use crate::domain::{self, now, short_id};
 use crate::events::emit;
 use crate::git;
@@ -41,6 +42,44 @@ pub(super) async fn list_projects(
         .bind(&row.id)
         .fetch_one(&state.db)
         .await?;
+        let latest_project_job_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM jobs WHERE project_id = ? AND task_id IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&row.id)
+        .fetch_optional(&state.db)
+        .await?;
+        let analysis_running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND task_id IS NULL \
+             AND role = 'analysis' AND status = 'running'",
+        )
+        .bind(&row.id)
+        .fetch_one(&state.db)
+        .await?;
+        let merged_into_base =
+            row.merged_at.is_some() || super::detail::project_merged_into_base(&row).await;
+        let proposal_raw = if row.replan_active != 0 {
+            row.replan_proposal.as_deref()
+        } else {
+            row.proposal.as_deref()
+        };
+        let attention = project_attention(ProjectAttentionState {
+            stage: &row.stage,
+            status: row.status.as_deref(),
+            goal: &row.goal,
+            blocked_reason: row.blocked_reason.as_deref(),
+            proposal_pending: proposal_raw
+                .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok())
+                .is_some(),
+            report_ready: row
+                .report
+                .as_deref()
+                .is_some_and(|report| !report.is_empty()),
+            merged_into_base,
+            latest_project_job_failed: latest_project_job_status.as_deref()
+                == Some(JOB_STATUS_FAILED),
+            analysis_running: analysis_running > 0,
+        });
         projects.push(ProjectSummary {
             id: row.id,
             name: row.name,
@@ -51,6 +90,7 @@ pub(super) async fn list_projects(
             stage: row.stage,
             status: row.status,
             blocked_reason: row.blocked_reason,
+            attention,
             task_total: total,
             task_completed: completed,
             replan_reason: row.replan_reason,
@@ -594,6 +634,55 @@ pub(super) async fn resolve_task_agent_from_single(
     Ok(agent.id)
 }
 
+pub(super) async fn update_project_goal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateGoalRequest>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.stage == STAGE_COMPLETED {
+        return Err(ApiError::bad("项目已完成，不能修改目标"));
+    }
+    if project.goal_locked_at.is_none() {
+        return Err(ApiError::bad("首次方案确认前请在项目分析中输入目标"));
+    }
+    let goal = request.goal.trim();
+    if goal.is_empty() {
+        return Err(ApiError::bad("项目目标不能为空"));
+    }
+    if goal == project.goal.trim() {
+        return Err(ApiError::bad("新项目目标与当前目标相同"));
+    }
+    if replan::change_goal(&state, &id, goal).await?.is_none() {
+        return Err(ApiError::conflict("项目状态已变化，请刷新后重试"));
+    }
+    state.notify_scheduler();
+    load_detail(&state, &id).await.map(Json)
+}
+
+pub(super) async fn abandon_replan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let project = require_project(&state, &id).await?;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Err(ApiError::bad("项目已归档"));
+    }
+    if project.replan_active == 0 {
+        return Err(ApiError::bad("当前没有进行中的重规划"));
+    }
+    if crate::replan::cancel(&state, &id).await?.is_none() {
+        return Err(ApiError::conflict(
+            "规划者仍在分析或项目状态已变化，请稍后重试",
+        ));
+    }
+    state.notify_scheduler();
+    load_detail(&state, &id).await.map(Json)
+}
+
 pub(super) async fn replan_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -624,7 +713,7 @@ pub(super) async fn replan_project(
         canceled_tasks = summary.canceled_tasks,
         retained_tasks = summary.retained_tasks,
         canceled_jobs = summary.canceled_jobs,
-        "项目已重新规划"
+        "项目已请求重规划，等待方案确认"
     );
     state.notify_scheduler();
     load_detail(&state, &id).await.map(Json)

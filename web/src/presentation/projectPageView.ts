@@ -2,7 +2,7 @@
 /// 把阶段判定、筛选、徽标与重试入口统一在这里计算，组件只负责呈现。
 import type { ProjectDetail } from "../types";
 import { analysisThread } from "./analysisThread";
-import { latestFailedJobId } from "./jobSelection";
+import { retryableProjectJobId } from "./jobSelection";
 import { reordableQueueIds } from "../taskQueue";
 import {
   dependencyOptions,
@@ -58,12 +58,7 @@ export function projectPageView(
   const directJob =
     jobs.find((job) => job.role === "direct" && job.status === "running") ?? null;
   const directMode = project.completion_mode === "direct";
-  const retryableProjectJobId =
-    !archived &&
-    project.status === "blocked" &&
-    !(project.stage === "summarizing" && project.report)
-      ? latestFailedJobId(projectJobs)
-      : null;
+  const retryableJobId = retryableProjectJobId(project, projectJobs);
   // 队列位置由可调整任务的 (queue_order, seq) 顺序推导，与服务端重排口径一致。
   const queueIds = reordableQueueIds(tasks, archived);
 
@@ -99,7 +94,7 @@ export function projectPageView(
     ? null
     : input.message.trim()
       ? "输入框里有未发送的修改意见，发送或清空后再确认。"
-      : proposal.kind === "direct" && activeTasks.length > 0
+      : proposal.kind === "direct" && activeTasks.length > 0 && !proposal.replan_impact
         ? "项目已有任务，不能直接完成。"
         : null;
 
@@ -118,7 +113,7 @@ export function projectPageView(
     analysisJob,
     directJob,
     directMode,
-    retryableProjectJobId,
+    retryableProjectJobId: retryableJobId,
     queueIds,
     taskCounts,
     searchActive,

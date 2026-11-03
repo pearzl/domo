@@ -2,9 +2,9 @@
 
 > 组建你的 AI 团队，自动交付可靠结果。
 
-DOMO 是一个面向个人使用、本地部署的多 Agent 协作平台。
+DOMO 是一个本地运行的个人交付系统。
 
-你只需要与 AI 讨论清楚目标，之后 AI 团队会自动完成“项目分析 -> 执行 -> 验收”全流程；你可以随时看到进展，也能随时叫停和纠偏；所有过程可审计、可回溯。
+你只需要与 AI 讨论清楚目标，之后 AI 团队会通过多 Agent 协作完成“项目分析 -> 执行 -> 验收”全流程，把目标推进为可审查、可验收的交付物；你可以随时看到进展，也能随时叫停和纠偏；所有过程可审计、可回溯。
 
 ## 快速开始
 
@@ -50,7 +50,7 @@ Windows 使用 `python tests/run.py`。单个用例可直接运行，例如 `pyt
 - **动态调度**：可根据任务不同使用不同的 Agent 和模型，支持按优先级的顺序调度、错误退避和限额保护。
 - **审计与回溯**：整个执行过程，包括每次对 Agent 调用的输入与输出有完整记录。
 - **自备 Agent**：内置支持 OpenCode、Codex CLI、WorkBuddy（CodeBuddy Code CLI，可执行文件 `codebuddy`）和自定义 CLI 四类 Agent。前三类内置默认命令，只需填写名称与模型；自定义 CLI 通过命令模板描述参数，模板占位符包括 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}`，未写 `{prompt}` 时提示词从 stdin 传入。可执行文件不在 `PATH` 中时用 `DOMO_CODEX_BIN`、`DOMO_WORKBUDDY_BIN` 指向文件路径，例如 `DOMO_CODEX_BIN=/opt/bin/codex DOMO_WORKBUDDY_BIN=/opt/bin/codebuddy cd server && cargo run --release`。
-- **Git 仓库优先**：通过 worktree 进行隔离，支持同一工程下多个项目并行。
+- **Git 软件交付**：通过 worktree 进行隔离，支持同一工程下多个项目并行，并提供任务分支与项目交付分支的合入能力。
 - **完全本地**：数据、日志和产物都保存在本地。
 
 

@@ -2,6 +2,7 @@ mod activity;
 mod agents;
 mod api;
 mod artifacts;
+mod attention;
 mod config;
 mod db;
 mod domain;

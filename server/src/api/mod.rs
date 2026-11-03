@@ -46,8 +46,9 @@ use self::milestones::{
     accept_milestone, reject_milestone, save_task_guidance, set_task_milestone,
 };
 use self::projects::{
-    create_project, get_project, get_project_agents, get_task_agent_pool, list_projects,
-    replan_project, set_task_agents, update_project_agent, update_task_agent,
+    abandon_replan, create_project, get_project, get_project_agents, get_task_agent_pool,
+    list_projects, replan_project, set_task_agents, update_project_agent, update_project_goal,
+    update_task_agent,
 };
 use self::reports::submit_report;
 use self::tasks::{
@@ -193,7 +194,9 @@ pub fn router(state: AppState) -> Router {
             get(archive_preview).post(archive_project),
         )
         .route("/api/projects/{id}/archive-refs", get(project_archive_refs))
+        .route("/api/projects/{id}/goal", post(update_project_goal))
         .route("/api/projects/{id}/replan", post(replan_project))
+        .route("/api/projects/{id}/replan/abandon", post(abandon_replan))
         .route("/api/projects/{id}/report", post(submit_report))
         .route("/api/projects/{id}/merge", post(merge_project))
         .route("/api/projects/{id}/tasks", post(create_task))

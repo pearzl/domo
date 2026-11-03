@@ -198,7 +198,7 @@ fn analysis_prompt(data: &PromptData) -> String {
         common_header(data),
         replan,
         if auto {
-            "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true，DOMO 会直接开始执行；仍有歧义时必须提问或等待用户确认。"
+            "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true；重规划若取消任务、扩大范围或修改验收标准，DOMO 仍会等待人工确认。"
         } else {
             "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认方案后开始执行。"
         },
@@ -299,13 +299,14 @@ fn replan_section(data: &PromptData) -> String {
     format!(
         "\n## 重规划上下文\n\
          重规划原因（来源：{source}）：\n{reason}\n\
-         \n已完成任务（保留在交付分支中，不要重新规划、不要重复实现）：\n{completed}\n\
-         \n已取消任务（已退出活动 DAG，不要把它们作为前置依赖）：\n{canceled}\n\
+         \n完整保留的交付任务链（不要重新规划、不要重复实现）：\n{completed}\n\
+         \n不保留任务（未完成任务及其完整派生链；其中已完成子任务也不属于交付分支保留成果）：\n{canceled}\n\
          \n## 重规划约束\n\
+         - 必须沿用当前项目目标，重规划不得修改目标；只有用户主动提交新目标才能改变它；\n\
          - 新计划只包含仍需完成的工作，不要重复已完成任务；\n\
          - 新计划最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段推进，本次只规划距离关键进展最近的一批，后续再通过重规划派发新任务；\n\
          - deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n\
-         - 可以复用已取消任务的 key；\n\
+         - 可以复用当前未完成或已取消任务的 key；\n\
          - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正；\n\
          - 不得降低项目级验收口径；如需调整范围，必须在方案摘要中说明原因和影响。\n"
     )
@@ -838,10 +839,7 @@ mod tests {
                 prompt.contains(result_schema_text(role)),
                 "{role} 缺少输出 schema"
             );
-            assert!(
-                prompt.contains("长命令进度"),
-                "{role} 缺少长命令进度说明"
-            );
+            assert!(prompt.contains("长命令进度"), "{role} 缺少长命令进度说明");
             assert!(
                 prompt.contains("最少每隔5分钟要有一次内容输出，否则会被判定为卡死而被关闭"),
                 "{role} 缺少卡死判定说明"
@@ -863,7 +861,10 @@ mod tests {
             "缺少卡死判定口径"
         );
         for forbidden in ["Start-Process", "nohup", "sleep 120", "tail -n 5"] {
-            assert!(!rules.contains(forbidden), "长命令说明不应包含示例: {forbidden}");
+            assert!(
+                !rules.contains(forbidden),
+                "长命令说明不应包含示例: {forbidden}"
+            );
         }
     }
 

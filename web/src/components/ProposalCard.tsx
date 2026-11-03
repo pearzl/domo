@@ -186,8 +186,11 @@ export function ProposalCard({
     );
   }
 
-  const confirmLabel =
-    proposal.kind === "direct" ? "确认并直接完成" : "确认方案，开始执行";
+  const confirmLabel = proposal.replan_impact
+    ? "确认并应用重规划"
+    : proposal.kind === "direct"
+      ? "确认并直接完成"
+      : "确认方案，开始执行";
 
   return (
     <article className="proposal-card" data-proposal-kind={proposal.kind}>
@@ -197,7 +200,13 @@ export function ProposalCard({
             proposal.kind === "direct" ? " proposal-kind-direct" : ""
           }`}
         >
-          {proposal.kind === "direct" ? "建议直接完成" : "项目方案"}
+          {proposal.replan_impact
+            ? proposal.replan_impact.high_impact
+              ? "高影响重规划草稿"
+              : "低影响重规划草稿"
+            : proposal.kind === "direct"
+              ? "建议直接完成"
+              : "项目方案"}
         </span>
         <span className="proposal-kind-scope muted">
           {proposal.kind === "direct"

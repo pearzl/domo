@@ -68,8 +68,8 @@ export function ProjectGoal({ goal }: { goal: string }) {
   );
 }
 
-/// 项目概览只保留“当前需要你处理”、统计与用量摘要，不提供操作；
-/// 运行中作业、排队任务与最近关键事件折叠进待办的紧凑摘要，跳转由外层选项卡承接。
+/// 项目概览集中展示当前进展或待办、下一步动作、统计与用量摘要；
+/// 运行中作业、排队任务与最近关键事件折叠进紧凑摘要，面板与作业跳转由外层承接。
 /// 宽屏布局为上排待办占满整行、下排统计区与用量摘要等宽并排；
 /// 960px 及以下依次纵向堆叠为待办、用量摘要、统计区。
 /// 作业数与用量记录覆盖只由用量摘要给出，统计区保留任务完成与项目用时。
@@ -81,9 +81,19 @@ export function ProjectGoal({ goal }: { goal: string }) {
 export function ProjectOverview({
   detail,
   onOpenTab,
+  onRetryJob,
+  onMerge,
+  onResume,
+  busy = false,
+  merging = false,
 }: {
   detail: ProjectDetail;
-  onOpenTab?: (tab: GuidanceTab) => void;
+  onOpenTab?: (tab: GuidanceTab, jobId?: string) => void;
+  onRetryJob?: (jobId: string) => void;
+  onMerge?: () => void;
+  onResume?: () => void;
+  busy?: boolean;
+  merging?: boolean;
 }) {
   const { project, tasks, jobs, messages, events, proposal } = detail;
   const now = Date.now();
@@ -116,8 +126,14 @@ export function ProjectOverview({
       <div className="overview-grid">
         <Guidance
           guidance={status.guidance}
+          needsAttention={status.attention !== null}
           activity={activity}
           onOpenTab={onOpenTab}
+          onRetryJob={onRetryJob}
+          onMerge={onMerge}
+          onResume={onResume}
+          busy={busy}
+          merging={merging}
         />
         <div className="overview-stats" aria-label="项目统计">
           <TaskStat stats={status.stats} />
@@ -177,12 +193,24 @@ interface ActivitySummary {
 
 function Guidance({
   guidance,
+  needsAttention,
   activity,
   onOpenTab,
+  onRetryJob,
+  onMerge,
+  onResume,
+  busy,
+  merging,
 }: {
   guidance: ProjectGuidance;
+  needsAttention: boolean;
   activity: ActivitySummary;
-  onOpenTab?: (tab: GuidanceTab) => void;
+  onOpenTab?: (tab: GuidanceTab, jobId?: string) => void;
+  onRetryJob?: (jobId: string) => void;
+  onMerge?: () => void;
+  onResume?: () => void;
+  busy: boolean;
+  merging: boolean;
 }) {
   const groups = guidance.tasks;
   const taskCount = groups ? groupCount(groups) : 0;
@@ -190,12 +218,19 @@ function Guidance({
     activity.running.length > 0 ||
     activity.queue.length > 0 ||
     activity.events.length > 0;
-  const jump = Boolean(guidance.tab && guidance.action);
+  const hasActions = Boolean(
+    (guidance.tab && guidance.action) ||
+      guidance.retryJobId ||
+      guidance.merge ||
+      guidance.resume,
+  );
 
   return (
     <div className={`overview-todo overview-tone-${guidance.tone}`}>
       <div className="overview-todo-head">
-        <span className="meta-label">当前需要你处理</span>
+        <span className="meta-label">
+          {needsAttention ? "当前需要你处理" : "当前进展"}
+        </span>
         <Badge tone={guidance.tone}>{guidance.label}</Badge>
       </div>
       <strong className="overview-title">{guidance.title}</strong>
@@ -249,19 +284,47 @@ function Guidance({
           ) : null}
         </div>
       ) : null}
-      {jump ? (
+      {hasActions ? (
         <div className="overview-jump-row">
-          <button
-            type="button"
-            className="secondary overview-jump"
-            onClick={() =>
-              onOpenTab?.(
-                (guidance.tab ?? "analysis") as GuidanceTab,
-              )
-            }
-          >
-            {guidance.action}
-          </button>
+          {guidance.retryJobId ? (
+            <button
+              type="button"
+              className="primary overview-jump"
+              disabled={busy}
+              onClick={() => onRetryJob?.(guidance.retryJobId!)}
+            >
+              重试失败作业
+            </button>
+          ) : null}
+          {guidance.merge ? (
+            <button
+              type="button"
+              className="primary overview-jump"
+              disabled={busy || merging}
+              onClick={onMerge}
+            >
+              {merging ? "合入中…" : "合入项目"}
+            </button>
+          ) : null}
+          {guidance.resume ? (
+            <button
+              type="button"
+              className="primary overview-jump"
+              disabled={busy}
+              onClick={onResume}
+            >
+              恢复项目
+            </button>
+          ) : null}
+          {guidance.tab && guidance.action ? (
+            <button
+              type="button"
+              className="secondary overview-jump"
+              onClick={() => onOpenTab?.(guidance.tab!, guidance.jobId)}
+            >
+              {guidance.action}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

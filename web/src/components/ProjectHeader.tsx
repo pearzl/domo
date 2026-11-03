@@ -8,6 +8,7 @@ import { AnimatedNumber } from "./AnimatedNumber";
 export interface ProjectHeaderProps {
   detail: ProjectDetail;
   canReplan: boolean;
+  canEditGoal: boolean;
   busy: boolean;
   merging: boolean;
   mergeNotice: { tone: "ok" | "error"; text: string } | null;
@@ -15,6 +16,7 @@ export interface ProjectHeaderProps {
   onPause: () => void;
   onForcePause: () => void;
   onToggleReplan: () => void;
+  onToggleGoalEdit: () => void;
   onArchive: () => void;
   onMerge: () => void;
 }
@@ -30,6 +32,7 @@ export interface ProjectHeaderProps {
 export function ProjectHeader({
   detail,
   canReplan,
+  canEditGoal,
   busy,
   merging,
   mergeNotice,
@@ -37,6 +40,7 @@ export function ProjectHeader({
   onPause,
   onForcePause,
   onToggleReplan,
+  onToggleGoalEdit,
   onArchive,
   onMerge,
 }: ProjectHeaderProps) {
@@ -79,6 +83,11 @@ export function ProjectHeader({
                 </button>
               </>
             )
+          ) : null}
+          {canEditGoal ? (
+            <button className="secondary" disabled={busy} onClick={onToggleGoalEdit}>
+              修改目标
+            </button>
           ) : null}
           {canReplan ? (
             <button className="secondary" disabled={busy} onClick={onToggleReplan}>

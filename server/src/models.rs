@@ -320,6 +320,15 @@ pub struct ProposalTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplanImpact {
+    pub high_impact: bool,
+    pub canceled_task_keys: Vec<String>,
+    pub retained_task_keys: Vec<String>,
+    pub added_task_keys: Vec<String>,
+    pub acceptance_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisProposal {
     pub kind: String,
     pub summary: String,
@@ -337,6 +346,8 @@ pub struct AnalysisProposal {
     pub verification: Vec<String>,
     #[serde(default)]
     pub skip_confirmation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_impact: Option<ReplanImpact>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -356,6 +367,18 @@ pub struct ProjectRow {
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
     pub replan_requested_at: Option<String>,
+    pub replan_active: i64,
+    #[serde(skip_serializing)]
+    pub replan_proposal: Option<String>,
+    #[serde(skip_serializing)]
+    pub replan_generation: i64,
+    #[serde(skip_serializing)]
+    pub replan_previous_stage: Option<String>,
+    #[serde(skip_serializing)]
+    pub replan_previous_goal: Option<String>,
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
+    pub replan_cleanup_needed: i64,
     /// Latest project-level acceptance verdict. The job result keeps the full
     /// audit trail; this copy is the current gate for report dispatch.
     #[serde(skip_serializing)]
@@ -370,6 +393,8 @@ pub struct ProjectRow {
     #[serde(skip_serializing)]
     pub proposal: Option<String>,
     pub confirmed_at: Option<String>,
+    #[serde(skip_serializing)]
+    pub goal_locked_at: Option<String>,
     pub completion_mode: String,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
@@ -459,6 +484,7 @@ pub struct JobRow {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub resume: i64,
+    pub replan_generation: i64,
     pub created_at: String,
 }
 
@@ -531,6 +557,16 @@ impl EventView {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectAttention {
+    Confirm,
+    Review,
+    Failed,
+    Merge,
+    Blocked,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
     pub id: String,
@@ -542,6 +578,7 @@ pub struct ProjectSummary {
     pub stage: String,
     pub status: Option<String>,
     pub blocked_reason: Option<String>,
+    pub attention: Option<ProjectAttention>,
     pub task_total: i64,
     pub task_completed: i64,
     pub replan_reason: Option<String>,
@@ -753,6 +790,11 @@ pub struct TaskGuidanceRequest {
 pub struct ReplanRequest {
     #[serde(alias = "message", alias = "content", alias = "text")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGoalRequest {
+    pub goal: String,
 }
 
 #[derive(Debug, Deserialize)]

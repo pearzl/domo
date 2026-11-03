@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 全部任务完成后先派发项目验收作业，验收通过后才生成项目报告；
-  2. 项目验收不通过时按验收条目自动重规划，新任务完成后再次验收；
+  2. 项目验收不通过时按验收条目生成重规划草稿，确认后执行并再次验收；
   3. 项目验收连续未通过达到上限后阻塞，等待人工裁决；
   4. 项目验收与总结作业在作业记录和事件流中分别可查。
 
@@ -58,6 +58,16 @@ def create_running_project(call, repo, name, goal):
 def wait_for_report(call, project_id, timeout=120):
     def check():
         detail = call("GET", f"/api/projects/{project_id}")
+        if (
+            detail["project"]["stage"] == "analysis"
+            and (detail.get("proposal") or {}).get("replan_impact")
+            and not any(
+                job["role"] == "analysis" and job["status"] == "running"
+                for job in detail["jobs"]
+            )
+        ):
+            call("POST", f"/api/projects/{project_id}/analysis/confirm", {})
+            return None
         if detail["project"]["stage"] == "summarizing" and detail["project"]["report"]:
             return detail
         return None
@@ -140,6 +150,16 @@ def test_acceptance_loop_blocks_for_human(temp, repo):
 
         def blocked():
             detail = call("GET", f"/api/projects/{project_id}")
+            if (
+                detail["project"]["stage"] == "analysis"
+                and (detail.get("proposal") or {}).get("replan_impact")
+                and not any(
+                    job["role"] == "analysis" and job["status"] == "running"
+                    for job in detail["jobs"]
+                )
+            ):
+                call("POST", f"/api/projects/{project_id}/analysis/confirm", {})
+                return None
             if (
                 detail["project"]["stage"] == "summarizing"
                 and detail["project"]["status"] == "blocked"

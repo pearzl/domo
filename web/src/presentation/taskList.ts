@@ -250,19 +250,31 @@ export interface ReplanSummary {
   keepKeys: string[];
 }
 
-/// 重规划预览：未完成任务会退出 DAG 并被取消，已完成任务保留；
-/// 已取消任务既不再保留也不再取消，不进入两份清单。
+/// 重规划预览：确认方案时未完成派生链整体退出 DAG，完整交付链保留；
+/// 已取消任务不进入两份清单。
 export function replanSummary(tasks: Task[]): ReplanSummary {
-  const cancelKeys: string[] = [];
-  const keepKeys: string[] = [];
-  for (const task of tasks) {
-    if (task.status === "canceled") continue;
-    if (task.stage === "completed") {
-      keepKeys.push(task.key);
-    } else {
-      cancelKeys.push(task.key);
+  const active = tasks.filter((task) => task.status !== "canceled");
+  const canceled = new Set(
+    active.filter((task) => task.stage !== "completed").map((task) => task.id),
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const task of active) {
+      if (canceled.has(task.id)) continue;
+      const familyCanceled =
+        (task.parent_id && canceled.has(task.parent_id)) ||
+        active.some((child) => child.parent_id === task.id && canceled.has(child.id));
+      if (familyCanceled) {
+        canceled.add(task.id);
+        changed = true;
+      }
     }
   }
+  const cancelKeys = active.filter((task) => canceled.has(task.id)).map((task) => task.key);
+  const keepKeys = active
+    .filter((task) => task.stage === "completed" && !canceled.has(task.id))
+    .map((task) => task.key);
   return {
     cancelCount: cancelKeys.length,
     cancelKeys,

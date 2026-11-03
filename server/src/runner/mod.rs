@@ -184,6 +184,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
     }
 
+    if std::env::var("DOMO_MOCK_RUNTIME_FAIL_ROLE").is_ok_and(|role| role == job.role) {
+        return Err(anyhow!("mock 运行时失败"));
+    }
     let progress = agents::JobProgress::new();
     let mut job_deadline = Instant::now() + state.cfg.job_timeout;
     let mut run_timeout = state.cfg.job_timeout;
@@ -344,6 +347,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("项目不存在"))?;
     if fresh_project.status.as_deref() == Some(STATUS_ARCHIVED) {
         mark_archived_job(state, &job).await?;
+        return Ok(());
+    }
+    if job.role == JOB_ROLE_ANALYSIS
+        && fresh_project.goal_locked_at.is_some()
+        && (fresh_project.goal != project.goal
+            || fresh_project.replan_generation != job.replan_generation
+            || (job.replan_generation > 0 && fresh_project.replan_active == 0))
+    {
+        mark_canceled_job(state, &job, "重规划代际已变化，丢弃过期分析结果").await?;
         return Ok(());
     }
     let Some(current_job) = load_job(&state.db, &job.id).await? else {

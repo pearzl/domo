@@ -54,7 +54,8 @@ pub(super) async fn handle_verdict(
             .await?;
             sqlx::query(
                 "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-                 THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
+                 THEN status ELSE ? END, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? AND replan_active = 0",
             )
             .bind(STATUS_BLOCKED)
             .bind(&blocked_reason)

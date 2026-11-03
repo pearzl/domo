@@ -113,7 +113,7 @@ function detail(tasks: Task[], jobs: JobSummary[] = []): ProjectDetail {
   } as unknown as ProjectDetail;
 }
 
-function renderDrawer(current: Task, jobs: JobSummary[] = []) {
+function renderDrawer(current: Task, jobs: JobSummary[] = [], archived = false) {
   return renderToStaticMarkup(
     <TaskDrawer
       task={current}
@@ -124,7 +124,7 @@ function renderDrawer(current: Task, jobs: JobSummary[] = []) {
       onSaveGuidance={async () => true}
       onToggleMilestone={() => {}}
       onRefresh={async () => {}}
-      archived={false}
+      archived={archived}
       busy={false}
       agentName={() => "—"}
     />,
@@ -424,6 +424,15 @@ describe("TaskDrawer 信息去重", () => {
 });
 
 describe("TaskDrawer 作业记录", () => {
+  it("归档任务不渲染失败作业的重试入口", () => {
+    const current = task({ status: "blocked" });
+    const failed = { ...job(1), status: "failed" };
+    const active = renderDrawer(current, [failed]);
+    const archived = renderDrawer(current, [failed], true);
+    expect(active).toContain("让这个失败作业重新排队");
+    expect(archived).not.toContain("让这个失败作业重新排队");
+  });
+
   it("默认只展示最近若干条，并可展开全部", () => {
     const jobs = Array.from({ length: RECENT_JOB_LIMIT + 2 }, (_, index) => job(index));
     const markup = renderDrawer(task(), jobs);

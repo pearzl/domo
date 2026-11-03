@@ -62,6 +62,12 @@ def main():
                     {"name": name, "repo_path": str(repo), "base_branch": "main"},
                 )["project"]
 
+            def project_summary(project_id):
+                return next(
+                    item for item in call("GET", "/api/projects")
+                    if item["id"] == project_id
+                )
+
             def submit(project_id, message, mode="manual"):
                 return call(
                     "POST",
@@ -107,6 +113,7 @@ def main():
             assert empty_detail["project"]["stage"] == "analysis", empty_detail["project"]
             assert empty_detail["project"]["status"] == "blocked", empty_detail["project"]
             assert empty_detail["jobs"] == [], empty_detail["jobs"]
+            assert project_summary(empty["id"])["attention"] == "blocked"
 
             # 2. 人工确认：多轮提问 -> 包含任务的方案 -> 确认 -> 创建任务并执行。
             questions = create_project("Questions")
@@ -121,11 +128,13 @@ def main():
                 "规划者提问",
             )
             assert "哪个使用场景" in asked["messages"][-1]["content"], asked["messages"]
+            assert project_summary(questions["id"])["attention"] == "blocked"
             submit(questions["id"], "没有偏好，请直接规划。")
             proposal = wait_proposal(questions["id"], "plan")
             assert proposal["project"]["status"] == "blocked", proposal["project"]
             assert proposal["proposal"]["tasks"], proposal["proposal"]
             assert proposal["tasks"] == [], proposal["tasks"]
+            assert project_summary(questions["id"])["attention"] == "confirm"
             call("POST", f"/api/projects/{questions['id']}/analysis/confirm", {})
             planned = wait_project(
                 questions["id"],
@@ -136,6 +145,7 @@ def main():
             assert len(planned["tasks"]) == 2, planned["tasks"]
             assert any(job["role"] == "analysis" for job in planned["jobs"]), planned["jobs"]
             call("POST", f"/api/projects/{questions['id']}/archive", {})
+            assert project_summary(questions["id"])["attention"] is None
 
             # 3. 自动确认：规划者直接进入执行，不等待人工确认。
             auto = create_project("AutoPlan")
@@ -147,7 +157,7 @@ def main():
             )
             assert auto_detail["project"]["confirm_mode"] == "auto", auto_detail["project"]
             assert any(job["role"] == "analysis" for job in auto_detail["jobs"]), auto_detail["jobs"]
-            call("POST", f"/api/projects/{auto['id']}/archive", {})
+            call("POST", f"/api/projects/{auto['id']}/archive?force=true", {})
 
             # 4. 人工确认的直接完成：确认前不修改仓库，确认后提交并生成报告。
             direct = create_project("Direct")
@@ -165,6 +175,7 @@ def main():
             assert direct_done["project"]["completion_mode"] == "direct", direct_done["project"]
             assert direct_done["tasks"] == [], direct_done["tasks"]
             assert any(job["role"] == "direct" for job in direct_done["jobs"]), direct_done["jobs"]
+            assert project_summary(direct["id"])["attention"] == "review"
             content = git(["show", f"{branch}:domo_mock/direct.txt"], repo)
             assert "mock direct completion" in content, content
 
@@ -182,6 +193,7 @@ def main():
             )
             assert redone["project"]["completion_mode"] == "direct", redone["project"]
             call("POST", f"/api/projects/{direct['id']}/report", {"action": "accept"})
+            assert project_summary(direct["id"])["attention"] == "merge"
 
             # 5. 自动确认的直接完成：不需要人工确认。
             auto_direct = create_project("AutoDirect")

@@ -254,4 +254,37 @@ describe("确认后影响摘要", () => {
     );
     expect(impact.items.join(" ")).toContain("报告");
   });
+
+  it("高影响重规划展示取消、范围和验收变化且不允许静默自动应用", () => {
+    const draft = proposal({
+      replan_impact: {
+        high_impact: true,
+        canceled_task_keys: ["T2"],
+        retained_task_keys: ["T1"],
+        added_task_keys: ["T3"],
+        acceptance_changed: true,
+      },
+    });
+    const impact = confirmImpact(draft, [], "auto");
+    expect(impact.items.join(" ")).toContain("取消 1 个未完成任务（T2）");
+    expect(impact.items.join(" ")).toContain("扩大任务范围（T3）");
+    expect(impact.items.join(" ")).toContain("修改项目或任务验收标准");
+    expect(impact.items.join(" ")).toContain("已确认目标保持不变");
+    expect(impact.items.join(" ")).not.toContain("修改项目目标");
+    expect(impact.note).toContain("自动确认不会应用");
+    const markup = renderToStaticMarkup(
+      <ProposalCard
+        proposal={draft}
+        activeTasks={[]}
+        mode="auto"
+        busy={false}
+        confirming={false}
+        disabled={false}
+        confirmDisabledReason={null}
+        onConfirm={() => {}}
+      />,
+    );
+    expect(markup).toContain("高影响重规划草稿");
+    expect(markup).toContain("确认并应用重规划");
+  });
 });

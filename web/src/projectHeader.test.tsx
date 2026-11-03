@@ -107,6 +107,7 @@ function renderHeader(detail: ProjectDetail) {
     <ProjectHeader
       detail={detail}
       canReplan
+      canEditGoal
       busy={false}
       merging={false}
       mergeNotice={null}
@@ -114,6 +115,7 @@ function renderHeader(detail: ProjectDetail) {
       onPause={() => {}}
       onForcePause={() => {}}
       onToggleReplan={() => {}}
+      onToggleGoalEdit={() => {}}
       onArchive={() => {}}
       onMerge={() => {}}
     />,

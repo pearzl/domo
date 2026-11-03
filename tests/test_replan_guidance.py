@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 人工指导保存后可查询审计事件，并出现在任务下一次执行作业的 prompt 中；
-  2. 执行者返回 replan 后作业按成功处理，产生重规划事件，旧计划被作废；
+  2. 执行者返回 replan 后产生重规划事件，高影响草稿确认后才作废旧计划；
   3. 已完成任务保留，未完成任务退出活动 DAG，新规划可复用旧 key 并最终产出报告；
   4. 暂停中的项目可提交重规划，暂停期间不产生新的规划作业，恢复后按新计划推进；
   5. 归档中的项目拒绝重规划，状态和规划作业数量不变；
@@ -273,6 +273,31 @@ def main():
             )
             detail = wait_project(
                 replan_project,
+                lambda item: item["project"]["stage"] == "analysis"
+                and item.get("proposal") is not None
+                and not any(
+                    job["role"] == "analysis" and job["status"] == "running"
+                    for job in item["jobs"]
+                ),
+                "高影响重规划草稿等待确认",
+            )
+            assert detail["proposal"]["replan_impact"]["high_impact"], detail["proposal"]
+            assert old_t2["id"] in {task["id"] for task in detail["tasks"]}
+            assert next(
+                task for task in detail["tasks"] if task["id"] == old_t2["id"]
+            )["status"] != "canceled", "分析期间不应提前取消旧任务"
+            assert not any(
+                event["kind"] == "plan_superseded" for event in detail["events"]
+            ), "确认前不应作废旧计划"
+            detail = call(
+                "POST", f"/api/projects/{replan_project}/analysis/confirm", {}
+            )
+            assert next(
+                task for task in detail["tasks"] if task["id"] == old_t2["id"]
+            )["status"] == "canceled", detail["tasks"]
+            assert any(task["id"] not in old_ids for task in detail["tasks"]), detail["tasks"]
+            detail = wait_project(
+                replan_project,
                 lambda item: item["project"]["stage"] == "summarizing"
                 and item["project"]["report"],
                 "重规划后的项目报告",
@@ -339,7 +364,7 @@ def main():
             )
             assert (
                 old_t2["key"] in planner_prompt
-                and "已取消任务" in planner_prompt
+                and "不保留任务" in planner_prompt
             )
             replan_reason = detail["project"]["replan_reason"]
             code, _ = call_error(
@@ -381,9 +406,9 @@ def main():
             assert paused_detail["project"]["replan_source"] == "human", paused_detail[
                 "project"
             ]
-            assert any(
-                task["status"] == "canceled" for task in paused_detail["tasks"]
-            ), paused_detail["tasks"]
+            assert all(
+                task["status"] != "canceled" for task in paused_detail["tasks"]
+            ), "暂停分析期间也应保留旧任务"
 
             time.sleep(1.5)
             paused_detail = call("GET", f"/api/projects/{paused_project}")
@@ -398,6 +423,22 @@ def main():
             ), "暂停期间不应产生新的项目分析作业"
 
             call("POST", f"/api/projects/{paused_project}/resume", {})
+            detail = wait_project(
+                paused_project,
+                lambda item: item["project"]["stage"] == "analysis"
+                and item.get("proposal") is not None
+                and not any(
+                    job["role"] == "analysis" and job["status"] == "running"
+                    for job in item["jobs"]
+                ),
+                "暂停恢复后的重规划草稿",
+            )
+            detail = call(
+                "POST", f"/api/projects/{paused_project}/analysis/confirm", {}
+            )
+            assert any(
+                task["status"] == "canceled" for task in detail["tasks"]
+            ), detail["tasks"]
             detail = wait_project(
                 paused_project,
                 lambda item: item["project"]["stage"] == "summarizing"

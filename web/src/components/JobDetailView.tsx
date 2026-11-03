@@ -26,11 +26,14 @@ export const RECENT_JOB_LIMIT = 3;
 export function JobDetailView({
   job,
   retryable = false,
+  readOnly = false,
   onRetry,
   focusNonce = 0,
 }: {
   job: JobSummary;
   retryable?: boolean;
+  /** 只读项目保留作业内容，但不提供变更操作。 */
+  readOnly?: boolean;
   onRetry?: () => void;
   /** 大于 0 时展开该作业并滚动到可见位置；用于从执行历史跳转。 */
   focusNonce?: number;
@@ -56,24 +59,27 @@ export function JobDetailView({
   }, [focusNonce]);
 
 
-  async function loadDetail() {
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setDetail(null);
     setLoading(true);
     setError("");
-    try {
-      setDetail(await api.getJob(job.id));
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (open && !detail && !loading) void loadDetail();
-    // Detail loading is keyed by the open state; job details never change for
-    // a finished job.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+    api
+      .getJob(job.id)
+      .then((next) => {
+        if (active) setDetail(next);
+      })
+      .catch((err) => {
+        if (active) setError(errorMessage(err));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open, job.id, job.status, job.finished_at]);
 
   function handleToggle(event: SyntheticEvent<HTMLDetailsElement>) {
     setOpen(event.currentTarget.open);
@@ -115,7 +121,7 @@ export function JobDetailView({
           {job.exit_code !== null ? (
             <span className="muted">exit {job.exit_code}</span>
           ) : null}
-          {retryable && onRetry ? (
+          {!readOnly && retryable && onRetry ? (
             <button
               className="secondary"
               title="让这个失败作业重新排队"

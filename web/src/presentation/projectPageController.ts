@@ -25,7 +25,7 @@ import {
 } from "./addTaskDraft";
 
 function readWindowView(): ProjectViewState {
-  if (typeof window === "undefined") return { tab: null, taskId: null };
+  if (typeof window === "undefined") return { tab: null, taskId: null, jobId: null };
   return readProjectView(window.location.search);
 }
 
@@ -33,7 +33,8 @@ export function useProjectPageController({ id }: { id: string }) {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [snapshotVersion, setSnapshotVersion] = useState(0);
   const verificationSignatureRef = useRef("");
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [loading, setLoading] = useState(true);
   const analysisDraft = useDraftValue(
     { projectId: id, field: "analysis-message" },
@@ -53,14 +54,24 @@ export function useProjectPageController({ id }: { id: string }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
     initialView.taskId,
   );
-  const [activeTab, setActiveTab] = useState<string | null>(initialView.tab);
+  const [activeTab, setActiveTab] = useState<string | null>(
+    initialView.tab ?? (initialView.jobId ? "info" : null),
+  );
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(
+    initialView.jobId,
+  );
   const [replanOpen, setReplanOpen] = useState(false);
+  const [replanOrigin, setReplanOrigin] = useState<"project" | "report">("project");
   const replanDraft = useDraftValue(
     { projectId: id, field: "replan-reason" },
     "",
   );
   const replanReason = replanDraft.value;
   const setReplanReason = replanDraft.setValue;
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const goalDraft = useDraftValue({ projectId: id, field: "project-goal" }, "");
+  const goalValue = goalDraft.value;
+  const setGoalValue = goalDraft.setValue;
   const [addTaskOpen, setAddTaskOpen] = useState(false);
   const taskDraft = useDraftJson(
     { projectId: id, field: "add-task-form" },
@@ -107,21 +118,24 @@ export function useProjectPageController({ id }: { id: string }) {
 
   function selectTask(taskId: string | null) {
     setSelectedTaskId(taskId);
-    applyProjectView({ taskId }, taskId ? "push" : "replace");
+    setSelectedJobId(null);
+    applyProjectView({ taskId, jobId: null }, taskId ? "push" : "replace");
   }
 
-  function selectTab(tab: string) {
+  function selectTab(tab: string, jobId: string | null = null) {
     setActiveTab(tab);
     setSelectedTaskId(null);
-    applyProjectView({ tab, taskId: null }, "push");
+    setSelectedJobId(jobId);
+    applyProjectView({ tab, taskId: null, jobId }, "push");
   }
 
   // 浏览器前进/后退时同步选项卡与抽屉；路径变化由 App 负责。
   useEffect(() => {
     function handlePop() {
       const view = readWindowView();
-      setActiveTab(view.tab);
+      setActiveTab(view.tab ?? (view.jobId ? "info" : null));
       setSelectedTaskId(view.taskId);
+      setSelectedJobId(view.jobId);
     }
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
@@ -138,9 +152,9 @@ export function useProjectPageController({ id }: { id: string }) {
         verificationSignatureRef.current = signature;
         setSnapshotVersion((current) => current + 1);
       }
-      setError("");
+      setReadError("");
     } catch (err) {
-      if (!silent) setError(errorMessage(err));
+      if (!silent) setReadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -178,8 +192,11 @@ export function useProjectPageController({ id }: { id: string }) {
     if (!detail) return;
     const next = resolveProjectTab(detail.project.stage, activeTab);
     if (next !== activeTab) setActiveTab(next);
-    applyProjectView({ tab: next, taskId: selectedTaskId }, "replace");
-  }, [detail, activeTab, selectedTaskId]);
+    applyProjectView(
+      { tab: next, taskId: selectedTaskId, jobId: selectedJobId },
+      "replace",
+    );
+  }, [detail, activeTab, selectedTaskId, selectedJobId]);
 
   useEffect(() => {
     if (detail?.project.status !== "archived") {
@@ -202,13 +219,13 @@ export function useProjectPageController({ id }: { id: string }) {
 
   async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
-    setError("");
+    setActionError("");
     try {
       await action();
       await refresh();
       return true;
     } catch (err) {
-      setError(errorMessage(err));
+      setActionError(errorMessage(err));
       return false;
     } finally {
       setBusy(false);
@@ -217,7 +234,7 @@ export function useProjectPageController({ id }: { id: string }) {
 
   async function handleArchive() {
     setBusy(true);
-    setError("");
+    setActionError("");
     try {
       const preview = await api.getArchivePreview(id);
       const dirty = preview.dirty;
@@ -235,7 +252,7 @@ export function useProjectPageController({ id }: { id: string }) {
       await api.archiveProject(id, dirty.length > 0);
       await refresh();
     } catch (err) {
-      setError(errorMessage(err));
+      setActionError(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -336,33 +353,70 @@ export function useProjectPageController({ id }: { id: string }) {
     if (ok) analysisDraft.clear();
   }
 
-  async function submitReport(
-    action: "accept" | "comment" | "reject" | "replan",
-  ) {
+  async function submitReport(action: "accept" | "comment" | "reject") {
     const ok = await run(() => api.submitReport(id, action, feedback));
     if (ok) feedbackDraft.clear();
   }
 
+  function requestReportReplan() {
+    if (!feedback.trim()) return;
+    setReplanReason(feedback);
+    setReplanOrigin("report");
+    setReplanOpen(true);
+  }
+
+  async function abandonReplan() {
+    const ok = await run(() => api.abandonReplan(id));
+    if (ok) setReplanOpen(false);
+  }
+
   async function submitReplan() {
-    const ok = await run(() => api.replanProject(id, replanReason));
+    const ok = await run(() =>
+      replanOrigin === "report"
+        ? api.submitReport(id, "replan", replanReason)
+        : api.replanProject(id, replanReason),
+    );
     if (!ok) return;
     replanDraft.clear();
+    if (replanOrigin === "report") feedbackDraft.clear();
     setReplanOpen(false);
   }
 
   function toggleReplan() {
+    setReplanOrigin("project");
+    setGoalEditOpen(false);
     setReplanOpen((value) => !value);
+  }
+
+  function toggleGoalEdit() {
+    if (!detail) return;
+    if (!goalEditOpen) setGoalValue(detail.project.goal);
+    setReplanOpen(false);
+    setGoalEditOpen((value) => !value);
+  }
+
+  function cancelGoalEdit() {
+    setGoalEditOpen(false);
+    goalDraft.clear();
+  }
+
+  async function submitGoalEdit() {
+    const ok = await run(() => api.updateProjectGoal(id, goalValue));
+    if (!ok) return;
+    goalDraft.clear();
+    setGoalEditOpen(false);
   }
 
   function cancelReplan() {
     setReplanOpen(false);
+    setReplanOrigin("project");
     replanDraft.clear();
   }
 
   return {
     detail,
     snapshotVersion,
-    error,
+    error: actionError || readError,
     loading,
     busy,
     confirming,
@@ -373,11 +427,16 @@ export function useProjectPageController({ id }: { id: string }) {
     setFeedback,
     feedbackDraftKey: feedbackDraft.key,
     selectedTaskId,
+    selectedJobId,
     activeTab,
     replanOpen,
     replanReason,
     setReplanReason,
     replanDraftKey: replanDraft.key,
+    goalEditOpen,
+    goalValue,
+    setGoalValue,
+    goalDraftKey: goalDraft.key,
     addTaskOpen,
     taskForm,
     setTaskField,
@@ -403,9 +462,14 @@ export function useProjectPageController({ id }: { id: string }) {
     sendAnalysis,
     confirmProposal,
     submitReport,
+    requestReportReplan,
+    abandonReplan,
     submitReplan,
     toggleReplan,
     cancelReplan,
+    toggleGoalEdit,
+    cancelGoalEdit,
+    submitGoalEdit,
   };
 }
 

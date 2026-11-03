@@ -12,6 +12,7 @@ export function ProjectReportPanel({
   busy,
   archived,
   onSubmitReport,
+  onRequestReplan,
   onAddTask,
 }: {
   project: Project;
@@ -21,7 +22,8 @@ export function ProjectReportPanel({
   onFeedbackChange: (value: string) => void;
   busy: boolean;
   archived: boolean;
-  onSubmitReport: (action: "accept" | "comment" | "reject" | "replan") => void;
+  onSubmitReport: (action: "accept" | "comment" | "reject") => void;
+  onRequestReplan: () => void;
   onAddTask: () => void;
 }) {
   if (project.stage !== "summarizing" && !project.report) return null;
@@ -50,7 +52,7 @@ export function ProjectReportPanel({
           <p className="muted">规划者正在依据评议意见重写报告…</p>
         )
       ) : null}
-      {project.stage === "summarizing" ? (
+      {project.stage === "summarizing" && !archived ? (
         <div className="report-actions">
           <InputBox
             value={feedback}
@@ -90,8 +92,8 @@ export function ProjectReportPanel({
                 <button
                   className="secondary"
                   disabled={busy || !project.report || !feedback.trim()}
-                  onClick={() => onSubmitReport("replan")}
-                  title="记录意见并要求重新规划，项目回到项目分析阶段"
+                  onClick={onRequestReplan}
+                  title="先预览影响；提交后生成方案草稿，确认草稿时才应用"
                 >
                   要求重新规划
                 </button>

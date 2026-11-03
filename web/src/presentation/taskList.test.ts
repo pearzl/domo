@@ -347,15 +347,25 @@ describe("queueSummary", () => {
 describe("replanSummary", () => {
   it("未完成任务计入取消，已完成任务计入保留，已取消忽略", () => {
     const summary = replanSummary([
-      task({ key: "T1", stage: "completed" }),
-      task({ key: "T2", stage: "executing" }),
-      task({ key: "T3" }),
-      task({ key: "T4", status: "canceled" }),
+      task({ id: "t1", key: "T1", stage: "completed" }),
+      task({ id: "t2", key: "T2", stage: "executing" }),
+      task({ id: "t3", key: "T3" }),
+      task({ id: "t4", key: "T4", status: "canceled" }),
     ]);
     expect(summary.cancelCount).toBe(2);
     expect(summary.cancelKeys).toEqual(["T2", "T3"]);
     expect(summary.keepCount).toBe(1);
     expect(summary.keepKeys).toEqual(["T1"]);
+  });
+
+  it("未完成父任务的已完成派生子任务随整链取消", () => {
+    const summary = replanSummary([
+      task({ id: "parent", key: "T1", stage: "pending" }),
+      task({ id: "child", key: "T1.1", parent_id: "parent", stage: "completed" }),
+      task({ id: "done", key: "T2", stage: "completed" }),
+    ]);
+    expect(summary.cancelKeys).toEqual(["T1", "T1.1"]);
+    expect(summary.keepKeys).toEqual(["T2"]);
   });
 
   it("空任务列表两份清单为空", () => {

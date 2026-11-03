@@ -91,10 +91,12 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
     let merged_at = project.merged_at.clone();
     let merged_commit = project.merged_commit.clone();
     let merged_into_base = project_merged_into_base(&project).await;
-    let proposal = project
-        .proposal
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
+    let proposal_raw = if project.replan_active != 0 {
+        project.replan_proposal.as_deref()
+    } else {
+        project.proposal.as_deref()
+    };
+    let proposal = proposal_raw.and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
     Ok(ProjectDetail {
         project,
         merged_at: merged_at.clone(),

@@ -64,10 +64,12 @@ CREATE TABLE jobs (
 INSERT INTO projects VALUES
  ('p1','OldGoal','g1','/tmp/repo','main','b1','/tmp/w1','goal_confirm','blocked','等待用户答复或确认目标',NULL,NULL,NULL,NULL,NULL,'manual','{"kind":"ready","summary":"s","goal":"g1","assumptions":[],"acceptance":[],"plan":[],"verification":[],"skip_confirmation":false}',NULL,'tasks',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
  ('p2','OldPlanning','g2','/tmp/repo','main','b2','/tmp/w2','planning','paused',NULL,NULL,NULL,'why',NULL,'2026-01-01T00:00:00Z','auto',NULL,'2026-01-01T00:00:00Z','tasks',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
- ('p3','OldExecuting','g3','/tmp/repo','main','b3','/tmp/w3','executing','paused',NULL,NULL,NULL,NULL,NULL,NULL,'manual',NULL,'2026-01-01T00:00:00Z','tasks',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+ ('p3','OldExecuting','g3','/tmp/repo','main','b3','/tmp/w3','executing','paused',NULL,NULL,NULL,NULL,NULL,NULL,'manual',NULL,'2026-01-01T00:00:00Z','tasks',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+ ('p4','OldDirectFailure','g4','/tmp/repo','main','b4','/tmp/w4','analysis','blocked',NULL,NULL,NULL,NULL,NULL,NULL,'manual',NULL,NULL,'direct',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 INSERT INTO jobs (id, project_id, role, status, prompt, created_at) VALUES
  ('j1','p1','confirm','succeeded','x','2026-01-01T00:00:00Z'),
- ('j2','p2','goal','succeeded','x','2026-01-01T00:00:00Z');
+ ('j2','p2','goal','succeeded','x','2026-01-01T00:00:00Z'),
+ ('j3','p4','direct','failed','x','2026-01-01T00:00:00Z');
 INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, command_json, model_args_json, created_at, updated_at) VALUES
  ('agt_legacy','Legacy','opencode','','["planner","executor","verifier"]',0,1,1,NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 """
@@ -104,7 +106,15 @@ INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, ena
         assert rows["p3"][0] == "executing", rows
 
         roles = {row[0]: row[1] for row in db.execute("SELECT id, role FROM jobs")}
-        assert roles == {"j1": "analysis", "j2": "analysis"}, roles
+        assert roles == {"j1": "analysis", "j2": "analysis", "j3": "direct"}, roles
+        goal_locks = {
+            row[0]: row[1]
+            for row in db.execute("SELECT id, goal_locked_at FROM projects ORDER BY id")
+        }
+        assert goal_locks["p1"] is None, goal_locks
+        assert goal_locks["p2"] is not None, goal_locks
+        assert goal_locks["p3"] is not None, goal_locks
+        assert goal_locks["p4"] is not None, goal_locks
 
         agent_columns = {row[1]: row for row in db.execute("PRAGMA table_info('agents')")}
         assert "allow_priority_fallback" in agent_columns, agent_columns.keys()

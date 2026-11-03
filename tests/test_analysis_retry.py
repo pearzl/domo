@@ -39,6 +39,12 @@ def main():
             def analysis_jobs(detail):
                 return [job for job in detail["jobs"] if job["role"] == "analysis"]
 
+            def project_summary():
+                return next(
+                    item for item in call("GET", "/api/projects")
+                    if item["id"] == project_id
+                )
+
             for agent in call("GET", "/api/agents"):
                 call("PATCH", f"/api/agents/{agent['id']}", {"enabled": False})
             steady = call(
@@ -112,6 +118,10 @@ def main():
                 ),
                 "重规划后的项目分析重试耗尽",
             )
+            assert detail["project"]["report"], "分析失败不应清空旧报告"
+            assert detail["tasks"] and all(
+                task["status"] != "canceled" for task in detail["tasks"]
+            ), "分析失败不应取消旧计划任务"
             jobs = analysis_jobs(detail)
             assert len(jobs) == len(first_analysis) + 2, jobs
             retried = jobs[len(first_analysis):]
@@ -120,6 +130,7 @@ def main():
                 job["status"] == "failed" and job["failure_kind"] == "transient"
                 for job in retried
             ), retried
+            assert project_summary()["attention"] == "failed"
 
             # 人工重试最新失败作业仍会派发新的项目分析作业。
             call("POST", f"/api/jobs/{retried[-1]['id']}/retry", {})
@@ -138,7 +149,12 @@ def main():
             assert jobs[-1]["agent_id"] == flaky, jobs[-1]
             assert jobs[-1]["status"] == "failed", jobs[-1]
 
-            print("项目分析重试场景通过")
+            detail = call("POST", f"/api/projects/{project_id}/replan/abandon")
+            assert detail["project"]["stage"] == "summarizing", detail["project"]
+            assert detail["project"]["report"], detail["project"]
+            assert all(task["status"] != "canceled" for task in detail["tasks"])
+
+            print("项目分析重试与失败后放弃重规划场景通过")
 
 
 if __name__ == "__main__":

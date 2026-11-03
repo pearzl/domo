@@ -16,13 +16,16 @@ import {
 } from "../ui";
 import {
   EMPTY_PROJECT_FILTERS,
+  PROJECT_ATTENTION_LABELS,
   PROJECT_STAGES,
   PROJECT_STATUSES,
+  countProjectAttention,
   countProjectStage,
   countProjectStatus,
   filterProjects,
   isProjectFilterActive,
   resetProjectFilters,
+  toggleProjectAttention,
   toggleProjectStage,
   toggleProjectStatus,
 } from "../projectFilter";
@@ -31,7 +34,8 @@ import type { ProjectFilters, ProjectStageFilter, ProjectStatusFilter } from "..
 export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [formError, setFormError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [repoPath, setRepoPath] = useState("");
@@ -39,19 +43,20 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [creating, setCreating] = useState(false);
   const [filters, setFilters] = useState<ProjectFilters>(EMPTY_PROJECT_FILTERS);
 
-  async function refresh() {
+  async function refresh(showLoading = false) {
+    if (showLoading) setLoading(true);
     try {
       setProjects(await api.listProjects());
-      setError("");
+      setLoadError("");
     } catch (err) {
-      setError(errorMessage(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    void refresh();
+    void refresh(true);
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
   }, []);
@@ -64,7 +69,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   async function handleCreate(event: FormEvent) {
     event.preventDefault();
     setCreating(true);
-    setError("");
+    setFormError("");
     try {
       const detail = await api.createProject({
         name: name.trim(),
@@ -77,7 +82,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       setShowForm(false);
       onOpen(detail.project.id);
     } catch (err) {
-      setError(errorMessage(err));
+      setFormError(errorMessage(err));
     } finally {
       setCreating(false);
     }
@@ -95,13 +100,23 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
         </button>
       </header>
 
-      {error ? <ErrorBox message={error} /> : null}
+      {loadError ? (
+        <ErrorBox
+          message={loadError}
+          onRetry={() => void refresh(true)}
+          retrying={loading}
+        />
+      ) : null}
+      {formError ? <ErrorBox message={formError} /> : null}
 
       {loading ? null : projects.length > 0 ? (
         <FilterBar
           projects={projects}
           filters={filters}
           onReset={() => setFilters(resetProjectFilters())}
+          onToggleAttention={() =>
+            setFilters((current) => toggleProjectAttention(current))
+          }
           onToggleStage={(stage) =>
             setFilters((current) => toggleProjectStage(current, stage))
           }
@@ -153,7 +168,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
         <div className="panel">
           <SkeletonLines label="加载中…" />
         </div>
-      ) : projects.length === 0 ? (
+      ) : projects.length === 0 && !loadError ? (
         <EmptySteps
           title="还没有项目"
           hint="按三步开始第一个项目。"
@@ -164,7 +179,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
           ]}
           action={{ label: "新建项目", onClick: () => setShowForm(true) }}
         />
-      ) : visibleProjects.length === 0 ? (
+      ) : projects.length === 0 ? null : visibleProjects.length === 0 ? (
         <div className="empty">
           <div className="empty-title">没有符合筛选条件的项目</div>
           <div className="empty-hint">调整筛选标签组合后再试。</div>
@@ -204,6 +219,17 @@ function renderProjectCards(
           <h2>{project.name}</h2>
           <StageBadge stage={project.stage} />
           <StatusBadge status={project.status} />
+          {project.attention ? (
+            <Badge
+              tone={
+                project.attention === "failed" || project.attention === "blocked"
+                  ? "danger"
+                  : "success"
+              }
+            >
+              {PROJECT_ATTENTION_LABELS[project.attention]}
+            </Badge>
+          ) : null}
           {project.merged_at ? (
             <Badge
               tone="success"
@@ -239,15 +265,25 @@ function renderProjectCards(
 interface FilterBarProps {
   projects: ProjectSummary[];
   filters: ProjectFilters;
+  onToggleAttention: () => void;
   onToggleStage: (stage: ProjectStageFilter) => void;
   onToggleStatus: (status: ProjectStatusFilter) => void;
   onReset: () => void;
 }
 
-function FilterBar({ projects, filters, onToggleStage, onToggleStatus, onReset }: FilterBarProps) {
+function FilterBar({ projects, filters, onToggleAttention, onToggleStage, onToggleStatus, onReset }: FilterBarProps) {
   const allActive = !isProjectFilterActive(filters);
   return (
     <div className="filter-bar panel" aria-label="项目筛选">
+      <div className="filter-group">
+        <span className="filter-group-label">视角</span>
+        <FilterTag
+          label="待我处理"
+          count={countProjectAttention(projects)}
+          active={filters.attentionOnly}
+          onClick={onToggleAttention}
+        />
+      </div>
       <div className="filter-group">
         <span className="filter-group-label">阶段</span>
         {PROJECT_STAGES.map((stage) => (

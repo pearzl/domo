@@ -97,12 +97,14 @@ export function UsageTable({
   projects,
   agents,
   loading,
+  error = "",
 }: {
   dimension: UsageDimension;
   report: UsageReport | null;
   projects: ProjectSummary[];
   agents: Agent[];
   loading: boolean;
+  error?: string;
 }) {
   const current = currentUsageReport(dimension, report);
   return (
@@ -112,7 +114,11 @@ export function UsageTable({
       <p className="subtitle">输入 token 含缓存读写，输出 token 含推理。</p>
       {!current ? (
         <div className="muted">
-          {loading ? "正在加载用量记录…" : "暂时没有可展示的用量数据。"}
+          {loading
+            ? "正在加载用量记录…"
+            : error
+              ? "用量记录加载失败，请重试。"
+              : "暂时没有可展示的用量数据。"}
         </div>
       ) : current.groups.length === 0 ? (
         <Empty

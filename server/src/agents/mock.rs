@@ -180,6 +180,10 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
         .and_then(|value| value.get("goal"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    let proposed_goal = std::env::var("DOMO_MOCK_ANALYSIS_GOAL_OVERRIDE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| goal.to_string());
     let mode = context
         .get("project")
         .and_then(|value| value.get("confirm_mode"))
@@ -211,11 +215,12 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
         return mock_replan_plan(context, reason);
     }
     let skip = goal.contains("[skipforce]") || mode == CONFIRM_AUTO;
-    if goal.contains("[direct]") {
+    let force_plan = std::env::var("DOMO_MOCK_ANALYSIS_FORCE_PLAN").is_ok_and(|value| value == "1");
+    if goal.contains("[direct]") && !force_plan {
         return serde_json::json!({
             "kind": "direct",
             "summary": "这个目标足够简单，可以直接完成",
-            "goal": goal,
+            "goal": proposed_goal,
             "plan": ["创建目标文件", "检查文件内容"],
             "verification": ["读取文件确认内容"],
             "skip_confirmation": skip
@@ -285,7 +290,7 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "kind": "plan",
         "summary": summary,
-        "goal": goal,
+        "goal": proposed_goal,
         "assumptions": ["使用 mock Agent"],
         "acceptance": ["产物符合目标描述"],
         "tasks": tasks,
@@ -313,6 +318,26 @@ fn mock_direct(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
 }
 
 fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Value {
+    let goal = context
+        .get("project")
+        .and_then(|value| value.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if goal.contains("[replan-direct]") || goal.contains("[replan-direct-mismatch]") {
+        let draft_goal = if goal.contains("[replan-direct-mismatch]") {
+            "规划者擅自修改的目标"
+        } else {
+            goal
+        };
+        return serde_json::json!({
+            "kind": "direct",
+            "summary": format!("mock 直接重规划：{reason}"),
+            "goal": draft_goal,
+            "plan": ["直接完成重规划工作"],
+            "verification": ["核对直接完成产物"],
+            "skip_confirmation": true
+        });
+    }
     let completed: HashSet<String> = context
         .get("completed_tasks")
         .and_then(|value| value.as_array())
@@ -368,9 +393,16 @@ fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Va
         let second_key = next_mock_key(&taken, &HashSet::new());
         (first_key, second_key)
     };
+    let skip = context
+        .get("project")
+        .and_then(|value| value.get("confirm_mode"))
+        .and_then(|value| value.as_str())
+        == Some(CONFIRM_AUTO);
     serde_json::json!({
         "kind": "plan",
         "summary": format!("mock 重规划：{reason}"),
+        "goal": if goal.contains("[replan-goal-mismatch]") { "规划者擅自修改的目标" } else { goal },
+        "skip_confirmation": skip,
         "tasks": [
             {
                 "key": first_key,
@@ -447,6 +479,17 @@ fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_js
         return None;
     }
     let failed = |reason: String| Some(serde_json::json!({ "kind": "failed", "reason": reason }));
+    if role == JOB_ROLE_DIRECT
+        && std::env::var("DOMO_MOCK_DIRECT_FAIL_GOAL").is_ok_and(|marker| {
+            context
+                .get("project")
+                .and_then(|value| value.get("goal"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|goal| goal.contains(&marker))
+        })
+    {
+        return Some(serde_json::json!({"kind": "invalid_direct_result"}));
+    }
     if mock_flag_matches(context, "DOMO_MOCK_PLANNER_RATE_LIMIT", "") {
         let secs = std::env::var("DOMO_MOCK_PLANNER_RATE_LIMIT_RETRY")
             .ok()

@@ -16,6 +16,29 @@ pub(super) async fn handle_report(
     report: &str,
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    let current = crate::replan::load_project(&state.db, &project.id)
+        .await?
+        .unwrap_or_else(|| project.clone());
+    if current.replan_active != 0 {
+        sqlx::query(
+            "UPDATE projects SET report = ?, report_feedback = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(report)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "report_ready",
+            "旧计划报告已生成，重规划状态保持不变",
+        )
+        .await;
+        return Ok(());
+    }
     if has_active_tasks(&state.db, &project.id).await? {
         return apply_stale_result(
             state,
@@ -76,9 +99,14 @@ pub(super) async fn handle_project_acceptance(
         .collect();
     let passed = gaps.is_empty();
     let timestamp = now();
+    let replanning;
     {
         let _guard = state.schedule_lock.lock().await;
-        if has_active_tasks(&state.db, &project.id).await? {
+        let current = crate::replan::load_project(&state.db, &project.id)
+            .await?
+            .unwrap_or_else(|| project.clone());
+        replanning = current.replan_active != 0;
+        if !replanning && has_active_tasks(&state.db, &project.id).await? {
             return apply_stale_result(
                 state,
                 project,
@@ -87,7 +115,7 @@ pub(super) async fn handle_project_acceptance(
             )
             .await;
         }
-        if passed {
+        if passed && !replanning {
             sqlx::query(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
                  ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
@@ -99,6 +127,24 @@ pub(super) async fn handle_project_acceptance(
             .bind(STATUS_RUNNING)
             .bind(&snapshot)
             .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
+        } else if replanning {
+            sqlx::query(
+                "UPDATE projects SET acceptance = ?, acceptance_passed = ?, \
+                 acceptance_round = CASE WHEN ? THEN 0 ELSE acceptance_round END, \
+                 acceptance_at = ?, report = CASE WHEN ? THEN NULL ELSE report END, \
+                 report_feedback = CASE WHEN ? THEN NULL ELSE report_feedback END, \
+                 updated_at = ? WHERE id = ?",
+            )
+            .bind(&snapshot)
+            .bind(if passed { 1 } else { 0 })
+            .bind(passed)
+            .bind(&timestamp)
+            .bind(passed)
+            .bind(passed)
             .bind(&timestamp)
             .bind(&project.id)
             .execute(&state.db)
@@ -151,6 +197,9 @@ pub(super) async fn handle_project_acceptance(
     )
     .await;
 
+    if replanning {
+        return Ok(());
+    }
     if project.acceptance_round >= domain::MAX_AUTO_ACCEPTANCE_REPLANS {
         let _guard = state.schedule_lock.lock().await;
         let blocked_reason = format!(
@@ -307,6 +356,34 @@ pub(super) async fn handle_project_job_failure(
     )
     .await?;
     let _guard = state.schedule_lock.lock().await;
+    let current = crate::replan::load_project(&state.db, &project.id)
+        .await?
+        .unwrap_or_else(|| project.clone());
+    if current.replan_active != 0 {
+        sqlx::query(
+            "UPDATE projects SET avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
+             avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(failure.switch)
+        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(failure.switch)
+        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            failure.event_kind(failed_kind),
+            format!("旧计划{label}{}：{reason}", failure.label()),
+        )
+        .await;
+        return Ok(());
+    }
     if has_active_tasks(&state.db, &project.id).await? {
         return apply_stale_result(
             state,

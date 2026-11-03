@@ -74,6 +74,12 @@ CREATE TABLE IF NOT EXISTS projects (
     replan_reason TEXT,
     replan_source TEXT,
     replan_requested_at TEXT,
+    replan_active INTEGER NOT NULL DEFAULT 0,
+    replan_proposal TEXT,
+    replan_generation INTEGER NOT NULL DEFAULT 0,
+    replan_previous_stage TEXT,
+    replan_previous_goal TEXT,
+    replan_cleanup_needed INTEGER NOT NULL DEFAULT 0,
     acceptance TEXT,
     acceptance_passed INTEGER NOT NULL DEFAULT 0,
     acceptance_round INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +87,7 @@ CREATE TABLE IF NOT EXISTS projects (
     confirm_mode TEXT NOT NULL DEFAULT 'manual',
     proposal TEXT,
     confirmed_at TEXT,
+    goal_locked_at TEXT,
     completion_mode TEXT NOT NULL DEFAULT 'tasks',
     merged_at TEXT,
     merged_commit TEXT,
@@ -208,6 +215,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     finished_at TEXT,
     resume INTEGER NOT NULL DEFAULT 0,
+    replan_generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
@@ -233,6 +241,17 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id, id);
+
+CREATE TABLE IF NOT EXISTS replan_cleanup (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    requested_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (project_id, generation)
+);
+CREATE INDEX IF NOT EXISTS idx_replan_cleanup_status ON replan_cleanup(status, created_at);
 "#;
 
 pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
@@ -259,6 +278,37 @@ async fn migrate(pool: &SqlitePool) -> DbResult<()> {
     ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
     ensure_column(pool, "projects", "replan_source", "TEXT").await?;
     ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "replan_active",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(pool, "projects", "replan_proposal", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "replan_generation",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(pool, "projects", "replan_previous_stage", "TEXT").await?;
+    ensure_column(pool, "projects", "replan_previous_goal", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "replan_cleanup_needed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "jobs",
+        "replan_generation",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
     ensure_column(pool, "projects", "acceptance", "TEXT").await?;
     ensure_column(
         pool,
@@ -290,6 +340,29 @@ async fn migrate(pool: &SqlitePool) -> DbResult<()> {
         .execute(pool)
         .await?;
     ensure_column(pool, "projects", "confirmed_at", "TEXT").await?;
+    ensure_column(pool, "projects", "goal_locked_at", "TEXT").await?;
+    sqlx::raw_sql(
+        "UPDATE projects SET goal_locked_at = COALESCE(confirmed_at, updated_at) \
+         WHERE goal_locked_at IS NULL AND (confirmed_at IS NOT NULL \
+         OR stage NOT IN ('analysis', 'goal_confirm', 'planning') \
+         OR replan_requested_at IS NOT NULL OR report IS NOT NULL \
+         OR EXISTS (SELECT 1 FROM tasks WHERE tasks.project_id = projects.id) \
+         OR EXISTS (SELECT 1 FROM jobs WHERE jobs.project_id = projects.id \
+         AND jobs.role IN ('direct', 'project_acceptance', 'summary')))",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(
+        "INSERT OR IGNORE INTO replan_cleanup \
+         (project_id, generation, requested_at, status, created_at) \
+         SELECT id, CASE WHEN replan_active = 1 THEN replan_generation - 1 \
+         ELSE replan_generation END, CASE WHEN replan_active = 1 THEN '' \
+         ELSE replan_requested_at END, 'pending', updated_at FROM projects \
+         WHERE replan_cleanup_needed = 1 AND ((replan_active = 0 AND replan_requested_at IS NOT NULL) \
+         OR (replan_active = 1 AND replan_generation > 0))",
+    )
+    .execute(pool)
+    .await?;
     ensure_column(
         pool,
         "projects",
