@@ -77,6 +77,7 @@ export function TaskDrawer({
   /** 项目快照版本：验收记录随任务与作业一起刷新。 */
   snapshotVersion?: number;
 }) {
+  const isGit = detail.project.workspace_type !== "plain";
   const jobs = detail.jobs.filter((job) => job.task_id === task.id);
   // 验收摘要优先取逐轮验收记录；接口不可用时呈现层回退到任务字段并标注来源。
   const verificationHistory = useVerificationHistory(
@@ -291,7 +292,9 @@ export function TaskDrawer({
               </span>
             </div>
             <p className="muted">
-              派生任务跳过验收，执行成功后直接提交并合入父任务分支。
+              {isGit
+                ? "派生任务跳过验收，执行成功后直接提交并合入父任务分支。"
+                : "派生任务跳过验收，执行成功后产物直接保留在普通工作区。"}
             </p>
           </>
         ) : null}
@@ -424,7 +427,12 @@ export function TaskDrawer({
   const depsFolded = depsFoldedFields({
     archiveReference: Boolean(archiveReference && artifactsReleased && !artifactsReleasing),
     archiveRecovery: Boolean(artifactsReleased && !artifactsReleasing && archiveRecovery),
-  });
+  }).filter(
+    (field) =>
+      isGit ||
+      (field !== "branch" && field !== "worktree" && field !== "archiveRef" &&
+        field !== "archiveRecovery"),
+  );
   const depsSection = (
     <section className="task-deps">
       <h3>依赖与位置</h3>

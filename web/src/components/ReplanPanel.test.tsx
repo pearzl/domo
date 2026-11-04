@@ -94,7 +94,7 @@ describe("安全重规划入口", () => {
       />,
     );
     expect(markup).toContain("旧任务、报告和验收口径在分析期间保持可恢复");
-    expect(markup).toContain("确认新方案后将取消 1 个未完成任务");
+    expect(markup).toContain("应用新方案后将取消 1 个未完成任务");
     expect(markup).toContain("原子切换计划");
   });
 });

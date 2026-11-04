@@ -109,13 +109,15 @@ def main():
                     "/api/projects",
                     {
                         "name": name,
-                        "goal": goal,
                         "repo_path": str(repo),
                         "base_branch": "main",
                     },
                 )["project"]["id"]
 
             def submit(project_id, goal):
+                detail = call("GET", f"/api/projects/{project_id}")
+                if detail["messages"]:
+                    return
                 call(
                     "POST",
                     f"/api/projects/{project_id}/analysis/messages",

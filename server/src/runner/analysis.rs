@@ -359,16 +359,10 @@ pub(super) async fn handle_analysis_plan(
     };
     let proposal_json = serde_json::to_string(&proposal)?;
     let confirm_mode = latest_confirm_mode(state, &project.id).await?;
-    let auto = if project.replan_active != 0 {
-        skip_confirmation
-            && confirm_mode == CONFIRM_AUTO
-            && !proposal
-                .replan_impact
-                .as_ref()
-                .is_some_and(|impact| impact.high_impact)
-    } else {
-        project.confirmed_at.is_some() || (skip_confirmation && confirm_mode == CONFIRM_AUTO)
-    };
+    // 重规划草稿生成后由 DOMO 直接应用，不受方案确认方式与影响范围影响。
+    let auto = project.replan_active != 0
+        || project.confirmed_at.is_some()
+        || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
     if project.replan_active != 0
         && !crate::replan::store_draft(state, project, &proposal_json).await?
     {
@@ -384,7 +378,22 @@ pub(super) async fn handle_analysis_plan(
         return Ok(());
     }
     if auto {
-        return apply_analysis_plan(state, project, &goal, &tasks, summary, &proposal_json).await;
+        apply_analysis_plan(state, project, &goal, &tasks, summary, &proposal_json).await?;
+        if project.replan_active != 0 {
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&project.id),
+                None,
+                "replan_applied",
+                format!(
+                    "重规划草稿已自动应用，取消未完成任务并创建 {} 个新任务",
+                    tasks.len()
+                ),
+            )
+            .await;
+        }
+        return Ok(());
     }
     let _guard = state.schedule_lock.lock().await;
     let current = crate::replan::load_project(&state.db, &project.id)
@@ -501,16 +510,10 @@ pub(super) async fn handle_analysis_direct(
     };
     let proposal_json = serde_json::to_string(&proposal)?;
     let confirm_mode = latest_confirm_mode(state, &project.id).await?;
-    let auto = if project.replan_active != 0 {
-        skip_confirmation
-            && confirm_mode == CONFIRM_AUTO
-            && !proposal
-                .replan_impact
-                .as_ref()
-                .is_some_and(|impact| impact.high_impact)
-    } else {
-        project.confirmed_at.is_some() || (skip_confirmation && confirm_mode == CONFIRM_AUTO)
-    };
+    // 重规划草稿生成后由 DOMO 直接应用，不受方案确认方式与影响范围影响。
+    let auto = project.replan_active != 0
+        || project.confirmed_at.is_some()
+        || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
     let content =
         analysis_proposal_content(summary, Some(&goal), &[], &[], &[], plan, verification);
     if project.replan_active != 0
@@ -538,8 +541,8 @@ pub(super) async fn handle_analysis_direct(
             &state.bus,
             Some(&project.id),
             None,
-            "analysis_auto_confirmed",
-            "低影响重规划方案已由自动确认通过，开始直接完成",
+            "replan_applied",
+            "重规划草稿已自动应用，开始直接完成",
         )
         .await;
         return Ok(());
@@ -601,28 +604,6 @@ pub(super) async fn handle_analysis_direct(
             None,
             "analysis_auto_confirmed",
             "方案已由自动确认通过，开始直接完成",
-        )
-        .await;
-    } else if project.replan_active != 0 {
-        sqlx::query(
-            "UPDATE projects SET replan_proposal = ?, stage = ?, \
-             status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-             blocked_reason = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(&proposal_json)
-        .bind(STAGE_ANALYSIS)
-        .bind(STATUS_BLOCKED)
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "analysis_direct",
-            "重规划建议直接完成，等待人工确认影响",
         )
         .await;
     } else {

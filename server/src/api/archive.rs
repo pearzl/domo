@@ -38,6 +38,9 @@ pub(super) async fn dirty_worktrees(
     state: &AppState,
     project: &ProjectRow,
 ) -> Result<Vec<DirtyWorktree>, ApiError> {
+    if !project.is_git() {
+        return Ok(Vec::new());
+    }
     let _guard = state.git_lock.lock().await;
     let mut dirty = Vec::new();
     let project_worktree = paths::project_repo(&PathBuf::from(&project.workspace));
@@ -173,6 +176,13 @@ pub(super) async fn project_archive_refs(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = require_project(&state, &id).await?;
+    if !project.is_git() {
+        return Ok(Json(json!({
+            "project": Value::Null,
+            "tasks": [],
+            "backup_command": Value::Null,
+        })));
+    }
     let repo = PathBuf::from(&project.repo_path);
     let project_reference = git::archive_ref(&project.branch);
     let project_recovery = format!("git branch {} {}", project.branch, project_reference);

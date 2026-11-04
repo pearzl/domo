@@ -81,7 +81,7 @@ pub(super) async fn handle_direct_failure(
     agent: Option<&AgentRow>,
     process_failure: bool,
 ) -> Result<()> {
-    {
+    if project.is_git() {
         let _guard = state.git_lock.lock().await;
         let _ = git::reset_hard(&paths::project_repo(&PathBuf::from(&project.workspace))).await;
     }

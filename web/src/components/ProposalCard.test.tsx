@@ -255,7 +255,7 @@ describe("确认后影响摘要", () => {
     expect(impact.items.join(" ")).toContain("报告");
   });
 
-  it("高影响重规划展示取消、范围和验收变化且不允许静默自动应用", () => {
+  it("高影响重规划展示影响并由 DOMO 自动应用，不提供确认入口", () => {
     const draft = proposal({
       replan_impact: {
         high_impact: true,
@@ -271,7 +271,7 @@ describe("确认后影响摘要", () => {
     expect(impact.items.join(" ")).toContain("修改项目或任务验收标准");
     expect(impact.items.join(" ")).toContain("已确认目标保持不变");
     expect(impact.items.join(" ")).not.toContain("修改项目目标");
-    expect(impact.note).toContain("自动确认不会应用");
+    expect(impact.note).toContain("DOMO 自动应用");
     const markup = renderToStaticMarkup(
       <ProposalCard
         proposal={draft}
@@ -285,6 +285,7 @@ describe("确认后影响摘要", () => {
       />,
     );
     expect(markup).toContain("高影响重规划草稿");
-    expect(markup).toContain("确认并应用重规划");
+    expect(markup).toContain("重规划草稿由 DOMO 自动应用");
+    expect(markup).not.toContain("确认并应用重规划");
   });
 });

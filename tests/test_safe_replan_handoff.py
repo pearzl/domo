@@ -67,80 +67,22 @@ def main():
                     {"reason": reason},
                 )
 
-            def wait_draft(project_id):
+            def wait_applied(project_id, label="重规划自动应用"):
                 return wait_project(
                     project_id,
-                    lambda detail: detail["project"]["stage"] == "analysis"
-                    and detail.get("proposal") is not None
+                    lambda detail: detail["project"]["stage"] == "executing"
+                    and any(
+                        event["kind"] == "replan_applied"
+                        for event in detail["events"]
+                    )
                     and not any(
                         job["role"] == "analysis" and job["status"] == "running"
                         for job in detail["jobs"]
                     ),
-                    "静默后的重规划草稿",
+                    label,
                 )
 
-            # 旧 direct 回调只保存旧报告，不覆盖重规划阶段；放弃后报告可验收。
-            direct_id = new_project("DirectHandoff", "[direct] 旧直接完成交接")
-            running_role(direct_id, "direct")
-            request_replan(direct_id, "旧 direct 完成后重新规划")
-            detail = wait_draft(direct_id)
-            assert detail["project"]["report"], detail["project"]
-            assert detail["project"]["stage"] == "analysis"
-            detail = call("POST", f"/api/projects/{direct_id}/replan/abandon")
-            assert detail["project"]["stage"] == "summarizing", detail["project"]
-            assert detail["project"]["report"], detail["project"]
-
-            # 等待旧作业静默时也能取消请求，旧 direct 继续完成原流程。
-            waiting_id = new_project("WaitingAbandon", "[direct] 等待交接时放弃")
-            running_role(waiting_id, "direct")
-            request_replan(waiting_id, "等待期间放弃重规划")
-            detail = call("POST", f"/api/projects/{waiting_id}/replan/abandon")
-            assert detail["project"]["stage"] == "executing", detail["project"]
-            detail = wait_project(
-                waiting_id,
-                lambda item: item["project"]["stage"] == "summarizing"
-                and bool(item["project"]["report"]),
-                "放弃后旧 direct 报告",
-            )
-
-            # 多次主动改目标后放弃，旧 direct 报告与本轮最初目标一起恢复。
-            goal_id = new_project("GoalRestoreHandoff", "[direct] 放弃时恢复最初目标")
-            original_goal = call("GET", f"/api/projects/{goal_id}")["project"]["goal"]
-            running_role(goal_id, "direct")
-            call("POST", f"/api/projects/{goal_id}/goal", {"goal": "本轮中间目标"})
-            call("POST", f"/api/projects/{goal_id}/goal", {"goal": "本轮最后目标"})
-            detail = wait_draft(goal_id)
-            assert detail["project"]["report"], detail["project"]
-            detail = call("POST", f"/api/projects/{goal_id}/replan/abandon")
-            assert detail["project"]["goal"] == original_goal, detail["project"]
-            assert detail["project"]["stage"] == "summarizing", detail["project"]
-            assert detail["project"]["report"], detail["project"]
-            assert any(
-                event["kind"] == "replan_aborted" and original_goal in event["message"]
-                for event in detail["events"]
-            )
-
-            # 旧 summary 回调也不能把 stage 改回 summarizing。
-            summary_id = new_project("SummaryHandoff", "[single] 旧总结交接")
-            running_role(summary_id, "summary")
-            request_replan(summary_id, "旧 summary 完成后重新规划")
-            detail = wait_draft(summary_id)
-            assert detail["project"]["report"], detail["project"]
-            assert detail["project"]["stage"] == "analysis"
-            detail = call("POST", f"/api/projects/{summary_id}/replan/abandon")
-            assert detail["project"]["stage"] == "summarizing", detail["project"]
-
-            # 旧项目验收在静默屏障内完成，不触发第二次重规划或阶段回写。
-            acceptance_id = new_project("AcceptanceHandoff", "[single] 旧项目验收交接")
-            running_role(acceptance_id, "project_acceptance")
-            request_replan(acceptance_id, "旧项目验收完成后重新规划")
-            detail = wait_draft(acceptance_id)
-            assert detail["project"]["stage"] == "analysis"
-            assert detail["project"]["replan_reason"] == "旧项目验收完成后重新规划"
-            detail = call("POST", f"/api/projects/{acceptance_id}/replan/abandon")
-            assert detail["project"]["stage"] == "summarizing", detail["project"]
-
-            # verifier 的 Git 合并和作业结算先于分析草稿，保留范围与交付分支一致。
+            # verifier 的 Git 合并和作业结算先于自动应用，保留范围与交付分支一致。
             verifier_id = new_project("VerifierHandoff", "[single] 旧验收合并交接")
             running_role(verifier_id, "verifier")
             before = call("GET", f"/api/projects/{verifier_id}")
@@ -148,7 +90,7 @@ def main():
                 [job for job in before["jobs"] if job["role"] == "analysis"]
             )
             request_replan(verifier_id, "旧 verifier 完成后重新规划")
-            detail = wait_draft(verifier_id)
+            detail = wait_applied(verifier_id, "verifier 交接后自动应用")
             verifier = next(
                 job for job in detail["jobs"] if job["role"] == "verifier"
             )
@@ -157,12 +99,11 @@ def main():
             assert len(analysis_jobs) == analysis_before + 1, analysis_jobs
             old = next(task for task in detail["tasks"] if task["key"] == "T1")
             assert old["stage"] == "completed" and old["status"] != "canceled", old
-            assert "T1" in detail["proposal"]["replan_impact"]["retained_task_keys"]
             branch = detail["project"]["branch"]
             assert "T1" in git(["show", f"{branch}:domo_mock/T1.txt"], repo)
-            detail = call("POST", f"/api/projects/{verifier_id}/analysis/confirm", {})
-            old = next(task for task in detail["tasks"] if task["id"] == old["id"])
-            assert old["status"] != "canceled", old
+            assert any(
+                event["kind"] == "plan_superseded" for event in detail["events"]
+            )
 
             # 任一未完成父任务会使整个派生链退出，已完成子任务不会伪称已交付。
             derive_id = new_project(
@@ -189,11 +130,13 @@ def main():
             assert any(child["stage"] == "completed" for child in children), children
             request_replan(derive_id, "未完成父任务需要重规划")
             call("POST", f"/api/projects/{derive_id}/resume", {})
-            detail = wait_draft(derive_id)
-            impact = detail["proposal"]["replan_impact"]
-            assert "T1" in impact["canceled_task_keys"], impact
-            assert any(child["key"] in impact["canceled_task_keys"] for child in children), impact
-            assert all(child["key"] not in impact["retained_task_keys"] for child in children)
+            detail = wait_applied(derive_id, "派生链重规划自动应用")
+            family = [
+                task
+                for task in detail["tasks"]
+                if task["id"] == parent["id"] or task["parent_id"] == parent["id"]
+            ]
+            assert all(task["status"] == "canceled" for task in family), family
             analysis_job = sorted(
                 (job for job in detail["jobs"] if job["role"] == "analysis"),
                 key=lambda job: job["created_at"],
@@ -205,13 +148,6 @@ def main():
             assert all(child["key"] not in retained_prompt for child in children), prompt
             canceled_prompt = prompt.split("不保留任务", 1)[1]
             assert any(child["key"] in canceled_prompt for child in children), prompt
-            detail = call("POST", f"/api/projects/{derive_id}/analysis/confirm", {})
-            family = [
-                task
-                for task in detail["tasks"]
-                if task["id"] == parent["id"] or task["parent_id"] == parent["id"]
-            ]
-            assert all(task["status"] == "canceled" for task in family), family
             for child in children:
                 if child["stage"] == "completed":
                     result = run(

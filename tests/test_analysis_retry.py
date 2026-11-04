@@ -77,15 +77,11 @@ def main():
                 {
                     "name": "Analysis Retry",
                     "goal": goal,
+                    "confirm_mode": "auto",
                     "repo_path": str(repo),
                     "base_branch": "main",
                 },
             )["project"]["id"]
-            call(
-                "POST",
-                f"/api/projects/{project_id}/analysis/messages",
-                {"message": goal, "confirm_mode": "auto"},
-            )
             detail = wait_project(
                 project_id,
                 lambda item: item["project"]["stage"] == "summarizing"

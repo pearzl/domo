@@ -104,18 +104,23 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     let _ = fs::write(job_dir.join("stderr.log"), b"").await;
 
     let workspace = PathBuf::from(&project.workspace);
-    let cwd = match job.role.as_str() {
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
-            paths::project_repo(&workspace)
+    let cwd = if project.is_git() {
+        match job.role.as_str() {
+            JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
+                paths::project_repo(&workspace)
+            }
+            JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
+            JOB_ROLE_VERIFIER => {
+                prepare_verify_worktree(state, &project, task.as_ref(), &job.id).await?
+            }
+            other => return Err(anyhow!("未知作业角色: {other}")),
         }
-        JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
-        JOB_ROLE_VERIFIER => {
-            prepare_verify_worktree(state, &project, task.as_ref(), &job.id).await?
-        }
-        other => return Err(anyhow!("未知作业角色: {other}")),
+    } else {
+        // 普通工作区的全部角色共用所选本地目录，不创建 worktree。
+        PathBuf::from(&project.repo_path)
     };
-    ensure_worktree_root(&cwd).await?;
-    if job.role == JOB_ROLE_DIRECT {
+    ensure_worktree_root(&cwd, project.is_git()).await?;
+    if job.role == JOB_ROLE_DIRECT && project.is_git() {
         let _guard = state.git_lock.lock().await;
         git::reset_hard(&cwd).await?;
     }
@@ -329,15 +334,17 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     state.unregister_job(&job_dir);
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
-    if job.role == JOB_ROLE_VERIFIER {
+    if job.role == JOB_ROLE_VERIFIER && project.is_git() {
         // The verifier workspace is disposable and must not leak into later work.
         let _guard = state.git_lock.lock().await;
         let _ = git::remove_worktree(&paths::project_repo(&workspace), &cwd).await;
     }
-    if matches!(
-        job.role.as_str(),
-        JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
-    ) {
+    if project.is_git()
+        && matches!(
+            job.role.as_str(),
+            JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+        )
+    {
         let _guard = state.git_lock.lock().await;
         let _ = git::reset_hard(&paths::project_repo(&workspace)).await;
     }
@@ -494,9 +501,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if job.role == JOB_ROLE_DIRECT && status == JOB_STATUS_SUCCEEDED {
         if let Some(ParsedResult::DirectDone { summary, report }) = parsed.clone() {
             let message = format!("domo(direct): {} ({})", project.name, short_id(&job.id));
-            let commit = {
+            let commit = if project.is_git() {
                 let _guard = state.git_lock.lock().await;
                 git::commit_all(&cwd, &message).await
+            } else {
+                Ok(false)
             };
             if let Err(commit_error) = commit {
                 let error_text = format!("提交直接完成结果失败: {commit_error:#}");
@@ -561,9 +570,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     "domo(task-{}): {} (attempt {})",
                     task.key, task.title, job.attempt
                 );
-                let commit = {
+                let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
                     git::commit_all(&cwd, &message).await
+                } else {
+                    Ok(false)
                 };
                 if let Err(commit_error) = commit {
                     let error_text = format!("提交执行结果失败: {commit_error:#}");
@@ -610,9 +621,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     "domo(task-{}): {} (attempt {})",
                     task.key, task.title, job.attempt
                 );
-                let commit = {
+                let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
                     git::commit_all(&cwd, &message).await
+                } else {
+                    Ok(false)
                 };
                 if let Err(commit_error) = commit {
                     let error_text = format!("提交执行结果失败: {commit_error:#}");

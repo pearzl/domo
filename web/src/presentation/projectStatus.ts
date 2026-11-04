@@ -152,6 +152,7 @@ export function projectAttention(
     return project.status === "blocked" ? blockedAttention(input) : null;
   }
   if (project.stage === "completed") {
+    if (project.workspace_type === "plain") return null;
     return project.merged_at || input.mergedIntoBase ? null : "merge";
   }
   return project.status === "blocked" ? blockedAttention(input) : null;
@@ -219,6 +220,14 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
   }
 
   if (project.stage === "completed") {
+    if (project.workspace_type === "plain") {
+      return guidance(
+        "success",
+        "已交付",
+        "已交付",
+        `产物与作业记录保留在普通工作区 ${project.repo_path}。`,
+      );
+    }
     if (project.merged_at) {
       return guidance(
         "success",

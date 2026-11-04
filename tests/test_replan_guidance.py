@@ -273,29 +273,18 @@ def main():
             )
             detail = wait_project(
                 replan_project,
-                lambda item: item["project"]["stage"] == "analysis"
-                and item.get("proposal") is not None
-                and not any(
-                    job["role"] == "analysis" and job["status"] == "running"
-                    for job in item["jobs"]
+                lambda item: any(
+                    event["kind"] == "replan_applied" for event in item["events"]
                 ),
-                "高影响重规划草稿等待确认",
-            )
-            assert detail["proposal"]["replan_impact"]["high_impact"], detail["proposal"]
-            assert old_t2["id"] in {task["id"] for task in detail["tasks"]}
-            assert next(
-                task for task in detail["tasks"] if task["id"] == old_t2["id"]
-            )["status"] != "canceled", "分析期间不应提前取消旧任务"
-            assert not any(
-                event["kind"] == "plan_superseded" for event in detail["events"]
-            ), "确认前不应作废旧计划"
-            detail = call(
-                "POST", f"/api/projects/{replan_project}/analysis/confirm", {}
+                "重规划草稿自动应用",
             )
             assert next(
                 task for task in detail["tasks"] if task["id"] == old_t2["id"]
             )["status"] == "canceled", detail["tasks"]
             assert any(task["id"] not in old_ids for task in detail["tasks"]), detail["tasks"]
+            assert any(
+                event["kind"] == "plan_superseded" for event in detail["events"]
+            ), "自动应用后应作废旧计划"
             detail = wait_project(
                 replan_project,
                 lambda item: item["project"]["stage"] == "summarizing"
@@ -425,16 +414,13 @@ def main():
             call("POST", f"/api/projects/{paused_project}/resume", {})
             detail = wait_project(
                 paused_project,
-                lambda item: item["project"]["stage"] == "analysis"
-                and item.get("proposal") is not None
+                lambda item: item["project"]["stage"] == "executing"
+                and any(task["status"] == "canceled" for task in item["tasks"])
                 and not any(
                     job["role"] == "analysis" and job["status"] == "running"
                     for job in item["jobs"]
                 ),
-                "暂停恢复后的重规划草稿",
-            )
-            detail = call(
-                "POST", f"/api/projects/{paused_project}/analysis/confirm", {}
+                "暂停恢复后的重规划自动应用",
             )
             assert any(
                 task["status"] == "canceled" for task in detail["tasks"]

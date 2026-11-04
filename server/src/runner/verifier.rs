@@ -77,6 +77,17 @@ pub(super) async fn handle_verdict(
             .await;
             return Ok(());
         }
+        if !project.is_git() {
+            complete_verified_task(
+                state,
+                project,
+                task,
+                agent,
+                format!("任务 {} 验收通过，普通工作区交付完成", task.key),
+            )
+            .await?;
+            return Ok(());
+        }
         let branch = task
             .branch
             .clone()
@@ -89,29 +100,14 @@ pub(super) async fn handle_verdict(
         };
         match merge {
             Ok(_) => {
-                let guard = state.schedule_lock.lock().await;
-                sqlx::query(
-                    "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
-                     human_gate = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
-                     updated_at = ? WHERE id = ?",
-                )
-                .bind(TASK_STAGE_COMPLETED)
-                .bind(&agent.id)
-                .bind(now())
-                .bind(&task.id)
-                .execute(&state.db)
-                .await?;
-                emit(
-                    &state.db,
-                    &state.bus,
-                    Some(&project.id),
-                    Some(&task.id),
-                    "task_completed",
+                complete_verified_task(
+                    state,
+                    project,
+                    task,
+                    agent,
                     format!("任务 {} 验收通过并合并到项目分支", task.key),
                 )
-                .await;
-                drop(guard);
-                cleanup_task_artifacts(state, project, task).await;
+                .await?;
             }
             Err(error) => {
                 handoff_merge_conflict(state, project, task, &error, agent).await?;
@@ -160,6 +156,41 @@ pub(super) async fn handle_verdict(
         )
         .await;
     }
+    Ok(())
+}
+
+/// Marks a task complete after its acceptance requirements are met, emits the
+/// audit event and releases task artifacts when the workspace owns any.
+async fn complete_verified_task(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    agent: &AgentRow,
+    message: String,
+) -> Result<()> {
+    let guard = state.schedule_lock.lock().await;
+    sqlx::query(
+        "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
+         human_gate = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(TASK_STAGE_COMPLETED)
+    .bind(&agent.id)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        "task_completed",
+        message,
+    )
+    .await;
+    drop(guard);
+    cleanup_task_artifacts(state, project, task).await;
     Ok(())
 }
 

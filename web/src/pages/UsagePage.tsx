@@ -286,7 +286,7 @@ export function UsagePage() {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>用量</h1>
+          <h1>成本用量</h1>
           <p className="subtitle">
             汇总每次 Agent 调用的输入/输出 token、费用与时长，可按项目、Agent、角色和时间范围筛选。
           </p>

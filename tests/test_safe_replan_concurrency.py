@@ -91,43 +91,31 @@ def main():
                     {"reason": reason},
                 )
 
-            # 分析期间不能绕过影响预览添加任务。
-            pid = new_project("DoubleConfirm")
-            request_replan(pid, "验证原子双确认")
-            detail = draft(pid)
-            before = len(detail["tasks"])
-            status, _ = raw_call(
-                server.base,
-                "POST",
-                f"/api/projects/{pid}/tasks",
-                {
-                    "key": "T9",
-                    "title": "绕过预览的任务",
-                    "description": "不应创建",
-                    "acceptance": [],
-                    "deps": [],
-                },
-            )
-            assert status == 409, status
-            assert len(call("GET", f"/api/projects/{pid}")["tasks"]) == before
-
-            # 两个请求读取同一草稿时，只有一个能提交代际切换。
+            # 重规划草稿由 DOMO 自动应用；并发请求不能让同一代际重复创建任务。
+            pid = new_project("AutoApplyReplan")
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(
                     pool.map(
                         lambda _: raw_call(
                             server.base,
                             "POST",
-                            f"/api/projects/{pid}/analysis/confirm",
-                            {},
+                            f"/api/projects/{pid}/replan",
+                            {"reason": "验证自动应用代际"},
                         ),
                         range(2),
                     )
                 )
-            statuses = sorted(status for status, _ in results)
-            assert statuses[0] == 200 and statuses[1] in (400, 409), results
-            detail = call("GET", f"/api/projects/{pid}")
-            assert len(detail["tasks"]) == 4, detail["tasks"]
+            assert any(status == 200 for status, _ in results), results
+            detail = wait_project(
+                pid,
+                lambda item: item["project"]["stage"] == "executing"
+                and len(item["tasks"]) == 4
+                and any(
+                    event["kind"] == "replan_applied"
+                    for event in item["events"]
+                ),
+                "重规划自动应用",
+            )
             old = [task for task in detail["tasks"] if task["seq"] <= 2]
             new = [task for task in detail["tasks"] if task["seq"] > 2]
             assert all(task["status"] == "canceled" for task in old), old
@@ -135,86 +123,62 @@ def main():
             assert sum(
                 event["kind"] == "plan_superseded" for event in detail["events"]
             ) == 1
+            assert sum(
+                event["kind"] == "replan_applied" for event in detail["events"]
+            ) == 1
 
-            # direct 草稿使用同一代际校验，不能重复取消新计划。
-            direct_id = new_project("DirectDoubleConfirm", "[replan-direct] direct 双确认")
-            request_replan(direct_id, "验证 direct 原子双确认")
-            detail = draft(direct_id)
-            assert detail["proposal"]["kind"] == "direct", detail["proposal"]
+            # direct 重规划使用同一代际校验，不能重复取消新计划。
+            direct_id = new_project(
+                "DirectAutoApply", "[replan-direct] direct 自动应用"
+            )
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                results = list(
+                list(
                     pool.map(
                         lambda _: raw_call(
                             server.base,
                             "POST",
-                            f"/api/projects/{direct_id}/analysis/confirm",
-                            {},
+                            f"/api/projects/{direct_id}/replan",
+                            {"reason": "验证 direct 自动应用"},
                         ),
                         range(2),
                     )
                 )
-            statuses = sorted(status for status, _ in results)
-            assert statuses[0] == 200 and statuses[1] in (400, 409), results
-            detail = call("GET", f"/api/projects/{direct_id}")
-            assert detail["project"]["completion_mode"] == "direct"
-            assert len(detail["tasks"]) == 2, detail["tasks"]
-            assert all(task["status"] == "canceled" for task in detail["tasks"])
-
-            # 修改意见与确认竞态时同样只能有一个代际所有者。
-            race_id = new_project("ConfirmMessageRace")
-            request_replan(race_id, "验证确认与修改意见竞态")
-            draft(race_id)
-
-            def confirm(_):
-                return raw_call(
-                    server.base,
-                    "POST",
-                    f"/api/projects/{race_id}/analysis/confirm",
-                    {},
+            detail = wait_project(
+                direct_id,
+                lambda item: item["project"]["completion_mode"] == "direct"
+                and len(item["tasks"]) == 2
+                and all(
+                    task["status"] == "canceled" for task in item["tasks"]
                 )
-
-            def modify(_):
-                return raw_call(
-                    server.base,
-                    "POST",
-                    f"/api/projects/{race_id}/analysis/messages",
-                    {"message": "与确认同时提交的修改意见"},
-                )
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                outcomes = list(pool.map(lambda fn: fn(None), (confirm, modify)))
-            statuses = sorted(status for status, _ in outcomes)
-            assert statuses[0] == 200 and statuses[1] in (400, 409), outcomes
-            detail = call("GET", f"/api/projects/{race_id}")
-            if outcomes[0][0] == 200:
-                assert detail["project"]["stage"] == "executing", detail["project"]
-            else:
-                assert outcomes[1][0] == 200
-                assert detail["project"]["stage"] == "analysis", detail["project"]
-                assert detail.get("proposal") is None
-                assert all(task["status"] != "canceled" for task in detail["tasks"])
-
-            # 草稿就绪时可放弃并恢复旧计划，暂停项目保持暂停状态。
-            abandon_id = new_project("AbandonDraft")
-            request_replan(abandon_id, "验证放弃草稿")
-            before = draft(abandon_id)
-            old_ids = {task["id"] for task in before["tasks"]}
-            detail = call("POST", f"/api/projects/{abandon_id}/replan/abandon")
+                and any(
+                    event["kind"] == "replan_applied"
+                    for event in item["events"]
+                ),
+                "direct 重规划自动应用",
+            )
             assert detail["project"]["stage"] == "executing", detail["project"]
-            assert detail["project"]["replan_active"] == 0
+
+            # 分析尚未应用时仍可放弃并恢复旧计划，暂停项目保持暂停状态。
+            paused_id = new_project("AbandonPaused")
+            call("POST", f"/api/projects/{paused_id}/pause", {"force": True})
+            wait_project(
+                paused_id,
+                lambda item: item["project"]["status"] == "paused",
+                "暂停项目",
+            )
+            request_replan(paused_id, "暂停时放弃重规划")
+            before = call("GET", f"/api/projects/{paused_id}")
+            assert before["project"]["stage"] == "analysis", before["project"]
+            assert before["project"]["status"] == "paused", before["project"]
+            old_ids = {task["id"] for task in before["tasks"]}
+            detail = call("POST", f"/api/projects/{paused_id}/replan/abandon")
+            assert detail["project"]["stage"] == "executing", detail["project"]
+            assert detail["project"]["status"] == "paused", detail["project"]
             assert {task["id"] for task in detail["tasks"]} == old_ids
             assert all(task["status"] != "canceled" for task in detail["tasks"])
             assert any(event["kind"] == "replan_aborted" for event in detail["events"])
 
-            paused_id = new_project("AbandonPaused")
-            call("POST", f"/api/projects/{paused_id}/pause", {"force": True})
-            request_replan(paused_id, "暂停时放弃重规划")
-            detail = call("POST", f"/api/projects/{paused_id}/replan/abandon")
-            assert detail["project"]["stage"] == "executing", detail["project"]
-            assert detail["project"]["status"] == "paused", detail["project"]
-            assert all(task["status"] != "canceled" for task in detail["tasks"])
-
-            print("重规划并发、加任务约束与放弃恢复测试通过")
+            print("重规划自动应用、并发代际与放弃恢复测试通过")
 
 
 if __name__ == "__main__":

@@ -238,7 +238,10 @@ export function useProjectPageController({ id }: { id: string }) {
     try {
       const preview = await api.getArchivePreview(id);
       const dirty = preview.dirty;
-      let prompt = "归档后不会继续推进，也不能恢复。确认归档？";
+      let prompt =
+        detail?.project.workspace_type === "plain"
+          ? "归档后不会继续推进，也不能恢复；产物与作业记录保留在普通工作区。确认归档？"
+          : "归档后不会继续推进，也不能恢复。确认归档？";
       if (dirty.length > 0) {
         const shown = dirty
           .slice(0, 5)
@@ -279,6 +282,7 @@ export function useProjectPageController({ id }: { id: string }) {
   async function handleMerge() {
     if (!detail) return;
     const project = detail.project;
+    if (project.workspace_type === "plain") return;
     if (
       !window.confirm(
         `将项目分支 ${project.branch} rebase 到 ${project.base_branch}，并把 ${project.base_branch} 快进到项目分支提交。确认合入？`,

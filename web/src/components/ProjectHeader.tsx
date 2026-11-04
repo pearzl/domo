@@ -45,6 +45,7 @@ export function ProjectHeader({
   onMerge,
 }: ProjectHeaderProps) {
   const { project, tasks, jobs } = detail;
+  const isGit = project.workspace_type !== "plain";
   const mergedIntoBase = detail.merged_into_base;
   const archived = project.status === "archived";
   const paused = project.status === "paused" || project.status === "pausing";
@@ -107,6 +108,7 @@ export function ProjectHeader({
         baseBranch={project.base_branch}
         branch={project.branch}
         workspace={project.workspace}
+        isGit={isGit}
       />
       {project.blocked_reason ? (
         <div className="blocked-banner">
@@ -115,60 +117,69 @@ export function ProjectHeader({
         </div>
       ) : null}
       {project.stage === "completed" ? (
-        <div className="success-banner merge-banner">
-          <div>
-            {project.merged_at && mergedIntoBase ? (
-              <>
-                已合入 <span className="mono">{project.base_branch}</span>（
-                {formatTime(project.merged_at)}，提交{" "}
-                <span className="mono">
-                  {project.merged_commit?.slice(0, 7) ?? "—"}
-                </span>
-                ）。项目分支 <span className="mono">{project.branch}</span> 已 rebase
-                到目标分支。
-              </>
-            ) : mergedIntoBase ? (
-              <>
-                目标分支 <span className="mono">{project.base_branch}</span> 已包含项目分支{" "}
-                <span className="mono">{project.branch}</span> 的全部提交。
-              </>
-            ) : archived ? (
-              <>
-                未合入，项目分支 <span className="mono">{project.branch}</span>{" "}
-                已归档。归档 ref：
-                <span className="mono">
-                  {`refs/domo-archive/heads/${project.branch}`}
-                </span>
-                <br />
-                恢复命令：
-                <span className="mono">
-                  {`git branch ${project.branch} refs/domo-archive/heads/${project.branch}`}
-                </span>
-              </>
-            ) : (
-              <>
-                项目已完成。改动位于 <span className="mono">{project.branch}</span>
-                ，请审阅后合入 <span className="mono">{project.base_branch}</span>。
-              </>
-            )}
+        isGit ? (
+          <div className="success-banner merge-banner">
+            <div>
+              {project.merged_at && mergedIntoBase ? (
+                <>
+                  已合入 <span className="mono">{project.base_branch}</span>（
+                  {formatTime(project.merged_at)}，提交{" "}
+                  <span className="mono">
+                    {project.merged_commit?.slice(0, 7) ?? "—"}
+                  </span>
+                  ）。项目分支 <span className="mono">{project.branch}</span> 已 rebase
+                  到目标分支。
+                </>
+              ) : mergedIntoBase ? (
+                <>
+                  目标分支 <span className="mono">{project.base_branch}</span> 已包含项目分支{" "}
+                  <span className="mono">{project.branch}</span> 的全部提交。
+                </>
+              ) : archived ? (
+                <>
+                  未合入，项目分支 <span className="mono">{project.branch}</span>{" "}
+                  已归档。归档 ref：
+                  <span className="mono">
+                    {`refs/domo-archive/heads/${project.branch}`}
+                  </span>
+                  <br />
+                  恢复命令：
+                  <span className="mono">
+                    {`git branch ${project.branch} refs/domo-archive/heads/${project.branch}`}
+                  </span>
+                </>
+              ) : (
+                <>
+                  项目已完成。改动位于 <span className="mono">{project.branch}</span>
+                  ，请审阅后合入 <span className="mono">{project.base_branch}</span>。
+                </>
+              )}
+            </div>
+            {!mergedIntoBase && !archived ? (
+              <div className="button-row merge-actions">
+                <button className="primary" disabled={busy || merging} onClick={onMerge}>
+                  {merging ? "合入中…" : `合入到 ${project.base_branch}`}
+                </button>
+              </div>
+            ) : null}
+            {mergeNotice ? (
+              <div
+                className={`merge-result ${
+                  mergeNotice.tone === "error" ? "merge-error" : "merge-ok"
+                }`}
+              >
+                <RichContent content={mergeNotice.text} />
+              </div>
+            ) : null}
           </div>
-          {!mergedIntoBase && !archived ? (
-            <div className="button-row merge-actions">
-              <button className="primary" disabled={busy || merging} onClick={onMerge}>
-                {merging ? "合入中…" : `合入到 ${project.base_branch}`}
-              </button>
+        ) : (
+          <div className="success-banner">
+            <div>
+              项目已完成，产物保留在普通工作区{" "}
+              <span className="mono">{project.repo_path}</span>。
             </div>
-          ) : null}
-          {mergeNotice ? (
-            <div
-              className={`merge-result ${
-                mergeNotice.tone === "error" ? "merge-error" : "merge-ok"
-              }`}
-            >
-              <RichContent content={mergeNotice.text} />
-            </div>
-          ) : null}
-        </div>
+          </div>
+        )
       ) : null}
     </header>
   );
@@ -240,17 +251,24 @@ export function ProjectSourceInfo({
   baseBranch,
   branch,
   workspace,
+  isGit = true,
 }: {
   repoPath: string;
   baseBranch: string;
   branch: string;
   workspace: string;
+  isGit?: boolean;
 }) {
-  const entries: { label: string; value: string }[] = [
-    { label: "仓库", value: repoPath },
-    { label: "交付分支", value: `${baseBranch} → ${branch}` },
-    { label: "工作区", value: workspace },
-  ];
+  const entries: { label: string; value: string }[] = isGit
+    ? [
+        { label: "仓库", value: repoPath },
+        { label: "交付分支", value: `${baseBranch} → ${branch}` },
+        { label: "工作区", value: workspace },
+      ]
+    : [
+        { label: "本地目录", value: repoPath },
+        { label: "工作区", value: workspace },
+      ];
   return (
     <details className="project-source">
       <summary>项目源信息</summary>

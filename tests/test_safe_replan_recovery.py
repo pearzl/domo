@@ -73,19 +73,23 @@ def main():
                 "重规划分析在途",
             )
 
-        def wait_draft(server, project_id, minimum):
+        def wait_applied(server, project_id, minimum):
             return wait_project(
                 server,
                 project_id,
                 lambda detail: len(
                     [job for job in detail["jobs"] if job["role"] == "analysis"]
                 ) >= minimum
-                and detail.get("proposal") is not None
+                and detail["project"]["stage"] == "executing"
+                and any(
+                    event["kind"] == "replan_applied"
+                    for event in detail["events"]
+                )
                 and not any(
                     job["role"] == "analysis" and job["status"] == "running"
                     for job in detail["jobs"]
                 ),
-                "中断后的重规划草稿",
+                "中断后的重规划自动应用",
             )
 
         interrupted_root = temp / "interrupted"
@@ -103,7 +107,7 @@ def main():
             detail = server.call("GET", f"/api/projects/{paused_id}")
             assert detail["project"]["status"] == "paused"
             server.call("POST", f"/api/projects/{paused_id}/resume", {})
-            wait_draft(server, paused_id, 3)
+            wait_applied(server, paused_id, 3)
 
             restart_id = new_project(server, "RestartRecovery")
             server.call(
@@ -114,7 +118,7 @@ def main():
             analysis_running(server, restart_id, 2)
             server.kill()
             server.restart()
-            wait_draft(server, restart_id, 3)
+            wait_applied(server, restart_id, 3)
             print("强制暂停与进程重启后的分析恢复通过")
 
         crash_root = temp / "apply-crash"
@@ -146,34 +150,15 @@ def main():
                 {"reason": "验证提交后的清理恢复"},
             )
             server.call("POST", f"/api/projects/{pid}/resume", {})
-            detail = wait_project(
-                server,
-                pid,
-                lambda item: item.get("proposal") is not None,
-                "待确认草稿",
-            )
-            old_ids = {task["id"] for task in old_tasks}
             cancel_candidate = next(
                 task
-                for task in detail["tasks"]
-                if task["id"] in old_ids
-                and task["stage"] != "completed"
-                and task["worktree"]
+                for task in old_tasks
+                if task["stage"] != "completed" and task["worktree"]
             )
-            request = urllib.request.Request(
-                server.base + f"/api/projects/{pid}/analysis/confirm",
-                data=b"{}",
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                urllib.request.urlopen(request, timeout=10).read()
-            except Exception:
-                pass
-            deadline = time.time() + 20
+            deadline = time.time() + 30
             while server.process.poll() is None and time.time() < deadline:
                 time.sleep(0.1)
-            assert server.process.poll() is not None, "确认后崩溃钩子未触发"
+            assert server.process.poll() is not None, "自动应用后的崩溃钩子未触发"
             server.env.pop("DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY")
             server.restart()
             detail = wait_project(

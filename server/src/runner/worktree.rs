@@ -11,9 +11,16 @@ use crate::state::AppState;
 
 use super::common::load_task;
 
-/// Every job runs in a dedicated Git worktree root. A mismatch means the agent
+/// Every Git job runs in a dedicated worktree root; a mismatch means the agent
 /// would read or write another checkout, so the job is rejected before spawn.
-pub(super) async fn ensure_worktree_root(cwd: &Path) -> Result<()> {
+/// 普通工作区直接在所选目录中运行，只校验目录存在。
+pub(super) async fn ensure_worktree_root(cwd: &Path, is_git: bool) -> Result<()> {
+    if !is_git {
+        if fs::metadata(cwd).await.map(|meta| meta.is_dir())? {
+            return Ok(());
+        }
+        return Err(anyhow!("工作目录不存在: {}", cwd.display()));
+    }
     let expected = fs::canonicalize(cwd).await?;
     let root = fs::canonicalize(git::repo_root(cwd).await?).await?;
     if root != expected {
@@ -32,6 +39,11 @@ pub(super) async fn prepare_task_worktree(
     task: Option<&TaskRow>,
 ) -> Result<PathBuf> {
     let task = task.ok_or_else(|| anyhow!("执行作业缺少任务"))?;
+    if !project.is_git() {
+        let path = PathBuf::from(&project.repo_path);
+        fs::create_dir_all(&path).await?;
+        return Ok(path);
+    }
     if let Some(worktree) = &task.worktree {
         let path = PathBuf::from(worktree);
         if path.join(".git").exists() {
@@ -91,6 +103,12 @@ pub(super) async fn prepare_verify_worktree(
     job_id: &str,
 ) -> Result<PathBuf> {
     let task = task.ok_or_else(|| anyhow!("验收作业缺少任务"))?;
+    if !project.is_git() {
+        // 普通工作区不提供隔离副本，验收者只读核验同一交付目录。
+        let path = PathBuf::from(&project.repo_path);
+        fs::create_dir_all(&path).await?;
+        return Ok(path);
+    }
     let branch = task
         .branch
         .clone()

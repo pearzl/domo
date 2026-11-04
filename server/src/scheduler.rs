@@ -538,6 +538,11 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         .await?;
                         continue;
                     }
+                    // 普通工作区没有隔离副本，同一项目同一时刻只推进一个任务。
+                    if !project.is_git() && active_project_jobs(&state.db, &project.id).await? > 0 {
+                        set_task_waiting(state, &task.id, "普通工作区按顺序推进任务").await?;
+                        continue;
+                    }
                     let choice = choose_agent(state, &project, role, Some(task)).await?;
                     let Some(agent) = choice.agent else {
                         if task.status.as_deref() != Some(STATUS_QUEUED) {

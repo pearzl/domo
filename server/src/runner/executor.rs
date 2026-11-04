@@ -205,6 +205,18 @@ pub(super) async fn handle_derived_task_success(
     if parent.status.as_deref() == Some(STATUS_CANCELED) {
         return Ok(());
     }
+    if !project.is_git() {
+        complete_derived_task(
+            state,
+            project,
+            task,
+            summary,
+            agent,
+            format!("派生任务 {} 已完成，产物保留在普通工作区", task.key),
+        )
+        .await?;
+        return Ok(());
+    }
     let parent_worktree = match parent.worktree.as_deref() {
         Some(path) if Path::new(path).join(".git").exists() => PathBuf::from(path),
         _ => prepare_task_worktree(state, project, Some(&parent)).await?,
@@ -220,45 +232,66 @@ pub(super) async fn handle_derived_task_success(
     };
     match merge {
         Ok(_) => {
-            let guard = state.schedule_lock.lock().await;
-            if let Some(current) = load_task(&state.db, &task.id).await? {
-                if current.status.as_deref() == Some(STATUS_CANCELED)
-                    || current.stage == TASK_STAGE_COMPLETED
-                {
-                    return Ok(());
-                }
-            }
-            sqlx::query(
-                "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
-                 result_summary = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(TASK_STAGE_COMPLETED)
-            .bind(&agent.id)
-            .bind(summary)
-            .bind(now())
-            .bind(&task.id)
-            .execute(&state.db)
-            .await?;
-            emit(
-                &state.db,
-                &state.bus,
-                Some(&project.id),
-                Some(&task.id),
-                "task_completed",
+            complete_derived_task(
+                state,
+                project,
+                task,
+                summary,
+                agent,
                 format!(
                     "派生任务 {} 已跳过验收并合入父任务 {} 的分支",
                     task.key, parent.key
                 ),
             )
-            .await;
-            drop(guard);
-            cleanup_task_artifacts(state, project, task).await;
+            .await?;
         }
         Err(error) => {
             let reason = format!("合入父任务分支失败：{error:#}");
             handle_executor_failure(state, project, task, &reason, agent, false).await?;
         }
     }
+    Ok(())
+}
+
+/// 派生任务不调用验收者：结果直接置为通过并按普通任务完成条件结束。
+async fn complete_derived_task(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    summary: &str,
+    agent: &AgentRow,
+    message: String,
+) -> Result<()> {
+    let guard = state.schedule_lock.lock().await;
+    if let Some(current) = load_task(&state.db, &task.id).await? {
+        if current.status.as_deref() == Some(STATUS_CANCELED)
+            || current.stage == TASK_STAGE_COMPLETED
+        {
+            return Ok(());
+        }
+    }
+    sqlx::query(
+        "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
+         result_summary = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(TASK_STAGE_COMPLETED)
+    .bind(&agent.id)
+    .bind(summary)
+    .bind(now())
+    .bind(&task.id)
+    .execute(&state.db)
+    .await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        "task_completed",
+        message,
+    )
+    .await;
+    drop(guard);
+    cleanup_task_artifacts(state, project, task).await;
     Ok(())
 }
 

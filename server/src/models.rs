@@ -73,6 +73,9 @@ pub const JOB_ROLE_ACCEPTANCE: &str = "project_acceptance";
 pub const CONFIRM_MANUAL: &str = "manual";
 pub const CONFIRM_AUTO: &str = "auto";
 
+pub const WORKSPACE_GIT: &str = "git";
+pub const WORKSPACE_PLAIN: &str = "plain";
+
 pub const COMPLETION_TASKS: &str = "tasks";
 pub const COMPLETION_DIRECT: &str = "direct";
 
@@ -359,6 +362,7 @@ pub struct ProjectRow {
     pub base_branch: String,
     pub branch: String,
     pub workspace: String,
+    pub workspace_type: String,
     pub stage: String,
     pub status: Option<String>,
     pub blocked_reason: Option<String>,
@@ -413,6 +417,14 @@ pub struct ProjectRow {
     pub retry_role: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl ProjectRow {
+    /// Git workspaces own worktrees, task branches and the delivery branch.
+    /// Every other workspace runs jobs directly in the selected local directory.
+    pub fn is_git(&self) -> bool {
+        self.workspace_type == WORKSPACE_GIT
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -567,6 +579,14 @@ pub enum ProjectAttention {
     Blocked,
 }
 
+/// 待办关联的任务摘要；项目级待办没有对应任务。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectAttentionTask {
+    pub id: String,
+    pub key: String,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
     pub id: String,
@@ -575,10 +595,12 @@ pub struct ProjectSummary {
     pub repo_path: String,
     pub base_branch: String,
     pub branch: String,
+    pub workspace_type: String,
     pub stage: String,
     pub status: Option<String>,
     pub blocked_reason: Option<String>,
     pub attention: Option<ProjectAttention>,
+    pub attention_task: Option<ProjectAttentionTask>,
     pub task_total: i64,
     pub task_completed: i64,
     pub replan_reason: Option<String>,
@@ -751,6 +773,11 @@ pub struct CreateProjectRequest {
     pub name: String,
     pub repo_path: String,
     pub base_branch: Option<String>,
+    /// `git`（默认）或 `plain`；普通工作区直接在所选本地目录中推进。
+    pub workspace_type: Option<String>,
+    /// 创建时的项目目标；留空时项目保持阻塞并等待输入。
+    pub goal: Option<String>,
+    pub confirm_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

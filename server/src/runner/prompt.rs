@@ -129,29 +129,33 @@ pub(super) async fn build_prompt_data(
         });
     }
     let workspace = PathBuf::from(&project.workspace);
-    let diff_stat = match job.role.as_str() {
-        JOB_ROLE_VERIFIER => {
-            let branch = task.and_then(|task| task.branch.clone());
-            if let Some(branch) = branch {
-                git::diff_between(
-                    &paths::project_repo(&workspace),
-                    &project.base_branch,
-                    &branch,
-                )
-                .await
-                .unwrap_or_default()
-            } else {
-                String::new()
+    let diff_stat = if project.is_git() {
+        match job.role.as_str() {
+            JOB_ROLE_VERIFIER => {
+                let branch = task.and_then(|task| task.branch.clone());
+                if let Some(branch) = branch {
+                    git::diff_between(
+                        &paths::project_repo(&workspace),
+                        &project.base_branch,
+                        &branch,
+                    )
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    String::new()
+                }
             }
+            JOB_ROLE_SUMMARY => git::diff_between(
+                &paths::project_repo(&workspace),
+                &project.base_branch,
+                &project.branch,
+            )
+            .await
+            .unwrap_or_default(),
+            _ => String::new(),
         }
-        JOB_ROLE_SUMMARY => git::diff_between(
-            &paths::project_repo(&workspace),
-            &project.base_branch,
-            &project.branch,
-        )
-        .await
-        .unwrap_or_default(),
-        _ => String::new(),
+    } else {
+        String::new()
     };
     let job_dir = paths::job_dir(&workspace, &job.id);
     let proposal = project
@@ -180,6 +184,7 @@ pub(super) async fn build_prompt_data(
         goal: project.goal.clone(),
         cwd: cwd.to_string_lossy().to_string(),
         repo_path: project.repo_path.clone(),
+        workspace_type: project.workspace_type.clone(),
         base_branch: project.base_branch.clone(),
         project_branch: project.branch.clone(),
         task: task_info,
@@ -231,6 +236,7 @@ pub(super) fn build_context(
             "name": project.name,
             "goal": project.goal,
             "repo_path": project.repo_path,
+            "workspace_type": project.workspace_type,
             "base_branch": project.base_branch,
             "branch": project.branch,
             "replan_reason": project.replan_reason,

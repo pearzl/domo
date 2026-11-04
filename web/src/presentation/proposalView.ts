@@ -159,12 +159,12 @@ export function confirmImpact(
     }
     items.push("已确认目标保持不变");
     if (replan.acceptance_changed) items.push("修改项目或任务验收标准");
-    items.push("确认时一次性切换计划；分析失败不会破坏当前计划");
+    items.push("应用时一次性切换计划；分析失败不会破坏当前计划");
     return {
       items,
       note: replan.high_impact
-        ? "这是高影响重规划，自动确认不会应用它，必须在这里明确确认。"
-        : "这是低影响重规划；符合自动确认条件时可应用，也可在这里明确确认。",
+        ? "这是高影响重规划草稿；生成后由 DOMO 自动应用，不受方案确认方式影响。"
+        : "这是低影响重规划草稿；生成后由 DOMO 自动应用，不受方案确认方式影响。",
     };
   }
   if (proposal.kind === "direct") {

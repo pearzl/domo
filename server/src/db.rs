@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS projects (
     base_branch TEXT NOT NULL,
     branch TEXT NOT NULL,
     workspace TEXT NOT NULL,
+    workspace_type TEXT NOT NULL DEFAULT 'git',
     stage TEXT NOT NULL,
     status TEXT,
     blocked_reason TEXT,
@@ -372,6 +373,13 @@ async fn migrate(pool: &SqlitePool) -> DbResult<()> {
     .await?;
     ensure_column(pool, "projects", "merged_at", "TEXT").await?;
     ensure_column(pool, "projects", "merged_commit", "TEXT").await?;
+    ensure_column(
+        pool,
+        "projects",
+        "workspace_type",
+        "TEXT NOT NULL DEFAULT 'git'",
+    )
+    .await?;
     ensure_column(pool, "projects", "avoid_agent_id", "TEXT").await?;
     ensure_column(pool, "projects", "avoid_agent_role", "TEXT").await?;
     ensure_column(pool, "projects", "retry_agent_id", "TEXT").await?;
@@ -753,7 +761,7 @@ pub async fn ensure_project_agents(pool: &SqlitePool, project_id: &str) -> DbRes
         .fetch_all(pool)
         .await?;
     let timestamp = crate::domain::now();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let recheck: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM project_agents WHERE project_id = ?")
             .bind(project_id)

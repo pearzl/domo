@@ -25,6 +25,9 @@ pub(super) async fn merge_project(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = require_project(&state, &id).await?;
+    if !project.is_git() {
+        return Err(ApiError::bad("普通工作区没有交付分支，不支持合入"));
+    }
     if project.stage != STAGE_COMPLETED {
         return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
     }

@@ -56,8 +56,8 @@ pub(super) async fn list_projects(
         .bind(&row.id)
         .fetch_one(&state.db)
         .await?;
-        let merged_into_base =
-            row.merged_at.is_some() || super::detail::project_merged_into_base(&row).await;
+        let merged_into_base = row.is_git()
+            && (row.merged_at.is_some() || super::detail::project_merged_into_base(&row).await);
         let proposal_raw = if row.replan_active != 0 {
             row.replan_proposal.as_deref()
         } else {
@@ -76,10 +76,25 @@ pub(super) async fn list_projects(
                 .as_deref()
                 .is_some_and(|report| !report.is_empty()),
             merged_into_base,
+            requires_merge: row.is_git(),
             latest_project_job_failed: latest_project_job_status.as_deref()
                 == Some(JOB_STATUS_FAILED),
             analysis_running: analysis_running > 0,
         });
+        let attention_task = if attention.is_some() {
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT id, key, title FROM tasks WHERE project_id = ? AND status = ? \
+                 AND stage != ? ORDER BY queue_order ASC, seq ASC LIMIT 1",
+            )
+            .bind(&row.id)
+            .bind(STATUS_BLOCKED)
+            .bind(TASK_STAGE_COMPLETED)
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(id, key, title)| ProjectAttentionTask { id, key, title })
+        } else {
+            None
+        };
         projects.push(ProjectSummary {
             id: row.id,
             name: row.name,
@@ -87,10 +102,12 @@ pub(super) async fn list_projects(
             repo_path: row.repo_path,
             base_branch: row.base_branch,
             branch: row.branch,
+            workspace_type: row.workspace_type,
             stage: row.stage,
             status: row.status,
             blocked_reason: row.blocked_reason,
             attention,
+            attention_task,
             task_total: total,
             task_completed: completed,
             replan_reason: row.replan_reason,
@@ -114,60 +131,140 @@ pub(super) async fn create_project(
     if name.is_empty() {
         return Err(ApiError::bad("项目名称不能为空"));
     }
-    let repo_input = crate::platform::expand_tilde(request.repo_path.trim());
-    if !repo_input.is_dir() {
-        return Err(ApiError::bad("仓库路径不存在"));
-    }
-    let repo = git::repo_root(&repo_input)
-        .await
-        .map_err(|error| ApiError::bad(format!("{error:#}")))?;
-    let base = match request.base_branch.as_deref().map(str::trim) {
-        Some(value) if !value.is_empty() => value.to_string(),
-        _ => git::current_branch(&repo)
-            .await
-            .map_err(|error| ApiError::bad(format!("{error:#}")))?,
-    };
-    git::validate_base(&repo, &base)
-        .await
-        .map_err(|error| ApiError::bad(format!("base 分支不可用: {error:#}")))?;
-    let project_id = domain::new_id("prj");
-    let branch = format!("domo/p-{}", short_id(&project_id));
-    if git::has_branch(&repo, &branch).await {
-        return Err(ApiError::bad(format!("分支 {branch} 已存在")));
-    }
-    let workspace = paths::project_workspace(&state.cfg.workspace_root, &project_id);
-    let repo_worktree = paths::project_repo(&workspace);
+    let workspace_type = match request
+        .workspace_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        let _guard = state.git_lock.lock().await;
-        git::create_project_worktree(&repo, &base, &repo_worktree, &branch)
+        None | Some(WORKSPACE_GIT) => WORKSPACE_GIT,
+        Some(WORKSPACE_PLAIN) => WORKSPACE_PLAIN,
+        Some(other) => {
+            return Err(ApiError::bad(format!(
+                "未知工作区类型: {other}（可选 git 或 plain）"
+            )))
+        }
+    };
+    let confirm = match request
+        .confirm_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some(CONFIRM_MANUAL) => CONFIRM_MANUAL,
+        Some(CONFIRM_AUTO) => CONFIRM_AUTO,
+        Some(other) => {
+            return Err(ApiError::bad(format!(
+                "未知方案确认方式: {other}（可选 manual 或 auto）"
+            )))
+        }
+    };
+    let goal = request
+        .goal
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let repo_input = crate::platform::expand_tilde(request.repo_path.trim());
+    let project_id = domain::new_id("prj");
+    let workspace = paths::project_workspace(&state.cfg.workspace_root, &project_id);
+    let (repo, base, branch, repo_worktree) = if workspace_type == WORKSPACE_PLAIN {
+        // 普通工作区直接在用户选择的本地目录中推进，不要求、也不初始化 Git。
+        if repo_input.exists() {
+            if !repo_input.is_dir() {
+                return Err(ApiError::bad("本地目录不是一个目录"));
+            }
+        } else {
+            tokio::fs::create_dir_all(&repo_input)
+                .await
+                .map_err(|error| ApiError::bad(format!("创建本地目录失败: {error:#}")))?;
+        }
+        let repo = repo_input
+            .canonicalize()
+            .unwrap_or_else(|_| repo_input.clone());
+        (repo, String::new(), String::new(), None)
+    } else {
+        if !repo_input.is_dir() {
+            return Err(ApiError::bad("仓库路径不存在"));
+        }
+        let repo = git::repo_root(&repo_input)
             .await
-            .map_err(|error| ApiError::bad(format!("创建项目 worktree 失败: {error:#}")))?;
+            .map_err(|error| ApiError::bad(format!("{error:#}")))?;
+        let base = match request.base_branch.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => git::current_branch(&repo)
+                .await
+                .map_err(|error| ApiError::bad(format!("{error:#}")))?,
+        };
+        git::validate_base(&repo, &base)
+            .await
+            .map_err(|error| ApiError::bad(format!("base 分支不可用: {error:#}")))?;
+        let branch = format!("domo/p-{}", short_id(&project_id));
+        if git::has_branch(&repo, &branch).await {
+            return Err(ApiError::bad(format!("分支 {branch} 已存在")));
+        }
+        let repo_worktree = paths::project_repo(&workspace);
+        {
+            let _guard = state.git_lock.lock().await;
+            git::create_project_worktree(&repo, &base, &repo_worktree, &branch)
+                .await
+                .map_err(|error| ApiError::bad(format!("创建项目 worktree 失败: {error:#}")))?;
+        }
+        (repo, base, branch, Some(repo_worktree))
+    };
+    if let Err(error) = tokio::fs::create_dir_all(&workspace).await {
+        if let Some(worktree) = repo_worktree.as_deref() {
+            let _ = git::remove_worktree(&repo, worktree).await;
+        }
+        return Err(ApiError::bad(format!("创建项目目录失败: {error:#}")));
     }
     let timestamp = now();
+    let status = if goal.is_empty() {
+        STATUS_BLOCKED
+    } else {
+        STATUS_RUNNING
+    };
+    let blocked_reason = goal.is_empty().then_some("等待输入项目目标");
     let result = sqlx::query(
         "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
-         stage, status, blocked_reason, confirm_mode, completion_mode, created_at, updated_at) \
-         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         workspace_type, stage, status, blocked_reason, confirm_mode, completion_mode, \
+         created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&project_id)
     .bind(name)
+    .bind(&goal)
     .bind(repo.to_string_lossy().to_string())
     .bind(&base)
     .bind(&branch)
     .bind(workspace.to_string_lossy().to_string())
+    .bind(workspace_type)
     .bind(STAGE_ANALYSIS)
-    .bind(STATUS_BLOCKED)
-    .bind("等待输入项目目标")
-    .bind(CONFIRM_MANUAL)
+    .bind(status)
+    .bind(blocked_reason)
+    .bind(confirm)
     .bind(COMPLETION_TASKS)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)
     .await;
     if let Err(error) = result {
-        let _ = git::remove_worktree(&repo, &repo_worktree).await;
+        if let Some(worktree) = repo_worktree.as_deref() {
+            let _ = git::remove_worktree(&repo, worktree).await;
+        }
         let _ = crate::platform::remove_dir_all(&workspace).await;
         return Err(error.into());
+    }
+    if !goal.is_empty() {
+        sqlx::query(
+            "INSERT INTO messages (id, project_id, role, content, created_at) \
+             VALUES (?, ?, 'user', ?, ?)",
+        )
+        .bind(domain::new_id("msg"))
+        .bind(&project_id)
+        .bind(&goal)
+        .bind(&timestamp)
+        .execute(&state.db)
+        .await?;
     }
     crate::db::ensure_project_agents(&state.db, &project_id).await?;
     emit(
@@ -176,7 +273,13 @@ pub(super) async fn create_project(
         Some(&project_id),
         None,
         "project_created",
-        format!("项目创建，等待输入目标（base 分支 {base}）"),
+        if workspace_type == WORKSPACE_PLAIN {
+            format!("项目创建，普通工作区 {}", repo.display())
+        } else if goal.is_empty() {
+            format!("项目创建，等待输入目标（base 分支 {base}）")
+        } else {
+            format!("项目创建（base 分支 {base}）")
+        },
     )
     .await;
     state.notify_scheduler();
@@ -256,7 +359,7 @@ pub(super) async fn update_project_agent(
         };
         if let Some(target) = target {
             let timestamp = now();
-            let mut tx = state.db.begin().await?;
+            let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query(
                 "UPDATE project_agents SET priority = ?, updated_at = ? \
                  WHERE project_id = ? AND role = ? AND agent_id = ?",
@@ -332,7 +435,7 @@ pub(super) async fn move_project_agent_to(
     .await?;
     let reordered = plan_role_reorder(members, "项目 Agent 池", agent_id, position)?;
     let timestamp = now();
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for (priority, id) in reordered.iter().enumerate() {
         sqlx::query(
             "UPDATE project_agents SET priority = ?, updated_at = ? \
@@ -438,7 +541,7 @@ pub(super) async fn update_task_agent(
         };
         if let Some(target) = target {
             let timestamp = now();
-            let mut tx = state.db.begin().await?;
+            let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query(
                 "UPDATE task_agents SET priority = ?, updated_at = ? \
                  WHERE task_id = ? AND role = ? AND agent_id = ?",

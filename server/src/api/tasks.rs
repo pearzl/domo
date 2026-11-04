@@ -377,7 +377,7 @@ pub(super) async fn reorder_task_queue(
     {
         return Err(ApiError::bad("只有尚未开始的任务可以调整排队顺序"));
     }
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut queue = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks WHERE project_id = ? AND stage = ? AND attempts = 0 \
          AND rejections = 0 AND COALESCE(status, '') != ? ORDER BY queue_order ASC, seq ASC",

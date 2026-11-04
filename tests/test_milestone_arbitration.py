@@ -234,7 +234,7 @@ def main():
                 event["kind"] == "milestone_acceptance_required" for event in detail["events"]
             ), detail["events"]
 
-            # 2. 人工拒绝：理由和指导进入下一轮执行 prompt，且不增加自动拒绝计数。
+            # 2. 人工拒绝：理由和指导进入下一轮执行 prompt，并计入验收失败次数。
             jobs_before_reject = len(detail["jobs"])
             rejected = call(
                 "POST",
@@ -247,7 +247,7 @@ def main():
             t1 = task_by_key(rejected, "T1")
             assert t1["status"] == "queued", t1
             assert t1["human_gate"] is None, t1
-            assert t1["rejections"] == 0, t1
+            assert t1["rejections"] == 1, t1
             assert "人工验收意见" in (t1["verifier_issues"] or [""])[-1], t1
 
             detail = wait_project(
@@ -385,19 +385,15 @@ def main():
 
             detail = wait_project(
                 replan_id,
-                lambda item: item["project"]["stage"] == "analysis"
-                and item.get("proposal") is not None,
-                "里程碑重规划草稿等待确认",
-            )
-            assert task_by_key(detail, "T1")["status"] != "canceled", detail["tasks"]
-            detail = call("POST", f"/api/projects/{replan_id}/analysis/confirm", {})
-            assert task_by_key(detail, "T1")["status"] == "canceled", detail["tasks"]
-            detail = wait_project(
-                replan_id,
                 lambda item: item["project"]["stage"] == "executing"
+                and any(
+                    event["kind"] == "replan_applied"
+                    for event in item["events"]
+                )
                 and len([task for task in item["tasks"] if task["status"] != "canceled"]) == 2,
-                "重新规划生成新任务",
+                "里程碑重规划自动应用",
             )
+            assert task_by_key(detail, "T1")["status"] == "canceled", detail["tasks"]
             assert all(task["key"] in ("T1", "T2") for task in detail["tasks"]), detail["tasks"]
 
             # 4. switch_agent：默认 Agent 连续失败阻塞，人工指定停用的另一 Agent 执行。

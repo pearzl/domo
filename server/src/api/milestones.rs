@@ -170,36 +170,38 @@ pub(super) async fn accept_milestone(
         (project, task)
     };
 
-    let Some(branch) = task.branch.clone() else {
-        restore_milestone_gate_unlocked(&state, &task.id, "任务缺少执行分支，无法完成人工验收")
-            .await?;
-        return Err(ApiError::bad("任务缺少执行分支，无法完成人工验收"));
-    };
-    let workspace = PathBuf::from(&project.workspace);
-    let message = format!("domo(task-{}): {}", task.key, task.title);
-    if let Some(delay) = std::env::var("DOMO_MOCK_MILESTONE_MERGE_DELAY_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-    }
-    let merge = {
-        let _guard = state.git_lock.lock().await;
-        git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
-    };
-    if let Err(error) = merge {
-        let reason = format!("人工验收通过但合并失败：{error:#}");
-        restore_milestone_gate_unlocked(&state, &task.id, &reason).await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project_id),
-            Some(&task.id),
-            "milestone_merge_conflict",
-            format!("任务 {} 人工验收合并失败：{reason}", task.key),
-        )
-        .await;
-        return Err(ApiError::from(error));
+    if project.is_git() {
+        let Some(branch) = task.branch.clone() else {
+            restore_milestone_gate_unlocked(&state, &task.id, "任务缺少执行分支，无法完成人工验收")
+                .await?;
+            return Err(ApiError::bad("任务缺少执行分支，无法完成人工验收"));
+        };
+        let workspace = PathBuf::from(&project.workspace);
+        let message = format!("domo(task-{}): {}", task.key, task.title);
+        if let Some(delay) = std::env::var("DOMO_MOCK_MILESTONE_MERGE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        let merge = {
+            let _guard = state.git_lock.lock().await;
+            git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
+        };
+        if let Err(error) = merge {
+            let reason = format!("人工验收通过但合并失败：{error:#}");
+            restore_milestone_gate_unlocked(&state, &task.id, &reason).await?;
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&project_id),
+                Some(&task.id),
+                "milestone_merge_conflict",
+                format!("任务 {} 人工验收合并失败：{reason}", task.key),
+            )
+            .await;
+            return Err(ApiError::from(error));
+        }
     }
 
     {
@@ -231,12 +233,17 @@ pub(super) async fn accept_milestone(
             Some(&task.id),
             "milestone_accepted",
             format!(
-                "任务 {} 人工验收通过{}，已合并到项目交付分支",
+                "任务 {} 人工验收通过{}{}",
                 task.key,
                 if note.is_empty() {
                     String::new()
                 } else {
                     format!("：{note}")
+                },
+                if project.is_git() {
+                    "，已合并到项目交付分支"
+                } else {
+                    "，普通工作区交付完成"
                 }
             ),
         )
@@ -247,7 +254,11 @@ pub(super) async fn accept_milestone(
             Some(&project_id),
             Some(&task.id),
             "task_completed",
-            format!("任务 {} 人工验收通过并合并到项目分支", task.key),
+            if project.is_git() {
+                format!("任务 {} 人工验收通过并合并到项目分支", task.key)
+            } else {
+                format!("任务 {} 人工验收通过，交付完成", task.key)
+            },
         )
         .await;
         if fresh_project.status.as_deref() == Some(STATUS_ARCHIVED) {
@@ -317,8 +328,9 @@ pub(super) async fn reject_milestone(
         return Err(ApiError::bad("任务不在等待人工验收状态"));
     }
     if disposition == MILESTONE_DISPOSITION_REPLAN {
-        sqlx::query("UPDATE tasks SET human_gate = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE tasks SET human_gate = ?, rejections = ?, updated_at = ? WHERE id = ?")
             .bind(HUMAN_GATE_MILESTONE_REPLANNING)
+            .bind(task.rejections + 1)
             .bind(now())
             .bind(&task.id)
             .execute(&state.db)
@@ -331,12 +343,13 @@ pub(super) async fn reject_milestone(
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, agent_id = NULL, \
          last_error = NULL, verifier_issues = ?, guidance = ?, forced_agent_id = NULL, \
-         forced_agent_role = NULL, updated_at = ? WHERE id = ?",
+         forced_agent_role = NULL, rejections = ?, updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_EXECUTING)
     .bind(STATUS_QUEUED)
     .bind(&issues)
     .bind(&guidance)
+    .bind(task.rejections + 1)
     .bind(now())
     .bind(&task.id)
     .execute(&state.db)
@@ -363,7 +376,11 @@ pub(super) async fn reject_milestone(
         Some(&project_id),
         Some(&task.id),
         "milestone_rejected",
-        format!("任务 {} 人工验收被拒绝，退回执行：{reason}", task.key),
+        format!(
+            "任务 {} 人工验收被拒绝（第 {} 次验收失败），退回执行：{reason}",
+            task.key,
+            task.rejections + 1
+        ),
     )
     .await;
     state.notify_scheduler();

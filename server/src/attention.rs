@@ -12,6 +12,8 @@ pub(crate) struct ProjectAttentionState<'a> {
     pub proposal_pending: bool,
     pub report_ready: bool,
     pub merged_into_base: bool,
+    /// 普通工作区没有交付分支，完成即交付，不产生合入待办。
+    pub requires_merge: bool,
     pub latest_project_job_failed: bool,
     pub analysis_running: bool,
 }
@@ -48,7 +50,8 @@ pub(crate) fn project_attention(state: ProjectAttentionState<'_>) -> Option<Proj
             .then_some(blocked_attention(state.latest_project_job_failed));
     }
     if state.stage == STAGE_COMPLETED {
-        return (!state.merged_into_base).then_some(ProjectAttention::Merge);
+        return (state.requires_merge && !state.merged_into_base)
+            .then_some(ProjectAttention::Merge);
     }
     (state.status == Some(STATUS_BLOCKED))
         .then_some(blocked_attention(state.latest_project_job_failed))
@@ -75,6 +78,7 @@ mod tests {
             proposal_pending: false,
             report_ready: false,
             merged_into_base: false,
+            requires_merge: true,
             latest_project_job_failed: false,
             analysis_running: false,
         }
@@ -107,6 +111,12 @@ mod tests {
 
         let merge = project_attention(state(STAGE_COMPLETED));
         assert_eq!(merge, Some(ProjectAttention::Merge));
+
+        let delivered = project_attention(ProjectAttentionState {
+            requires_merge: false,
+            ..state(STAGE_COMPLETED)
+        });
+        assert_eq!(delivered, None);
 
         let blocked = project_attention(ProjectAttentionState {
             status: Some(STATUS_BLOCKED),

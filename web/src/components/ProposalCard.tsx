@@ -186,11 +186,8 @@ export function ProposalCard({
     );
   }
 
-  const confirmLabel = proposal.replan_impact
-    ? "确认并应用重规划"
-    : proposal.kind === "direct"
-      ? "确认并直接完成"
-      : "确认方案，开始执行";
+  const isReplan = Boolean(proposal.replan_impact);
+  const confirmLabel = proposal.kind === "direct" ? "确认并直接完成" : "确认方案，开始执行";
 
   return (
     <article className="proposal-card" data-proposal-kind={proposal.kind}>
@@ -200,8 +197,8 @@ export function ProposalCard({
             proposal.kind === "direct" ? " proposal-kind-direct" : ""
           }`}
         >
-          {proposal.replan_impact
-            ? proposal.replan_impact.high_impact
+          {isReplan
+            ? proposal.replan_impact?.high_impact
               ? "高影响重规划草稿"
               : "低影响重规划草稿"
             : proposal.kind === "direct"
@@ -222,7 +219,7 @@ export function ProposalCard({
       </div>
       <footer className="proposal-card-footer">
         <div className="proposal-impact">
-          <strong>确认后</strong>
+          <strong>{isReplan ? "应用后" : "确认后"}</strong>
           <ul>
             {impact.items.map((item) => (
               <li key={item}>{item}</li>
@@ -231,18 +228,26 @@ export function ProposalCard({
           <span className="muted">{impact.note}</span>
         </div>
         <div className="proposal-actions">
-          <button
-            type="button"
-            className="primary"
-            disabled={busy || disabled || confirmDisabledReason !== null}
-            title={confirmDisabledReason ?? undefined}
-            onClick={onConfirm}
-          >
-            {confirming ? "确认中…" : confirmLabel}
-          </button>
-          {confirmDisabledReason ? (
-            <span className="muted">{confirmDisabledReason}</span>
-          ) : null}
+          {isReplan ? (
+            <span className="muted">
+              {confirming ? "正在应用重规划…" : "重规划草稿由 DOMO 自动应用"}
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || disabled || confirmDisabledReason !== null}
+                title={confirmDisabledReason ?? undefined}
+                onClick={onConfirm}
+              >
+                {confirming ? "确认中…" : confirmLabel}
+              </button>
+              {confirmDisabledReason ? (
+                <span className="muted">{confirmDisabledReason}</span>
+              ) : null}
+            </>
+          )}
         </div>
       </footer>
     </article>

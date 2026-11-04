@@ -213,15 +213,17 @@ export function ProjectPage({
           <span className="muted">旧目标、任务、报告和验收口径仍保留；恢复后继续原计划派发。</span>
         </div>
       ) : null}
-      <AutoConfirmRow
-        mode={project.confirm_mode}
-        busy={busy}
-        disabled={autoConfirmLocked(project.status)}
-        note={confirmModeRuntimeNote(!!analysisJob)}
-        onChange={(mode) =>
-          void run(() => api.updateAnalysisPolicy(project.id, mode))
-        }
-      />
+      {project.replan_active === 1 ? null : (
+        <AutoConfirmRow
+          mode={project.confirm_mode}
+          busy={busy}
+          disabled={autoConfirmLocked(project.status)}
+          note={confirmModeRuntimeNote(!!analysisJob)}
+          onChange={(mode) =>
+            void run(() => api.updateAnalysisPolicy(project.id, mode))
+          }
+        />
+      )}
       <div className="messages">
         {analysisConversation.messages.map((item) =>
           item.folded ? (
@@ -407,7 +409,7 @@ export function ProjectPage({
         </section>
       ) : null}
 
-      {archived && archiveRefs ? (
+      {archived && archiveRefs && project.workspace_type !== "plain" ? (
         <details className="panel">
           <summary>归档历史与备份</summary>
           <p className="muted">

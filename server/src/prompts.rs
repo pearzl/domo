@@ -48,6 +48,7 @@ pub struct PromptData {
     pub goal: String,
     pub cwd: String,
     pub repo_path: String,
+    pub workspace_type: String,
     pub base_branch: String,
     pub project_branch: String,
     pub task: Option<TaskInfo>,
@@ -106,30 +107,48 @@ pub fn continuation(data: &PromptData) -> String {
 }
 
 fn common_header(data: &PromptData) -> String {
-    let mut header = format!(
-        "你是 DOMO 本地多 Agent 协作平台中的团队成员。\n\
-         \n## 工作区\n\
-         - 工作目录（唯一可写）：{}\n\
-         - 作业目录（写结果，不在 Git 仓库内）：{}\n\
-         \n## 项目目标\n\
-         - {} ({})：{}\n\
-         \n## 仓库与分支\n\
-         - 主工作树（只读参考）：{}\n\
-         - base 分支：{}\n\
-         - 项目交付分支：{}\n\
-         \n## 只读边界\n\
-         - 仓库主工作树与其他工作区只读；只能在工作区或作业目录内创建和修改文件。\n",
-        data.cwd,
-        data.job_dir,
-        data.project_name,
-        data.project_id,
-        data.goal,
-        data.repo_path,
-        data.base_branch,
-        data.project_branch
-    );
+    let workspace = if data.workspace_type == crate::models::WORKSPACE_PLAIN {
+        format!(
+            "## 工作区\n\
+             - 工作目录（唯一可写）：{}\n\
+             - 作业目录（写结果）：{}\n\
+             \n## 项目目标\n\
+             - {} ({})：{}\n\
+             \n## 只读边界\n\
+             - 只能在工作目录或作业目录内创建和修改文件。\n",
+            data.cwd, data.job_dir, data.project_name, data.project_id, data.goal
+        )
+    } else {
+        format!(
+            "## 工作区\n\
+             - 工作目录（唯一可写）：{}\n\
+             - 作业目录（写结果，不在 Git 仓库内）：{}\n\
+             \n## 项目目标\n\
+             - {} ({})：{}\n\
+             \n## 仓库与分支\n\
+             - 主工作树（只读参考）：{}\n\
+             - base 分支：{}\n\
+             - 项目交付分支：{}\n\
+             \n## 只读边界\n\
+             - 仓库主工作树与其他工作区只读；只能在工作区或作业目录内创建和修改文件。\n",
+            data.cwd,
+            data.job_dir,
+            data.project_name,
+            data.project_id,
+            data.goal,
+            data.repo_path,
+            data.base_branch,
+            data.project_branch
+        )
+    };
+    let mut header = format!("你是 DOMO 本地多 Agent 协作平台中的团队成员。\n\n{workspace}");
     header.push_str(long_command_rules());
     header
+}
+
+/// 普通工作区没有分支、worktree 与合入步骤，任务产物直接留在交付目录。
+fn plain_workspace(data: &PromptData) -> bool {
+    data.workspace_type == crate::models::WORKSPACE_PLAIN
 }
 
 fn long_command_rules() -> &'static str {
@@ -170,6 +189,15 @@ fn conversation_history(data: &PromptData) -> String {
 fn analysis_prompt(data: &PromptData) -> String {
     let auto = data.confirm_mode == crate::models::CONFIRM_AUTO;
     let replan = replan_section(data);
+    let task_rules = if plain_workspace(data) {
+        "- 任务产物直接写入普通工作区；任务按依赖顺序依次执行，不创建分支或 worktree；\n\
+         - 验收标准不得要求执行者提交、合并、推送或 git commit；\n\
+         - 本工作区不使用 Git，不要执行改变仓库状态的版本控制命令；\n"
+    } else {
+        "- 任务产物在独立 worktree 完成，验收通过后由 DOMO 合并到交付分支；合并冲突时退回执行者解决并重新验收；\n\
+         - 验收标准不得要求执行者提交、合并、推送或 git commit；\n\
+         - 不要修改任何代码或文件，不执行改变暂存区、历史或分支的 git 命令，仅阅读；\n"
+    };
     format!(
         "{}你当前扮演**规划者**，负责项目分析：理解目标并给出可执行的项目方案。\n\
          \n## 分析要求\n\
@@ -177,9 +205,7 @@ fn analysis_prompt(data: &PromptData) -> String {
          - 说明可交付物、范围边界（不做什么）、关键假设、验收口径与风险；验收口径须可观察或可执行；\n\
          - 每个任务写清目标、边界和验收方式；单个方案最多包含 {MAX_PLAN_TASKS} 个任务；大型项目分阶段，后续通过重规划派发下一批；\n\
          - 任务可独立执行与验收；deps 表示前置依赖，须为无环 DAG；\n\
-         - 任务产物在独立 worktree 完成，验收通过后由 DOMO 合并到交付分支；合并冲突时退回执行者解决并重新验收；\n\
-         - 验收标准不得要求执行者提交、合并、推送或 git commit；\n\
-         - 不要修改任何代码或文件，不执行改变暂存区、历史或分支的 git 命令，仅阅读；\n\
+         {task_rules}\
          - 仅在会改变任务拆分时提问，最多 3 个；其余写入 assumptions；\n\
          - 以最新对话为准，按历史修订意见；\n\
          - 目标简单到不需要拆分时输出 direct。\n\
@@ -198,9 +224,9 @@ fn analysis_prompt(data: &PromptData) -> String {
         common_header(data),
         replan,
         if auto {
-            "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true；重规划若取消任务、扩大范围或修改验收标准，DOMO 仍会等待人工确认。"
+            "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true；重规划草稿生成后由 DOMO 直接应用。"
         } else {
-            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认方案后开始执行。"
+            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认方案后开始执行；重规划草稿不受此限制，生成后自动应用。"
         },
         conversation_history(data),
         result_rules(
@@ -361,9 +387,15 @@ fn executor_prompt(data: &PromptData) -> String {
     let derivation = match &data.derived_from {
         Some(parent) => format!(
             "\n## 派生任务约束\n\
-             本任务是从父任务 {} {} 派生的子任务。完成工作后跳过验收阶段，由 DOMO 直接提交并合入父任务分支。\n\
+             本任务是从父任务 {} {} 派生的子任务。完成工作后跳过验收阶段，{}。\n\
              禁止再次派生新的子任务；如果任务仍然过于复杂，请在结果中说明失败原因或请求重新规划。\n",
-            parent.key, parent.title
+            parent.key,
+            parent.title,
+            if plain_workspace(data) {
+                "产物直接保留在普通工作区"
+            } else {
+                "由 DOMO 直接提交并合入父任务分支"
+            }
         ),
         None => String::new(),
     };
@@ -398,6 +430,14 @@ fn executor_prompt(data: &PromptData) -> String {
             "任务仍复杂时可派生子任务：单次 1 到 {MAX_DERIVED_TASKS} 个、deps 为空、key 在活动任务中唯一，每个子任务写清描述与验收标准。"
         )
     };
+    let git_rules = if plain_workspace(data) {
+        "- 产物直接写入普通工作区；不要执行 git add、git commit、git merge 等版本控制命令；\n\
+         - 无法完成时写清原因，不伪造成功；\n"
+    } else {
+        "- 不要执行 git add、git commit、git checkout、git reset、git merge、git rebase 等改变暂存区、历史或分支的命令；DOMO 负责暂存、提交和合并；\n\
+         - 合并冲突状态下，编辑冲突文件消除标记并保留所需改动；可运行只读 git 查看状态，但不要执行会改变暂存区、历史或分支的 git 命令；DOMO 完成提交并重新验收；\n\
+         - 无法完成时写清原因，不伪造成功；\n"
+    };
     let schema = if data.derived_from.is_some() {
         "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
          {\"kind\":\"failed\",\"reason\":\"失败原因\"} 或 \
@@ -421,9 +461,7 @@ fn executor_prompt(data: &PromptData) -> String {
          - 由你决定实现与核验方式，满足任务与验收标准；\n\
          - 如实核验并说明结果，不伪造；\n\
          - 不要在工作区以外读写文件；\n\
-         - 不要执行 git add、git commit、git checkout、git reset、git merge、git rebase 等改变暂存区、历史或分支的命令；DOMO 负责暂存、提交和合并；\n\
-         - 合并冲突状态下，编辑冲突文件消除标记并保留所需改动；可运行只读 git 查看状态，但不要执行会改变暂存区、历史或分支的 git 命令；DOMO 完成提交并重新验收；\n\
-         - 无法完成时写清原因，不伪造成功；\n\
+         {git_rules}\
          - 仅当事实前提错误、无法按描述完成或约束冲突需规划者裁决时输出 replan；\n\
          - 不要判断其他任务或整个项目计划的进度；\n\
          - {}。\n\
@@ -486,8 +524,19 @@ fn verifier_prompt(data: &PromptData) -> String {
     } else {
         task.guidance.trim().to_string()
     };
+    let (opening, workspace_note) = if plain_workspace(data) {
+        (
+            "你当前扮演**验收者**，在同一普通工作区核验执行结果；产物直接留在此目录，不存在分支或合入步骤。",
+            "不要在工作区以外读写文件，也不要修改任何文件；",
+        )
+    } else {
+        (
+            "你当前扮演**验收者**，在任务分支的独立只读工作区核验执行结果。项目交付分支会在验收通过后由 DOMO 自动合并；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在项目交付分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。",
+            "不要在工作区以外读写文件，也不要修改任何文件；验收工作区在结束后会被删除；",
+        )
+    };
     format!(
-        "{}你当前扮演**验收者**，在任务分支的独立只读工作区核验执行结果。项目交付分支会在验收通过后由 DOMO 自动合并；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在项目交付分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。\n\
+        "{}{}\n\
          \n## 任务\n{} - {}\n\n{}\n\
          \n## 人工指导\n{}\n\
          \n## 验收标准\n{}\n\
@@ -498,10 +547,11 @@ fn verifier_prompt(data: &PromptData) -> String {
          - 如实验证，不能只看执行者的自述，也不能伪造核验结果；\n\
          - 如果历史问题包含合并冲突，先确认执行者已解决冲突并消除冲突标记，再按任务验收标准复核；冲突处理本身不作为验收标准；\n\
          - 发现真实缺陷、验证失败、遗漏或伪造，判定不通过；\n\
-         - 不要在工作区以外读写文件，也不要修改任何文件；验收工作区在结束后会被删除；\n\
+         - {workspace_note}\n\
          - 即使无法验收，也要写结果文件。\n\
          {}",
         common_header(data),
+        opening,
         task.key,
         task.title,
         task.description,
@@ -597,20 +647,35 @@ fn acceptance_prompt(data: &PromptData) -> String {
         .filter(|value| !value.is_empty())
         .map(|reason| format!("\n## 上次重规划原因（本次验收需核对是否已闭合）\n{reason}\n"))
         .unwrap_or_default();
+    let (completion_note, workspace_label, evidence_rule, git_rule) = if plain_workspace(data) {
+        (
+            "当前计划的活动任务已经完成；你只做验收，不写项目报告。",
+            "工作区改动规模",
+            "逐条对照项目验收条目，以工作区的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；",
+            "不要修改源码、配置或文档，不要执行改变仓库状态的版本控制命令；",
+        )
+    } else {
+        (
+            "当前计划的活动任务已经完成并合入项目交付分支；你只做验收，不写项目报告。",
+            "交付分支改动规模",
+            "逐条对照项目验收条目，以交付分支的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；",
+            "不要修改源码、配置或文档，不要执行 git add、git commit、git merge、git rebase、git push 等改变暂存区、历史或分支的命令；",
+        )
+    };
     format!(
-        "{}你当前扮演**规划者**，负责项目整体验收。当前计划的活动任务已经完成并合入项目交付分支；你只做验收，不写项目报告。\n\
+        "{}你当前扮演**规划者**，负责项目整体验收。{completion_note}\n\
          {}\
          \n## 项目验收条目\n{}\
          \n## 关键假设与范围\n{}\
          \n## 已完成任务\n{}\
          \n## 已取消任务\n{}\
-         \n## 交付分支改动规模\n{}\
+         \n## {workspace_label}\n{}\
          \n## 项目对话\n{}\
          {}\
          \n## 验收要求\n\
-         - 逐条对照项目验收条目，以交付分支的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；\n\
-         - 可以运行只读验证命令（测试、探针、构建检查等）获取证据；构建与测试产物应落在仓库已忽略的目录；\n\
-         - 不要修改源码、配置或文档，不要执行 git add、git commit、git merge、git rebase、git push 等改变暂存区、历史或分支的命令；\n\
+         - {evidence_rule}\n\
+         - 可以运行只读验证命令（测试、探针、构建检查等）获取证据；构建与测试产物应落在已忽略的目录；\n\
+         - {git_rule}\n\
          - 每条验收条目给出 verdict：met（有可核查证据）、unmet（代理本应完成但未完成）、unverifiable（代理应能验证但当前无法验证）、human_required（只能由人完成的签字、试听、实机对照等）；\n\
          - 方案明确允许以 UNKNOWN 收口的条目，判为 met，并在 evidence 中引用允许该口径的方案条文；不为通过验收而放宽标准；\n\
          - human_required 不是重规划理由，会作为人工待办写入项目报告；只有 unmet 和 unverifiable 需要重新规划；\n\
@@ -689,10 +754,18 @@ fn summary_prompt(data: &PromptData) -> String {
             format!("\n## 项目验收结论（已通过，报告必须与此一致）\n```json\n{result}\n```\n")
         })
         .unwrap_or_default();
+    let (completion_note, workspace_label) = if plain_workspace(data) {
+        ("项目整体验收已经通过，所有任务已经完成。", "工作区改动规模")
+    } else {
+        (
+            "项目整体验收已经通过，所有任务已经完成并合并到项目交付分支。",
+            "交付分支改动规模",
+        )
+    };
     format!(
-        "{}你当前扮演**规划者**，负责撰写项目总结报告。项目整体验收已经通过，所有任务已经完成并合并到项目交付分支。\n\
+        "{}你当前扮演**规划者**，负责撰写项目总结报告。{completion_note}\n\
          \n## 任务结果\n{}\n\
-         \n## 交付分支改动规模\n{}\n\
+         \n## {workspace_label}\n{}\n\
          {}{}\n\
          ## 报告要求\n\
          - 使用 Markdown，面向用户说明最终交付了什么、关键思路、验证情况和已知风险；\n\
@@ -744,6 +817,7 @@ mod tests {
             goal: "让交付结果可用".into(),
             cwd: "/workspace".into(),
             repo_path: "/repos/example".into(),
+            workspace_type: crate::models::WORKSPACE_GIT.into(),
             base_branch: "main".into(),
             project_branch: "domo/p-1".into(),
             task: Some(sample_task()),

@@ -78,15 +78,19 @@ def main():
                     "报告就绪",
                 )
 
-            def wait_draft(pid):
+            def wait_applied(pid, label="重规划自动应用"):
                 return wait_project(
                     pid,
-                    lambda item: item.get("proposal") is not None
+                    lambda item: item["project"]["stage"] == "executing"
+                    and any(
+                        event["kind"] == "replan_applied"
+                        for event in item["events"]
+                    )
                     and not any(
                         job["role"] == "analysis" and job["status"] == "running"
                         for job in item["jobs"]
                     ),
-                    "重规划草稿",
+                    label,
                 )
 
             # 人工验收的 Git 合并与数据库完成全程串行，replan 只能看到完成后的保留链。
@@ -128,9 +132,7 @@ def main():
                 )
                 assert accepted.result()[0] == 200, accepted.result()
             assert replanned[0] == 200, replanned
-            detail = wait_draft(milestone_id)
-            assert "T1" in detail["proposal"]["replan_impact"]["retained_task_keys"]
-            detail = call("POST", f"/api/projects/{milestone_id}/analysis/confirm", {})
+            detail = wait_applied(milestone_id, "里程碑验收后重规划自动应用")
             assert next(task for task in detail["tasks"] if task["key"] == "T1")[
                 "status"
             ] != "canceled"
@@ -156,11 +158,10 @@ def main():
                 {"reason": "与 fail_runtime 交错"},
             )
             assert status == 200, status
-            detail = wait_draft(runtime_id)
+            detail = wait_applied(runtime_id, "运行时失败后重规划自动应用")
             direct = next(job for job in detail["jobs"] if job["role"] == "direct")
             assert direct["status"] == "canceled", direct
             assert detail["project"]["goal"] == original_goal
-            assert detail["project"]["stage"] == "analysis"
             # 延迟期间强制取消后，旧异常回调和失败事件都不能落到新计划。
             server.env["DOMO_MOCK_RUNTIME_FAIL_ROLE"] = "direct"
             server.env["DOMO_MOCK_FAILURE_CALLBACK_DELAY_MS"] = "1200"
@@ -182,7 +183,7 @@ def main():
                 {"reason": "强制取消后的新计划"},
             )
             call("POST", f"/api/projects/{canceled_id}/resume", {})
-            detail = wait_draft(canceled_id)
+            detail = wait_applied(canceled_id, "强制取消后重规划自动应用")
             old_job_events = [
                 event
                 for event in detail["events"]

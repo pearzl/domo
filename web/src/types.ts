@@ -184,6 +184,13 @@ export interface VerificationHistory {
 }
 
 export type ProjectAttention = "confirm" | "review" | "failed" | "merge" | "blocked";
+export type WorkspaceType = "git" | "plain";
+
+export interface ProjectAttentionTask {
+  id: string;
+  key: string;
+  title: string;
+}
 
 export interface ProjectSummary {
   id: string;
@@ -192,10 +199,14 @@ export interface ProjectSummary {
   repo_path: string;
   base_branch: string;
   branch: string;
+  /** 缺省按 Git 工作区处理，兼容旧接口。 */
+  workspace_type?: WorkspaceType;
   stage: string;
   status: string | null;
   blocked_reason: string | null;
   attention: ProjectAttention | null;
+  /** 待办关联的任务；项目级待办可能为空。 */
+  attention_task?: ProjectAttentionTask | null;
   task_total: number;
   task_completed: number;
   replan_reason: string | null;
@@ -216,6 +227,8 @@ export interface Project {
   base_branch: string;
   branch: string;
   workspace: string;
+  /** 缺省按 Git 工作区处理，兼容旧接口。 */
+  workspace_type?: WorkspaceType;
   stage: string;
   status: string | null;
   blocked_reason: string | null;
@@ -488,6 +501,9 @@ export interface CreateProjectInput {
   name: string;
   repo_path: string;
   base_branch?: string;
+  goal?: string;
+  workspace_type?: WorkspaceType;
+  confirm_mode?: "manual" | "auto";
 }
 
 export interface CreateTaskInput {

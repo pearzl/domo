@@ -451,6 +451,21 @@ button.event-filter:focus-visible,
   color: var(--muted);
   padding: 8px 12px;
   border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger, #dc2626);
+  color: #fff;
+  font-size: 0.72rem;
+  line-height: 18px;
+  text-align: center;
 }
 
 .nav-link:hover {
@@ -907,6 +922,10 @@ button:disabled {
   gap: 14px;
 }
 
+.form-wide {
+  grid-column: 1 / -1;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -1179,6 +1198,42 @@ small {
   font-size: 0.8rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.attention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attention-item {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attention-item:hover,
+.attention-item:focus-visible {
+  border-color: var(--line-strong);
+}
+
+.attention-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.attention-item-head h2 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.attention-kind {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent, #3b82f6);
 }
 
 .project-list {

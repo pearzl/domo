@@ -6,6 +6,8 @@ import { ProjectsPage } from "./pages/ProjectsPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { AgentsPage } from "./pages/AgentsPage";
 import { UsagePage } from "./pages/UsagePage";
+import { AttentionPage } from "./pages/AttentionPage";
+import { projectNeedsAttention } from "./projectFilter";
 
 const HEALTH_POLL_MS = 5000;
 
@@ -20,6 +22,7 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthOnline, setHealthOnline] = useState(false);
   const [eventsOnline, setEventsOnline] = useState(false);
+  const [attentionCount, setAttentionCount] = useState(0);
 
   useEffect(() => {
     const canonical = normalizePath(window.location.pathname);
@@ -68,6 +71,26 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    async function refreshAttention() {
+      try {
+        const projects = await api.listProjects();
+        if (active) {
+          setAttentionCount(projects.filter(projectNeedsAttention).length);
+        }
+      } catch {
+        // 列表页与待我处理页各自展示加载错误，导航计数保持上次值。
+      }
+    }
+    void refreshAttention();
+    const timer = window.setInterval(() => void refreshAttention(), HEALTH_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   function navigate(next: string) {
     const target = normalizePath(next);
     window.history.pushState({}, "", target);
@@ -78,8 +101,9 @@ export default function App() {
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   const isAgents = path === "/agents";
   const isUsage = path === "/usage";
+  const isAttention = path === "/attention";
   // 项目详情、根路径与未知路径都回退或落在项目视图，导航高亮“项目”。
-  const isProjects = !isAgents && !isUsage;
+  const isProjects = !isAgents && !isUsage && !isAttention;
   const online = healthOnline || eventsOnline;
 
   return (
@@ -99,6 +123,15 @@ export default function App() {
             项目
           </button>
           <button
+            className={isAttention ? "nav-link active" : "nav-link"}
+            onClick={() => navigate("/attention")}
+          >
+            待我处理
+            {attentionCount > 0 ? (
+              <span className="nav-count">{attentionCount}</span>
+            ) : null}
+          </button>
+          <button
             className={isAgents ? "nav-link active" : "nav-link"}
             onClick={() => navigate("/agents")}
           >
@@ -108,7 +141,7 @@ export default function App() {
             className={isUsage ? "nav-link active" : "nav-link"}
             onClick={() => navigate("/usage")}
           >
-            用量
+            成本用量
           </button>
         </nav>
 
@@ -143,6 +176,8 @@ export default function App() {
             id={projectMatch[1]}
             onBack={() => navigate("/")}
           />
+        ) : isAttention ? (
+          <AttentionPage onOpen={(id) => navigate(`/projects/${id}`)} />
         ) : isAgents ? (
           <AgentsPage />
         ) : isUsage ? (

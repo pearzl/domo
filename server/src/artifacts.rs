@@ -41,6 +41,10 @@ pub async fn cleanup_task(
     task: &TaskRow,
     force: bool,
 ) -> ArtifactsResult<bool> {
+    // 普通工作区的产物位于用户目录，不随任务完成回收。
+    if !project.is_git() {
+        return Ok(true);
+    }
     if !force && has_unfinished_children(&state.db, &task.id).await? {
         return Ok(false);
     }
@@ -145,6 +149,10 @@ pub async fn cleanup_project(
     project: &ProjectRow,
     force: bool,
 ) -> ArtifactsResult<bool> {
+    // 普通工作区归档保留产物与 `jobs` 审计记录，不执行 Git 引用操作。
+    if !project.is_git() {
+        return Ok(true);
+    }
     let workspace = PathBuf::from(&project.workspace);
     if !managed_child(&state.cfg.workspace_root, &workspace) {
         return Err(ArtifactsError::WorkspaceOutsideRoot);
@@ -239,6 +247,9 @@ pub async fn cleanup_completed_tasks(
     state: &AppState,
     project: &ProjectRow,
 ) -> ArtifactsResult<()> {
+    if !project.is_git() {
+        return Ok(());
+    }
     let tasks = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks WHERE project_id = ? AND stage = ? \
          AND (artifacts_released_at IS NULL OR artifacts_released_at = ?) \

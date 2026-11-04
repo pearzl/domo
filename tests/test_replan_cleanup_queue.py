@@ -3,27 +3,16 @@
 
 import sqlite3
 import time
-import urllib.request
 from pathlib import Path
 
 from harness import Server, ensure_server_built, git, init_repo, temp_root, wait_for
 
 
-def confirm_crash(server, pid):
-    request = urllib.request.Request(
-        server.base + f"/api/projects/{pid}/analysis/confirm",
-        data=b"{}",
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        urllib.request.urlopen(request, timeout=10).read()
-    except Exception:
-        pass
-    deadline = time.time() + 20
+def wait_crash(server):
+    deadline = time.time() + 30
     while server.process.poll() is None and time.time() < deadline:
         time.sleep(0.1)
-    assert server.process.poll() is not None, "提交后崩溃钩子未触发"
+    assert server.process.poll() is not None, "自动应用后的崩溃钩子未触发"
 
 
 def main():
@@ -77,11 +66,10 @@ def main():
             old_task = next(task for task in detail["tasks"] if task["worktree"])
             call("POST", f"/api/projects/{pid}/pause", {"force": True})
             call("POST", f"/api/projects/{pid}/replan", {"reason": "第一轮清理"})
-            call("POST", f"/api/projects/{pid}/resume", {})
-            wait_project(lambda item: item.get("proposal") is not None, "第一轮草稿")
             Path(old_task["worktree"], "dirty-replan-cleanup.txt").write_text("dirty")
+            call("POST", f"/api/projects/{pid}/resume", {})
 
-            confirm_crash(server, pid)
+            wait_crash(server)
             server.env.pop("DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY")
             server.restart()
             wait_project(lambda item: item["project"]["stage"] == "executing", "第一轮恢复")
@@ -96,8 +84,7 @@ def main():
             server.env["DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY"] = "1"
             server.restart()
             call("POST", f"/api/projects/{pid}/replan", {"reason": "第二轮清理"})
-            wait_project(lambda item: item.get("proposal") is not None, "第二轮草稿")
-            confirm_crash(server, pid)
+            wait_crash(server)
 
             db = sqlite3.connect(temp / "data" / "domo.db")
             rows = db.execute(
@@ -137,34 +124,7 @@ def main():
             db.close()
             assert unreleased == 0, unreleased
 
-            # 草稿期的旧标志只能归属上一代，不能让当前代际提前完成清理。
-            call("POST", f"/api/projects/{pid}/replan", {"reason": "草稿期迁移归属"})
-            detail = wait_project(lambda item: item.get("proposal") is not None, "迁移前草稿")
-            generation = 3
-            db = sqlite3.connect(temp / "data" / "domo.db")
-            db.execute(
-                "UPDATE projects SET replan_cleanup_needed = 1 WHERE id = ?", (pid,)
-            )
-            db.commit()
-            db.close()
-            server.restart()
-            db = sqlite3.connect(temp / "data" / "domo.db")
-            current = db.execute(
-                "SELECT COUNT(*) FROM replan_cleanup WHERE project_id = ? AND generation = ?",
-                (pid, generation),
-            ).fetchone()[0]
-            db.close()
-            assert current == 0, current
-            detail = call("POST", f"/api/projects/{pid}/analysis/confirm", {})
-            assert detail["project"]["stage"] == "executing"
-            db = sqlite3.connect(temp / "data" / "domo.db")
-            status = db.execute(
-                "SELECT status FROM replan_cleanup WHERE project_id = ? AND generation = ?",
-                (pid, generation),
-            ).fetchone()[0]
-            db.close()
-            assert status == "done", status
-            print("两轮 apply 与清理失败后的逐代际恢复测试通过")
+            print("两轮自动应用与清理失败后的逐代际恢复测试通过")
 
 
 if __name__ == "__main__":

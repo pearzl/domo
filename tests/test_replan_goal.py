@@ -126,8 +126,18 @@ def main():
             original_goal = "用户首次确认的原始目标"
             edit_id = new_project("ExplicitGoalEdit", original_goal)
             request_replan(edit_id)
-            old_draft = wait_draft(edit_id)
-            assert old_draft["proposal"]["goal"] == original_goal
+            # 重规划草稿自动应用，旧目标保持不变。
+            applied = wait_project(
+                edit_id,
+                lambda item: item["project"]["stage"] == "executing"
+                and item["project"]["goal"] == original_goal
+                and not any(
+                    job["role"] == "analysis" and job["status"] == "running"
+                    for job in item["jobs"]
+                ),
+                "目标一致的重规划草稿自动应用",
+            )
+            assert applied["project"]["goal"] == original_goal, applied["project"]
             new_goal = "用户主动提交的新目标"
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 outcomes = list(
@@ -153,13 +163,13 @@ def main():
             assert outcomes[1][0] in (200, 400, 409), outcomes
             detail = wait_project(
                 edit_id,
-                lambda item: item.get("proposal") is not None
-                and item["proposal"]["goal"] == new_goal
+                lambda item: item["project"]["stage"] == "executing"
+                and item["project"]["goal"] == new_goal
                 and not any(
                     job["role"] == "analysis" and job["status"] == "running"
                     for job in item["jobs"]
                 ),
-                "围绕用户新目标生成的草稿",
+                "围绕用户新目标自动应用的新计划",
             )
             assert detail["project"]["goal"] == new_goal, detail["project"]
             assert any(event["kind"] == "goal_updated" for event in detail["events"])
@@ -169,7 +179,7 @@ def main():
                 f"/api/projects/{edit_id}/analysis/confirm",
                 {},
             )
-            assert status == 200, status
+            assert status in (200, 400), status
             detail = call("GET", f"/api/projects/{edit_id}")
             assert detail["project"]["goal"] == new_goal, detail["project"]
 

@@ -403,6 +403,20 @@ describe("projectGuidance", () => {
     expect(guidance.action).toBe("审阅项目报告");
   });
 
+  it("普通工作区完成即交付，不产生合入待办", () => {
+    const plain = project({
+      stage: "completed",
+      workspace_type: "plain",
+      repo_path: "/delivery",
+    });
+    const guidance = projectGuidance(input({ project: plain }));
+    expect(guidance.label).toBe("已交付");
+    expect(guidance.title).toBe("已交付");
+    expect(guidance.merge).toBeUndefined();
+    expect(guidance.detail).toContain("/delivery");
+    expect(projectAttention(input({ project: plain }))).toBeNull();
+  });
+
   it("执行阶段直接完成模式区分作业运行", () => {
     const running = projectGuidance(
       input({

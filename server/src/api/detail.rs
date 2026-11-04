@@ -116,7 +116,7 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
 /// 目标分支是否已经包含项目分支提交。比较当前分支提交，覆盖 DOMO 记录的
 /// 合入和用户在 DOMO 之外完成的合入；分支不可读时退回已记录的合入状态。
 pub(super) async fn project_merged_into_base(project: &ProjectRow) -> bool {
-    if project.stage != STAGE_COMPLETED {
+    if project.stage != STAGE_COMPLETED || !project.is_git() {
         return false;
     }
     let repo = PathBuf::from(&project.repo_path);
