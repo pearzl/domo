@@ -81,6 +81,28 @@ function elementMarkup(
 }
 
 describe("任务面板表单与列表是平级容器", () => {
+  it("打开详情与调整队列是独立按钮，排序按钮不位于按钮语义内部", () => {
+    const markup = renderToStaticMarkup(<TaskRow task={TASKS[0]} selected={false} agent="Agent" counts="" onSelect={() => {}}><QueueControls task={TASKS[0]} summary={{ total: 2, label: "可调整 1/2", canMoveUp: false, canMoveDown: true, position: 1 }} busy={false} onReorder={() => {}} /></TaskRow>);
+    expect(markup).toContain('role="group"');
+    expect(markup).not.toContain('role="button"');
+    const openStart = markup.indexOf('class="task-row-open"');
+    const openEnd = markup.indexOf("</button>", openStart);
+    expect(openStart).toBeGreaterThan(0);
+    expect(markup.slice(openStart, openEnd)).not.toContain('class="queue-controls"');
+    expect(markup.indexOf('class="queue-controls"')).toBeGreaterThan(openEnd);
+    expect(markup).not.toContain("onKeyDown");
+  });
+
+  it("派生任务就近放在父任务后，保留原任务内容与顺序", () => {
+    const parent = task("T1");
+    const other = task("T2");
+    const child = { ...task("T1.1"), parent_id: parent.id };
+    const tasks = [parent, other, child];
+    const markup = renderToStaticMarkup(<TaskList tasks={tasks} activeTasks={tasks} selectedTaskId={null} onSelect={() => {}} agentName={() => "—"} queueIds={[]} archived={false} busy={false} onReorder={() => {}} />);
+    expect(markup.indexOf("打开 T1.1")).toBeLessThan(markup.indexOf("打开 T2 "));
+    expect(markup).toContain("派生自 T1");
+    expect(tasks.map(task => task.key)).toEqual(["T1", "T2", "T1.1"]);
+  });
   function renderPanel(addTaskOpen: boolean) {
     return renderToStaticMarkup(
       <TaskPanel
@@ -157,7 +179,7 @@ describe("任务行层级", () => {
     const secondRow = markup.indexOf("任务 B</span>");
     const main = elementMarkup(
       markup,
-      "div",
+      "span",
       "task-row-main",
       markup.indexOf(">", secondRow),
     );
@@ -170,7 +192,7 @@ describe("任务行层级", () => {
     expect(markup).toContain('class="task-row-meta"');
     const meta = elementMarkup(
       markup,
-      "div",
+      "span",
       "task-row-meta",
       markup.lastIndexOf('class="task-row-meta"'),
     );

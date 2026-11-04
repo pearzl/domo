@@ -352,6 +352,7 @@ export function ProjectPage({
   ) : goalMessages.length > 1 ? (
     <details className="panel">
       <summary>项目分析记录</summary>
+      <p className="subtitle">方案已确认，以下为目标澄清与方案讨论的历史记录。</p>
       <div className="messages compact">
         {goalMessages.map((item) => (
           <div key={item.id} className={`message message-${item.role}`}>
@@ -536,8 +537,6 @@ export function ProjectPage({
       >
         {activeBlock === "overview" ? (
           <>
-          <DeliveryPanel detail={detail} onSaved={() => void refresh()} />
-          <ResourcePanel detail={detail} onSaved={() => void refresh()} />
           <ProjectOverview
             detail={detail}
             onOpenTab={openGuidanceTab}
@@ -547,6 +546,8 @@ export function ProjectPage({
             busy={busy}
             merging={merging}
           />
+          <DeliveryPanel detail={detail} onSaved={() => void refresh()} />
+          <ResourcePanel detail={detail} onSaved={() => void refresh()} />
           </>
         ) : activeBlock === "analysis" ? (
           analysisBlock
@@ -554,6 +555,7 @@ export function ProjectPage({
           <ProjectTasksSection
             project={project}
             tasks={tasks}
+            jobs={jobs}
             activeTasks={activeTasks}
             visibleTasks={visibleTasks}
             directMode={directMode}
@@ -597,6 +599,7 @@ export function ProjectPage({
             onSubmitReport={(action) => void submitReport(action)}
             onRequestReplan={requestReportReplan}
             onAddTask={openAddTaskForm}
+            onOpenTasks={() => selectTab("tasks")}
           />
         ) : (
           infoBlock

@@ -64,6 +64,14 @@ const input = {
 };
 
 describe("direct 重规划草稿确认", () => {
+  it("执行阶段保留历史方案但不显示待确认徽标", () => {
+    const value = detail(proposal(false));
+    value.project.stage = "executing";
+    value.project.confirmed_at = "2026-01-10T10:00:00Z";
+    expect(projectPageView(value, input).badgeInput.proposalPending).toBe(false);
+    value.project.stage = "analysis";
+    expect(projectPageView(value, input).badgeInput.proposalPending).toBe(true);
+  });
   it("历史任务不会阻止 direct 重规划草稿确认", () => {
     expect(projectPageView(detail(proposal(true)), input).confirmBlockedReason).toBeNull();
   });

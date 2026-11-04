@@ -91,7 +91,7 @@ export function resultSource(taskId: string, jobs: JobSummary[]): ResultSource |
     return left.id < right.id ? -1 : 1;
   })[completed.length - 1];
   return {
-    label: `来自第 ${latest.attempt} 次执行作业`,
+    label: "来自最近成功执行作业",
     jobId: latest.id,
     finishedAt: latest.finished_at ?? latest.started_at ?? latest.created_at,
     agent: latest.agent_name,

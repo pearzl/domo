@@ -172,9 +172,12 @@ export function AgentFormPanel({
 
   useEffect(() => {
     const active = document.activeElement;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     returnFocusRef.current = active instanceof HTMLElement ? active : null;
     closeRef.current?.focus();
     return () => {
+      document.body.style.overflow = overflow;
       const target = returnFocusRef.current;
       if (target?.isConnected) target.focus();
       returnFocusRef.current = null;
@@ -486,7 +489,7 @@ export function AgentFormPanel({
         </div>
         <form className="agent-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
           <div className="drawer-body agent-form-body">
-            {error ? <div className="error-box">{error}</div> : null}
+            {error ? <div className="error-box" role="alert">{error}</div> : null}
             {SECTIONS.map((section) => (
               <details className="agent-form-section" key={section.key} open>
                 <summary>{section.title}</summary>

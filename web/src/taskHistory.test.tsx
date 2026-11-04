@@ -186,6 +186,17 @@ function renderHistory(value = oneRoundHistory()) {
 }
 
 describe("TaskHistoryBlock 按执行轮渲染", () => {
+  it("长历史默认展示最近三轮，最新在前，保留全部轮次入口", () => {
+    const value = taskHistory(Array.from({ length: 20 }, (_, index) => job(`e${index}`, "executor", index)), history([]), "ready");
+    const markup = renderHistory(value);
+    expect(markup.match(/id="task-round-\d+"/g)).toHaveLength(3);
+    expect(markup).toContain("第 20 轮");
+    expect(markup).toContain("第 18 轮");
+    expect(markup).not.toContain("第 17 轮");
+    expect(markup).toContain("展开全部 20 轮");
+    expect(markup.indexOf("第 20 轮")).toBeLessThan(markup.indexOf("第 19 轮"));
+    expect(markup).toContain('<details class="task-history-body">');
+  });
   it("一次执行 + 三次验收（两次失败）只渲染 1 个轮次并汇总本轮验收", () => {
     const markup = renderHistory();
     expect(markup).toContain(TASK_HISTORY_TITLE);
@@ -270,11 +281,9 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
     expect(markup).toContain("第 2 轮");
     expect(markup).toContain("2 个执行轮次 · 失败 1 轮");
 
-    const first = markup.slice(
-      markup.indexOf('id="task-round-1"'),
-      markup.indexOf('id="task-round-2"'),
-    );
-    const second = markup.slice(markup.indexOf('id="task-round-2"'));
+    const first = markup.slice(markup.indexOf('id="task-round-1"'));
+    const second = markup.slice(markup.indexOf('id="task-round-2"'), markup.indexOf('id="task-round-1"'));
+    expect(markup.indexOf('id="task-round-2"')).toBeLessThan(markup.indexOf('id="task-round-1"'));
     expect(first).toContain("最近通过");
     expect(second).toContain("最近拒绝");
     expect(second).toContain("拒绝");

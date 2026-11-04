@@ -57,17 +57,19 @@ describe("matchesTaskFilter", () => {
     expect(matchesTaskFilter(task({ status: "canceled" }), "all")).toBe(true);
   });
 
-  it("进行中匹配运行、执行与验收阶段", () => {
+  it("进行中只匹配运行，不把执行或验收阶段的排队暂停算作运行", () => {
     expect(matchesTaskFilter(task({ status: "running" }), "active")).toBe(true);
-    expect(matchesTaskFilter(task({ stage: "executing" }), "active")).toBe(true);
-    expect(matchesTaskFilter(task({ stage: "verifying" }), "active")).toBe(true);
+    expect(matchesTaskFilter(task({ stage: "executing" }), "active")).toBe(false);
+    expect(matchesTaskFilter(task({ stage: "verifying", status: "queued" }), "active")).toBe(false);
+    expect(matchesTaskFilter(task({ stage: "executing", status: "paused" }), "active")).toBe(false);
     expect(matchesTaskFilter(task(), "active")).toBe(false);
     expect(matchesTaskFilter(task({ stage: "completed" }), "active")).toBe(false);
   });
 
-  it("排队匹配待启动且未阻塞或暂停的任务", () => {
+  it("排队使用服务端 queued 状态，不包含依赖等待", () => {
     expect(matchesTaskFilter(task({ status: "queued" }), "queued")).toBe(true);
-    expect(matchesTaskFilter(task(), "queued")).toBe(true);
+    expect(matchesTaskFilter(task(), "queued")).toBe(false);
+    expect(matchesTaskFilter(task({ stage: "verifying", status: "queued" }), "queued")).toBe(true);
     expect(matchesTaskFilter(task({ status: "blocked" }), "queued")).toBe(false);
     expect(matchesTaskFilter(task({ status: "paused" }), "queued")).toBe(false);
     expect(matchesTaskFilter(task({ stage: "executing" }), "queued")).toBe(false);
@@ -104,7 +106,7 @@ describe("taskFilterCounts", () => {
     const tasks = [
       task({ id: "a", status: "blocked" }),
       task({ id: "b", status: "paused" }),
-      task({ id: "c", stage: "executing" }),
+      task({ id: "c", stage: "executing", status: "running" }),
       task({ id: "d", stage: "completed" }),
       task({ id: "e", status: "canceled" }),
       task({ id: "f", status: "queued" }),

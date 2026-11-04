@@ -33,12 +33,12 @@ export function DeliveryPanel({ detail, onSaved }: { detail: ProjectDetail; onSa
     catch (err) { setError(errorMessage(err)); }
     finally { setBusy(false); }
   }
-  return <section className="panel">
+  return <section className="panel delivery-panel">
     <h2>交付契约与消耗边界</h2>
-    <p>当前契约 #{current?.id ?? "—"} · 已知费用 {delivery.known_cost.toFixed(4)} · 费用未知 {delivery.unknown_cost_jobs} 次</p>
-    <p className="muted">预算按已知费用控制新派发，在途作业允许结算；未知或延迟上报的费用使预算不能作为账单硬上限。重试、换人和重规划不会重置累计消耗。</p>
-    {detail.project.report ? <details open><summary>最新可审查结果</summary><RichContent content={detail.project.report} /></details> : null}
-    {delivery.acceptance ? <details open><summary>项目集成验收 · 契约 #{delivery.acceptance.contract_id ?? "历史未记录"}</summary>
+    <p className="subtitle">契约 #{current?.id ?? "—"} · 已记录费用 {delivery.known_cost.toFixed(4)} · 费用未知 {delivery.unknown_cost_jobs} 次</p>
+    <details className="reference-fold"><summary>预算计量说明</summary><p className="muted">费用为 Agent 上报值，不代表实际账单或免费使用。预算按已知费用控制新派发，在途作业允许结算；未知或延迟上报的费用使预算不能作为账单硬上限。重试、换人和重规划不会重置累计消耗。</p></details>
+    {detail.project.report ? <details className="reference-fold"><summary>最新可审查结果</summary><RichContent content={detail.project.report} /></details> : null}
+    {delivery.acceptance ? <details className="reference-fold"><summary>项目集成验收 · 契约 #{delivery.acceptance.contract_id ?? "历史未记录"}</summary>
       <p>已检查版本：{delivery.acceptance.artifact_version ?? "普通工作区当前产物"}</p>
       <ul>{delivery.acceptance.criteria.map((item, index) => <li key={index}>
         <strong>{item.verdict} · {item.criterion}</strong><p>{item.evidence.join("；")}</p>{item.gap ? <p>风险 / 缺口：{item.gap}</p> : null}
@@ -48,7 +48,7 @@ export function DeliveryPanel({ detail, onSaved }: { detail: ProjectDetail; onSa
       合入操作 {delivery.merge_operation.phase}：{delivery.merge_operation.error}
       <p>目标操作前引用：{delivery.merge_operation.base_before}；项目操作前引用：{delivery.merge_operation.project_before}</p>
     </div> : null}
-    {current?.proposal?.acceptance.length ? <div><strong>当前交付验收标准</strong><ul>{current.proposal.acceptance.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+    {current?.proposal?.acceptance.length ? <details className="reference-fold"><summary>当前交付验收标准（{current.proposal.acceptance.length} 项）</summary><ul>{current.proposal.acceptance.map((item, index) => <li key={index}>{item}</li>)}</ul></details> : null}
     <details><summary>契约版本与方案差异（{delivery.contracts.length}）</summary>
       {delivery.contracts.map((item, index) => {
         const before = delivery.contracts[index - 1];
@@ -71,11 +71,11 @@ export function DeliveryPanel({ detail, onSaved }: { detail: ProjectDetail; onSa
     </details> : null}
     <p>费用预算：{delivery.limits.cost_budget ?? "不限"}；任务自动执行尝试：{delivery.limits.task_attempt_limit ?? "不限"}；重规划次数：{delivery.limits.replan_limit ?? "不限"}</p>
     {!readOnly && !editing ? <button className="secondary" onClick={edit}>设置限制 / 授权继续</button> : null}
-    {editing ? <form onSubmit={event => { event.preventDefault(); void save(); }}>
+    {editing ? <form className="form" onSubmit={event => { event.preventDefault(); void save(); }}>
       <label>费用预算（留空不限）<input type="number" min="0" step="any" value={budget} onChange={e => setBudget(e.target.value)} /></label>
       <label>每任务累计执行尝试上限<input type="number" min="1" step="1" value={attempts} onChange={e => setAttempts(e.target.value)} /></label>
       <label>项目累计重规划次数上限<input type="number" min="0" step="1" value={replans} onChange={e => setReplans(e.target.value)} /></label>
-      <div className="button-row"><button disabled={busy}>保存限制</button><button type="button" disabled={busy} onClick={() => setEditing(false)}>取消</button></div>
+      <div className="button-row"><button className="primary" disabled={busy}>保存限制</button><button className="secondary" type="button" disabled={busy} onClick={() => setEditing(false)}>取消</button></div>
     </form> : null}
     {error ? <ErrorBox message={error} /> : null}
   </section>;

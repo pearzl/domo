@@ -54,29 +54,17 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
   return (
     <>
       <div className="usage-cards">
-        <div>
+        <div className="usage-primary">
           <span className="meta-label">作业</span>
           <strong>{totals.jobs}</strong>
         </div>
-        <div>
-          <span className="meta-label">用量记录覆盖</span>
-          <strong>
-            {totals.jobs > 0 ? (
-              <>
-                {totals.known_jobs}/{totals.jobs} 个作业
-              </>
-            ) : (
-              "—"
-            )}
-          </strong>
-        </div>
-        <div>
+        <div className="usage-primary">
           <span className="meta-label">输入 token</span>
           <strong>
             <UsageMetricValue totals={totals} metric="input_tokens" />
           </strong>
         </div>
-        <div>
+        <div className="usage-primary">
           <span className="meta-label">输出 token</span>
           <strong>
             <UsageMetricValue totals={totals} metric="output_tokens" />
@@ -100,8 +88,8 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
             <UsageMetricValue totals={totals} metric="reasoning_tokens" />
           </strong>
         </div>
-        <div>
-          <span className="meta-label">费用</span>
+        <div className="usage-primary usage-cost">
+          <span className="meta-label">已记录费用</span>
           <strong>
             <UsageMetricValue totals={totals} metric="cost" />
           </strong>
@@ -110,16 +98,6 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
           <span className="meta-label">时长</span>
           <strong>{formatMillis(totals.duration_ms)}</strong>
         </div>
-        <div>
-          <span className="meta-label">未知用量</span>
-          <strong>
-            {totals.unknown_jobs > 0 ? (
-              <Badge tone="warn">{totals.unknown_jobs} 个作业</Badge>
-            ) : (
-              "无"
-            )}
-          </strong>
-        </div>
       </div>
       {totals.jobs > 0 && totals.known_jobs === 0 ? (
         <div className="warn-banner">
@@ -127,10 +105,7 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
         </div>
       ) : totals.unknown_jobs > 0 ? (
         <div className="warn-banner">
-          已记录 {totals.known_jobs}/{totals.jobs} 个作业的用量；其余{" "}
-          {totals.unknown_jobs} 个作业未提供 token 或费用，已单独计为未知。输入/输出
-          token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。输入 token
-          含缓存读写，输出 token 含推理。
+          {totals.unknown_jobs} 个作业未提供用量。＊ 表示部分合计，标记说明包含对应指标的覆盖范围；作业数与时长包含未知作业。
         </div>
       ) : null}
       {totals.jobs > 0 && totals.known_jobs === totals.jobs && usageCoverageNote(totals) ? (
@@ -351,15 +326,14 @@ export function UsagePage() {
 
       <div
         className="segmented usage-dimensions"
-        role="tablist"
+        role="group"
         aria-label="用量维度"
       >
         {USAGE_DIMENSIONS.map((value) => (
           <button
             key={value}
             type="button"
-            role="tab"
-            aria-selected={dimension === value}
+            aria-pressed={dimension === value}
             className={dimension === value ? "segmented-item active" : "segmented-item"}
             onClick={() => setDimension(value)}
           >
@@ -382,6 +356,7 @@ export function UsagePage() {
             <span className="muted">未知作业不参与 token 与费用合计。</span>
           </div>
           <TotalsCards totals={totals} />
+          <p className="muted">费用为 Agent 上报值；0 表示上报合计为零，不代表实际账单或免费使用。＊ 标记可聚焦查看指标覆盖范围。</p>
         </section>
       ) : null}
 

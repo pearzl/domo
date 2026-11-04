@@ -83,7 +83,7 @@ export function projectPageView(
     (project.stage === "summarizing" || project.stage === "completed");
   const badgeInput = {
     taskCount: activeTasks.length,
-    proposalPending: !!proposal,
+    proposalPending: project.stage === "analysis" && !!proposal,
     reportReady,
   };
   const selectedTask =

@@ -1,5 +1,24 @@
 import type { ReactNode } from "react";
 
+/** 小型线性图标只作视觉定位，含义由旁边的文字提供。 */
+export function Icon({ name }: { name: "projects" | "attention" | "agents" | "usage" | "search" | "plus" | "arrow" }) {
+  const paths: Record<typeof name, ReactNode> = {
+    projects: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
+    attention: <><path d="M9 4H5v17h14V4h-4" /><rect x="9" y="2" width="6" height="4" rx="1" /><path d="m8 13 3 3 5-6" /></>,
+    agents: <><circle cx="9" cy="8" r="3" /><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6m3 10v-3a6 6 0 0 0-2-4" /></>,
+    usage: <><path d="M4 3v17h17M9 16v-5m5 5V7m5 9V4" /></>,
+    search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
+    plus: <path d="M12 5v14M5 12h14" />,
+    arrow: <path d="M4 12h16m-6-6 6 6-6 6" />,
+  };
+  return <svg className="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+/** 使用说明按需展开，页面首屏留给状态和操作。 */
+export function PageGuide({ children }: { children: ReactNode }) {
+  return <details className="page-guide"><summary>使用说明</summary><div>{children}</div></details>;
+}
+
 export const STAGE_LABELS: Record<string, string> = {
   analysis: "项目分析",
   executing: "执行中",
@@ -276,12 +295,12 @@ export function Progress({
   const percent = Number.isFinite(total) && total > 0 && Number.isFinite(completed)
     ? Math.min(100, Math.max(0, Math.round(completed / total * 100))) : 0;
   return (
-    <div className="progress" aria-label={`${completed}/${total}`}>
-      <div className="progress-track">
+    <div className="progress">
+      <div className="progress-track" role="progressbar" aria-label="任务完成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={total > 0 ? `已完成 ${completed} / ${total} 项任务` : "尚无任务"}>
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
       <span className="progress-text">
-        {completed}/{total}
+        {total > 0 ? `${completed}/${total}` : "尚无任务"}
       </span>
     </div>
   );
@@ -338,7 +357,7 @@ export function ErrorBox({
   retrying?: boolean;
 }) {
   return (
-    <div className="error-box">
+    <div className="error-box" role="alert">
       <span>{message}</span>
       {onRetry ? (
         <button

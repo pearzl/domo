@@ -97,11 +97,11 @@ describe("UsageTable", () => {
     for (const tree of [project, agent, role]) {
       expect(tree.match(/<table/g) ?? []).toHaveLength(1);
     }
-    expect(project).toContain("<th>项目</th>");
+    expect(project).toContain('<th scope="col">项目</th>');
     expect(project).toContain("项目一");
-    expect(agent).toContain("<th>Agent</th>");
+    expect(agent).toContain('<th scope="col">Agent</th>');
     expect(agent).toContain("Agent 一");
-    expect(role).toContain("<th>角色</th>");
+    expect(role).toContain('<th scope="col">角色</th>');
     expect(role).toContain("执行");
   });
 
@@ -109,5 +109,13 @@ describe("UsageTable", () => {
     expect(render("project", PROJECT_REPORT)).toContain("<table");
     expect(render("project", AGENT_REPORT)).not.toContain("<table");
     expect(render("project", null)).not.toContain("<table");
+  });
+
+  it("明细滚动区可通过键盘聚焦，并有明确名称和表格说明", () => {
+    const markup = render("project", PROJECT_REPORT);
+    expect(markup).toContain('role="region"');
+    expect(markup).toContain('tabindex="0"');
+    expect(markup).toContain("可横向滚动");
+    expect(markup).toContain('<caption class="sr-only">');
   });
 });

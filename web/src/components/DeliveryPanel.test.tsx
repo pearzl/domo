@@ -17,9 +17,10 @@ const detail = {
 describe("DeliveryPanel", () => {
   it("交付概览显示契约、标准、结果与费用未知边界", () => {
     const markup = renderToStaticMarkup(<DeliveryPanel detail={detail} onSaved={() => {}} />);
-    for (const text of ["当前契约 #", "引用可核对", "报告结果与引用", "1.2500", "费用未知", "预算不能作为账单硬上限", "授权继续"]) {
+    for (const text of ["契约 #", "引用可核对", "报告结果与引用", "1.2500", "费用未知", "预算不能作为账单硬上限", "授权继续"]) {
       expect(markup).toContain(text);
     }
+    expect(markup).not.toContain("<details open");
   });
   it("归档视图只读", () => {
     const archived = { ...detail, project: { ...detail.project, status: "archived" } };

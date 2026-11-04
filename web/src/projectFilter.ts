@@ -161,6 +161,24 @@ export function countProjectAttention(projects: ProjectSummary[]): number {
   return projects.filter(projectNeedsAttention).length;
 }
 
+export type ProjectSort = "updated" | "name";
+
+/** 搜索在标签筛选后执行；分词取交集，排序不改写原始快照。 */
+export function searchProjects(
+  projects: ProjectSummary[],
+  query: string,
+  sort: ProjectSort = "updated",
+): ProjectSummary[] {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  return projects.filter((project) => {
+    const text = [project.name, project.goal, project.repo_path, project.base_branch, project.branch]
+      .join(" ").toLocaleLowerCase();
+    return terms.every((term) => text.includes(term));
+  }).sort((a, b) => sort === "name"
+    ? a.name.localeCompare(b.name, "zh-CN", { numeric: true })
+    : b.updated_at.localeCompare(a.updated_at));
+}
+
 function toggleValue<T>(values: T[], value: T): T[] {
   return values.includes(value)
     ? values.filter((item) => item !== value)

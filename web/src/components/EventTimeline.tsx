@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { AuditEvent, JobSummary, Task } from "../types";
 import { api, errorMessage } from "../api";
 import { RichContent } from "./RichContent";
-import { CONFIG_KINDS, KEY_JOB_KINDS, JOB_KINDS, isKeyEventKind } from "../presentation/events";
+import { CONFIG_KINDS, KEY_JOB_KINDS, JOB_KINDS, eventSummary, isKeyEventKind } from "../presentation/events";
 export { isKeyEventKind } from "../presentation/events";
 import {
   Badge,
@@ -31,6 +31,12 @@ const PREVIEW_CHARS = 400;
 const GROUP_KINDS = CONFIG_KINDS;
 
 const KIND_LABELS: Record<string, string> = {
+  task_state_changed: "任务状态更新",
+  project_state_changed: "项目状态更新",
+  job_state_changed: "作业状态更新",
+  arbitration_retry: "人工重试",
+  arbitration_guide: "人工指导",
+  arbitration_switch_agent: "人工切换 Agent",
   goal_confirmed: "目标已确认",
   goal_updated: "目标已更新",
   project_created: "项目创建",
@@ -218,7 +224,7 @@ function filterEvents(events: AuditEvent[], filter: EventFilter): AuditEvent[] {
     if (isJobKind(event.kind)) {
       return event.job_id ? keyJobs.has(event.job_id) : KEY_JOB_KINDS.has(event.kind);
     }
-    return true;
+    return isKeyEventKind(event.kind);
   });
 }
 
@@ -381,6 +387,7 @@ export function EventTimeline({
   emptyText?: string;
 }) {
   const [filter, setFilter] = useState<EventFilter>(defaultFilter);
+  const [visibleCount, setVisibleCount] = useState(20);
 
   const taskKeys = useMemo(() => {
     const map = new Map<string, string>();
@@ -416,22 +423,21 @@ export function EventTimeline({
     <div className="event-timeline">
       {showFilters ? (
         <div className="event-toolbar">
-          <div className="event-filters" role="tablist" aria-label="事件过滤">
+          <div className="event-filters" role="group" aria-label="事件过滤">
             {FILTERS.map((definition) => (
               <button
                 key={definition.key}
                 type="button"
-                role="tab"
-                aria-selected={filter === definition.key}
+                aria-pressed={filter === definition.key}
                 className={`ghost event-filter${filter === definition.key ? " active" : ""}`}
-                onClick={() => setFilter(definition.key)}
+                onClick={() => { setFilter(definition.key); setVisibleCount(20); }}
               >
                 {definition.label}
                 <span className="event-filter-count">{counts[definition.key]}</span>
               </button>
             ))}
           </div>
-          <span className="muted event-result-count">当前 {items.length} 条</span>
+          <span className="muted event-result-count" role="status">显示 {Math.min(visibleCount, items.length)} / {items.length} 条</span>
         </div>
       ) : null}
 
@@ -439,7 +445,7 @@ export function EventTimeline({
         <div className="muted event-empty">{emptyText}</div>
       ) : (
         <div className="events">
-          {items.map((item) => {
+          {items.slice(0, visibleCount).map((item) => {
             if (item.type === "job") {
               return (
                 <JobRow
@@ -464,6 +470,7 @@ export function EventTimeline({
           })}
         </div>
       )}
+      {items.length > visibleCount ? <div className="button-row"><button className="secondary" onClick={() => setVisibleCount(count => count + 20)}>加载更早 20 条</button></div> : null}
     </div>
   );
 }
@@ -602,8 +609,8 @@ function EventMessage({ event }: { event: AuditEvent }) {
   const [loading, setLoading] = useState(false);
   const [full, setFull] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const long = event.message_length > PREVIEW_CHARS;
-  const preview = Array.from(event.message).slice(0, PREVIEW_CHARS).join("");
+  const preview = eventSummary(event.message, PREVIEW_CHARS);
+  const long = event.message_length > PREVIEW_CHARS || preview !== event.message;
 
   async function load() {
     setOpen(true);

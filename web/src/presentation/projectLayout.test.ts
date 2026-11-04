@@ -407,7 +407,8 @@ describe("ProjectOverview 当前需要你处理", () => {
     expect(markup).not.toContain("现在在做什么");
     expect(markup).toContain("当前进展");
     expect(markup).toContain("运行中作业");
-    expect(markup).toContain("排队任务");
+    expect(markup).not.toContain("排队任务");
+    expect(markup).toContain("待启动");
     expect(markup).toContain("T2");
     expect(markup).toContain("最近关键事件");
     expect(markup).toContain("T1 验收失败，需要人工裁决");
@@ -628,7 +629,8 @@ describe("概览内嵌用量摘要", () => {
     );
     expect(markup).toContain("用量记录覆盖 2/4");
     expect(markup).toContain("已记录 2/4 个作业的用量");
-    expect(markup.match(/（2\/4 个作业）/g) ?? []).toHaveLength(3);    expect(markup).not.toContain("全部 4 个作业未记录用量");
+    expect(markup.match(/aria-label="部分合计：已记录 2\/4 个作业"/g) ?? []).toHaveLength(3);
+    expect(markup).not.toContain("全部 4 个作业未记录用量");
   });
 });
 

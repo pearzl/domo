@@ -9,6 +9,7 @@ import {
   matchProjectAttention,
   projectNeedsAttention,
   resetProjectFilters,
+  searchProjects,
   toggleProjectAttention,
   toggleProjectStage,
 } from "./projectFilter";
@@ -103,5 +104,30 @@ describe("项目待我处理筛选", () => {
     expect(filterProjects(PROJECTS, resetProjectFilters())).toHaveLength(
       PROJECTS.length,
     );
+  });
+});
+
+describe("项目检索与排序", () => {
+  const projects = [
+    project("a", null, { name: "交付 10", goal: "完善登录", repo_path: "/Repos/Web", updated_at: "2026-01-09T10:00:00Z" }),
+    project("b", "confirm", { name: "交付 2", goal: "接口验收", repo_path: "/repos/api" }),
+  ];
+
+  it("名称、目标、路径与分支均可搜索，忽略大小写与首尾空白", () => {
+    for (const query of ["  WEB  ", "登录", "交付 10", "DOMO/a"]) {
+      expect(searchProjects(projects, query).map((item) => item.id)).toEqual(["a"]);
+    }
+    expect(searchProjects(projects, "不存在")).toEqual([]);
+  });
+
+  it("搜索词之间取交集，并与标签筛选组合", () => {
+    expect(searchProjects(projects, "交付 登录").map((item) => item.id)).toEqual(["a"]);
+    expect(searchProjects(filterProjects(projects, { ...EMPTY_PROJECT_FILTERS, attentionOnly: true }), "登录")).toEqual([]);
+  });
+
+  it("空白搜索恢复全部，默认最近更新，名称使用自然排序且不改写快照", () => {
+    expect(searchProjects(projects, " ").map((item) => item.id)).toEqual(["b", "a"]);
+    expect(searchProjects(projects, "", "name").map((item) => item.id)).toEqual(["b", "a"]);
+    expect(projects.map((item) => item.id)).toEqual(["a", "b"]);
   });
 });

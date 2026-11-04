@@ -1,7 +1,7 @@
 import type { AuditEvent, JobSummary, Project, Task } from "../types";
 /// 任务阶段文案统一取自 ui.tsx，执行现场与任务列表不会出现两套措辞。
 import { ROLE_LABELS, taskStageLabel } from "../ui";
-import { isKeyEventKind as isKeyEvent } from "./events";
+import { eventSummary, isKeyEventKind as isKeyEvent } from "./events";
 export { isKeyEventKind as isKeyEvent } from "./events";
 
 /// 执行现场只读取项目详情里已有的 tasks / jobs / events，不发起任何请求。
@@ -66,7 +66,7 @@ export interface ExecutionIdle {
 export interface ExecutionNow {
   /// 运行中的项目作业与任务作业，按开始时间先后排列。
   running: ExecutionJobItem[];
-  /// 排队与待启动任务，按队列位置、任务序号排列。
+   /// 实际排队任务，按队列位置、任务序号排列；依赖等待单独由阶段呈现。
   queue: ExecutionQueueItem[];
   /// 最近的关键事件，最新在前。
   events: ExecutionEventItem[];
@@ -138,7 +138,7 @@ export function formatElapsedLabel(milliseconds: number | null): string {
   return `${hours} 时 ${minutes % 60} 分`;
 }
 
-/// 排队与待启动任务按队列位置排序，没有位置的任务排在后面并按任务序号先后排列。
+/// 实际排队任务按队列位置排序，没有位置的任务排在后面并按任务序号先后排列。
 export function queuedTasks(tasks: Task[]): ExecutionQueueItem[] {
   const pending = tasks.filter((task) => isWaitingTask(task));
   pending.sort((left, right) => {
@@ -166,7 +166,7 @@ export function queuedTasks(tasks: Task[]): ExecutionQueueItem[] {
   }));
 }
 
-/// 等待中的任务：仍在待启动阶段且排队中，且不在运行、完成、取消、暂停或阻塞中。
+/// 调度等待只取服务端 queued 状态，不包含依赖未满足的待启动任务。
 export function isWaitingTask(task: Task): boolean {
   if (task.status === "canceled" || task.stage === "completed") return false;
   if (
@@ -177,7 +177,7 @@ export function isWaitingTask(task: Task): boolean {
     return false;
   }
   if (task.status === "running") return false;
-  return task.stage === "pending";
+  return task.status === "queued";
 }
 
 /// 等待原因优先采用服务端说明，缺失时按任务状态给出可读的默认说明。
@@ -185,7 +185,7 @@ export function waitingReason(task: Task): string {
   const reason = task.waiting_reason?.trim();
   if (reason) return reason;
   if (task.status === "queued") return "等待派发";
-  if (task.stage === "pending") return "等待调度";
+  if (task.stage === "pending") return "等待前置任务完成";
   return "等待派发";
 }
 
@@ -200,7 +200,7 @@ export function recentKeyEvents(
   return recent.reverse().map((event) => ({
     id: event.id,
     kind: event.kind,
-    message: event.message,
+    message: eventSummary(event.message),
     createdAt: event.created_at,
     taskKey: event.task_id ? taskMap.get(event.task_id)?.key ?? null : null,
     jobId: event.job_id,

@@ -234,7 +234,7 @@ describe("resultSource 结果摘要来源", () => {
       job({ id: "v1", role: "verifier", finished_at: "2026-01-10T13:01:00Z" }),
     ]);
     expect(source?.jobId).toBe("e2");
-    expect(source?.label).toContain("第 2 次执行作业");
+    expect(source?.label).toBe("来自最近成功执行作业");
     expect(source?.finishedAt).toBe("2026-01-10T11:01:00Z");
   });
 

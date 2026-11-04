@@ -11,7 +11,7 @@
  *   行内的重排按钮仍回调页面传入的处理函数。
  */
 import type { ReactNode } from "react";
-import type { Task } from "../types";
+import type { JobSummary, Task } from "../types";
 import {
   queueSummary,
   type QueuePositionSummary,
@@ -98,48 +98,41 @@ export function TaskRow({
   /// 计数区的说明文案。
   summary?: string;
   onSelect: () => void;
-  /// 队列重排控件，保持在计数区内。
+  /// 队列重排控件，与打开任务的按钮同级，避免嵌套交互。
   children?: ReactNode;
 }) {
   return (
     <div
-      className={`task-row ${selected ? "selected" : ""}`}
-      role="button"
-      tabIndex={0}
+      className={`task-row ${selected ? "selected" : ""}${task.parent_id ? " task-row-derived" : ""}`}
+      role="group"
       aria-label={`${task.key} ${task.title}，${taskStateLabel(task.stage, task.status)}`}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.key === " " || event.key === "Enter") {
-          // Space 默认会滚动页面，打开抽屉时阻止滚动。
-          event.preventDefault();
-          onSelect();
-        }
-      }}
     >
-      <div className="task-row-main">
-        <span className="task-key">{task.key}</span>
-        <span className="task-title">{task.title}</span>
-        <span className="task-state">
-          <TaskStateBadge stage={task.stage} status={task.status} />
-          {task.queue_position !== null ? (
-            <Badge tone="info">队列 #{task.queue_position}</Badge>
-          ) : null}
-          {task.milestone ? <Badge tone="warn">里程碑</Badge> : null}
+      <button type="button" className="task-row-open" onClick={onSelect} aria-label={`打开 ${task.key} ${task.title}，${taskStateLabel(task.stage, task.status)}`}>
+        <span className="task-row-main">
+          <span className="task-key">{task.key}</span>
+          <span className="task-title">{task.title}</span>
+          <span className="task-state">
+            <TaskStateBadge stage={task.stage} status={task.status} />
+            {task.queue_position !== null ? (
+              <Badge tone="info">队列 #{task.queue_position}</Badge>
+            ) : null}
+            {task.milestone ? <Badge tone="warn">里程碑</Badge> : null}
+          </span>
         </span>
-      </div>
-      <div className="task-row-meta">
-        <span className="task-deps muted" title={task.waiting_reason ?? ""}>
-          {deps ?? depsText(task)}
+        <span className="task-row-meta">
+          <span className="task-deps muted" title={task.waiting_reason ?? ""}>
+            {deps ?? depsText(task)}
+          </span>
+          <span className="task-agent muted" title={agent}>
+            <span className="task-agent-label">Agent </span>
+            {agent}
+          </span>
+          <span className="task-counts muted" title={summary}>
+            {counts}
+          </span>
         </span>
-        <span className="task-agent muted" title={agent}>
-          <span className="task-agent-label">Agent </span>
-          {agent}
-        </span>
-        <span className="task-counts muted" title={summary}>
-          {counts}
-          {children}
-        </span>
-      </div>
+      </button>
+      {children}
     </div>
   );
 }
@@ -197,6 +190,7 @@ export function QueueControls({
 /// 任务列表视图：逐行渲染任务，行内直接给出队列位置与重排入口。
 export function TaskList({
   tasks,
+  jobs = [],
   activeTasks,
   selectedTaskId,
   onSelect,
@@ -207,6 +201,7 @@ export function TaskList({
   onReorder,
 }: {
   tasks: Task[];
+  jobs?: JobSummary[];
   /// 全部活动任务，用于统计子任务完成数。
   activeTasks: Task[];
   selectedTaskId: string | null;
@@ -219,7 +214,7 @@ export function TaskList({
 }) {
   return (
     <TaskListShell>
-      {tasks.map((task) => {
+      {tasks.flatMap((task) => task.parent_id && tasks.some(parent => parent.id === task.parent_id) ? [] : [task, ...tasks.filter(child => child.parent_id === task.id)]).map((task) => {
         const children = activeTasks.filter(
           (item) => item.parent_id === task.id,
         );
@@ -230,17 +225,15 @@ export function TaskList({
           children.length > 0 &&
           task.stage === "pending" &&
           childCompleted < children.length;
-        const counts = [
-          task.attempts ? `执行 ${task.attempts}` : "",
-          task.rejections ? `拒绝 ${task.rejections}` : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
+        const taskJobs = jobs.filter(job => job.task_id === task.id);
+        const counts = taskJobs.length
+          ? `执行作业 ${taskJobs.filter(job => job.role === "executor").length} · 验收作业 ${taskJobs.filter(job => job.role === "verifier").length}`
+          : "";
         const deps = [
           depsText(task),
           children.length ? `子任务 ${childCompleted}/${children.length}` : "",
           waitingChildren ? "等待子任务" : "",
-          task.parent_id ? "派生任务" : "",
+          task.parent_id ? `派生自 ${activeTasks.find(parent => parent.id === task.parent_id)?.key ?? "父任务"}` : "",
           task.waiting_reason ?? "",
         ]
           .filter(Boolean)
@@ -253,7 +246,7 @@ export function TaskList({
             agent={agentName(task.agent_id)}
             counts={counts}
             deps={deps}
-            summary={counts || "无执行或拒绝记录"}
+            summary={`${counts || "无作业记录"}；作业数来自当前项目记录，自动尝试与拒绝计数为调度计数，不等于历史执行轮次。`}
             onSelect={() => onSelect(task.id)}
           >
             {isReordableQueueTask(task, archived) ? (

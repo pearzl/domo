@@ -227,7 +227,7 @@ describe("jobElapsedMs", () => {
 });
 
 describe("queuedTasks", () => {
-  it("收集排队与待启动任务，排除运行、完成、取消、暂停与阻塞任务", () => {
+  it("只收集实际排队任务，依赖等待不冒充 Agent 排队", () => {
     const items = queuedTasks([
       task({ id: "t1", key: "T1", stage: "pending" }),
       task({ id: "t2", key: "T2", status: "queued", queue_position: 1 }),
@@ -238,15 +238,15 @@ describe("queuedTasks", () => {
       task({ id: "t7", key: "T7", status: "blocked" }),
       task({ id: "t8", key: "T8", stage: "verifying", status: "queued" }),
     ]);
-    expect(items.map((item) => item.key)).toEqual(["T2", "T1"]);
+    expect(items.map((item) => item.key)).toEqual(["T2", "T8"]);
   });
 
   it("按队列位置排序，未入队任务按任务序号排在后面", () => {
     const items = queuedTasks([
-      task({ id: "t1", key: "T1", seq: 1, stage: "pending" }),
+      task({ id: "t1", key: "T1", seq: 1, stage: "executing", status: "queued" }),
       task({ id: "t2", key: "T2", seq: 2, status: "queued", queue_position: 2 }),
       task({ id: "t3", key: "T3", seq: 3, status: "queued", queue_position: 1 }),
-      task({ id: "t4", key: "T4", seq: 4, stage: "pending" }),
+      task({ id: "t4", key: "T4", seq: 4, stage: "verifying", status: "queued" }),
     ]);
     expect(items.map((item) => item.key)).toEqual(["T3", "T2", "T1", "T4"]);
     expect(items[0].positionLabel).toBe("队列第 1 位");
@@ -255,14 +255,14 @@ describe("queuedTasks", () => {
 
   it("保留服务端等待原因，缺失时按状态补默认说明", () => {
     const items = queuedTasks([
-      task({ id: "t1", key: "T1", stage: "pending", waiting_reason: "等待前置任务：T0" }),
+      task({ id: "t1", key: "T1", stage: "executing", status: "queued", waiting_reason: "等待 Agent 并发释放" }),
       task({ id: "t2", key: "T2", status: "queued", queue_position: 1 }),
-      task({ id: "t3", key: "T3", stage: "pending", waiting_reason: "   " }),
+      task({ id: "t3", key: "T3", stage: "verifying", status: "queued", waiting_reason: "   " }),
     ]);
     const byKey = new Map(items.map((item) => [item.key, item]));
-    expect(byKey.get("T1")?.waitingReason).toBe("等待前置任务：T0");
+    expect(byKey.get("T1")?.waitingReason).toBe("等待 Agent 并发释放");
     expect(byKey.get("T2")?.waitingReason).toBe("等待派发");
-    expect(byKey.get("T3")?.waitingReason).toBe("等待调度");
+    expect(byKey.get("T3")?.waitingReason).toBe("等待派发");
   });
 
   it("空任务列表返回空队列", () => {
@@ -270,7 +270,7 @@ describe("queuedTasks", () => {
   });
 
   it("等待判定排除暂停、阻塞、运行、完成与取消", () => {
-    expect(isWaitingTask(task({ stage: "pending" }))).toBe(true);
+    expect(isWaitingTask(task({ stage: "pending" }))).toBe(false);
     expect(isWaitingTask(task({ status: "queued", stage: "pending" }))).toBe(true);
     expect(isWaitingTask(task({ status: "pausing", stage: "pending" }))).toBe(false);
     expect(isWaitingTask(task({ status: "blocked", stage: "pending" }))).toBe(false);

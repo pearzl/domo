@@ -4,7 +4,7 @@ import { api, errorMessage } from "../api";
 import { PROJECT_ATTENTION_LABELS } from "../projectFilter";
 import { attentionItems } from "../presentation/attention";
 import { formatElapsed } from "../presentation/projectStatus";
-import { ErrorBox, formatTime } from "../ui";
+import { ErrorBox, Icon, formatTime } from "../ui";
 import { SkeletonLines } from "../components/Skeleton";
 
 const REFRESH_MS = 5000;
@@ -16,6 +16,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -40,7 +41,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
       window.clearInterval(timer);
       window.clearInterval(clock);
     };
-  }, []);
+  }, [reloadKey]);
 
   const items = useMemo(
     () => attentionItems(projects, now),
@@ -56,18 +57,18 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
             所有需要你回答、确认、验收或裁决的项目；处理完成后事项会离开此列表。
           </p>
         </div>
-        <span className="muted">{items.length} 项待办</span>
+        <span className="page-count" role="status">{loading ? "加载中…" : loadError && items.length === 0 ? "待办暂不可用" : `${items.length} 项待办`}</span>
       </header>
 
       {loadError ? (
-        <ErrorBox message={loadError} />
+        <ErrorBox message={loadError} onRetry={() => setReloadKey((value) => value + 1)} retrying={loading} />
       ) : null}
 
       {loading ? (
         <div className="panel">
           <SkeletonLines label="加载中…" />
         </div>
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && loadError ? null : items.length === 0 ? (
         <div className="empty">
           <div className="empty-title">没有待处理事项</div>
           <div className="empty-hint">需要你驱动的项目会出现在这里。</div>
@@ -98,6 +99,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
                   <span className="muted">
                     已等待 {formatElapsed(waitingMs)}
                   </span>
+                  <span className="attention-open">前往处理 <Icon name="arrow" /></span>
                 </div>
                 <p className="goal-line">
                   {project.goal || "尚未输入项目目标"}

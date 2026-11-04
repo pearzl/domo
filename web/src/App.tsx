@@ -7,6 +7,7 @@ import { ProjectPage } from "./pages/ProjectPage";
 import { AgentsPage } from "./pages/AgentsPage";
 import { UsagePage } from "./pages/UsagePage";
 import { AttentionPage } from "./pages/AttentionPage";
+import { Icon } from "./ui";
 
 const HEALTH_POLL_MS = 5000;
 
@@ -26,7 +27,7 @@ export default function App() {
   useEffect(() => {
     const canonical = normalizePath(window.location.pathname);
     if (window.location.pathname !== canonical) {
-      window.history.replaceState(window.history.state, "", canonical);
+      window.history.replaceState(window.history.state, "", `${canonical}${window.location.search}${window.location.hash}`);
     }
   }, []);
 
@@ -93,9 +94,10 @@ export default function App() {
   }, []);
 
   function navigate(next: string) {
-    const target = normalizePath(next);
-    window.history.pushState({}, "", target);
-    setPath(target);
+    const target = new URL(next, window.location.href);
+    const pathname = normalizePath(target.pathname);
+    window.history.pushState({}, "", `${pathname}${target.search}${target.hash}`);
+    setPath(pathname);
     window.scrollTo(0, 0);
   }
 
@@ -109,40 +111,47 @@ export default function App() {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <aside className="sidebar">
         <button className="brand" onClick={() => navigate("/")} aria-label="DOMO 首页">
           <span className="brand-mark" aria-hidden="true">D</span>
-          <span className="brand-text">DOMO</span>
+          <span className="brand-text">DOMO<span className="brand-caption">个人 AI 交付工作台</span></span>
         </button>
+
+        <div className="nav-section-label">工作空间</div>
 
         {/* 窄屏下同一组导航按钮改为顶部横向排布，DOM 结构保持不变。 */}
         <nav className="nav-links sidebar-nav" aria-label="主导航">
           <button
             className={isProjects ? "nav-link active" : "nav-link"}
+            aria-current={isProjects ? "page" : undefined}
             onClick={() => navigate("/")}
           >
-            项目
+            <Icon name="projects" />项目
           </button>
           <button
             className={isAttention ? "nav-link active" : "nav-link"}
+            aria-current={isAttention ? "page" : undefined}
             onClick={() => navigate("/attention")}
           >
-            待我处理
+            <Icon name="attention" />待我处理
             {attentionCount > 0 ? (
               <span className="nav-count">{attentionCount}</span>
             ) : null}
           </button>
           <button
             className={isAgents ? "nav-link active" : "nav-link"}
+            aria-current={isAgents ? "page" : undefined}
             onClick={() => navigate("/agents")}
           >
-            Agent 团队
+            <Icon name="agents" />Agent 团队
           </button>
           <button
             className={isUsage ? "nav-link active" : "nav-link"}
+            aria-current={isUsage ? "page" : undefined}
             onClick={() => navigate("/usage")}
           >
-            成本用量
+            <Icon name="usage" />成本用量
           </button>
         </nav>
 
@@ -170,7 +179,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="content">
+       <main className="content" id="main-content" tabIndex={-1}>
         {projectMatch ? (
           <ProjectPage
             key={projectMatch[1]}

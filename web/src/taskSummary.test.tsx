@@ -111,7 +111,7 @@ describe("结果摘要 Markdown 排版", () => {
       />,
     );
     const source = markup.slice(markup.indexOf("task-result-source"));
-    expect(source).toContain("来自第 2 次执行作业");
+    expect(source).toContain("来自最近成功执行作业");
     expect(source).toContain("执行者乙");
   });
 

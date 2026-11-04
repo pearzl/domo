@@ -52,7 +52,7 @@ export function UsageSummary({
           partial={usageMetricPartial(totals, "output_tokens")}
         />
         <SummaryStat
-          label="费用"
+           label="已记录费用"
           value={usageMetricValue(totals.cost, totals, "cost")}
           partial={usageMetricPartial(totals, "cost")}
         />
@@ -66,6 +66,7 @@ export function UsageSummary({
       >
         {note}
       </p>
+      <p className="usage-summary-note">＊ 为部分合计，覆盖范围可聚焦标记查看。费用为 Agent 上报值，不代表账单或免费使用。</p>
       <div className="usage-summary-actions">
         <a className="button-link" href={usagePath(projectId)}>
           查看用量明细
@@ -92,7 +93,7 @@ function SummaryStat({
         {value}
       </strong>
       {partial ? (
-        <span className="usage-summary-partial muted">（{partial} 个作业）</span>
+        <span className="usage-partial-mark" tabIndex={0} title={`部分合计：已记录 ${partial} 个作业`} aria-label={`部分合计：已记录 ${partial} 个作业`}>＊</span>
       ) : null}
     </div>
   );

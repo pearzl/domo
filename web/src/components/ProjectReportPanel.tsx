@@ -1,6 +1,7 @@
 import type { Message, Project } from "../types";
 import { InputBox } from "./InputBox";
 import { RichContent } from "./RichContent";
+import { Empty } from "../ui";
 
 /// 项目报告与评议：报告内容、意见记录与四类提交动作。
 export function ProjectReportPanel({
@@ -14,6 +15,7 @@ export function ProjectReportPanel({
   onSubmitReport,
   onRequestReplan,
   onAddTask,
+  onOpenTasks,
 }: {
   project: Project;
   reviewMessages: Message[];
@@ -25,8 +27,14 @@ export function ProjectReportPanel({
   onSubmitReport: (action: "accept" | "comment" | "reject") => void;
   onRequestReplan: () => void;
   onAddTask: () => void;
+  onOpenTasks?: () => void;
 }) {
-  if (project.stage !== "summarizing" && !project.report) return null;
+  if (project.stage !== "summarizing" && !project.report) return (
+    <section className="panel" aria-label="项目报告">
+      <Empty title="项目报告尚未生成" hint={archived ? "项目已归档，未保存项目报告。任务与作业记录仍可查阅。" : project.stage === "analysis" ? "确认项目方案并完成交付后，规划者将生成报告。" : "任务仍在推进，任务完成后规划者将进行项目验收并生成报告。"} />
+      {onOpenTasks ? <div className="empty-actions"><button className="secondary" onClick={onOpenTasks}>查看任务进展</button></div> : null}
+    </section>
+  );
   return (
     <section className="panel">
       <h2>项目报告{reviewMessages.length > 0 ? `（${reviewMessages.length} 条评议）` : ""}</h2>

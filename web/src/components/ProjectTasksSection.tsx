@@ -20,6 +20,7 @@ import type { AddTaskDraft } from "../presentation/addTaskDraft";
 export function ProjectTasksSection({
   project,
   tasks,
+  jobs,
   activeTasks,
   visibleTasks,
   directMode,
@@ -51,6 +52,7 @@ export function ProjectTasksSection({
 }: {
   project: Project;
   tasks: Task[];
+  jobs?: JobSummary[];
   activeTasks: Task[];
   visibleTasks: Task[];
   directMode: boolean;
@@ -217,6 +219,7 @@ export function ProjectTasksSection({
       ) : (
         <TaskList
           tasks={visibleTasks}
+          jobs={jobs}
           activeTasks={activeTasks}
           selectedTaskId={selectedTaskId}
           onSelect={onSelectTask}
@@ -232,7 +235,7 @@ export function ProjectTasksSection({
 
   const taskFooter = !directMode && tasks.length > 0 && taskView === "list" ? (
     <div className="legend muted">
-      阶段：待启动 → 执行 → 验收 → 完成。执行与验收都在独立 worktree 中进行；派生任务跳过验收，完成后直接合入父任务分支。“作业”指一次 Agent 调用，每次执行或验收作业都有独立的输入、输出与用量。上移/下移只调整同一可调整队列内的派发顺序，不改变依赖关系。
+      阶段：待启动 → 执行 → 验收 → 完成。待启动表示等待前置任务，排队表示等待 Agent 派发。作业数按当前记录统计，自动尝试与拒绝计数不等于历史轮次。派生任务与普通任务遵循同一验收规则；Git 工作区合入后完成，普通工作区直接保留产物。队列调整不改变依赖关系。
     </div>
   ) : null;
 

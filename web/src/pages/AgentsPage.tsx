@@ -34,7 +34,7 @@ import {
   readDraft,
   writeDraftJson,
 } from "../presentation/draft";
-import { Empty, ErrorBox } from "../ui";
+import { Empty, ErrorBox, Icon, PageGuide } from "../ui";
 
 // 供其它模块与测试直接从页面取到卡片与编辑面板组件。
 export { AgentCard } from "../components/AgentCard";
@@ -203,11 +203,12 @@ export function AgentsPage() {
         <div>
           <h1>Agent 团队</h1>
           <p className="subtitle">
-            同一 Agent 可以扮演多个角色。卡片上的启停是全局开关，影响所有项目与任务；
-            默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量限额达到后自动跳过，新窗口开始后自动恢复。
+            配置团队分工、调度顺序与用量边界，让合适的 Agent 完成合适的工作。
           </p>
+          <PageGuide>同一 Agent 可扮演多个角色。卡片启停是影响所有项目与任务的全局开关；默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量达到限额后自动跳过，新窗口开始后恢复。</PageGuide>
         </div>
         <button className="primary" onClick={startCreate}>
+          <Icon name="plus" />
           添加 Agent
         </button>
       </header>
@@ -227,14 +228,13 @@ export function AgentsPage() {
         </section>
       ) : null}
 
-      <GlobalQueue />
+      <GlobalQueue agents={agents} />
       {team ? (
         <AgentPoolPanel
           title="默认团队"
           subtitle="系统级团队模板：全部已注册 Agent 按角色出现在默认团队中，顺序越靠前优先级越高。新建项目的项目 Agent 池按这里的角色、顺序与启停状态快照初始化，之后项目独立维护。"
           roles={team.roles}
           scope="default"
-          defaultOpen
           onReorder={(role, agentId, position) =>
             api.updateDefaultTeamAgent(role, agentId, { position })
           }
@@ -248,6 +248,7 @@ export function AgentsPage() {
         />
       ) : null}
 
+      {!loading && agents.length > 0 ? <div className="section-heading"><h2>已注册 Agent <span className="section-count">{agents.length}</span></h2><span className="muted">{agents.filter((agent) => agent.enabled).length} 个已启用 · 启停影响所有项目</span></div> : null}
       <div className="agent-grid">
         {!loading && agents.length === 0 && !loadError ? (
           <Empty

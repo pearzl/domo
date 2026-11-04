@@ -89,18 +89,19 @@ export function UsageTable({
           hint="调整项目、Agent、角色或时间范围后再试。"
         />
       ) : (
-        <div className="usage-table-wrap">
+        <div className="usage-table-wrap" role="region" aria-label={`${USAGE_DIMENSION_LABELS[dimension]}用量明细，可横向滚动`} tabIndex={0} aria-busy={loading}>
           <table className="usage-table" data-dimension={dimension}>
+            <caption className="sr-only">{USAGE_DIMENSION_LABELS[dimension]}用量明细；输入 token 含缓存读写，输出 token 含推理。</caption>
             <thead>
               <tr>
-                <th>{USAGE_NAME_HEADERS[dimension]}</th>
+                <th scope="col">{USAGE_NAME_HEADERS[dimension]}</th>
                 <th className="num">作业</th>
                 <th className="num">输入 token</th>
                 <th className="num">输出 token</th>
                 <th className="num">缓存读</th>
                 <th className="num">缓存写</th>
                 <th className="num">推理</th>
-                <th className="num">费用</th>
+                <th className="num">已记录费用</th>
                 <th className="num">时长</th>
                 <th className="num">未知</th>
               </tr>

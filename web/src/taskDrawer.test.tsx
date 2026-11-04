@@ -376,7 +376,7 @@ describe("TaskDrawer 信息去重", () => {
     expect(result).toContain("<ul");
     expect(result).toContain("<li>第一项</li>");
     expect(result).toContain('class="rich-content rich-content-markdown"');
-    expect(result).toContain("来自第 1 次执行作业");
+    expect(result).toContain("来自最近成功执行作业");
     expect(result).not.toContain("## 完成内容");
 
     const empty = renderDrawer(task({ stage: "completed" }), [job(1)]);
@@ -409,7 +409,7 @@ describe("TaskDrawer 信息去重", () => {
 
   it("Agent 池由布局尾部最后一项渲染", () => {
     expect(projectPageSource).toContain(
-      "{layout.tail.map((key) => tailBlock(key))}",
+      "{layout.tail.map((key) =>",
     );
     const jobsCase = projectPageSource.indexOf('case "jobs":');
     const poolCase = projectPageSource.indexOf('case "agentPool":');

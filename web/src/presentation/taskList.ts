@@ -26,21 +26,17 @@ export const TASK_FILTERS: { id: TaskFilter; label: string }[] = [
   { id: "canceled", label: "已取消" },
 ];
 
-/// 进行中：任务正在执行、验收或运行。
+/// 进行中只包含正在运行的任务，阶段不代表当前正在占用 Agent。
 function isRunning(task: Task): boolean {
-  return (
-    task.status === "running" ||
-    task.stage === "executing" ||
-    task.stage === "verifying"
-  );
+  return task.status === "running" && task.stage !== "completed";
 }
 
-/// 排队：等待调度、尚未开始执行的任务，含暂停后重新等待派发的待启动任务。
+/// 排队以服务端状态为准，不把等待依赖的待启动任务当成等待调度。
 function isQueued(task: Task): boolean {
   if (task.status === "canceled" || task.stage === "completed") return false;
   if (isAttention(task)) return false;
   if (isRunning(task)) return false;
-  return task.stage === "pending";
+  return task.status === "queued";
 }
 
 /// 待处理：阻塞、暂停或暂停中，需要人工或等待恢复的任务。

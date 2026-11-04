@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { DragEvent, KeyboardEvent } from "react";
 import type { ProjectRolePool, Role } from "../types";
 import {
@@ -82,6 +82,8 @@ export function AgentPoolPanel({
   const [drop, setDrop] = useState<DropTarget | null>(null);
   const initialOpen = defaultOpen ?? false;
   const [open, setOpen] = useState(initialOpen);
+  const tabListRef = useRef<HTMLDivElement>(null);
+  const tabPrefix = useId();
   useEffect(() => {
     setOpen(initialOpen);
   }, [initialOpen]);
@@ -109,13 +111,18 @@ export function AgentPoolPanel({
   }
 
   function onTabListKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }
     // 方向键在 tablist 内只切换角色：阻止默认行为，避免页面横向滚动或触发提交。
     event.preventDefault();
-    const direction = event.key === "ArrowRight" ? "next" : "previous";
-    selectRole(nextRoleTab(tabs, currentRole, direction));
+    const target = event.key === "Home" ? tabs[0]?.role
+      : event.key === "End" ? tabs[tabs.length - 1]?.role
+      : nextRoleTab(tabs, currentRole, event.key === "ArrowRight" ? "next" : "previous");
+    selectRole(target ?? null);
+    const button = Array.from(tabListRef.current?.querySelectorAll<HTMLButtonElement>("button[data-role]") ?? [])
+      .find((node) => node.dataset.role === target);
+    button?.focus();
   }
 
   async function act(action: () => Promise<unknown>) {
@@ -155,6 +162,7 @@ export function AgentPoolPanel({
       <AgentAdvice roles={roles} />
       <div
         className="agent-pool-tabs"
+        ref={tabListRef}
         role="tablist"
         aria-label={`${title}角色`}
         onKeyDown={onTabListKeyDown}
@@ -166,9 +174,10 @@ export function AgentPoolPanel({
               key={tab.role}
               type="button"
               role="tab"
-              id={`agent-pool-tab-${tab.role}`}
+              id={`${tabPrefix}-tab-${tab.role}`}
+              data-role={tab.role}
               aria-selected={selected}
-              aria-controls={`agent-pool-panel-${tab.role}`}
+              aria-controls={`${tabPrefix}-panel-${tab.role}`}
               tabIndex={selected ? 0 : -1}
               className={`agent-pool-tab${selected ? " active" : ""}`}
               onClick={() => selectRole(tab.role)}
@@ -186,8 +195,8 @@ export function AgentPoolPanel({
         <div
           className="agent-pool-role"
           role="tabpanel"
-          id={`agent-pool-panel-${currentGroup.role}`}
-          aria-labelledby={`agent-pool-tab-${currentGroup.role}`}
+          id={`${tabPrefix}-panel-${currentGroup.role}`}
+          aria-labelledby={`${tabPrefix}-tab-${currentGroup.role}`}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
               setDrop(null);

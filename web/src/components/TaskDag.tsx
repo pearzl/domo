@@ -276,7 +276,7 @@ export function TaskDag({
                     {task.title}
                   </div>
                   <div className="dag-node-meta">
-                    <Badge tone="muted">{taskStageLabel(task.stage)}</Badge>
+                    {task.status && task.stage !== "completed" ? <Badge tone="muted">{taskStageLabel(task.stage)}</Badge> : null}
                     <TaskStateBadge stage={task.stage} status={task.status} />
                   </div>
                   <div className="dag-node-deps" title={meta}>

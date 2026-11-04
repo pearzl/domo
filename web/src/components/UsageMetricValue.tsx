@@ -9,7 +9,7 @@ export function UsageMetricValue({ totals, metric }: { totals: UsageTotals; metr
       <span title={totals.known_metrics[metric] === 0 ? "该指标未记录，不能视为零" : undefined}>
         {usageMetricValue(totals[metric], totals, metric)}
       </span>
-      {partial ? <span className="muted usage-coverage-note">（{partial} 个作业）</span> : null}
+      {partial ? <span className="usage-partial-mark" tabIndex={0} title={`部分合计：已记录 ${partial} 个作业`} aria-label={`部分合计：已记录 ${partial} 个作业`}>＊</span> : null}
     </>
   );
 }

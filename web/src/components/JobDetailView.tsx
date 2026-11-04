@@ -101,7 +101,7 @@ export function JobDetailView({
             {jobStatusLabel(job.status)}
           </Badge>
           <span className="muted">{job.agent_name ?? "无 Agent"}</span>
-          <span className="muted">第 {job.attempt} 次</span>
+          <span className="muted" title="当前作业自身的尝试编号，不是任务历史执行轮次">本作业尝试 {job.attempt}</span>
           <span className="muted job-duration">{duration}</span>
           {job.usage_known ? (
             <span className="muted" title={tokenDetails || undefined}>

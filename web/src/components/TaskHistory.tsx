@@ -56,9 +56,11 @@ export function TaskHistoryBlock({
   onJumpToJob: (jobId: string) => void;
 }) {
   const [failedOnly, setFailedOnly] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const failedAvailable = history.failedRounds > 0;
   const active = failedOnly && failedAvailable;
   const rounds = filterFailedRounds(history.rounds, active);
+  const visibleRounds = (showAll ? rounds : rounds.slice(-3)).slice().reverse();
   const unlinkedJobs = history.unlinkedJobs ?? [];
   const unlinkedLatest = unlinkedJobs[unlinkedJobs.length - 1] ?? null;
   const countLabel = active
@@ -108,7 +110,7 @@ export function TaskHistoryBlock({
               aria-pressed={active}
               disabled={!failedAvailable}
               title={failedAvailable ? "只保留问题轮次" : "没有失败的轮次"}
-              onClick={() => setFailedOnly((current) => !current)}
+              onClick={() => { setFailedOnly((current) => !current); setShowAll(false); }}
             >
               {TASK_HISTORY_FILTER_LABEL}
             </button>
@@ -119,11 +121,12 @@ export function TaskHistoryBlock({
             <p className="muted task-history-note">{TASK_HISTORY_FILTER_EMPTY}</p>
           ) : (
             <ol className="task-history-rounds">
-              {rounds.map((round) => (
+              {visibleRounds.map((round) => (
                 <RoundItem key={round.round} round={round} onJumpToJob={onJumpToJob} />
               ))}
             </ol>
           )}
+          {rounds.length > 3 ? <div className="button-row"><button className="secondary" onClick={() => setShowAll(current => !current)}>{showAll ? "只看最近 3 轮" : `展开全部 ${rounds.length} 轮`}</button><span className="muted">最新轮次在前 · 当前显示 {visibleRounds.length} 轮</span></div> : null}
         </>
       )}
     </section>
@@ -165,7 +168,8 @@ function RoundItem({
           <span className="task-history-round-summary">{verifierSummary(round)}</span>
         </span>
       </button>
-      <div className="task-history-body">
+      <details className="task-history-body">
+        <summary>本轮验收尝试（{round.verifierAttempts.total}）</summary>
         <div className="task-history-attempts-head">
           <span className="task-history-attempts-title">本轮验收</span>
           <span className="muted">{round.verifierAttempts.total} 次尝试</span>
@@ -201,7 +205,7 @@ function RoundItem({
             })}
           </ol>
         )}
-      </div>
+      </details>
     </li>
   );
 }

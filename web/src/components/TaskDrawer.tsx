@@ -158,9 +158,12 @@ export function TaskDrawer({
   const returnFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const active = document.activeElement;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     returnFocusRef.current = active instanceof HTMLElement ? active : null;
     closeRef.current?.focus();
     return () => {
+      document.body.style.overflow = overflow;
       const target = returnFocusRef.current;
       if (target?.isConnected) target.focus();
       returnFocusRef.current = null;
@@ -179,7 +182,7 @@ export function TaskDrawer({
     if (!drawer) return;
     const focusable = Array.from(
       drawer.querySelectorAll<HTMLElement>(
-        'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        'a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])',
       ),
     ).filter(
       (element) =>
@@ -264,6 +267,10 @@ export function TaskDrawer({
     hasVerifierFeedback(task) ? (
       <section className="task-feedback" data-drawer-block="feedback">
         <h3>{DRAWER_FEEDBACK_TITLE}</h3>
+        {!resultFirst && verificationRecapValue.conclusion === "rejected" ? <div className="latest-feedback"><strong>最近一次验收未通过，修复后需重新核验</strong>{verificationRecapValue.reason ? <RichContent content={verificationRecapValue.reason} format="markdown" /> : null}</div> : null}
+        <details className="reference-fold historical-feedback">
+          <summary>历史验收反馈（{verifierFeedback(task.verifier_issues).length} 条）</summary>
+          <p className="muted">以下为过去作业报告的反馈，不代表当前仍存在这些问题。当前结论以最新验收和任务状态为准。</p>
         <ul>
           {verifierFeedback(task.verifier_issues).map((issue, index) => (
             <li key={`${index}-${issue}`}>
@@ -271,6 +278,7 @@ export function TaskDrawer({
             </li>
           ))}
         </ul>
+        </details>
       </section>
     ) : null;
   // 任务描述与验收标准同级并列：同一个容器类、同一级标题、同一套 Markdown 排版。
@@ -308,8 +316,8 @@ export function TaskDrawer({
             </div>
             <p className="muted">
               {isGit
-                ? "派生任务跳过验收，执行成功后直接提交并合入父任务分支。"
-                : "派生任务跳过验收，执行成功后产物直接保留在普通工作区。"}
+                ? "派生任务按验收要求推进，通过后合入项目交付分支；父任务负责整合子任务成果。"
+                : "派生任务按验收要求推进，产物保留在普通工作区；父任务负责整合子任务成果。"}
             </p>
           </>
         ) : null}
@@ -690,11 +698,15 @@ export function TaskDrawer({
             关闭
           </button>
         </div>
+        <nav className="drawer-jumps" aria-label="任务内容定位">
+          <button className="ghost" onClick={() => drawerRef.current?.querySelector(".drawer-body")?.scrollTo({ top: 0 })}>当前状态</button>
+          {(["history", "jobs", "deps"] as const).map(key => <button className="ghost" key={key} onClick={() => drawerRef.current?.querySelector(`#task-section-${key}`)?.scrollIntoView({ block: "start" })}>{key === "history" ? "执行历史" : key === "jobs" ? "作业记录" : "依赖位置"}</button>)}
+        </nav>
         <div className="drawer-body">
           <div className="badge-row">
             <TaskStateBadge stage={task.stage} status={task.status} />
-            {task.attempts ? <Badge tone="warn">执行 {task.attempts} 次</Badge> : null}
-            {task.rejections ? <Badge tone="warn">拒绝 {task.rejections} 次</Badge> : null}
+            {task.attempts ? <Badge tone="warn" title="调度使用的自动尝试计数，不等于历史执行轮次">自动尝试计数 {task.attempts}</Badge> : null}
+            {task.rejections ? <Badge tone="warn" title="任务快照中的拒绝计数，逐轮记录见验收摘要与历史">拒绝计数 {task.rejections}</Badge> : null}
             {!resultFirst && task.last_failure_kind ? (
               <Badge tone="danger">
                 失败分类 ·{" "}
@@ -702,7 +714,7 @@ export function TaskDrawer({
               </Badge>
             ) : null}
             {!resultFirst && task.parent_id ? (
-              <Badge tone="info">派生任务 · 跳过验收</Badge>
+              <Badge tone="info">派生任务</Badge>
             ) : null}
             {!resultFirst && task.milestone ? (
               <Badge tone="warn">里程碑 · 需人工验收</Badge>
@@ -721,7 +733,7 @@ export function TaskDrawer({
             {layout.lead === "result" ? resultSection : null}
             {layout.lead === "control" ? controlBlock : null}
           </div>
-          {layout.tail.map((key) => tailBlock(key))}
+          {layout.tail.map((key) => <div className="drawer-section-anchor" id={`task-section-${key}`} key={key}>{tailBlock(key)}</div>)}
         </div>
       </aside>
     </div>

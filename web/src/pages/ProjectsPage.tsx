@@ -7,6 +7,8 @@ import {
   Badge,
   EmptySteps,
   ErrorBox,
+  Icon,
+  PageGuide,
   Progress,
   StageBadge,
   StatusBadge,
@@ -25,11 +27,12 @@ import {
   filterProjects,
   isProjectFilterActive,
   resetProjectFilters,
+  searchProjects,
   toggleProjectAttention,
   toggleProjectStage,
   toggleProjectStatus,
 } from "../projectFilter";
-import type { ProjectFilters, ProjectStageFilter, ProjectStatusFilter } from "../projectFilter";
+import type { ProjectFilters, ProjectSort, ProjectStageFilter, ProjectStatusFilter } from "../projectFilter";
 
 export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -45,6 +48,8 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [confirmMode, setConfirmMode] = useState<"manual" | "auto">("manual");
   const [creating, setCreating] = useState(false);
   const [filters, setFilters] = useState<ProjectFilters>(EMPTY_PROJECT_FILTERS);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<ProjectSort>("updated");
 
   async function refresh(showLoading = false) {
     if (showLoading) setLoading(true);
@@ -65,9 +70,14 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
   }, []);
 
   const visibleProjects = useMemo(
-    () => filterProjects(projects, filters),
-    [projects, filters],
+    () => searchProjects(filterProjects(projects, filters), query, sort),
+    [projects, filters, query, sort],
   );
+
+  function clearFilters() {
+    setFilters(resetProjectFilters());
+    setQuery("");
+  }
 
   async function handleCreate(event: FormEvent) {
     event.preventDefault();
@@ -101,9 +111,11 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
       <header className="page-header">
         <div>
           <h1>项目</h1>
-          <p className="subtitle">每个项目在独立工作区中推进。Git 工作区使用 worktree 与交付分支，普通工作区直接在所选本地目录中按顺序推进。任务是可独立验收的工作单元；“作业”指任务每次调用 Agent 产生的一次执行记录。</p>
+          <p className="subtitle">从目标到交付，掌握每个项目的进展与下一步。</p>
+          <PageGuide>每个项目在独立工作区中推进。Git 工作区使用 worktree 与交付分支，普通工作区在本地目录中串行推进。任务是可独立验收的工作单元；作业是一次 Agent 调用记录。</PageGuide>
         </div>
-        <button className="primary" onClick={() => setShowForm((value) => !value)}>
+        <button className="primary" disabled={creating} aria-expanded={showForm} aria-controls={showForm ? "create-project" : undefined} onClick={() => setShowForm((value) => !value)}>
+          {!showForm ? <Icon name="plus" /> : null}
           {showForm ? "取消" : "新建项目"}
         </button>
       </header>
@@ -115,27 +127,12 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
           retrying={loading}
         />
       ) : null}
-      {formError ? <ErrorBox message={formError} /> : null}
-
-      {loading ? null : projects.length > 0 ? (
-        <FilterBar
-          projects={projects}
-          filters={filters}
-          onReset={() => setFilters(resetProjectFilters())}
-          onToggleAttention={() =>
-            setFilters((current) => toggleProjectAttention(current))
-          }
-          onToggleStage={(stage) =>
-            setFilters((current) => toggleProjectStage(current, stage))
-          }
-          onToggleStatus={(status) =>
-            setFilters((current) => toggleProjectStatus(current, status))
-          }
-        />
-      ) : null}
 
       {showForm ? (
-        <form className="panel form" onSubmit={handleCreate}>
+        <form className="panel form" id="create-project" onSubmit={handleCreate}>
+          <div><h2>新建项目</h2><p className="subtitle">选择工作区，描述你希望交付的结果。</p></div>
+          {formError ? <ErrorBox message={formError} /> : null}
+          <fieldset className="form-fields" disabled={creating}>
           <div className="form-grid">
             <label>
               <span>项目名称</span>
@@ -144,6 +141,7 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
                 onChange={(event) => setName(event.target.value)}
                 placeholder="例如：完善用户登录"
                 required
+                autoFocus
               />
             </label>
             <label>
@@ -173,12 +171,13 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
             </label>
             {workspaceType === "git" ? (
               <label>
-                <span>base 分支（留空使用仓库当前分支）</span>
+              <span>base 分支（选填）</span>
                 <input
                   value={baseBranch}
                   onChange={(event) => setBaseBranch(event.target.value)}
                   placeholder="main"
                 />
+                <small>留空使用仓库当前分支</small>
               </label>
             ) : null}
             <label>
@@ -203,12 +202,44 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
               />
             </label>
           </div>
+          </fieldset>
           <div className="form-actions">
-            <button className="primary" type="submit" disabled={creating}>
+            <button className="primary" type="submit" disabled={creating || !name.trim() || !repoPath.trim()}>
               {creating ? "创建中…" : "创建项目"}
             </button>
+            <button className="secondary" type="button" disabled={creating} onClick={() => setShowForm(false)}>取消</button>
           </div>
         </form>
+      ) : null}
+
+      {!loading && projects.length > 0 ? (
+        <>
+          <div className="portfolio-summary" aria-label="项目总览">
+            <div><span>全部项目</span><strong>{projects.length}</strong></div>
+            <div><span>运行中</span><strong>{countProjectStatus(projects, "running")}</strong></div>
+            <div className={countProjectAttention(projects) > 0 ? "summary-attention" : ""}><span>待我处理的项目</span><strong>{countProjectAttention(projects)}</strong></div>
+            <div><span>已完成</span><strong>{countProjectStage(projects, "completed")}</strong></div>
+          </div>
+          <section className="panel project-browser" aria-label="查找项目">
+            <div className="project-search-row">
+              <label className="search-field">
+                <span className="sr-only">搜索项目</span>
+                <Icon name="search" />
+                <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、目标或工作区…" />
+              </label>
+              <label className="sort-field"><span className="sr-only">项目排序</span><select value={sort} onChange={(event) => setSort(event.target.value as ProjectSort)}><option value="updated">最近更新</option><option value="name">名称排序</option></select></label>
+            </div>
+            <FilterBar
+              projects={projects}
+              filters={filters}
+              onReset={clearFilters}
+              onToggleAttention={() => setFilters((current) => toggleProjectAttention(current))}
+              onToggleStage={(stage) => setFilters((current) => toggleProjectStage(current, stage))}
+              onToggleStatus={(status) => setFilters((current) => toggleProjectStatus(current, status))}
+            />
+            <div className="project-results" role="status">显示 {visibleProjects.length} / {projects.length} 个项目{query.trim() ? <button className="ghost" onClick={() => setQuery("")}>清除搜索</button> : null}</div>
+          </section>
+        </>
       ) : null}
 
       {loading ? (
@@ -222,16 +253,16 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
           steps={[
             "新建项目：填写项目名称与工作区（Git 仓库或普通目录）。",
             "输入目标并确认方案：在项目分析里描述目标、边界和验收预期，确认规划者给出的方案。",
-            "跟踪执行与验收：任务按依赖自动推进，可在概览、任务与事件时间线查看进展，报告生成后验收并合入。",
+            "跟踪执行与验收：任务按依赖自动推进，报告生成后进行人工验收；Git 项目可按需合入。",
           ]}
           action={{ label: "新建项目", onClick: () => setShowForm(true) }}
         />
       ) : projects.length === 0 ? null : visibleProjects.length === 0 ? (
         <div className="empty">
           <div className="empty-title">没有符合筛选条件的项目</div>
-          <div className="empty-hint">调整筛选标签组合后再试。</div>
+          <div className="empty-hint">试试其他关键词，或清除筛选条件。</div>
           <div className="empty-actions">
-            <button className="primary" onClick={() => setFilters(resetProjectFilters())}>
+            <button className="primary" onClick={clearFilters}>
               重置筛选
             </button>
           </div>
@@ -264,9 +295,6 @@ function renderProjectCards(
       <div className="project-card-main">
         <div className="project-card-title">
           <h2>{project.name}</h2>
-          <Badge tone="info">
-            {project.workspace_type === "plain" ? "普通工作区" : "Git 工作区"}
-          </Badge>
           <StageBadge stage={project.stage} />
           <StatusBadge status={project.status} />
           {project.attention_items[0] ? (
@@ -294,7 +322,7 @@ function renderProjectCards(
           <p className="blocked-line">阻塞：{project.blocked_reason}</p>
         ) : null}
         <div className="meta-line">
-          <span>{project.repo_path}</span>
+          <span className="project-path" title={project.repo_path}>{project.workspace_type === "plain" ? "目录" : "Git"} · {project.repo_path}</span>
           {project.workspace_type === "plain" ? (
             <span>普通工作区 · 串行推进</span>
           ) : (
@@ -306,6 +334,7 @@ function renderProjectCards(
         </div>
       </div>
       <div className="project-card-side">
+        <div className="project-progress-label"><span>任务进度</span><Icon name="arrow" /></div>
         <Progress
           total={project.task_total}
           completed={project.task_completed}
@@ -327,7 +356,7 @@ interface FilterBarProps {
 function FilterBar({ projects, filters, onToggleAttention, onToggleStage, onToggleStatus, onReset }: FilterBarProps) {
   const allActive = !isProjectFilterActive(filters);
   return (
-    <div className="filter-bar panel" aria-label="项目筛选">
+    <div className="filter-bar" role="group" aria-label="项目筛选">
       <div className="filter-group">
         <span className="filter-group-label">视角</span>
         <FilterTag
@@ -337,30 +366,35 @@ function FilterBar({ projects, filters, onToggleAttention, onToggleStage, onTogg
           onClick={onToggleAttention}
         />
       </div>
-      <div className="filter-group">
-        <span className="filter-group-label">阶段</span>
-        {PROJECT_STAGES.map((stage) => (
-          <FilterTag
-            key={stage}
-            label={stageLabel(stage)}
-            count={countProjectStage(projects, stage)}
-            active={filters.stages.includes(stage)}
-            onClick={() => onToggleStage(stage)}
-          />
-        ))}
-      </div>
-      <div className="filter-group">
-        <span className="filter-group-label">状态</span>
-        {PROJECT_STATUSES.map((status) => (
-          <FilterTag
-            key={status}
-            label={projectStatusLabel(status) ?? status}
-            count={countProjectStatus(projects, status)}
-            active={filters.statuses.includes(status)}
-            onClick={() => onToggleStatus(status)}
-          />
-        ))}
-      </div>
+      <details className="advanced-filters" open={filters.stages.length > 0 || filters.statuses.length > 0 || undefined}>
+        <summary>更多筛选{filters.stages.length + filters.statuses.length > 0 ? `（${filters.stages.length + filters.statuses.length}）` : ""}</summary>
+        <div className="advanced-filter-body">
+          <div className="filter-group">
+            <span className="filter-group-label">阶段</span>
+            {PROJECT_STAGES.map((stage) => (
+              <FilterTag
+                key={stage}
+                label={stageLabel(stage)}
+                count={countProjectStage(projects, stage)}
+                active={filters.stages.includes(stage)}
+                onClick={() => onToggleStage(stage)}
+              />
+            ))}
+          </div>
+          <div className="filter-group">
+            <span className="filter-group-label">状态</span>
+            {PROJECT_STATUSES.map((status) => (
+              <FilterTag
+                key={status}
+                label={projectStatusLabel(status) ?? status}
+                count={countProjectStatus(projects, status)}
+                active={filters.statuses.includes(status)}
+                onClick={() => onToggleStatus(status)}
+              />
+            ))}
+          </div>
+        </div>
+      </details>
       {allActive ? null : (
         <button className="filter-reset" onClick={onReset}>
           重置筛选

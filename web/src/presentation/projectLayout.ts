@@ -16,7 +16,7 @@ export const PROJECT_TAB_LABELS: Record<ProjectBlockKey, string> = {
   tasks: "任务",
   report: "项目报告",
   overview: "概览",
-  info: "信息",
+  info: "作业与记录",
 };
 
 /// 与信息选项卡同级、始终可见的顶层区块；活动与审计默认折叠。

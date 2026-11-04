@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ProjectDetail } from "../types";
 import { errorMessage } from "../api";
+import { Badge, ErrorBox } from "../ui";
 import { RichContent } from "./RichContent";
 
 export async function resourceRequest<T>(url: string, method = "GET", body?: unknown): Promise<T> {
@@ -39,6 +40,8 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   const [reason, setReason] = useState("");
   const [agent, setAgent] = useState("");
   const readonly = detail.project.status === "archived";
+  const kindLabels: Record<string, string> = { input: "原始输入", intermediate: "中间产物", delivery: "最终交付" };
+  const filteredArtifacts = (artifacts?.items ?? []).filter(item => (!taskFilter || item.task_id === taskFilter) && (!kindFilter || item.kind === kindFilter));
   async function refresh() {
     const [s, a, m] = await Promise.all([resourceRequest<Shared>(`${base}/shared${selectedVersion ? `?version=${encodeURIComponent(selectedVersion)}` : ""}`), resourceRequest<Artifacts>(`${base}/artifacts`), resourceRequest<MergeStatus>(`${base}/merge/assist`)]);
     setShared(s); setArtifacts(a); setMerge(m);
@@ -54,12 +57,13 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
     catch (err) { setError(errorMessage(err)); }
   }
   return <>
-    <section className="panel"><h2>项目共享信息</h2>
+    <details className="panel resource-panel"><summary>项目共享信息 <span className="section-count">{shared ? `${shared.records.length} 条记录` : "加载中…"}</span></summary>
+      <div className="resource-body">
       <p className="muted">独立本地 Git 仓库，不跟踪普通工作区交付文件；修正追加替代记录，分歧保留各方依据，不以最后提交者为准。</p>
       <p>共享版本：<code>{shared?.version ?? "读取中"}</code></p>
-      <label>主题过滤<input value={topic} onChange={e => setTopic(e.target.value)} /></label>
+      <div className="form-grid"><label>主题过滤<input value={topic} onChange={e => setTopic(e.target.value)} /></label>
       <label>历史共享提交<input value={version} onChange={e => setVersion(e.target.value)} placeholder="完整提交哈希；留空查看当前版本" /></label>
-      <button disabled={busy} onClick={() => { setBusy(true); setError(""); void resourceRequest<Shared>(`${base}/shared${version ? `?version=${encodeURIComponent(version)}` : ""}`).then(value => { setShared(value); setSelectedVersion(version); }).catch(err => setError(errorMessage(err))).finally(() => setBusy(false)); }}>读取共享版本</button>
+      </div><div><button className="secondary" disabled={busy} onClick={() => { setBusy(true); setError(""); void resourceRequest<Shared>(`${base}/shared${version ? `?version=${encodeURIComponent(version)}` : ""}`).then(value => { setShared(value); setSelectedVersion(version); }).catch(err => setError(errorMessage(err))).finally(() => setBusy(false)); }}>读取共享版本</button></div>
       {shared?.records.filter(record => record.topic.includes(topic)).map(record => <details key={record.id}>
         <summary>{record.topic} · {shared.superseded_ids?.includes(record.id) ? "已被替代" : "有效记录"}{record.conflicts.length ? " · 存在分歧，需局部核验" : ""}</summary>
         <code>{record.id}</code><RichContent content={record.body} />
@@ -67,18 +71,29 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
         <p>证据：{record.evidence.join("；")}</p><p>替代：{record.supersedes.join("、") || "无"}；分歧：{record.conflicts.join("、") || "无"}</p><p>{record.reason}</p>
       </details>)}
       {shared?.records.length === 0 ? <p>暂无共享记录。Agent 可在作业结果的 shared_updates 中提交事实、接口与结论。</p> : null}
-    </section>
-    <section className="panel"><h2>输入与产物</h2><p className="mono">{artifacts?.root}</p>
+      </div>
+    </details>
+    <details className="panel resource-panel"><summary>输入与产物 <span className="section-count">{artifacts ? `${artifacts.items.filter(item => item.kind === "delivery").length} 项最终交付 · ${artifacts.items.length} 项登记` : "加载中…"}</span></summary><div className="resource-body"><p className="mono">{artifacts?.root}</p>
       <p className="muted">原始输入、任务中间产物与最终交付物分别登记。普通工作区只管理当前文件，不承诺恢复历史内容；请暂停后再手工编辑。</p>
       {artifacts?.check?.interrupted ? <div className="error-box">需要检查现场：{artifacts.check.reason}。停止进程不代表撤销文件修改。</div> : null}
-      <label>按任务过滤<select value={taskFilter} onChange={e => setTaskFilter(e.target.value)}><option value="">全部任务</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
+      <div className="form-grid"><label>按任务过滤<select value={taskFilter} onChange={e => setTaskFilter(e.target.value)}><option value="">全部任务</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
       <label>按类型过滤<select value={kindFilter} onChange={e => setKindFilter(e.target.value)}><option value="">全部类型</option><option value="input">原始输入</option><option value="intermediate">中间产物</option><option value="delivery">最终交付</option></select></label>
-      <ul>{artifacts?.items.filter(item => (!taskFilter || item.task_id === taskFilter) && (!kindFilter || item.kind === kindFilter)).map(item => <li key={item.id}>
-        <strong>{item.path}</strong> · {item.kind} · {item.format || "格式未声明"}<p>{item.verification}</p>
-        <button onClick={() => void viewArtifact(item.id)}>查看 / 版本</button>{" "}<button onClick={() => void action(() => resourceRequest(`${base}/artifacts/${item.id}/reveal`, "POST", {}))}>打开所在目录</button>
-      </li>)}</ul>
+      </div>
+      {artifacts && filteredArtifacts.length === 0 ? <p className="muted">当前筛选下没有登记的产物。</p> : null}
+      {["delivery", "input", "intermediate", ...new Set(filteredArtifacts.map(item => item.kind).filter(value => !kindLabels[value]))].map(group => {
+        const items = filteredArtifacts.filter(item => item.kind === group);
+        if (!items.length) return null;
+        return <details key={group} className="artifact-group" open={group !== "intermediate"}>
+          <summary>{kindLabels[group] ?? group}（{items.length}）</summary>
+          <ul className="artifact-list">{items.map(item => <li key={item.id}>
+            <div className="artifact-title"><strong>{item.path}</strong><Badge>{detail.tasks.find(task => task.id === item.task_id)?.key ?? "项目"}</Badge></div>
+            <p className="muted">{item.format || "格式未声明"}{item.verification ? ` · ${item.verification}` : ""}</p>
+            <div className="button-row"><button className="secondary" onClick={() => void viewArtifact(item.id)}>查看 / 版本</button><button className="ghost" onClick={() => void action(() => resourceRequest(`${base}/artifacts/${item.id}/reveal`, "POST", {}))}>打开所在目录</button></div>
+          </li>)}</ul>
+        </details>;
+      })}
       {preview ? <details open><summary>{preview.path} · {preview.commit?.slice(0, 12) ?? "当前文件"}</summary>
-        {preview.versions.length ? <select value={preview.commit ?? ""} onChange={e => void viewArtifact(selectedArtifact, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
+        {preview.versions.length ? <select aria-label="产物版本" value={preview.commit ?? ""} onChange={e => void viewArtifact(selectedArtifact, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
         <pre>{preview.text}</pre>
       </details> : null}
       {!readonly ? <details><summary>登记产物、声明原地修改或确认现场检查</summary>
@@ -86,22 +101,23 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
         <label>类型<select value={kind} onChange={e => setKind(e.target.value)}><option value="input">原始输入</option><option value="intermediate">中间产物</option><option value="delivery">最终交付</option></select></label>
         <label>格式<input value={format} onChange={e => setFormat(e.target.value)} /></label><label>验收方式<input value={verification} onChange={e => setVerification(e.target.value)} /></label>
         <label>来源 / 授权任务<select value={task} onChange={e => setTask(e.target.value)}><option value="">项目直接完成</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
-        <button disabled={busy || !path} onClick={() => void action(() => resourceRequest(`${base}/artifacts`, "POST", { path, kind, format, verification, task_id: task || null }))}>登记产物</button>
+        <button className="secondary" disabled={busy || !path} onClick={() => void action(() => resourceRequest(`${base}/artifacts`, "POST", { path, kind, format, verification, task_id: task || null }))}>登记产物</button>
         <label>修改理由 / 文件现场检查结论<textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
-        <button disabled={busy || !path || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/permissions`, "POST", { path, task_id: task || null, reason }))}>授权该任务修改指定路径</button>{" "}
-        <button disabled={busy || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/inspect`, "POST", { reason }))}>记录检查结果并允许后续重试</button>
+        <button className="secondary" disabled={busy || !path || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/permissions`, "POST", { path, task_id: task || null, reason }))}>授权该任务修改指定路径</button>{" "}
+        <button className="secondary" disabled={busy || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/inspect`, "POST", { reason }))}>记录检查结果并允许后续重试</button>
         <ul>{artifacts?.permissions.map((p, index) => <li key={index}>{p.path} · {p.task_id || "项目直接完成"} · {p.reason}</li>)}</ul>
       </details> : null}
-    </section>
+    </div></details>
     {detail.project.workspace_type === "git" && detail.project.stage === "completed" && !readonly && !detail.merged_into_base ? <section className="panel"><h2>合入冲突处理</h2>
       <p>由人工指定 Agent，在隔离 worktree 中解决冲突并直接继续线性合入；不创建普通任务，不调用独立验收者，不改变项目已完成阶段。</p>
       <p className="muted">风险：本次调用可能额外收费，并绕过角色、启停、冷却和可用时段；仍受项目费用预算及并发限制。</p>
-      <select value={agent} onChange={e => setAgent(e.target.value)}><option value="">选择 Agent</option>{detail.agents.map(a => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select>
-      <button disabled={busy || !agent || merge?.request?.state === "running" || merge?.request?.state === "waiting"} onClick={() => {
+      <select aria-label="冲突处理 Agent" value={agent} onChange={e => setAgent(e.target.value)}><option value="">选择 Agent</option>{detail.agents.map(a => <option key={a.id} value={a.id}>{a.name} · {a.model}</option>)}</select>
+      <button className="primary" disabled={busy || !agent || merge?.request?.state === "running" || merge?.request?.state === "waiting"} onClick={() => {
         if (window.confirm("确认由所选 Agent 处理合入冲突？可能产生额外费用，解决后将直接继续合入。")) void action(() => resourceRequest(`${base}/merge/assist`, "POST", { agent_id: agent, risk_confirmed: true }));
       }}>确认风险并处理冲突</button>
       {merge?.request ? <p>状态：{merge.request.state} · {merge.request.error ?? ""} · 作业 {merge.request.job_id ?? "等待派发"}</p> : null}
     </section> : null}
-    {error ? <div className="error-box">{error}</div> : null}
+    {artifacts?.check?.interrupted ? <ErrorBox message={`工作区需要检查现场：${artifacts.check.reason ?? "作业中断"}。请展开输入与产物处理，停止进程不代表撤销文件修改。`} /> : null}
+    {error ? <ErrorBox message={error} onRetry={() => void refresh().then(() => setError("")).catch(err => setError(errorMessage(err)))} /> : null}
   </>;
 }
