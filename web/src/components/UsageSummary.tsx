@@ -1,18 +1,16 @@
 import type { ProjectUsage } from "../types";
 import { usagePath } from "../router";
-import { AnimatedNumber } from "./AnimatedNumber";
 import {
   usageAllUnknown,
   usageCoverageLabel,
   usageCoverageNote,
   usageMetricValue,
-  usagePartial,
+  usageMetricPartial,
 } from "../presentation/usage";
 
 /// 概览里的用量摘要：作业数、token、费用、时长与用量记录覆盖各以一张小卡片呈现，
 /// 数值与用量页同口径（无法合计时为“—”），并用一句话说明覆盖范围。
 /// 明细仍由用量页按项目过滤查看，这里只保留跳转入口。
-/// 卡片数值按项目会话逐位滚动，刷新后首次展示保持静态。
 export function UsageSummary({
   projectId,
   usage,
@@ -21,10 +19,7 @@ export function UsageSummary({
   usage: ProjectUsage;
 }) {
   const totals = usage.totals;
-  const session = `project:${projectId}`;
   const coverage = usageCoverageLabel(totals);
-  // 只有部分作业有用量记录时，合计数值后标注已记录作业数。
-  const partial = usagePartial(totals) ? coverage : null;
   const note = usageCoverageNote(totals);
   return (
     <section
@@ -43,37 +38,27 @@ export function UsageSummary({
       </div>
       <div className="usage-summary-cards">
         <SummaryStat
-          session={session}
-          slot="usage:jobs"
           label="作业数"
           value={`${totals.jobs} 个`}
         />
         <SummaryStat
-          session={session}
-          slot="usage:input-tokens"
           label="输入 token"
-          value={usageMetricValue(totals.input_tokens, totals, "tokens")}
-          partial={partial}
+          value={usageMetricValue(totals.input_tokens, totals, "input_tokens")}
+          partial={usageMetricPartial(totals, "input_tokens")}
         />
         <SummaryStat
-          session={session}
-          slot="usage:output-tokens"
           label="输出 token"
-          value={usageMetricValue(totals.output_tokens, totals, "tokens")}
-          partial={partial}
+          value={usageMetricValue(totals.output_tokens, totals, "output_tokens")}
+          partial={usageMetricPartial(totals, "output_tokens")}
         />
         <SummaryStat
-          session={session}
-          slot="usage:cost"
           label="费用"
           value={usageMetricValue(totals.cost, totals, "cost")}
-          partial={partial}
+          partial={usageMetricPartial(totals, "cost")}
         />
         <SummaryStat
-          session={session}
-          slot="usage:duration"
           label="时长"
-          value={usageMetricValue(totals.duration_ms, totals, "duration")}
+          value={usageMetricValue(totals.duration_ms, totals, "duration_ms")}
         />
       </div>
       <p
@@ -91,16 +76,10 @@ export function UsageSummary({
 }
 
 function SummaryStat({
-  session,
-  slot,
   label,
   value,
   partial,
 }: {
-  /// 项目会话键，数字滚动按它记忆上一次数值。
-  session: string;
-  /// 同一会话内各指标的槽位名。
-  slot: string;
   label: string;
   value: string;
   /// 部分覆盖时在数值后标注已记录作业数，避免把合计误读成全量。
@@ -110,7 +89,7 @@ function SummaryStat({
     <div className="usage-summary-stat">
       <span className="meta-label">{label}</span>
       <strong className="usage-summary-value">
-        <AnimatedNumber session={session} slot={slot} value={value} />
+        {value}
       </strong>
       {partial ? (
         <span className="usage-summary-partial muted">（{partial} 个作业）</span>

@@ -24,7 +24,7 @@ use super::ApiError;
 
 /// Marks a failed job for an in-place resume. The next `run_job` uses the same
 /// job id and therefore the same agent session.
-pub(super) async fn mark_job_resumed(
+pub(crate) async fn mark_job_resumed(
     conn: &mut sqlx::SqliteConnection,
     job_id: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -44,13 +44,6 @@ pub(super) async fn mark_job_resumed(
     Ok(result.rows_affected() == 1)
 }
 
-pub(super) fn spawn_saved_job(state: &AppState, job_id: String) {
-    let state = state.clone();
-    tokio::spawn(async move {
-        crate::runner::execute_job(state, job_id).await;
-    });
-}
-
 /// Resumes the latest failed task job in place: the task and project return to
 /// running, the same agent keeps the job, and the session is reused.
 pub(super) async fn resume_task_job(
@@ -61,6 +54,15 @@ pub(super) async fn resume_task_job(
     guidance: &str,
     role: &str,
 ) -> Result<(), ApiError> {
+    if let Some(reason) = crate::delivery::gate(
+        &state.db,
+        &project.id,
+        (role == ROLE_EXECUTOR).then_some(task.id.as_str()),
+    )
+    .await?
+    {
+        return Err(ApiError::conflict(reason));
+    }
     if matches!(
         project.status.as_deref(),
         Some(STATUS_PAUSING) | Some(STATUS_PAUSED) | Some(STATUS_ARCHIVED)
@@ -95,7 +97,7 @@ pub(super) async fn resume_task_job(
          WHERE id = ? AND status = ?",
     )
     .bind(stage)
-    .bind(STATUS_RUNNING)
+    .bind(STATUS_QUEUED)
     .bind(&agent_id)
     .bind(&agent_id)
     .bind(guidance)
@@ -107,9 +109,9 @@ pub(super) async fn resume_task_job(
     if updated.rows_affected() == 0 {
         return Err(ApiError::bad("任务状态已变化"));
     }
-    if !mark_job_resumed(&mut tx, &job.id).await? {
-        return Err(ApiError::bad("作业状态已变化"));
-    }
+    sqlx::query("INSERT INTO retry_requests(task_id, job_id, agent_id, role, requested_at) VALUES(?, ?, ?, ?, ?) \
+        ON CONFLICT(task_id) DO UPDATE SET job_id = excluded.job_id, agent_id = excluded.agent_id, role = excluded.role, requested_at = excluded.requested_at")
+        .bind(&task.id).bind(&job.id).bind(&agent_id).bind(role).bind(now()).execute(&mut *tx).await?;
     sqlx::query(
         "UPDATE projects SET status = ?, blocked_reason = NULL, avoid_agent_id = NULL, \
          avoid_agent_role = NULL, retry_agent_id = NULL, retry_role = NULL, updated_at = ? \
@@ -122,8 +124,7 @@ pub(super) async fn resume_task_job(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    crate::db::clear_agent_backoff(&state.db, &agent_id).await?;
-    spawn_saved_job(state, job.id.clone());
+    state.notify_scheduler();
     Ok(())
 }
 
@@ -141,6 +142,19 @@ pub(super) async fn retry_job(
         return Err(ApiError::bad("只有失败的作业可以重试"));
     }
     let project = require_project(&state, &job.project_id).await?;
+    if let Some(reason) = crate::delivery::gate(
+        &state.db,
+        &project.id,
+        if job.role == ROLE_EXECUTOR {
+            job.task_id.as_deref()
+        } else {
+            None
+        },
+    )
+    .await?
+    {
+        return Err(ApiError::conflict(reason));
+    }
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档"));
     }
@@ -318,6 +332,8 @@ pub(super) async fn get_job(
     };
     let failure_summary = crate::failure::summarize(job.error.as_deref());
     Ok(Json(JobView {
+        execution_job_id: job.execution_job_id,
+        contract_id: job.contract_id,
         id: job.id,
         project_id: job.project_id,
         task_id: job.task_id,

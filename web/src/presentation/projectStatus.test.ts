@@ -64,8 +64,6 @@ function task(overrides: Partial<Task> = {}): Task {
     human_gate: null,
     forced_agent_id: null,
     forced_agent_role: null,
-    executor_agent_id: null,
-    verifier_agent_id: null,
     stage: "pending",
     status: null,
     agent_id: null,
@@ -89,6 +87,7 @@ function task(overrides: Partial<Task> = {}): Task {
 
 function job(overrides: Partial<JobSummary> = {}): JobSummary {
   return {
+    execution_job_id: null,
     id: "j1",
     project_id: "p1",
     task_id: null,
@@ -144,6 +143,7 @@ function proposal(overrides: Partial<AnalysisProposal> = {}): AnalysisProposal {
 
 function input(overrides: Partial<ProjectStatusInput> = {}): ProjectStatusInput {
   return {
+    attentionItems: [],
     project: project(),
     tasks: [],
     jobs: [],
@@ -469,44 +469,17 @@ describe("projectGuidance", () => {
 });
 
 describe("projectAttention", () => {
-  it("按待确认、待验收、失败、待合入与一般阻塞分类", () => {
-    expect(
-      projectAttention(
-        input({
-          project: project({ status: "blocked" }),
-          proposal: proposal(),
-        }),
-      ),
-    ).toBe("confirm");
-    expect(
-      projectAttention(
-        input({
-          project: project({ stage: "summarizing", status: "blocked", report: "# 报告" }),
-        }),
-      ),
-    ).toBe("review");
-    expect(
-      projectAttention(
-        input({
-          project: project({ status: "blocked", blocked_reason: "分析失败" }),
-          jobs: [job({ status: "failed" })],
-        }),
-      ),
-    ).toBe("failed");
-    expect(
-      projectAttention(input({ project: project({ stage: "completed" }) })),
-    ).toBe("merge");
-    expect(
-      projectAttention(
-        input({
-          project: project({
-            stage: "executing",
-            status: "blocked",
-            blocked_reason: "需要人工裁决",
-          }),
-        }),
-      ),
-    ).toBe("blocked");
+  it("直接使用服务端事项，运行中项目的任务待办不会丢失", () => {
+    const state = input({
+      project: project({ stage: "executing", status: "running" }),
+      attentionItems: [{ id: "t1", kind: "review", task: { id: "t1", key: "T1", title: "验收" },
+        reason: "等待里程碑", since: "2026-01-10T10:00:00Z", affected_tasks: 2,
+        blocks_milestone: true, blocks_summary: true, project_advancing: true }],
+    });
+    expect(projectAttention(state)).toBe("review");
+    expect(projectGuidance(state).title).toBe("处理任务 T1");
+    expect(projectGuidance(state).tab).toBe("tasks");
+    expect(projectAttention(input({ project: project({ status: "blocked" }) }))).toBeNull();
   });
 
   it("DOMO 已记录合入后，项目分支的新提交不重新产生待合入待办", () => {

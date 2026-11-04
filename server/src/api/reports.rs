@@ -85,7 +85,8 @@ pub(super) async fn submit_report(
                 let round = record_report_opinion(&state, &id, &feedback).await?;
                 if project.completion_mode == COMPLETION_DIRECT {
                     sqlx::query(
-                        "UPDATE projects SET stage = ?, status = ?, report = NULL, \
+                        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused') \
+                         THEN status ELSE ? END, report = NULL, \
                          report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                     )
                     .bind(STAGE_EXECUTING)
@@ -101,7 +102,8 @@ pub(super) async fn submit_report(
                     );
                 } else {
                     sqlx::query(
-                        "UPDATE projects SET stage = ?, status = ?, report = NULL, \
+                        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused') \
+                         THEN status ELSE ? END, report = NULL, \
                          report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                     )
                     .bind(STAGE_SUMMARIZING)

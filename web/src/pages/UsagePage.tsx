@@ -3,6 +3,7 @@ import type { Agent, ProjectSummary, UsageReport, UsageTotals } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
 import { SkeletonLines } from "../components/Skeleton";
 import { UsageTable } from "../components/UsageGroupsTable";
+import { UsageMetricValue } from "../components/UsageMetricValue";
 import { readUsageProjectId, usagePath } from "../router";
 import {
   EMPTY_USAGE_FILTERS,
@@ -14,50 +15,19 @@ import {
   restrictUsageToProject,
   usageProjectOptions,
   usageRequestParams,
+  usageCoverageNote,
 } from "../presentation/usage";
 import {
   Badge,
   ErrorBox,
   ROLE_LABELS,
-  formatCost,
   formatMillis,
-  formatTokens,
 } from "../ui";
 
 // 初始项目过滤：地址栏带 project_id 时预选该项目，否则不限制。
 function initialProjectId(): string {
   if (typeof window === "undefined") return "";
   return readUsageProjectId(window.location.search) ?? "";
-}
-
-// 卡片数值：全部未知时显示占位，部分缺失时标注覆盖比例。
-function MetricValue({
-  value,
-  totals,
-  format,
-}: {
-  value: number;
-  totals: UsageTotals;
-  format: (value: number) => string;
-}) {
-  if (totals.jobs > 0 && totals.known_jobs === 0) {
-    return (
-      <span className="muted" title="全部作业未记录用量">
-        —
-      </span>
-    );
-  }
-  const partial = totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
-  return (
-    <>
-      {format(value)}
-      {partial ? (
-        <span className="muted usage-coverage-note">
-          （{totals.known_jobs}/{totals.jobs} 个作业）
-        </span>
-      ) : null}
-    </>
-  );
 }
 
 // 顶部覆盖徽标：作业全部未记录用量时提示，其余情况说明未知作业的计数方式。
@@ -103,57 +73,37 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
         <div>
           <span className="meta-label">输入 token</span>
           <strong>
-            <MetricValue
-              value={totals.input_tokens}
-              totals={totals}
-              format={formatTokens}
-            />
+            <UsageMetricValue totals={totals} metric="input_tokens" />
           </strong>
         </div>
         <div>
           <span className="meta-label">输出 token</span>
           <strong>
-            <MetricValue
-              value={totals.output_tokens}
-              totals={totals}
-              format={formatTokens}
-            />
+            <UsageMetricValue totals={totals} metric="output_tokens" />
           </strong>
         </div>
         <div>
           <span className="meta-label">缓存读</span>
           <strong>
-            <MetricValue
-              value={totals.cache_read_tokens}
-              totals={totals}
-              format={formatTokens}
-            />
+            <UsageMetricValue totals={totals} metric="cache_read_tokens" />
           </strong>
         </div>
         <div>
           <span className="meta-label">缓存写</span>
           <strong>
-            <MetricValue
-              value={totals.cache_write_tokens}
-              totals={totals}
-              format={formatTokens}
-            />
+            <UsageMetricValue totals={totals} metric="cache_write_tokens" />
           </strong>
         </div>
         <div>
           <span className="meta-label">推理</span>
           <strong>
-            <MetricValue
-              value={totals.reasoning_tokens}
-              totals={totals}
-              format={formatTokens}
-            />
+            <UsageMetricValue totals={totals} metric="reasoning_tokens" />
           </strong>
         </div>
         <div>
           <span className="meta-label">费用</span>
           <strong>
-            <MetricValue value={totals.cost} totals={totals} format={formatCost} />
+            <UsageMetricValue totals={totals} metric="cost" />
           </strong>
         </div>
         <div>
@@ -182,6 +132,9 @@ function TotalsCards({ totals }: { totals: UsageTotals }) {
           token 与费用合计只包含已知用量；作业数与时长仍包含未知作业。输入 token
           含缓存读写，输出 token 含推理。
         </div>
+      ) : null}
+      {totals.jobs > 0 && totals.known_jobs === totals.jobs && usageCoverageNote(totals) ? (
+        <p className="warn-banner">{usageCoverageNote(totals)}</p>
       ) : null}
     </>
   );

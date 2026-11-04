@@ -4,6 +4,7 @@ import type {
   UsageGroup,
   UsageReport,
   UsageTotals,
+  UsageAggregateMetric,
 } from "../types";
 import {
   ROLE_LABELS,
@@ -169,6 +170,11 @@ function usageTotalsOf(groups: UsageGroup[]): UsageTotals {
       duration_ms: sum.duration_ms + group.duration_ms,
       known_jobs: sum.known_jobs + group.known_jobs,
       unknown_jobs: sum.unknown_jobs + group.unknown_jobs,
+      known_metrics: Object.fromEntries(
+        USAGE_METRICS.map(metric => [metric,
+          sum.known_metrics[metric] + group.known_metrics[metric],
+        ]),
+      ) as Record<UsageAggregateMetric, number>,
     }),
     {
       jobs: 0,
@@ -181,12 +187,26 @@ function usageTotalsOf(groups: UsageGroup[]): UsageTotals {
       duration_ms: 0,
       known_jobs: 0,
       unknown_jobs: 0,
+      known_metrics: {
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0,
+        cache_write_tokens: 0, reasoning_tokens: 0, cost: 0,
+      },
     },
   );
 }
 
 /// 没有作业时汇总无从计算，所有指标都显示为“—”。
 export const USAGE_UNKNOWN_VALUE = "—";
+export const USAGE_METRICS: UsageAggregateMetric[] = [
+  "input_tokens", "output_tokens", "cache_read_tokens",
+  "cache_write_tokens", "reasoning_tokens", "cost",
+];
+
+/** Each metric's coverage counts reported zeros but never missing values. */
+export function usageMetricPartial(totals: UsageTotals, metric: UsageAggregateMetric): string | null {
+  const known = totals.known_metrics[metric];
+  return known > 0 && known < totals.jobs ? `${known}/${totals.jobs}` : null;
+}
 
 /// 全部作业都没有用量记录：token 与费用无法合计。
 export function usageAllUnknown(totals: UsageTotals): boolean {
@@ -204,7 +224,7 @@ export function usageCoverageLabel(totals: UsageTotals): string | null {
   return `${totals.known_jobs}/${totals.jobs}`;
 }
 
-/// 覆盖说明：解释“—”与部分覆盖的来源，没有作业或全部覆盖时为空。
+/// 覆盖说明同时区分作业覆盖与输入、输出、费用的单指标覆盖。
 export function usageCoverageNote(totals: UsageTotals): string {
   if (totals.jobs === 0) return "还没有作业，暂时没有用量记录。";
   if (totals.known_jobs === 0) {
@@ -213,7 +233,15 @@ export function usageCoverageNote(totals: UsageTotals): string {
   if (totals.known_jobs < totals.jobs) {
     return `已记录 ${totals.known_jobs}/${totals.jobs} 个作业的用量，合计只含已记录部分；其余 ${totals.unknown_jobs} 个作业未提供 token 或费用。`;
   }
-  return "";
+  const missing = [
+    ["输入 token", totals.known_metrics.input_tokens],
+    ["输出 token", totals.known_metrics.output_tokens],
+    ["费用", totals.known_metrics.cost],
+  ] as const;
+  return missing
+    .filter(([, known]) => known < totals.jobs)
+    .map(([label, known]) => `${label}覆盖 ${known}/${totals.jobs} 个作业，缺失值保持未知，合计只含已知部分。`)
+    .join(" ");
 }
 
 /// 汇总指标的取值：没有作业或无法合计时统一为“—”，与用量页同口径。
@@ -221,12 +249,12 @@ export function usageCoverageNote(totals: UsageTotals): string {
 export function usageMetricValue(
   value: number | null | undefined,
   totals: UsageTotals,
-  metric: "tokens" | "cost" | "duration",
+  metric: UsageAggregateMetric | "duration_ms",
 ): string {
   if (totals.jobs === 0) return USAGE_UNKNOWN_VALUE;
-  if (metric !== "duration" && usageAllUnknown(totals)) return USAGE_UNKNOWN_VALUE;
+  if (metric !== "duration_ms" && totals.known_metrics[metric] === 0) return USAGE_UNKNOWN_VALUE;
   if (value === null || value === undefined) return USAGE_UNKNOWN_VALUE;
   if (metric === "cost") return formatCost(value);
-  if (metric === "duration") return formatMillis(value);
+  if (metric === "duration_ms") return formatMillis(value);
   return formatTokens(value);
 }

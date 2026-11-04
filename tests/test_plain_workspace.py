@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 选择不存在的本地目录时自动创建，项目记录普通工作区类型；
-  2. 项目分析、任务执行、验收、项目验收与报告不调用 Git；
+  2. 普通目录交付不对产物使用 Git，内部共享仓库独立保存；
   3. 同一项目同一时刻只推进一个任务，任务没有分支与 worktree；
   4. 完成即交付，不产生合入待办，合入接口被拒绝；
   5. 归档保留产物与 jobs 审计记录，不产生 Git 归档引用。
@@ -99,7 +99,7 @@ def main():
                 item for item in call("GET", "/api/projects") if item["id"] == project_id
             )
             assert summary["workspace_type"] == "plain", summary
-            assert summary["attention"] == "review", summary
+            assert [item["kind"] for item in summary["attention_items"]] == ["review"], summary
 
             call("POST", f"/api/projects/{project_id}/report", {"action": "accept"})
             detail = call("GET", f"/api/projects/{project_id}")
@@ -111,7 +111,7 @@ def main():
             summary = next(
                 item for item in call("GET", "/api/projects") if item["id"] == project_id
             )
-            assert summary["attention"] is None, summary
+            assert summary["attention_items"] == [], summary
 
             status, _ = raw_status(
                 server.base, "POST", f"/api/projects/{project_id}/merge", {}
@@ -132,7 +132,7 @@ def main():
                 event["kind"] == "project_archived" for event in archived["events"]
             )
 
-            # 派生任务沿用普通任务规则：子任务顺序完成并自动跳过验收。
+            # 派生任务沿用普通任务规则：子任务顺序完成并独立验收。
             server.restart(
                 {
                     "DOMO_MOCK_DERIVE_ONCE": "1",
@@ -154,6 +154,9 @@ def main():
                 task for task in detail["tasks"] if task["parent_id"] == parent["id"]
             ]
             assert children and all(child["stage"] == "completed" for child in children), children
+            for child in children:
+                assert any(job["task_id"] == child["id"] and job["role"] == "verifier"
+                           and job["status"] == "succeeded" for job in detail["jobs"]), child
             assert parent["stage"] == "completed", parent
             for child in children:
                 path = delivery / "plain-derive" / "domo_mock" / f"{child['key']}.txt"

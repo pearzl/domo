@@ -298,3 +298,7 @@ grep -n 'pub fn kinds\|pub fn requires_command_template\|pub fn validate_config\
 grep -n 'enum JobUsage' server/src/agents/adapter.rs
 grep -n 'struct FinishContext' server/src/agents/adapter.rs
 ```
+
+## 注册表分发约束
+
+会话与用量结算分发同样由 `adapter_registry!` 生成；接入适配器只需实现 trait 并登记一次，不在门面中手写类型分支。本文关于手工登记 `session_for_job` 与 `finish_job` 的步骤不适用于当前实现。当前技术约束以 [TECH](../TECH.md) 为准。

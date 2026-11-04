@@ -36,6 +36,10 @@ export function useProjectPageController({ id }: { id: string }) {
   const [readError, setReadError] = useState("");
   const [actionError, setActionError] = useState("");
   const [loading, setLoading] = useState(true);
+  const refreshRef = useRef<Promise<void> | null>(null);
+  const refreshPendingRef = useRef(false);
+  const currentIdRef = useRef(id);
+  currentIdRef.current = id;
   const analysisDraft = useDraftValue(
     { projectId: id, field: "analysis-message" },
     "",
@@ -142,8 +146,26 @@ export function useProjectPageController({ id }: { id: string }) {
   }, []);
 
   async function refresh(silent = false) {
+    refreshPendingRef.current = true;
+    if (refreshRef.current) return refreshRef.current;
+    const pending = (async () => {
+      while (refreshPendingRef.current && currentIdRef.current === id) {
+        refreshPendingRef.current = false;
+        await loadSnapshot(silent);
+      }
+    })();
+    refreshRef.current = pending;
+    try {
+      await pending;
+    } finally {
+      if (refreshRef.current === pending) refreshRef.current = null;
+    }
+  }
+
+  async function loadSnapshot(silent: boolean) {
     try {
       const next = await api.getProject(id);
+      if (currentIdRef.current !== id) return;
       setDetail(next);
       // 验收相关数据变化时递增版本号，抽屉按版本号重新读取验收记录；
       // 仅轮询心跳而没有新数据时不重复请求。
@@ -154,17 +176,30 @@ export function useProjectPageController({ id }: { id: string }) {
       }
       setReadError("");
     } catch (err) {
+      if (currentIdRef.current !== id) return;
       if (!silent) setReadError(errorMessage(err));
     } finally {
-      setLoading(false);
+      if (currentIdRef.current === id) setLoading(false);
     }
   }
 
   useEffect(() => {
+    refreshRef.current = null;
+    refreshPendingRef.current = false;
+    verificationSignatureRef.current = "";
     setLoading(true);
     void refresh();
-    const timer = window.setInterval(() => void refresh(true), 2500);
-    const unsubscribe = subscribeEvents(() => void refresh(true));
+    let connected = false;
+    let lastRead = Date.now();
+    const timer = window.setInterval(() => {
+      if (connected && Date.now() - lastRead < 30_000) return;
+      lastRead = Date.now();
+      void refresh(true);
+    }, 5000);
+    const unsubscribe = subscribeEvents(() => {
+      lastRead = Date.now();
+      void refresh(true);
+    }, (online) => { connected = online; }, id);
     return () => {
       window.clearInterval(timer);
       unsubscribe();
@@ -352,7 +387,7 @@ export function useProjectPageController({ id }: { id: string }) {
   async function confirmProposal() {
     if (!detail) return;
     setConfirming(true);
-    const ok = await run(() => api.confirmAnalysis(detail.project.id));
+    const ok = await run(() => api.confirmAnalysis(detail.project.id, detail.proposal));
     setConfirming(false);
     if (ok) analysisDraft.clear();
   }

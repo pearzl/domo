@@ -431,14 +431,14 @@ def main():
             switched = call(
                 "POST",
                 f"/api/projects/{switch_id}/tasks/{t1['id']}/arbitration",
-                {"action": "switch_agent", "agent_id": forced_agent["id"]},
+                {"action": "switch_agent", "agent_id": forced_agent["id"], "risk_confirmed": True},
             )
             assert task_by_key(switched, "T1")["status"] == "queued", switched
             assert task_by_key(switched, "T1")["forced_agent_id"] == forced_agent["id"], switched
             code, _ = expect_error(
                 "POST",
                 f"/api/projects/{switch_id}/tasks/{t1['id']}/arbitration",
-                {"action": "switch_agent", "agent_id": forced_agent["id"]},
+                {"action": "switch_agent", "agent_id": forced_agent["id"], "risk_confirmed": True},
             )
             assert code == 400, code
 

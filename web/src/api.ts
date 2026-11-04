@@ -52,6 +52,10 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
+  setProjectLimits: (id: string, limits: NonNullable<ProjectDetail["delivery"]>["limits"]) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/limits`, {
+      method: "PUT", body: JSON.stringify(limits),
+    }),
   createTask: (projectId: string, input: CreateTaskInput) =>
     request<Task>(`/api/projects/${projectId}/tasks`, {
       method: "POST",
@@ -112,10 +116,10 @@ export const api = {
         confirm_mode: confirmMode ?? null,
       }),
     }),
-  confirmAnalysis: (id: string) =>
+   confirmAnalysis: (id: string, proposal?: ProjectDetail["proposal"]) =>
     request<ProjectDetail>(`/api/projects/${id}/analysis/confirm`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ proposal }),
     }),
   updateAnalysisPolicy: (id: string, mode: "manual" | "auto") =>
     request<ProjectDetail>(`/api/projects/${id}/analysis/policy`, {
@@ -218,7 +222,7 @@ export const api = {
   submitTaskArbitration: (
     projectId: string,
     taskId: string,
-    input: { action: "retry" | "switch_agent" | "guide"; agent_id?: string; guidance?: string },
+    input: { action: "retry" | "switch_agent" | "guide"; agent_id?: string; guidance?: string; risk_confirmed?: boolean },
   ) =>
     request<ProjectDetail>(
       `/api/projects/${projectId}/tasks/${taskId}/arbitration`,
@@ -298,16 +302,61 @@ export const api = {
   },
 };
 
+interface EventSubscription {
+  onEvent: () => void;
+  onStatus?: (connected: boolean) => void;
+  projectId?: string;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+const eventSubscriptions = new Set<EventSubscription>();
+let eventSource: EventSource | null = null;
+let eventsConnected = false;
+
+/** 同一页面共享连接，项目事件按 ID 过滤，短时间事件合并为一次刷新。 */
 export function subscribeEvents(
   onEvent: () => void,
   onStatus?: (connected: boolean) => void,
+  projectId?: string,
 ): () => void {
   if (typeof EventSource === "undefined") return () => undefined;
-  const source = new EventSource("/api/events/stream");
-  source.onopen = () => onStatus?.(true);
-  source.onerror = () => onStatus?.(false);
-  source.onmessage = () => onEvent();
-  return () => source.close();
+  const subscription: EventSubscription = { onEvent, onStatus, projectId };
+  eventSubscriptions.add(subscription);
+  onStatus?.(eventsConnected);
+  if (!eventSource) {
+    eventSource = new EventSource("/api/events/stream");
+    const status = (connected: boolean) => {
+      eventsConnected = connected;
+      for (const item of eventSubscriptions) item.onStatus?.(connected);
+    };
+    eventSource.onopen = () => status(true);
+    eventSource.onerror = () => status(false);
+    eventSource.onmessage = (event) => {
+      let projectId: string | null;
+      try {
+        projectId = (JSON.parse(event.data) as AuditEvent).project_id;
+      } catch {
+        return;
+      }
+      for (const item of eventSubscriptions) {
+        if (item.projectId && projectId && item.projectId !== projectId) continue;
+        if (item.timer !== undefined) continue;
+        item.timer = setTimeout(() => {
+          item.timer = undefined;
+          item.onEvent();
+        }, 100);
+      }
+    };
+  }
+  return () => {
+    if (subscription.timer !== undefined) clearTimeout(subscription.timer);
+    eventSubscriptions.delete(subscription);
+    if (eventSubscriptions.size === 0) {
+      eventSource?.close();
+      eventSource = null;
+      eventsConnected = false;
+    }
+  };
 }
 
 export function errorMessage(error: unknown): string {

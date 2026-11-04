@@ -4,10 +4,10 @@
 覆盖范围：
   1. 首个执行作业返回 derive 后，子任务写入同一项目 DAG；
   2. 子任务自动成为父任务前置，兄弟任务 deps 为空，父任务保持等待且没有失败；
-  3. 子任务跳过验收，执行成功后直接合入父任务分支；
+  3. 子任务经过独立验收，执行成功后合入项目交付分支；
   4. 全部子任务完成后父任务再次执行并通过验收，最终合入项目交付分支；
   5. 父任务 prompt 包含派生子任务及其结果，子任务 prompt 标记派生并禁止再次派生；
-  6. 非法派生使作业失败并进入既有重试流程，不写入子任务；
+  6. 非法派生在同一作业内修正协议，不写入非法子任务；
   7. 项目报告可生成并完成人工验收。
 
 使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
@@ -160,7 +160,7 @@ def main():
             assert all(child["status"] in ("queued", "running") for child in children), children
             assert set(parent["deps"]) == {"T1.1", "T1.2"}, parent
             assert parent["stage"] == "pending", parent
-            assert parent["status"] == "queued", parent
+            assert parent["status"] is None, parent
             assert parent["status"] != "blocked", parent
             derive_event = next(
                 event for event in detail["events"] if event["kind"] == "task_derived"
@@ -213,7 +213,7 @@ def main():
                     for job in jobs
                     if job["task_id"] == child["id"] and job["role"] == "verifier"
                 ]
-                assert not verifier_jobs, verifier_jobs
+                assert verifier_jobs and all(job["status"] == "succeeded" for job in verifier_jobs), verifier_jobs
 
             parent_prompt = call("GET", f"/api/jobs/{parent_execs[-1]['id']}")["prompt"]
             assert "## 派生子任务" in parent_prompt, parent_prompt
@@ -224,7 +224,7 @@ def main():
                 f"/api/jobs/{next(job for job in jobs if job['task_id'] == children[0]['id'] and job['role'] == 'executor')['id']}",
             )["prompt"]
             assert "## 派生任务约束" in child_prompt, child_prompt
-            assert "跳过验收阶段" in child_prompt, child_prompt
+            assert "接受独立验收" in child_prompt, child_prompt
             assert "禁止再次派生新的子任务" in child_prompt, child_prompt
             assert children[0]["key"] in child_prompt, child_prompt
 
@@ -242,34 +242,22 @@ def main():
             assert completed["project"]["stage"] == "completed", completed["project"]
             assert completed["project"]["status"] is None, completed["project"]
 
-            # 4. 非法派生：作业失败并进入既有重试流程，不写入子任务。
+            # 4. 非法派生：同一作业内继续修正协议，不写入非法子任务。
             invalid_id = new_project("InvalidDerive", "[invalid-derive] 非法派生应进入重试")
             detail = wait_project(
                 invalid_id,
                 lambda item: any(
-                    job["role"] == "executor"
-                    and job["status"] == "failed"
-                    and "派生" in (job["error"] or "")
-                    for job in item["jobs"]
+                    event["kind"] == "job_continued"
+                    for event in item["events"]
                 ),
-                "非法派生作业失败",
+                "非法派生结果触发同作业继续",
                 90,
             )
-            failed_job = next(
-                job
-                for job in detail["jobs"]
-                if job["role"] == "executor"
-                and job["status"] == "failed"
-                and "派生" in (job["error"] or "")
-            )
-            assert "deps" in failed_job["error"], failed_job
             invalid_t1 = next(task for task in detail["tasks"] if task["key"] == "T1")
-            assert invalid_t1["attempts"] >= 1, invalid_t1
+            assert invalid_t1["attempts"] == 0, invalid_t1
             assert invalid_t1["status"] != "blocked", invalid_t1
             assert not any(task["parent_id"] for task in detail["tasks"]), detail["tasks"]
-            assert any(event["kind"] == "task_retry" for event in detail["events"]), detail[
-                "events"
-            ]
+            assert any(event["kind"] == "job_continued" for event in detail["events"])
 
             detail = wait_project(
                 invalid_id,

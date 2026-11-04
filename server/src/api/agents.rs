@@ -118,6 +118,7 @@ pub(super) async fn update_agent(
     Path(id): Path<String>,
     Json(request): Json<UpdateAgentRequest>,
 ) -> Result<Json<AgentView>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
     let Some(existing) = crate::db::load_agent(&state.db, &id).await? else {
         return Err(ApiError::not_found("Agent 不存在"));
     };
@@ -205,6 +206,7 @@ pub(super) async fn update_agent(
     .execute(&state.db)
     .await?;
     crate::db::ensure_default_team(&state.db).await?;
+    crate::delivery::wake_configuration(&state.db, None).await?;
     state.notify_scheduler();
     let row = crate::db::load_agent(&state.db, &id)
         .await?
@@ -314,6 +316,7 @@ pub(super) async fn update_default_team_agent(
         ),
     )
     .await;
+    crate::delivery::wake_configuration(&state.db, None).await?;
     state.notify_scheduler();
     Ok(Json(crate::db::load_default_team_pool(&state.db).await?))
 }
@@ -372,6 +375,7 @@ pub(super) async fn reset_agent_usage(
         format!("Agent {} 的用量窗口已重置", row.name),
     )
     .await;
+    crate::delivery::wake_configuration(&state.db, None).await?;
     state.notify_scheduler();
     let row = crate::db::load_agent(&state.db, &id)
         .await?

@@ -123,6 +123,7 @@ def main():
                     "base_branch": "main",
                 },
             )["project"]
+            call("PUT", f"/api/projects/{project['id']}/limits", {"task_attempt_limit": 3})
             call("POST", f"/api/projects/{project['id']}/confirm", {})
 
             detail = wait_project(
@@ -133,8 +134,8 @@ def main():
 
             task = detail["tasks"][0]
             assert task["attempts"] == 3, task
-            assert "超时" in (task["last_error"] or ""), task
-            assert any(event["kind"] == "task_blocked" for event in detail["events"])
+            assert "尝试" in (task["last_error"] or ""), task
+            assert any(event["kind"] == "task_state_changed" for event in detail["events"])
             failed_jobs = [job for job in detail["jobs"] if job["status"] == "failed"]
             assert failed_jobs, detail["jobs"]
             for job in failed_jobs:
@@ -156,7 +157,11 @@ def main():
                 if job["task_id"] == blocked_task["id"] and job["status"] == "failed"
             ]
             job = max(failed_jobs, key=lambda item: item["created_at"])
-            call("POST", f"/api/jobs/{job['id']}/retry", {})
+            # 用户显式提高累计尝试上限，并解除该 Agent 的测试冷却以模拟时间恢复。
+            import sqlite3
+            with sqlite3.connect(server.root / "data" / "domo.db") as db:
+                db.execute("UPDATE agents SET cooldown_until = NULL WHERE id = ?", (job["agent_id"],))
+            call("PUT", f"/api/projects/{project_id}/limits", {"task_attempt_limit": 4})
 
             detail = wait_project(
                 project_id,

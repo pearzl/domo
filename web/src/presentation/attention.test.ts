@@ -16,7 +16,9 @@ function project(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
     stage: "executing",
     status: "blocked",
     blocked_reason: "等待人工处理",
-    attention: "blocked",
+    attention_items: [{ id: "action", kind: "blocked", task: null, reason: null,
+      since: overrides.updated_at ?? "2026-01-10T11:00:00Z", affected_tasks: 0,
+      blocks_milestone: false, blocks_summary: true, project_advancing: false }],
     task_total: 1,
     task_completed: 0,
     replan_reason: null,
@@ -32,13 +34,26 @@ function project(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
 }
 
 describe("attentionItems", () => {
+  it("运行中项目可以有多个独立待办，等待时间不受项目更新影响", () => {
+    const action = { kind: "review" as const, task: null, reason: "等待里程碑",
+      since: "2026-01-10T10:00:00Z", affected_tasks: 2,
+      blocks_milestone: true, blocks_summary: true, project_advancing: true };
+    const items = attentionItems([project({ status: "running",
+      updated_at: "2026-01-10T11:59:59Z",
+      attention_items: [{ ...action, id: "t1" }, { ...action, id: "t2" }],
+    })], NOW);
+    expect(items).toHaveLength(2);
+    expect(items.map(item => item.id)).toEqual(["t1", "t2"]);
+    expect(items[0].waitingMs).toBe(2 * 60 * 60 * 1000);
+    expect(items[0].projectAdvancing).toBe(true);
+  });
   it("过滤非待办项目并按等待时长倒序", () => {
     const items = attentionItems(
       [
         project({ id: "recent", updated_at: "2026-01-10T11:50:00Z" }),
         project({ id: "old", updated_at: "2026-01-10T10:00:00Z" }),
-        project({ id: "done", attention: null }),
-        project({ id: "archived", attention: null, status: "archived" }),
+        project({ id: "done", attention_items: [] }),
+        project({ id: "archived", attention_items: [], status: "archived" }),
       ],
       NOW,
     );

@@ -48,15 +48,19 @@ pub async fn emit_job(
 ) {
     let created_at = now();
     let message = message.into();
+    let payload = serde_json::json!({"version": 1, "kind": kind, "project_id": project_id,
+        "task_id": task_id, "job_id": job_id, "message": message})
+    .to_string();
     let result = sqlx::query(
-        "INSERT INTO events (project_id, task_id, job_id, kind, message, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (project_id, task_id, job_id, kind, message, payload, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(project_id)
     .bind(task_id)
     .bind(job_id)
     .bind(kind)
     .bind(&message)
+    .bind(&payload)
     .bind(&created_at)
     .execute(pool)
     .await;
@@ -68,8 +72,11 @@ pub async fn emit_job(
             job_id: job_id.map(|v| v.to_string()),
             kind: kind.to_string(),
             message,
+            payload,
             created_at,
         };
         bus.publish(&event);
+    } else if let Err(error) = result {
+        tracing::error!(kind, error = %error, "审计事件写入失败");
     }
 }

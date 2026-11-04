@@ -22,6 +22,8 @@ use crate::usage;
 pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
     if let Err(error) = recover(&state).await.context("恢复启动状态失败") {
         tracing::error!(error = %error, "启动恢复失败");
+        // 未完成资源核对时禁止开始派发，保留现场供人工处理。
+        return;
     }
     let mut shutdown = state.shutdown_receiver();
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -62,6 +64,12 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<()>) {
 
 async fn recover(state: &AppState) -> Result<()> {
     cleanup_orphans(state).await;
+    crate::resources::recover(state).await?;
+    sqlx::query("UPDATE merge_requests SET state = 'failed', error = '服务中断，保留处理工作区，请显式重新发起' WHERE state = 'running'")
+        .execute(&state.db).await?;
+    crate::api::recover_merges(state)
+        .await
+        .map_err(|error| anyhow::anyhow!("合入恢复失败：{error:?}"))?;
     let jobs = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE status = 'running'")
         .fetch_all(&state.db)
         .await?;
@@ -192,6 +200,16 @@ async fn recover(state: &AppState) -> Result<()> {
     .fetch_all(&state.db)
     .await?;
     for project in projects {
+        if project.status.as_deref() == Some(STATUS_BLOCKED)
+            && project
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty())
+            && project.completion_mode == COMPLETION_DIRECT
+        {
+            // 协议失败与人工决策不能通过重启解除。
+            continue;
+        }
         if project.stage == STAGE_SUMMARIZING && project.report.is_some() {
             if matches!(
                 project.status.as_deref(),
@@ -219,7 +237,7 @@ async fn recover(state: &AppState) -> Result<()> {
             .bind(STATUS_BLOCKED)
             .fetch_one(&state.db)
             .await?;
-            if human_gate > 0 {
+            if human_gate > 0 && !has_runnable_tasks(&state.db, &project.id).await? {
                 if project.status.as_deref() != Some(STATUS_BLOCKED) {
                     sqlx::query(
                         "UPDATE projects SET status = CASE WHEN status IN \
@@ -302,12 +320,57 @@ async fn cleanup_orphans(state: &AppState) {
 }
 
 async fn reconcile(state: &AppState) -> Result<Vec<String>> {
+    crate::queue::reconcile(&state.db).await?;
+    let mut merge_spawns = Vec::new();
+    let requests: Vec<(String, String)> = sqlx::query_as("SELECT project_id, agent_id FROM merge_requests WHERE state = 'waiting' ORDER BY requested_at")
+        .fetch_all(&state.db).await?;
+    for (id, agent_id) in requests {
+        let project = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await?;
+        if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+            continue;
+        }
+        if let Some(reason) = crate::delivery::gate(&state.db, &id, None).await? {
+            sqlx::query("UPDATE merge_requests SET error = ? WHERE project_id = ?")
+                .bind(reason)
+                .bind(&id)
+                .execute(&state.db)
+                .await?;
+            continue;
+        }
+        let Some(agent) = crate::db::load_agent(&state.db, &agent_id).await? else {
+            continue;
+        };
+        if !crate::queue::candidate(&state.db, &project, None, "merge_conflict", &agent, true)
+            .await?
+            || running_jobs(state, &agent.id).await? >= agent.max_concurrency.max(1)
+        {
+            crate::queue::waiting(
+                &state.db,
+                &project,
+                None,
+                "merge_conflict",
+                "由人工指定，等待 Agent 全局队列或并发释放",
+            )
+            .await?;
+            continue;
+        }
+        let job = domain::new_id("job");
+        sqlx::query("INSERT INTO jobs(id, project_id, role, agent_id, status, prompt, created_at) VALUES(?, ?, 'merge_conflict', ?, 'running', '', ?)")
+            .bind(&job).bind(&id).bind(&agent.id).bind(now()).execute(&state.db).await?;
+        sqlx::query("UPDATE merge_requests SET state = 'running', job_id = ?, error = NULL WHERE project_id = ?")
+            .bind(&job).bind(&id).execute(&state.db).await?;
+        crate::queue::dispatched(&state.db, &project, None, "merge_conflict", &job).await?;
+        merge_spawns.push(job);
+    }
     let projects = sqlx::query_as::<_, ProjectRow>(
         "SELECT * FROM projects WHERE status IN ('running', 'pausing') ORDER BY created_at ASC",
     )
     .fetch_all(&state.db)
     .await?;
-    let mut spawns = Vec::new();
+    let mut spawns = merge_spawns;
     for project in projects {
         crate::db::ensure_project_agents(&state.db, &project.id).await?;
         if project.status.as_deref() == Some(STATUS_PAUSING) {
@@ -322,16 +385,6 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 .bind(STATUS_PAUSING)
                 .execute(&state.db)
                 .await;
-                sqlx::query(
-                    "UPDATE tasks SET status = ?, updated_at = ? \
-                     WHERE project_id = ? AND stage != ? AND status IN ('queued', 'running', 'pausing')",
-                )
-                .bind(STATUS_PAUSED)
-                .bind(now())
-                .bind(&project.id)
-                .bind(TASK_STAGE_COMPLETED)
-                .execute(&state.db)
-                .await?;
                 emit(
                     &state.db,
                     &state.bus,
@@ -342,6 +395,10 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 )
                 .await;
             }
+            continue;
+        }
+        if let Some(reason) = crate::delivery::gate(&state.db, &project.id, None).await? {
+            note_waiting(state, &project, &reason, false).await?;
             continue;
         }
         match project.stage.as_str() {
@@ -379,6 +436,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         state,
                         &project,
                         choice.reason.as_deref().unwrap_or("等待可用的规划 Agent"),
+                        choice.recoverable,
                     )
                     .await?;
                     continue;
@@ -404,6 +462,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                                 .reason
                                 .as_deref()
                                 .unwrap_or("等待可用的直接完成 Agent"),
+                            choice.recoverable,
                         )
                         .await?;
                         continue;
@@ -499,13 +558,21 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     {
                         continue;
                     }
-                    if task.status.as_deref() != Some(STATUS_QUEUED) {
+                    if task.status.as_deref() != Some(STATUS_QUEUED)
+                        && !(task.stage == TASK_STAGE_PENDING && task.status.is_none())
+                    {
                         continue;
                     }
                     let deps = parse_list(&task.deps);
                     let ready =
                         task.stage != TASK_STAGE_PENDING || deps_complete(&deps, &completed);
                     if !ready {
+                        sqlx::query(
+                            "UPDATE tasks SET status = NULL WHERE id = ? AND status = 'queued'",
+                        )
+                        .bind(&task.id)
+                        .execute(&state.db)
+                        .await?;
                         let missing = deps
                             .iter()
                             .filter(|dep| !completed.contains(*dep))
@@ -519,11 +586,41 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                         .await?;
                         continue;
                     }
+                    if task.stage == TASK_STAGE_PENDING {
+                        sqlx::query("UPDATE tasks SET stage = 'executing', status = 'queued', updated_at = ? \
+                            WHERE id = ? AND stage = 'pending' AND (status IS NULL OR status = 'queued')")
+                            .bind(now()).bind(&task.id).execute(&state.db).await?;
+                    }
                     let role = if task.stage == TASK_STAGE_VERIFYING {
                         ROLE_VERIFIER
                     } else {
                         ROLE_EXECUTOR
                     };
+                    if role == ROLE_EXECUTOR {
+                        if let Some(reason) =
+                            crate::delivery::gate(&state.db, &project.id, Some(&task.id)).await?
+                        {
+                            let reason = format!(
+                                "{reason}{}",
+                                task.last_error
+                                    .as_ref()
+                                    .map(|error| format!("；上次失败：{error}"))
+                                    .unwrap_or_default()
+                            );
+                            sqlx::query("UPDATE tasks SET status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?")
+                                .bind(&reason).bind(now()).bind(&task.id).execute(&state.db).await?;
+                            emit(
+                                &state.db,
+                                &state.bus,
+                                Some(&project.id),
+                                Some(&task.id),
+                                "task_blocked",
+                                &reason,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                     if has_task_job(&state.db, &task.id, role).await? {
                         continue;
                     }
@@ -558,7 +655,13 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                             .clone()
                             .unwrap_or_else(|| format!("等待可用的{} Agent", role_label(role)));
                         set_task_waiting(state, &task.id, &reason).await?;
-                        note_waiting(state, &project, &reason).await?;
+                        crate::queue::waiting(&state.db, &project, Some(task), role, &reason)
+                            .await?;
+                        note_waiting(state, &project, &reason, true).await?;
+                        if !choice.recoverable {
+                            sqlx::query("UPDATE tasks SET status = 'blocked', last_failure_kind = 'configuration', last_error = ?, updated_at = ? WHERE id = ?")
+                                .bind(&reason).bind(now()).bind(&task.id).execute(&state.db).await?;
+                        }
                         continue;
                     };
                     if let Some(job_id) =
@@ -595,8 +698,13 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 }
                 let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
                 let Some(agent) = choice.agent else {
-                    note_waiting(state, &project, choice.reason.as_deref().unwrap_or(waiting))
-                        .await?;
+                    note_waiting(
+                        state,
+                        &project,
+                        choice.reason.as_deref().unwrap_or(waiting),
+                        choice.recoverable,
+                    )
+                    .await?;
                     continue;
                 };
                 if let Some(job_id) =
@@ -703,12 +811,88 @@ async fn recompute_blocked(state: &AppState, project_id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn has_runnable_tasks(pool: &SqlitePool, project_id: &str) -> Result<bool> {
+    let tasks = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE project_id = ?")
+        .bind(project_id)
+        .fetch_all(pool)
+        .await?;
+    let completed = tasks
+        .iter()
+        .filter(|task| task.stage == TASK_STAGE_COMPLETED)
+        .map(|task| task.key.clone())
+        .collect();
+    Ok(tasks.iter().any(|task| {
+        matches!(task.status.as_deref(), Some(STATUS_RUNNING | STATUS_QUEUED))
+            && task.stage != TASK_STAGE_COMPLETED
+            && (task.stage != TASK_STAGE_PENDING
+                || deps_complete(&parse_list(&task.deps), &completed))
+    }))
+}
+
 async fn choose_agent(
     state: &AppState,
     project: &ProjectRow,
     role: &str,
     task: Option<&TaskRow>,
 ) -> Result<AgentChoice> {
+    crate::queue::enter(&state.db, project, task, role).await?;
+    if let Some(task) = task {
+        let target: Option<String> = sqlx::query_scalar(
+            "SELECT agent_id FROM retry_requests WHERE task_id = ? AND role = ?",
+        )
+        .bind(&task.id)
+        .bind(role)
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some(id) = target {
+            if let Some(agent) = crate::db::load_agent(&state.db, &id).await? {
+                let member: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_agents t WHERE t.task_id = ? AND t.role = ? AND t.agent_id = ? AND t.enabled = 1 AND NOT EXISTS (SELECT 1 FROM project_agents p WHERE p.project_id = ? AND p.role = t.role AND p.agent_id = t.agent_id AND p.enabled = 0)")
+                    .bind(&task.id).bind(role).bind(&id).bind(&project.id).fetch_one(&state.db).await?;
+                if member == 0 {
+                    return Ok(AgentChoice {
+                        agent: None,
+                        recoverable: false,
+                        reason: Some(
+                            "原作业 Agent 在任务或项目池中已停用，请修复配置或人工换人".into(),
+                        ),
+                        yielded: Vec::new(),
+                    });
+                }
+                if agent.enabled == 0 || !parse_list(&agent.roles).iter().any(|r| r == role) {
+                    return Ok(AgentChoice {
+                        agent: None,
+                        recoverable: false,
+                        reason: Some("原作业 Agent 配置不可用，请更换 Agent 或修复配置".into()),
+                        yielded: Vec::new(),
+                    });
+                }
+                let gate = agent_gate(state, &agent).await?;
+                let ordered =
+                    crate::queue::candidate(&state.db, project, Some(task), role, &agent, false)
+                        .await?;
+                if gate.is_some()
+                    || !ordered
+                    || running_jobs(state, &id).await? >= agent.max_concurrency.max(1)
+                {
+                    return Ok(AgentChoice {
+                        agent: None,
+                        recoverable: true,
+                        reason: Some(format!(
+                            "原作业继续等待 Agent {} 的可用时段、全局队列或并发释放",
+                            agent.name
+                        )),
+                        yielded: Vec::new(),
+                    });
+                }
+                return Ok(AgentChoice {
+                    agent: Some(agent),
+                    recoverable: true,
+                    reason: None,
+                    yielded: Vec::new(),
+                });
+            }
+        }
+    }
     if let Some(task) = task {
         if let Some(forced_id) = task.forced_agent_id.as_deref() {
             if task.forced_agent_role.as_deref() == Some(role) {
@@ -723,6 +907,7 @@ async fn choose_agent(
                     .await?;
                     return Ok(AgentChoice {
                         agent: None,
+                        recoverable: false,
                         reason: Some(format!(
                             "人工指定的{} Agent 已被删除，请重新裁决或调整项目 Agent 池",
                             role_label(role)
@@ -731,16 +916,28 @@ async fn choose_agent(
                     });
                 };
                 // 人工指定的 Agent 只等待自身释放，不读取让位配置。
+                if !crate::queue::candidate(&state.db, project, Some(task), role, &agent, true)
+                    .await?
+                {
+                    return Ok(AgentChoice {
+                        agent: None,
+                        recoverable: true,
+                        reason: Some("等待人工指定 Agent 的全局队列前序作业".into()),
+                        yielded: Vec::new(),
+                    });
+                }
                 let running = running_jobs(state, &agent.id).await?;
                 if running < agent.max_concurrency.max(1) {
                     return Ok(AgentChoice {
                         agent: Some(agent),
+                        recoverable: true,
                         reason: None,
                         yielded: Vec::new(),
                     });
                 }
                 return Ok(AgentChoice {
                     agent: None,
+                    recoverable: true,
                     reason: Some(format!(
                         "等待人工指定的{} Agent {} 释放（并发 {running}/{}）",
                         role_label(role),
@@ -759,6 +956,7 @@ async fn choose_agent(
         let Some(task) = task else {
             return Ok(AgentChoice {
                 agent: None,
+                recoverable: false,
                 reason: Some(format!(
                     "{}角色只提供给任务使用，缺少任务上下文",
                     role_label(role)
@@ -766,7 +964,6 @@ async fn choose_agent(
                 yielded: Vec::new(),
             });
         };
-        crate::db::ensure_task_agents(&state.db, &project.id, &task.id).await?;
         let rows = sqlx::query_as::<_, TaskAgentRow>(
             "SELECT * FROM task_agents WHERE task_id = ? AND role = ? \
              ORDER BY priority ASC, agent_id ASC",
@@ -801,6 +998,7 @@ async fn choose_agent(
         };
         return Ok(AgentChoice {
             agent: None,
+            recoverable: false,
             reason: Some(format!("{scope}没有{}角色 Agent，{hint}", role_label(role))),
             yielded: Vec::new(),
         });
@@ -855,6 +1053,7 @@ async fn choose_agent(
         None => None,
     };
     let mut unavailable = Vec::new();
+    let mut recoverable = false;
     // 并发已满但开启让位配置的 Agent：名称与并发占用。它们把本次派发让给
     // 后续优先级的 Agent，派发成功时用于事件说明，全部满额时用于等待原因。
     let mut yielded: Vec<(String, i64, i64)> = Vec::new();
@@ -884,7 +1083,15 @@ async fn choose_agent(
             unavailable.push(format!("「{}」（项目 Agent 池已停用）", agent.name));
             continue;
         }
-        if avoided == Some(agent.id.as_str()) {
+        if avoided == Some(agent.id.as_str())
+            && rows.iter().any(|other| {
+                other.agent_id != agent.id
+                    && other.enabled != 0
+                    && agents
+                        .iter()
+                        .any(|candidate| candidate.id == other.agent_id && candidate.enabled != 0)
+            })
+        {
             unavailable.push(format!("「{}」（本次失败后暂不重试）", agent.name));
             continue;
         }
@@ -895,16 +1102,19 @@ async fn choose_agent(
             .map(|until| until.with_timezone(&Utc) > now)
             .unwrap_or(false);
         if cooling_down && retry_target != Some(agent.id.as_str()) {
+            recoverable = true;
             let until = agent.cooldown_until.as_deref().unwrap_or_default();
             unavailable.push(format!("「{}」（冷却中，至 {until}）", agent.name));
             continue;
         }
         match agent_gate(state, agent).await? {
             Some(usage::AgentGate::Schedule(reason)) => {
+                recoverable = true;
                 unavailable.push(format!("「{}」（{reason}）", agent.name));
                 continue;
             }
             Some(usage::AgentGate::Limit(reason)) => {
+                recoverable = true;
                 unavailable.push(format!("「{}」（{reason}）", agent.name));
                 continue;
             }
@@ -913,6 +1123,14 @@ async fn choose_agent(
         // Strict priority: the first usable agent owns this dispatch. When it
         // is at capacity the task waits instead of falling through to a lower
         // priority agent, unless that agent lets lower priorities take over.
+        if !crate::queue::candidate(&state.db, project, task, role, agent, false).await? {
+            return Ok(AgentChoice {
+                agent: None,
+                recoverable: true,
+                reason: Some(format!("等待 Agent {} 的全局队列前序作业", agent.name)),
+                yielded: Vec::new(),
+            });
+        }
         let running = counts.get(&agent.id).copied().unwrap_or(0);
         let limit = agent.max_concurrency.max(1);
         if running < limit {
@@ -920,6 +1138,7 @@ async fn choose_agent(
             // priority agents that yielded to it for the event message.
             return Ok(AgentChoice {
                 agent: Some(agent.clone()),
+                recoverable: true,
                 reason: None,
                 yielded: yielded.into_iter().map(|(name, _, _)| name).collect(),
             });
@@ -927,6 +1146,7 @@ async fn choose_agent(
         if agent.allow_priority_fallback == 0 {
             return Ok(AgentChoice {
                 agent: None,
+                recoverable: true,
                 reason: Some(format!(
                     "等待 Agent {} 释放（并发 {running}/{limit}）",
                     agent.name
@@ -944,6 +1164,7 @@ async fn choose_agent(
             .join("、");
         return Ok(AgentChoice {
             agent: None,
+            recoverable: true,
             reason: Some(format!(
                 "{scope}中{} Agent 并发已满且允许让位，暂无后续优先级可接手：{detail}",
                 role_label(role)
@@ -953,6 +1174,7 @@ async fn choose_agent(
     }
     Ok(AgentChoice {
         agent: None,
+        recoverable,
         reason: Some(format!(
             "{scope}没有可用的{} Agent（不可用：{}）",
             role_label(role),
@@ -964,6 +1186,7 @@ async fn choose_agent(
 
 struct AgentChoice {
     agent: Option<AgentRow>,
+    recoverable: bool,
     reason: Option<String>,
     /// 并发已满、开启让位配置并把本次派发让给该 Agent 的名称列表（按优先级
     /// 顺序）。派发事件据此说明“按让位配置调度”。
@@ -1004,7 +1227,15 @@ async fn spawn_task_job(
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Ok(None);
     }
-    let job_id = domain::new_id("job");
+    let resume: Option<String> = sqlx::query_scalar(
+        "SELECT job_id FROM retry_requests WHERE task_id = ? AND role = ? AND agent_id = ?",
+    )
+    .bind(&task.id)
+    .bind(role)
+    .bind(&agent.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let job_id = resume.clone().unwrap_or_else(|| domain::new_id("job"));
     let attempt = if role == ROLE_VERIFIER {
         task.rejections + 1
     } else {
@@ -1015,25 +1246,45 @@ async fn spawn_task_job(
     let retry = task.retry_role.as_deref() == Some(role)
         && task.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
-    sqlx::query(
-        "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
-         replan_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)",
-    )
-    .bind(&job_id)
-    .bind(&project.id)
-    .bind(&task.id)
-    .bind(role)
-    .bind(&agent.id)
-    .bind(JOB_STATUS_RUNNING)
-    .bind(attempt)
-    .bind(if project.goal_locked_at.is_some() {
-        project.replan_generation
+    if resume.is_some() {
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+        if !crate::api::mark_job_resumed(&mut tx, &job_id).await? {
+            return Ok(None);
+        }
+        sqlx::query("DELETE FROM retry_requests WHERE task_id = ?")
+            .bind(&task.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
     } else {
-        0
-    })
-    .bind(&timestamp)
-    .execute(&state.db)
-    .await?;
+        let execution_job_id: Option<String> = if role == ROLE_VERIFIER {
+            Some(sqlx::query_scalar(
+                "SELECT id FROM jobs WHERE task_id = ? AND role = 'executor' ORDER BY rowid DESC LIMIT 1",
+            ).bind(&task.id).fetch_one(&state.db).await?)
+        } else {
+            None
+        };
+        sqlx::query(
+            "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
+         replan_generation, created_at, execution_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)",
+        )
+        .bind(&job_id)
+        .bind(&project.id)
+        .bind(&task.id)
+        .bind(role)
+        .bind(&agent.id)
+        .bind(JOB_STATUS_RUNNING)
+        .bind(attempt)
+        .bind(if project.goal_locked_at.is_some() {
+            project.replan_generation
+        } else {
+            0
+        })
+        .bind(&timestamp)
+        .bind(execution_job_id)
+        .execute(&state.db)
+        .await?;
+    }
     let dispatched = sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_error = NULL, \
          waiting_reason = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
@@ -1057,10 +1308,11 @@ async fn spawn_task_job(
     .bind(STATUS_QUEUED)
     .execute(&state.db)
     .await?;
-    if retry && dispatched.rows_affected() > 0 {
+    if (retry || resume.is_some()) && dispatched.rows_affected() > 0 {
         crate::db::clear_agent_backoff(&state.db, &agent.id).await?;
     }
     clear_waiting(&state.db, &project.id).await?;
+    crate::queue::dispatched(&state.db, project, Some(task), role, &job_id).await?;
     emit_job(
         &state.db,
         &state.bus,
@@ -1092,7 +1344,7 @@ async fn spawn_project_job(
         return Ok(None);
     }
     let job_id = domain::new_id("job");
-    let retry = project.retry_role.as_deref() == Some(role)
+    let retry = project.retry_role.as_deref() == Some(ROLE_PLANNER)
         && project.retry_agent_id.as_deref() == Some(agent.id.as_str());
     let timestamp = now();
     sqlx::query(
@@ -1119,8 +1371,8 @@ async fn spawn_project_job(
          retry_agent_id = NULL, retry_role = NULL, \
          updated_at = ? WHERE id = ?",
     )
-    .bind(role)
-    .bind(role)
+    .bind(ROLE_PLANNER)
+    .bind(ROLE_PLANNER)
     .bind(&timestamp)
     .bind(&project.id)
     .execute(&state.db)
@@ -1129,6 +1381,7 @@ async fn spawn_project_job(
         crate::db::clear_agent_backoff(&state.db, &agent.id).await?;
     }
     clear_waiting(&state.db, &project.id).await?;
+    crate::queue::dispatched(&state.db, project, None, ROLE_PLANNER, &job_id).await?;
     emit_job(
         &state.db,
         &state.bus,
@@ -1250,15 +1503,29 @@ async fn active_project_jobs(pool: &SqlitePool, project_id: &str) -> Result<i64>
     )
 }
 
-async fn note_waiting(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
+async fn note_waiting(
+    state: &AppState,
+    project: &ProjectRow,
+    reason: &str,
+    recoverable: bool,
+) -> Result<()> {
+    if project.stage != STAGE_EXECUTING || project.completion_mode == COMPLETION_DIRECT {
+        crate::queue::waiting(&state.db, project, None, ROLE_PLANNER, reason).await?;
+    }
     if project.blocked_reason.as_deref() == Some(reason) {
         return Ok(());
     }
     sqlx::query(
-        "UPDATE projects SET blocked_reason = ?, updated_at = ? \
+        "UPDATE projects SET blocked_reason = ?, status = ?, blocked_kind = ?, updated_at = ? \
          WHERE id = ? AND status = ? AND (blocked_reason IS NULL OR blocked_reason != ?)",
     )
     .bind(reason)
+    .bind(if recoverable {
+        STATUS_RUNNING
+    } else {
+        STATUS_BLOCKED
+    })
+    .bind((!recoverable && !reason.starts_with("项目费用预算")).then_some("configuration"))
     .bind(now())
     .bind(&project.id)
     .bind(STATUS_RUNNING)

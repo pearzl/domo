@@ -1,7 +1,7 @@
 //! API 模块的单元测试。
 use super::agents::{require_command_if_needed, validate_kind};
 use super::tasks::update_analysis_policy;
-use super::verification::{task_verifications, VERIFICATION_HISTORY_LIMIT};
+use super::verification::{latest_failed_job, task_verifications, VERIFICATION_HISTORY_LIMIT};
 use crate::agents;
 use crate::models::*;
 use crate::state::AppState;
@@ -173,6 +173,58 @@ async fn insert_verification_job(
 }
 
 #[tokio::test]
+async fn retry_target_requires_the_latest_role_job_to_be_failed() {
+    let (state, root) = verification_test_state().await;
+    assert!(
+        latest_failed_job(&state, "prj_test", Some("tsk_a"), ROLE_EXECUTOR)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for (id, role, timestamp) in [
+        ("job_old", ROLE_EXECUTOR, "2026-01-01T00:00:00Z"),
+        ("job_latest", ROLE_EXECUTOR, "2026-01-01T00:00:01Z"),
+        ("job_verifier", ROLE_VERIFIER, "2026-01-01T00:00:02Z"),
+    ] {
+        insert_verification_job(
+            &state,
+            id,
+            "tsk_a",
+            role,
+            JOB_STATUS_FAILED,
+            1,
+            None,
+            false,
+            timestamp,
+            Some("agt_verifier"),
+        )
+        .await;
+    }
+    for status in [
+        JOB_STATUS_FAILED,
+        JOB_STATUS_SUCCEEDED,
+        JOB_STATUS_CANCELED,
+        JOB_STATUS_RUNNING,
+    ] {
+        sqlx::query("UPDATE jobs SET status = ? WHERE id = 'job_latest'")
+            .bind(status)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let target = latest_failed_job(&state, "prj_test", Some("tsk_a"), ROLE_EXECUTOR)
+            .await
+            .unwrap();
+        assert_eq!(
+            target.as_ref().map(|job| job.id.as_str()),
+            (status == JOB_STATUS_FAILED).then_some("job_latest"),
+            "latest status: {status}"
+        );
+    }
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn verification_history_parses_orders_and_reports_unknown_results() {
     let (state, root) = verification_test_state().await;
     insert_verification_job(
@@ -280,6 +332,20 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
     )
     .await;
 
+    for (verifier, executor) in [
+        ("job_v1", "job_executor"),
+        ("job_v2", "job_executor"),
+        ("job_v3", "job_executor"),
+        ("job_v4", "job_executor"),
+        ("job_v5", "job_executor_2"),
+    ] {
+        sqlx::query("UPDATE jobs SET execution_job_id = ? WHERE id = ?")
+            .bind(executor)
+            .bind(verifier)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
     let response = task_verifications(
         State(state.clone()),
         Path(("prj_test".to_string(), "tsk_a".to_string())),
@@ -412,6 +478,19 @@ async fn verification_history_keeps_the_newest_entries_and_marks_truncation() {
             None,
         )
         .await;
+        let execution = if index < 20 {
+            "job_x1"
+        } else if index < 40 {
+            "job_x2"
+        } else {
+            "job_x3"
+        };
+        sqlx::query("UPDATE jobs SET execution_job_id = ? WHERE id = ?")
+            .bind(execution)
+            .bind(format!("job_{index:02}"))
+            .execute(&state.db)
+            .await
+            .unwrap();
     }
 
     let response = task_verifications(
@@ -533,4 +612,102 @@ async fn analysis_policy_rejects_paused_projects() {
 
         let _ = std::fs::remove_dir_all(root);
     }
+}
+
+#[tokio::test]
+async fn verification_link_is_authoritative_even_when_timestamps_disagree() {
+    let (state, root) = verification_test_state().await;
+    for (id, role, created_at) in [
+        ("execution", JOB_ROLE_EXECUTOR, "2026-01-02T00:00:00Z"),
+        ("verification", JOB_ROLE_VERIFIER, "2026-01-01T00:00:00Z"),
+    ] {
+        insert_verification_job(
+            &state,
+            id,
+            "tsk_a",
+            role,
+            JOB_STATUS_SUCCEEDED,
+            1,
+            None,
+            false,
+            created_at,
+            None,
+        )
+        .await;
+    }
+    sqlx::query("UPDATE jobs SET execution_job_id = 'execution' WHERE id = 'verification'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let response = task_verifications(
+        State(state.clone()),
+        Path(("prj_test".into(), "tsk_a".into())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        response.verifications[0].execution_job_id.as_deref(),
+        Some("execution")
+    );
+    assert_eq!(response.verifications[0].round, 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn empty_task_pool_is_not_repopulated_by_reads() {
+    let (state, root) = verification_test_state().await;
+    crate::db::ensure_project_agents(&state.db, "prj_test")
+        .await
+        .unwrap();
+    let mut tx = state.db.begin().await.unwrap();
+    crate::db::initialize_task_agents_tx(&mut tx, "tsk_a")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let initial = crate::db::load_task_agent_pool(&state.db, "prj_test", "tsk_a")
+        .await
+        .unwrap();
+    assert!(initial.roles.iter().any(|role| !role.entries.is_empty()));
+    sqlx::query("DELETE FROM task_agents WHERE task_id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let empty = crate::db::load_task_agent_pool(&state.db, "prj_test", "tsk_a")
+            .await
+            .unwrap();
+        assert!(empty.roles.iter().all(|role| role.entries.is_empty()));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn running_project_exposes_the_same_task_attention_in_list_and_detail() {
+    let (state, root) = verification_test_state().await;
+    sqlx::query(
+        "UPDATE tasks SET stage = 'verifying', status = 'blocked', human_gate = 'milestone', \
+        last_error = '等待人工验收' WHERE id = 'tsk_a'",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let detail = super::detail::load_detail(&state, "prj_test")
+        .await
+        .unwrap();
+    let list = super::projects::list_projects(State(state.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(detail.project.status.as_deref(), Some(STATUS_RUNNING));
+    assert_eq!(detail.attention_items.len(), 1);
+    let item = &detail.attention_items[0];
+    assert!(item.project_advancing);
+    assert_eq!(item.kind, ProjectAttention::Review);
+    assert_eq!(item.task.as_ref().unwrap().id, "tsk_a");
+    assert_eq!(
+        serde_json::to_value(&detail.attention_items).unwrap(),
+        serde_json::to_value(&list[0].attention_items).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(root);
 }

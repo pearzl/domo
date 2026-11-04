@@ -6,7 +6,7 @@
   2. 规划、执行、验收分别按角色从项目池中启用且优先级最高的 Agent 选人；
   3. 调整项目池顺序后，新作业按新顺序选人；
   4. 禁用项目池中最高优先级的 Agent 后自动回退到下一优先级；
-  5. 任务级指定执行/验收 Agent 优先于项目池，清除后恢复项目池规则；
+  5. 任务池按角色独立启停；恢复高优先级条目后按任务池顺序派发；
   6. 项目池配置在服务重启后保持；
   7. 全局 Agent 删除后项目池条目标记为不可用，并给出可读的阻塞原因；
   8. 项目池角色校验拒绝未知角色。
@@ -449,7 +449,7 @@ def main():
                 for job in role_jobs(fallback, "verifier")
             ), fallback["jobs"]
 
-            # 4. 任务级指定执行/验收 Agent，优先于项目池。
+            # 4. 任务池停用高优先级条目，执行与验收均使用下一条目。
             override_id = create_project("TaskOverride", "任务级指定执行与验收 Agent")
             confirm(override_id)
             wait_project(
@@ -475,20 +475,15 @@ def main():
                 if job["task_id"] == t1["id"] and job["role"] == "executor"
             )
             assert default_t1_exec["agent_id"] == high["id"], default_t1_exec
-            updated_task = call(
-                "PATCH",
-                f"/api/projects/{override_id}/tasks/{t2['id']}/agents",
-                {"executor_agent_id": low["id"], "verifier_agent_id": low["id"]},
-            )
-            assert updated_task["executor_agent_id"] == low["id"], updated_task
-            assert updated_task["verifier_agent_id"] == low["id"], updated_task
+            for role in ("executor", "verifier"):
+                call("PATCH", f"/api/projects/{override_id}/tasks/{t2['id']}/agents/{role}/{high['id']}", {"enabled": False})
             t2_exec = wait_role_job(override_id, "executor", "T2")
             assert t2_exec["agent_id"] == low["id"], t2_exec
             t2_verify = wait_role_job(override_id, "verifier", "T2")
             assert t2_verify["agent_id"] == low["id"], t2_verify
             wait_completed(override_id, "任务覆盖项目完成")
 
-            # 5. 清除任务覆盖后恢复项目池规则。
+            # 5. 任务池重新启用高优先级条目后恢复原有顺序。
             clear_id = create_project("TaskOverrideClear", "清除任务覆盖后恢复项目池")
             confirm(clear_id)
             wait_project(
@@ -507,18 +502,10 @@ def main():
             )
             detail = call("GET", f"/api/projects/{clear_id}")
             t2 = task_by_key(detail, "T2")
-            call(
-                "PATCH",
-                f"/api/projects/{clear_id}/tasks/{t2['id']}/agents",
-                {"executor_agent_id": low["id"], "verifier_agent_id": low["id"]},
-            )
-            cleared = call(
-                "PATCH",
-                f"/api/projects/{clear_id}/tasks/{t2['id']}/agents",
-                {"executor_agent_id": None, "verifier_agent_id": None},
-            )
-            assert cleared["executor_agent_id"] is None, cleared
-            assert cleared["verifier_agent_id"] is None, cleared
+            for role in ("executor", "verifier"):
+                path = f"/api/projects/{clear_id}/tasks/{t2['id']}/agents/{role}/{high['id']}"
+                call("PATCH", path, {"enabled": False})
+                call("PATCH", path, {"enabled": True})
             t2_exec = wait_role_job(clear_id, "executor", "T2")
             assert t2_exec["agent_id"] == high["id"], t2_exec
             wait_completed(clear_id, "清除覆盖后项目完成")

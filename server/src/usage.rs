@@ -155,7 +155,7 @@ pub async fn load_jobs(
 ) -> UsageResult<Vec<UsageJobRow>> {
     const COLUMNS: &str = "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
                           cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, \
-                          duration_ms, usage_known, started_at, finished_at, created_at FROM jobs";
+                          duration_ms, usage_known, started_at, finished_at, created_at FROM accounting_jobs";
     let rows = match project_id {
         Some(project_id) => {
             sqlx::query_as::<_, UsageJobRow>(&format!("{COLUMNS} WHERE project_id = ?"))
@@ -173,6 +173,16 @@ pub async fn load_jobs(
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
+pub struct UsageMetricCounts {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub cost: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageTotals {
     pub jobs: i64,
     pub input_tokens: i64,
@@ -185,6 +195,9 @@ pub struct UsageTotals {
     /// Jobs with a recorded token or cost value; `jobs = known_jobs + unknown_jobs`.
     pub known_jobs: i64,
     pub unknown_jobs: i64,
+    /// Reporting coverage is independent for every metric. A reported zero is
+    /// known; a missing price remains unknown even when tokens are reported.
+    pub known_metrics: UsageMetricCounts,
 }
 
 impl UsageTotals {
@@ -197,6 +210,12 @@ impl UsageTotals {
         self.reasoning_tokens += row.reasoning_tokens.unwrap_or(0);
         self.cost += row.cost.unwrap_or(0.0);
         self.duration_ms += row_duration(row);
+        self.known_metrics.input_tokens += i64::from(row.input_tokens.is_some());
+        self.known_metrics.output_tokens += i64::from(row.output_tokens.is_some());
+        self.known_metrics.cache_read_tokens += i64::from(row.cache_read_tokens.is_some());
+        self.known_metrics.cache_write_tokens += i64::from(row.cache_write_tokens.is_some());
+        self.known_metrics.reasoning_tokens += i64::from(row.reasoning_tokens.is_some());
+        self.known_metrics.cost += i64::from(row.cost.is_some());
         if row.usage_known == 0 {
             self.unknown_jobs += 1;
         } else {
@@ -753,7 +772,7 @@ pub async fn agent_usage(
     let rows = sqlx::query_as::<_, UsageJobRow>(
         "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
          cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, duration_ms, \
-         usage_known, started_at, finished_at, created_at FROM jobs WHERE agent_id = ?",
+         usage_known, started_at, finished_at, created_at FROM accounting_jobs WHERE agent_id = ?",
     )
     .bind(agent_id)
     .fetch_all(pool)
@@ -1034,6 +1053,55 @@ mod tests {
         assert_eq!(empty.totals.jobs, 0);
         assert_eq!(empty.totals.known_jobs, 0);
         assert_eq!(empty.totals.unknown_jobs, 0);
+    }
+
+    #[test]
+    fn metric_coverage_distinguishes_missing_values_from_reported_zero() {
+        let mut tokens = row(
+            "p",
+            Some("a"),
+            "executor",
+            Some(123),
+            Some(12),
+            true,
+            "2026-10-27T10:00:00Z",
+        );
+        tokens.cost = None;
+        let mut price = row(
+            "p",
+            Some("a"),
+            "verifier",
+            None,
+            None,
+            true,
+            "2026-10-27T11:00:00Z",
+        );
+        price.cost = Some(0.0);
+        let report = summarize(
+            &[tokens, price],
+            &UsageFilter::default(),
+            UsageGroupBy::Role,
+            &HashMap::new(),
+        );
+        assert_eq!(report.totals.known_jobs, 2);
+        assert_eq!(report.totals.known_metrics.input_tokens, 1);
+        assert_eq!(report.totals.known_metrics.output_tokens, 1);
+        assert_eq!(report.totals.known_metrics.cost, 1);
+        assert_eq!(report.totals.known_metrics.cache_read_tokens, 0);
+        let executor = report
+            .groups
+            .iter()
+            .find(|group| group.key == "executor")
+            .unwrap();
+        assert_eq!(executor.totals.known_metrics.cost, 0);
+        assert_eq!(executor.totals.known_metrics.input_tokens, 1);
+        let verifier = report
+            .groups
+            .iter()
+            .find(|group| group.key == "verifier")
+            .unwrap();
+        assert_eq!(verifier.totals.cost, 0.0);
+        assert_eq!(verifier.totals.known_metrics.cost, 1);
     }
 
     #[test]

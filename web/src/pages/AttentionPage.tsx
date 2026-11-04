@@ -11,7 +11,7 @@ const REFRESH_MS = 5000;
 
 /// 待我处理：集中展示所有需要人工驱动的项目，默认按等待时长倒序排列。
 /// 数据来自项目列表的待办口径，处理完成后项目离开列表，导航计数同步减少。
-export function AttentionPage({ onOpen }: { onOpen: (id: string) => void }) {
+export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -74,19 +74,19 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string) => void }) {
         </div>
       ) : (
         <div className="attention-list">
-          {items.map(({ project, waitingMs }) => {
-            const attention = project.attention;
+          {items.map(({ project, action, waitingMs, id, affectedTasks, blocksMilestone, projectAdvancing }) => {
+            const attention = action.kind;
             return (
               <article
-                key={project.id}
+                key={id ?? project.id}
                 className="panel attention-item"
                 role="button"
                 tabIndex={0}
-                onClick={() => onOpen(project.id)}
+                onClick={() => onOpen(project.id, action.task?.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     if (event.key === " ") event.preventDefault();
-                    onOpen(project.id);
+                    onOpen(project.id, action.task?.id);
                   }
                 }}
               >
@@ -103,17 +103,18 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string) => void }) {
                   {project.goal || "尚未输入项目目标"}
                 </p>
                 <div className="meta-line">
-                  {project.attention_task ? (
+                  {action.task ? (
                     <span>
-                      任务 {project.attention_task.key} ·{" "}
-                      {project.attention_task.title}
+                      任务 {action.task.key} ·{" "}
+                      {action.task.title}
                     </span>
                   ) : null}
                   <span>
                     最近变化 {formatTime(project.updated_at)}
                   </span>
-                  {project.blocked_reason ? (
-                    <span>阻塞：{firstLine(project.blocked_reason)}</span>
+                  {affectedTasks !== undefined ? <span>影响后继 {affectedTasks} 项 · {blocksMilestone ? "阻挡里程碑" : "无里程碑阻挡"} · {projectAdvancing ? "项目仍可推进" : "等待人工处理"}</span> : null}
+                  {action.reason ? (
+                    <span>阻塞：{firstLine(action.reason)}</span>
                   ) : null}
                   <span>
                     {project.workspace_type === "plain"

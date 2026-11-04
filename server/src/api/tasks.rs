@@ -100,8 +100,8 @@ pub(super) async fn create_task(
     .bind(&timestamp)
     .execute(&mut *tx)
     .await?;
-    // 新任务与任务池快照在同一事务里创建；旧字段为空就是纯项目池快照。
-    crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
+    // 任务与任务池快照在同一事务里创建。
+    crate::db::initialize_task_agents_tx(&mut tx, &task_id).await?;
     // A project in the analysis, summarizing, or completed stage moves back to
     // executing so the DAG schedules the added task. A report that would not
     // cover every task is dropped and written again after the new work finishes.
@@ -370,20 +370,26 @@ pub(super) async fn reorder_task_queue(
     }
     let _guard = state.schedule_lock.lock().await;
     let task = load_project_task(&state, &project_id, &task_id).await?;
-    if task.stage != TASK_STAGE_PENDING
-        || task.attempts > 0
+    if !matches!(
+        task.stage.as_str(),
+        TASK_STAGE_PENDING | TASK_STAGE_EXECUTING
+    ) || task.attempts > 0
         || task.rejections > 0
-        || task.status.as_deref() == Some(STATUS_CANCELED)
+        || !matches!(
+            task.status.as_deref(),
+            None | Some(STATUS_QUEUED | STATUS_PAUSED)
+        )
     {
         return Err(ApiError::bad("只有尚未开始的任务可以调整排队顺序"));
     }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut queue = sqlx::query_as::<_, TaskRow>(
-        "SELECT * FROM tasks WHERE project_id = ? AND stage = ? AND attempts = 0 \
-         AND rejections = 0 AND COALESCE(status, '') != ? ORDER BY queue_order ASC, seq ASC",
+        "SELECT * FROM tasks WHERE project_id = ? AND stage IN ('pending', 'executing') AND attempts = 0 \
+          AND rejections = 0 AND COALESCE(status, '') != ? \
+          AND (status IS NULL OR status IN ('queued', 'paused')) \
+          AND NOT EXISTS(SELECT 1 FROM jobs WHERE task_id = tasks.id) ORDER BY queue_order ASC, seq ASC",
     )
     .bind(&project_id)
-    .bind(TASK_STAGE_PENDING)
     .bind(STATUS_CANCELED)
     .fetch_all(&mut *tx)
     .await?;
@@ -411,15 +417,26 @@ pub(super) async fn reorder_task_queue(
     for (position, row) in queue.iter().enumerate() {
         sqlx::query(
             "UPDATE tasks SET queue_order = ?, updated_at = ? \
-             WHERE id = ? AND stage = ? AND attempts = 0 AND COALESCE(status, '') != ?",
+             WHERE id = ? AND stage IN ('pending', 'executing') AND attempts = 0 AND COALESCE(status, '') != ?",
         )
         .bind((position + 1) as i64)
         .bind(&timestamp)
         .bind(&row.id)
-        .bind(TASK_STAGE_PENDING)
         .bind(STATUS_CANCELED)
         .execute(&mut *tx)
         .await?;
+    }
+    let queued: Vec<String> = sqlx::query_scalar("SELECT q.id FROM dispatch_queue q JOIN tasks t ON t.id = q.task_id \
+        WHERE q.project_id = ? AND q.role = 'executor' AND q.state = 'waiting' ORDER BY t.queue_order, q.position")
+        .bind(&project_id).fetch_all(&mut *tx).await?;
+    let positions: Vec<i64> = sqlx::query_scalar("SELECT position FROM dispatch_queue WHERE project_id = ? AND role = 'executor' AND state = 'waiting' ORDER BY position")
+        .bind(&project_id).fetch_all(&mut *tx).await?;
+    for (id, position) in queued.iter().zip(positions) {
+        sqlx::query("UPDATE dispatch_queue SET position = ? WHERE id = ?")
+            .bind(position)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     emit(
@@ -592,7 +609,7 @@ pub(super) async fn update_analysis_policy(
 pub(super) async fn confirm_analysis(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(_request): Json<ConfirmAnalysisRequest>,
+    Json(request): Json<ConfirmAnalysisRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
     let project = require_project(&state, &id).await?;
     if project.stage != STAGE_ANALYSIS {
@@ -618,6 +635,14 @@ pub(super) async fn confirm_analysis(
     .ok_or_else(|| ApiError::bad("规划者还没有给出可确认的项目方案"))?;
     let proposal: AnalysisProposal =
         serde_json::from_str(proposal_raw).map_err(|_| ApiError::bad("项目方案格式不合法"))?;
+    if let Some(expected) = request.proposal {
+        if expected
+            != serde_json::from_str::<serde_json::Value>(proposal_raw)
+                .map_err(|_| ApiError::bad("项目方案格式不合法"))?
+        {
+            return Err(ApiError::conflict("方案已变化，请审查最新草稿后重新确认"));
+        }
+    }
     if !matches!(proposal.kind.as_str(), "plan" | "direct") {
         return Err(ApiError::bad("当前项目方案不能确认"));
     }
@@ -657,6 +682,10 @@ pub(super) async fn confirm_analysis(
         } else {
             let _guard = state.schedule_lock.lock().await;
             let current = require_project(&state, &id).await?;
+            if current.stage != STAGE_ANALYSIS || current.proposal.as_deref() != Some(proposal_raw)
+            {
+                return Err(ApiError::conflict("方案已变化，请重新审查"));
+            }
             if current.goal_locked_at.is_some()
                 && (current.replan_generation != project.replan_generation
                     || current.goal != project.goal
@@ -665,7 +694,7 @@ pub(super) async fn confirm_analysis(
                 return Err(ApiError::conflict("已确认目标只能通过主动修改目标入口变更"));
             }
             sqlx::query(
-                "UPDATE projects SET goal = ?, stage = ?, status = ?, completion_mode = ?, \
+                    "UPDATE projects SET goal = ?, proposal = proposal, stage = ?, status = ?, completion_mode = ?, \
                  confirmed_at = ?, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
                  goal_locked_at = COALESCE(goal_locked_at, ?), updated_at = ? WHERE id = ?",
             )
@@ -780,14 +809,12 @@ pub(super) async fn pause_project(
                 .await?;
             }
             sqlx::query(
-                "UPDATE tasks SET status = ?, agent_id = NULL, waiting_reason = NULL, updated_at = ? \
-                 WHERE project_id = ? AND stage != ? AND status != ?",
+                "UPDATE tasks SET status = 'queued', agent_id = NULL, waiting_reason = NULL, updated_at = ? \
+                 WHERE project_id = ? AND stage != ? AND status = 'running'",
             )
-            .bind(STATUS_PAUSED)
             .bind(now())
             .bind(&id)
             .bind(TASK_STAGE_COMPLETED)
-            .bind(STATUS_CANCELED)
             .execute(&state.db)
             .await?;
             sqlx::query(
@@ -852,18 +879,7 @@ pub(super) async fn resume_project(
         || (project.stage == STAGE_SUMMARIZING && project.report.is_some());
     {
         let _guard = state.schedule_lock.lock().await;
-        sqlx::query(
-            "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
-             WHERE project_id = ? AND stage != ? AND status IN (?, ?)",
-        )
-        .bind(STATUS_QUEUED)
-        .bind(now())
-        .bind(&id)
-        .bind(TASK_STAGE_COMPLETED)
-        .bind(STATUS_PAUSED)
-        .bind(STATUS_PAUSING)
-        .execute(&state.db)
-        .await?;
+        // 项目恢复只解除项目级派发限制，任务自己的暂停状态保持不变。
         sqlx::query(
             "UPDATE projects SET status = ?, blocked_reason = CASE WHEN ? THEN blocked_reason \
              ELSE NULL END, updated_at = ? WHERE id = ?",

@@ -9,8 +9,6 @@ use crate::models::*;
 use crate::paths;
 use crate::state::AppState;
 
-use super::common::load_task;
-
 /// Every Git job runs in a dedicated worktree root; a mismatch means the agent
 /// would read or write another checkout, so the job is rejected before spawn.
 /// 普通工作区直接在所选目录中运行，只校验目录存在。
@@ -47,6 +45,18 @@ pub(super) async fn prepare_task_worktree(
     if let Some(worktree) = &task.worktree {
         let path = PathBuf::from(worktree);
         if path.join(".git").exists() {
+            if task.stage == TASK_STAGE_EXECUTING && task.parent_id.is_none() {
+                let children: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND stage = 'completed'",
+                )
+                .bind(&task.id)
+                .fetch_one(&state.db)
+                .await?;
+                if children > 0 {
+                    let _guard = state.git_lock.lock().await;
+                    git::merge_for_execution(&path, &project.branch).await?;
+                }
+            }
             return Ok(path);
         }
     }
@@ -59,17 +69,7 @@ pub(super) async fn prepare_task_worktree(
         task.seq,
         slug(&task.key)
     );
-    let base_branch = if let Some(parent_id) = &task.parent_id {
-        let parent = load_task(&state.db, parent_id)
-            .await?
-            .ok_or_else(|| anyhow!("派生子任务的父任务不存在"))?;
-        parent
-            .branch
-            .clone()
-            .ok_or_else(|| anyhow!("父任务还没有执行分支，无法派生子任务"))?
-    } else {
-        project.branch.clone()
-    };
+    let base_branch = project.branch.clone();
     {
         let _guard = state.git_lock.lock().await;
         if path.exists() {

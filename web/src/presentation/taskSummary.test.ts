@@ -13,6 +13,7 @@ import {
 
 function record(overrides: Partial<VerificationRecord> = {}): VerificationRecord {
   return {
+    execution_job_id: "job1",
     id: "v1",
     round: 1,
     attempt: 1,
@@ -45,6 +46,7 @@ function history(records: VerificationRecord[]): VerificationHistory {
 
 function job(overrides: Partial<JobSummary> = {}): JobSummary {
   return {
+    execution_job_id: null,
     id: "job1",
     project_id: "p1",
     task_id: "t1",

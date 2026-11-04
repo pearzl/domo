@@ -9,7 +9,7 @@ use super::common::parse_json_list;
 /// A missing result is terminal after its continuation budget. A malformed
 /// result can be corrected on retry and stays within the task attempt budget.
 pub(super) fn protocol_failure_blocks(reason: &str) -> bool {
-    reason.contains("没有写 result.json")
+    reason.contains("没有写 result.json") || reason.contains("协议继续次数用尽")
 }
 
 pub(super) struct AgentFailureEffect {
@@ -133,7 +133,8 @@ pub(super) async fn plan_project_failure(
     let blocked = kind == FailureKind::Protocol
         || (kind.is_agent_failure()
             && effect.switch
-            && !has_usable_agent(state, &project.id, ROLE_PLANNER, Some(&agent.id)).await?);
+            && kind == FailureKind::Permanent
+            && !has_usable_agent(state, &project.id, ROLE_PLANNER, Some(&agent.id), None).await?);
     Ok(ProjectFailure {
         kind,
         switch: effect.switch,
@@ -147,19 +148,28 @@ pub(super) async fn has_usable_agent(
     project_id: &str,
     role: &str,
     exclude: Option<&str>,
+    task: Option<&TaskRow>,
 ) -> Result<bool> {
     crate::db::ensure_project_agents(&state.db, project_id).await?;
-    let rows = sqlx::query_as::<_, ProjectAgentRow>(
-        "SELECT * FROM project_agents WHERE project_id = ? AND role = ? AND enabled = 1",
-    )
-    .bind(project_id)
-    .bind(role)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = if let Some(task) = task {
+        sqlx::query_as::<_, TaskAgentRow>(
+            "SELECT * FROM task_agents WHERE task_id = ? AND role = ? AND enabled = 1 \
+             AND NOT EXISTS (SELECT 1 FROM project_agents p WHERE p.project_id = ? \
+             AND p.role = task_agents.role AND p.agent_id = task_agents.agent_id AND p.enabled = 0)",
+        ).bind(&task.id).bind(role).bind(project_id).fetch_all(&state.db).await?
+            .into_iter().map(TaskAgentRow::into_project_row).collect()
+    } else {
+        sqlx::query_as::<_, ProjectAgentRow>(
+            "SELECT * FROM project_agents WHERE project_id = ? AND role = ? AND enabled = 1",
+        )
+        .bind(project_id)
+        .bind(role)
+        .fetch_all(&state.db)
+        .await?
+    };
     let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
         .fetch_all(&state.db)
         .await?;
-    let now = chrono::Utc::now();
     for row in rows {
         if exclude == Some(row.agent_id.as_str()) {
             continue;
@@ -176,28 +186,7 @@ pub(super) async fn has_usable_agent(
         {
             continue;
         }
-        let cooling = agent
-            .cooldown_until
-            .as_deref()
-            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-            .map(|until| until.with_timezone(&chrono::Utc) > now)
-            .unwrap_or(false);
-        if cooling {
-            continue;
-        }
-        if crate::usage::agent_gate(
-            &state.db,
-            &agent.id,
-            agent.availability_json.as_deref(),
-            agent.usage_limit_json.as_deref(),
-            agent.usage_reset_at.as_deref(),
-            now,
-        )
-        .await?
-        .is_some()
-        {
-            continue;
-        }
+        // 冷却、周期限额和时段限制能够自动恢复，不视为永久不可用。
         return Ok(true);
     }
     Ok(false)

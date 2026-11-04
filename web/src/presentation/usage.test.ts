@@ -27,6 +27,7 @@ import { UsageTable } from "../components/UsageGroupsTable";
 import { readUsageProjectId, usagePath } from "../router";
 
 function totals(overrides: Partial<UsageTotals> = {}): UsageTotals {
+  const known = overrides.known_jobs ?? 2;
   return {
     jobs: 2,
     input_tokens: 100,
@@ -38,6 +39,7 @@ function totals(overrides: Partial<UsageTotals> = {}): UsageTotals {
     duration_ms: 1000,
     known_jobs: 2,
     unknown_jobs: 0,
+    known_metrics: { input_tokens: known, output_tokens: known, cache_read_tokens: known, cache_write_tokens: known, reasoning_tokens: known, cost: known },
     ...overrides,
   };
 }
@@ -178,6 +180,7 @@ describe("restrictUsageToProject", () => {
     expect(scoped.totals.unknown_jobs).toBe(2);
     expect(scoped.totals.input_tokens).toBe(base.input_tokens * 2);
     expect(scoped.totals.cost).toBeCloseTo(base.cost * 2);
+    expect(scoped.totals.known_metrics.cost).toBe(3);
   });
 
   it("按 Agent 或角色分组沿用报告汇总", () => {
@@ -260,12 +263,19 @@ describe("项目过滤在项目页与用量页之间传递", () => {
 });
 
 describe("概览用量摘要的取值与覆盖口径", () => {
+  it("各指标独立判断未知，实际零费用仍是已知值", () => {
+    const tokensOnly = totals({ known_metrics: { ...totals().known_metrics, cost: 0 }, cost: 0 });
+    expect(usageMetricValue(100, tokensOnly, "input_tokens")).toBe("100");
+    expect(usageMetricValue(0, tokensOnly, "cost")).toBe("—");
+    expect(usageCoverageNote(tokensOnly)).toContain("费用覆盖 0/2");
+    expect(usageMetricValue(0, totals({ cost: 0 }), "cost")).toBe("0");
+  });
   it("有记录时按统一格式化函数展示 token、费用与时长", () => {
     const base = totals({ input_tokens: 12345, output_tokens: 678, cost: 0.5, duration_ms: 125000 });
-    expect(usageMetricValue(base.input_tokens, base, "tokens")).toBe("12,345");
-    expect(usageMetricValue(base.output_tokens, base, "tokens")).toBe("678");
+    expect(usageMetricValue(base.input_tokens, base, "input_tokens")).toBe("12,345");
+    expect(usageMetricValue(base.output_tokens, base, "output_tokens")).toBe("678");
     expect(usageMetricValue(base.cost, base, "cost")).toBe("0.5000");
-    expect(usageMetricValue(base.duration_ms, base, "duration")).toBe("2 分 5 秒");
+    expect(usageMetricValue(base.duration_ms, base, "duration_ms")).toBe("2 分 5 秒");
     expect(usagePartial(base)).toBe(false);
     expect(usageCoverageLabel(base)).toBe("2/2");
     expect(usageCoverageNote(base)).toBe("");
@@ -282,12 +292,12 @@ describe("概览用量摘要的取值与覆盖口径", () => {
       unknown_jobs: 3,
     });
     expect(usageAllUnknown(unknown)).toBe(true);
-    expect(usageMetricValue(unknown.input_tokens, unknown, "tokens")).toBe(
+    expect(usageMetricValue(unknown.input_tokens, unknown, "input_tokens")).toBe(
       USAGE_UNKNOWN_VALUE,
     );
     expect(usageMetricValue(unknown.cost, unknown, "cost")).toBe(USAGE_UNKNOWN_VALUE);
     // 时长来自作业记录本身，不受用量覆盖影响。
-    expect(usageMetricValue(unknown.duration_ms, unknown, "duration")).toBe("30 秒");
+    expect(usageMetricValue(unknown.duration_ms, unknown, "duration_ms")).toBe("30 秒");
     expect(usageCoverageLabel(unknown)).toBe("0/3");
     expect(usageCoverageNote(unknown)).toContain("全部 3 个作业未记录用量");
   });
@@ -310,8 +320,8 @@ describe("概览用量摘要的取值与覆盖口径", () => {
       known_jobs: 0,
       unknown_jobs: 0,
     });
-    expect(usageMetricValue(empty.input_tokens, empty, "tokens")).toBe(USAGE_UNKNOWN_VALUE);
-    expect(usageMetricValue(empty.duration_ms, empty, "duration")).toBe(USAGE_UNKNOWN_VALUE);
+    expect(usageMetricValue(empty.input_tokens, empty, "input_tokens")).toBe(USAGE_UNKNOWN_VALUE);
+    expect(usageMetricValue(empty.duration_ms, empty, "duration_ms")).toBe(USAGE_UNKNOWN_VALUE);
     expect(usageCoverageLabel(empty)).toBeNull();
     expect(usageCoverageNote(empty)).toContain("还没有作业");
   });

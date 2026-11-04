@@ -6,9 +6,7 @@
      由下一优先级的规划 Agent 自动接手并给出方案；
   2. 总结时高优先级规划 Agent 被限流：同样自动切换，总结作业由下一
      优先级的规划 Agent 完成；
-  3. 项目池里只剩一个规划 Agent 且被限流：项目阻塞并记录限流原因，调度器
-     不会自行重派；人工重试失败作业会重新派给该 Agent，并在派发成功后
-     清除它的冷却。
+   3. 项目池里只剩一个规划 Agent 且被限流：项目保持运行，等待冷却后自动重派。
 
 使用内置 mock Agent 与脚本化 CLI Agent，不访问外网；临时数据全部放在
 系统临时目录。退出码 0 表示全部通过。
@@ -64,6 +62,11 @@ elif role == "summary":
     result = {"kind": "report", "summary": "脚本化报告：全部任务已完成。"}
 else:
     result = {"kind": "failed", "reason": "脚本化规划 Agent 只承担项目分析"}
+if role == "project_acceptance":
+    with open(os.path.join(job_dir, "context.json"), encoding="utf-8") as handle:
+        context = json.load(handle)
+    result["contract_id"] = context["contract"]["id"]
+    result["artifact_version"] = context["artifact_version"]
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
     json.dump(result, handle, ensure_ascii=False)
 """
@@ -198,7 +201,7 @@ def main():
                     and job["agent_id"] == backup
                     and job["status"] == "succeeded"
                     for job in detail["jobs"]
-                ),
+                ) and bool(detail["tasks"]),
                 "项目分析切换到下一优先级",
             )
             jobs = role_jobs(detail, "analysis")
@@ -235,7 +238,7 @@ def main():
                 "项目产出报告",
             )
 
-            # 场景二：项目池里唯一的规划 Agent 被限流，项目阻塞并等待人工处理。
+            # 场景二：唯一规划 Agent 被限流时自动等待冷却，不产生人工待办。
             call("PATCH", f"/api/team/default/planner/{backup}", {"enabled": False})
             project_id = create_project("Only Planner", "写入 domo_mock 产物")
             call(
@@ -246,10 +249,11 @@ def main():
             submit(project_id, "写入 domo_mock 产物")
             detail = wait_project(
                 project_id,
-                lambda detail: detail["project"]["status"] == "blocked"
-                and "429" in (detail["project"]["blocked_reason"] or "")
+                lambda detail: detail["project"]["status"] == "running"
+                and "冷却" in (detail["project"]["blocked_reason"] or "")
+                and len(role_jobs(detail, "analysis")) == 1
                 and not any(job["status"] == "running" for job in detail["jobs"]),
-                "唯一规划 Agent 被限流后阻塞",
+                "唯一规划 Agent 被限流后等待冷却",
             )
             assert len(role_jobs(detail, "analysis")) == 1, role_jobs(detail, "analysis")
             assert (
@@ -262,7 +266,7 @@ def main():
 
             time.sleep(1.5)
             detail = call("GET", f"/api/projects/{project_id}")
-            assert detail["project"]["status"] == "blocked", detail["project"]
+            assert detail["project"]["status"] == "running", detail["project"]
             assert len(role_jobs(detail, "analysis")) == 1, role_jobs(detail, "analysis")
 
             call(
@@ -271,15 +275,13 @@ def main():
                 {"roles": ["planner", "executor", "verifier"]},
             )
             call("PATCH", f"/api/agents/{flaky}", {"enabled": True})
-            failed_job = role_jobs(detail, "analysis")[0]
-            call("POST", f"/api/jobs/{failed_job['id']}/retry", {})
             detail = wait_project(
                 project_id,
-                lambda detail: detail["project"]["status"] == "blocked"
-                and "429" in (detail["project"]["blocked_reason"] or "")
+                lambda detail: detail["project"]["status"] == "running"
+                and "冷却" in (detail["project"]["blocked_reason"] or "")
                 and len(role_jobs(detail, "analysis")) >= 2
                 and not any(job["status"] == "running" for job in detail["jobs"]),
-                "人工重试后重新派发并再次限流",
+                "冷却结束自动派发并再次限流",
             )
             resent = role_jobs(detail, "analysis")[1]
             assert resent["agent_id"] == flaky, resent

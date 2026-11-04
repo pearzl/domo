@@ -149,7 +149,6 @@ pre {
    - 新条目淡入：活动时间线与事件列表的条目。
    - 按钮回弹：按下时轻微缩放，松开后回弹。
    - 加载骨架与状态点脉冲：骨架用背景扫光，状态点只呼吸透明度。
-   - 字符滚动：.animated-number-digit 只对变化过的数字位播放，其余字符保持静态。
    减少动效时由文件末尾的 prefers-reduced-motion 块统一关闭位移与循环，只保留透明度变化。 */
 
 @keyframes motion-fade-rise {
@@ -200,28 +199,6 @@ pre {
   }
   50% {
     opacity: 1;
-  }
-}
-
-@keyframes motion-digit-up {
-  from {
-    opacity: 0;
-    transform: translateY(70%);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes motion-digit-down {
-  from {
-    opacity: 0;
-    transform: translateY(-70%);
-  }
-  to {
-    opacity: 1;
-    transform: none;
   }
 }
 
@@ -284,32 +261,6 @@ pre {
   border-radius: 50%;
   background: currentColor;
   animation: motion-pulse-dot 1.4s ease-in-out infinite;
-}
-
-/* 数字字符滚动：内层字符上下滚动一小段后落位。
-   外层行高固定，逐位换字不会改变行高；裁剪框上下各留 0.35em 行间，
-   含单位与“—”的整串数值既不会被切边，滚动时也不会露出相邻内容。 */
-.animated-number {
-  display: inline-flex;
-  align-items: baseline;
-  font-variant-numeric: tabular-nums;
-  clip-path: inset(-0.35em -0.1em -0.35em -0.1em);
-}
-
-.animated-number-digit {
-  display: inline-block;
-  line-height: inherit;
-  animation-duration: var(--motion-slow);
-  animation-timing-function: var(--motion-ease-out);
-  animation-fill-mode: both;
-}
-
-.animated-number-digit.is-up {
-  animation-name: motion-digit-up;
-}
-
-.animated-number-digit.is-down {
-  animation-name: motion-digit-down;
 }
 
 .sidebar {
@@ -845,11 +796,6 @@ button:disabled {
   transition:
     background-color var(--motion-color) var(--motion-ease),
     color var(--motion-color) var(--motion-ease);
-}
-
-/* 徽标数字与文本随状态变化淡入，不改变选项卡高度。 */
-.project-tab-badge .animated-number {
-  transition: color var(--motion-color) var(--motion-ease);
 }
 
 .project-tab.active .project-tab-badge {
@@ -5174,14 +5120,6 @@ summary {
       background-color var(--motion-color) var(--motion-ease);
   }
 
-  /* 概览与用量摘要中的数值字符滚动只淡入，滚动位不做上下位移。 */
-  .overview-value .animated-number-digit.is-up,
-  .overview-value .animated-number-digit.is-down,
-  .usage-summary-value .animated-number-digit.is-up,
-  .usage-summary-value .animated-number-digit.is-down {
-    animation-name: motion-fade-in;
-  }
-
   /* 按钮回弹：关闭按下缩放。 */
   button:not(:disabled):active {
     animation: none;
@@ -5211,12 +5149,6 @@ summary {
 
   .activity-progress-dup {
     display: none;
-  }
-
-  /* 字符滚动：逐位淡入，不上下移动。 */
-  .animated-number-digit.is-up,
-  .animated-number-digit.is-down {
-    animation-name: motion-fade-in;
   }
 
   /* 进度条宽度即时变化，不做平滑推进。 */

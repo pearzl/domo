@@ -8,8 +8,7 @@
   3. 任务池某角色只保留一个启用 Agent 时等价于指定该 Agent；该 Agent 全局
      不可用时作业给出明确的“任务 Agent 池”等待原因，不回退项目池、
      不转给其他 Agent；
-  4. executor_agent_id 覆盖对应单 Agent 池，清除覆盖恢复项目池快照，
-     调度只读取任务池；
+  4. 任务池只支持角色内排序与启停，不提供单 Agent 覆盖接口；
   5. 任务池修改在服务重启后保持。
 
 使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
@@ -364,46 +363,8 @@ def main():
                 ):
                     assert job["agent_id"] == high["id"], job
 
-            # ---------- 4. 覆盖字段与清除重置 ----------
-            legacy_id = create_project("TaskLegacy", "旧覆盖字段迁移为单 Agent 池")
-            confirm(legacy_id)
-            detail = wait_t1_executor_running(legacy_id, "TaskLegacy T1 执行作业")
-            lt2 = task_by_key(detail, "T2")
-            legacy_task = call(
-                "PATCH",
-                f"/api/projects/{legacy_id}/tasks/{lt2['id']}/agents",
-                {"executor_agent_id": low["id"]},
-            )
-            assert legacy_task["executor_agent_id"] == low["id"], legacy_task
-            legacy_pool = task_pool_role(legacy_id, lt2["id"], "executor")
-            assert [
-                entry["agent_id"] for entry in legacy_pool["entries"]
-            ] == [low["id"]], legacy_pool
-            cleared = call(
-                "PATCH",
-                f"/api/projects/{legacy_id}/tasks/{lt2['id']}/agents",
-                {"executor_agent_id": None},
-            )
-            assert cleared["executor_agent_id"] is None, cleared
-            legacy_pool = task_pool_role(legacy_id, lt2["id"], "executor")
-            assert [
-                entry["agent_id"]
-                for entry in legacy_pool["entries"]
-                if entry["enabled"]
-            ] == [high["id"], low["id"]], legacy_pool
-            # 调度依据任务池：T2 的作业交给池内最高优先级 high
-            detail = wait_project(
-                legacy_id,
-                lambda d: d["project"]["stage"] == "summarizing"
-                and d["project"]["report"],
-                "TaskLegacy 完成",
-            )
-            t2_exec = next(
-                job
-                for job in detail["jobs"]
-                if job["task_id"] == lt2["id"] and job["role"] == "executor"
-            )
-            assert t2_exec["agent_id"] == high["id"], t2_exec
+            assert expect_error("PATCH", f"/api/projects/{snap_id}/tasks/{t2['id']}/agents", {}) == 405
+            assert "executor_agent_id" not in t2 and "verifier_agent_id" not in t2
 
             state["t1_project"] = snap_id
 

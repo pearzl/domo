@@ -356,6 +356,25 @@ async fn abort_merge(dir: &Path) {
         .await;
 }
 
+/// Integrates accepted dependencies before the executor runs. File conflicts
+/// remain for that executor; unrelated errors abort without discarding files.
+pub async fn merge_for_execution(worktree: &Path, branch: &str) -> GitResult<()> {
+    let mut args = GIT_IDENTITY.to_vec();
+    args.extend(["merge", "--no-edit", branch]);
+    match run_git(worktree, &args).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let conflicts = run_git(worktree, &["diff", "--name-only", "--diff-filter=U"]).await?;
+            if conflicts.trim().is_empty() {
+                abort_merge(worktree).await;
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 pub async fn has_branch(repo: &Path, branch: &str) -> bool {
     run_git(repo, &["rev-parse", "--verify", branch])
         .await

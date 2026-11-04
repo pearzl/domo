@@ -1,11 +1,8 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashSet;
 
 use crate::domain::{self, now, FailureKind};
 use crate::events::emit;
-use crate::git;
 use crate::models::*;
 use crate::state::AppState;
 
@@ -14,7 +11,6 @@ use super::failure::{
     apply_agent_failure, failure_kind_label, has_usable_agent, protocol_failure_blocks,
     task_pause_intent,
 };
-use super::worktree::prepare_task_worktree;
 
 pub(super) async fn handle_executor_success(
     state: &AppState,
@@ -148,7 +144,7 @@ pub(super) async fn handle_executor_derive(
         .bind(&timestamp)
         .execute(&mut *tx)
         .await?;
-        crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
+        crate::db::initialize_task_agents_tx(&mut tx, &task_id).await?;
         child_keys.push(child.key.clone());
     }
     let mut deps = parse_json_list(&parent.deps);
@@ -185,113 +181,6 @@ pub(super) async fn handle_executor_derive(
         ),
     )
     .await;
-    Ok(())
-}
-
-pub(super) async fn handle_derived_task_success(
-    state: &AppState,
-    project: &ProjectRow,
-    task: &TaskRow,
-    summary: &str,
-    agent: &AgentRow,
-) -> Result<()> {
-    let parent_id = task
-        .parent_id
-        .clone()
-        .ok_or_else(|| anyhow!("任务不是派生任务"))?;
-    let parent = load_task(&state.db, &parent_id)
-        .await?
-        .ok_or_else(|| anyhow!("派生任务的父任务不存在"))?;
-    if parent.status.as_deref() == Some(STATUS_CANCELED) {
-        return Ok(());
-    }
-    if !project.is_git() {
-        complete_derived_task(
-            state,
-            project,
-            task,
-            summary,
-            agent,
-            format!("派生任务 {} 已完成，产物保留在普通工作区", task.key),
-        )
-        .await?;
-        return Ok(());
-    }
-    let parent_worktree = match parent.worktree.as_deref() {
-        Some(path) if Path::new(path).join(".git").exists() => PathBuf::from(path),
-        _ => prepare_task_worktree(state, project, Some(&parent)).await?,
-    };
-    let branch = load_task(&state.db, &task.id)
-        .await?
-        .and_then(|current| current.branch)
-        .ok_or_else(|| anyhow!("派生任务缺少执行分支"))?;
-    let message = format!("domo(task-{}): {}", task.key, task.title);
-    let merge = {
-        let _guard = state.git_lock.lock().await;
-        git::squash_merge(&parent_worktree, &branch, &message).await
-    };
-    match merge {
-        Ok(_) => {
-            complete_derived_task(
-                state,
-                project,
-                task,
-                summary,
-                agent,
-                format!(
-                    "派生任务 {} 已跳过验收并合入父任务 {} 的分支",
-                    task.key, parent.key
-                ),
-            )
-            .await?;
-        }
-        Err(error) => {
-            let reason = format!("合入父任务分支失败：{error:#}");
-            handle_executor_failure(state, project, task, &reason, agent, false).await?;
-        }
-    }
-    Ok(())
-}
-
-/// 派生任务不调用验收者：结果直接置为通过并按普通任务完成条件结束。
-async fn complete_derived_task(
-    state: &AppState,
-    project: &ProjectRow,
-    task: &TaskRow,
-    summary: &str,
-    agent: &AgentRow,
-    message: String,
-) -> Result<()> {
-    let guard = state.schedule_lock.lock().await;
-    if let Some(current) = load_task(&state.db, &task.id).await? {
-        if current.status.as_deref() == Some(STATUS_CANCELED)
-            || current.stage == TASK_STAGE_COMPLETED
-        {
-            return Ok(());
-        }
-    }
-    sqlx::query(
-        "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
-         result_summary = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(TASK_STAGE_COMPLETED)
-    .bind(&agent.id)
-    .bind(summary)
-    .bind(now())
-    .bind(&task.id)
-    .execute(&state.db)
-    .await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&project.id),
-        Some(&task.id),
-        "task_completed",
-        message,
-    )
-    .await;
-    drop(guard);
-    cleanup_task_artifacts(state, project, task).await;
     Ok(())
 }
 
@@ -349,7 +238,15 @@ pub(super) async fn handle_executor_failure(
         || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
-        && !has_usable_agent(state, &project.id, ROLE_EXECUTOR, Some(&agent.id)).await?
+        && kind == FailureKind::Permanent
+        && !has_usable_agent(
+            state,
+            &project.id,
+            ROLE_EXECUTOR,
+            Some(&agent.id),
+            Some(task),
+        )
+        .await?
     {
         blocked = true;
     }

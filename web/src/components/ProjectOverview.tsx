@@ -98,6 +98,7 @@ export function ProjectOverview({
   const { project, tasks, jobs, messages, events, proposal } = detail;
   const now = Date.now();
   const status = projectStatus({
+    attentionItems: detail.attention_items,
     project,
     tasks,
     jobs,

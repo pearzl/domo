@@ -2,6 +2,7 @@
 
 mod agents;
 mod archive;
+mod delivery;
 mod detail;
 mod helpers;
 mod jobs;
@@ -9,6 +10,7 @@ mod merge;
 mod milestones;
 mod projects;
 mod reports;
+mod resources;
 mod tasks;
 #[cfg(test)]
 mod tests;
@@ -37,18 +39,20 @@ use self::agents::{
     update_default_team_agent,
 };
 use self::archive::{archive_preview, archive_project, project_archive_refs};
+pub(crate) use self::jobs::mark_job_resumed;
 use self::jobs::{
     get_event, get_job, get_job_activity, get_job_output, list_events, retry_job, stream_events,
     usage_report,
 };
 use self::merge::merge_project;
+pub(crate) use self::merge::publish_assisted;
+pub(crate) use self::merge::recover_merges;
 use self::milestones::{
     accept_milestone, reject_milestone, save_task_guidance, set_task_milestone,
 };
 use self::projects::{
     abandon_replan, create_project, get_project, get_project_agents, get_task_agent_pool,
-    list_projects, replan_project, set_task_agents, update_project_agent, update_project_goal,
-    update_task_agent,
+    list_projects, replan_project, update_project_agent, update_project_goal, update_task_agent,
 };
 use self::reports::submit_report;
 use self::tasks::{
@@ -159,6 +163,12 @@ impl IntoResponse for ApiError {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/queue", get(resources::global_queue))
+        .route(
+            "/api/agents/recommendations",
+            get(resources::recommendations),
+        )
+        .route("/api/queue/{id}", patch(resources::reorder))
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/{id}", patch(update_agent).delete(delete_agent))
         .route("/api/agents/{id}/usage/reset", post(reset_agent_usage))
@@ -170,6 +180,34 @@ pub fn router(state: AppState) -> Router {
         .route("/api/usage", get(usage_report))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project))
+        .route(
+            "/api/projects/{id}/shared",
+            get(resources::get_shared).post(resources::post_shared),
+        )
+        .route(
+            "/api/projects/{id}/artifacts",
+            get(resources::list_artifacts).post(resources::put_artifact),
+        )
+        .route(
+            "/api/projects/{id}/artifacts/{artifact}",
+            get(resources::preview),
+        )
+        .route(
+            "/api/projects/{id}/artifacts/{artifact}/reveal",
+            post(resources::reveal),
+        )
+        .route(
+            "/api/projects/{id}/workspace/inspect",
+            post(resources::inspect),
+        )
+        .route(
+            "/api/projects/{id}/workspace/permissions",
+            post(resources::permit),
+        )
+        .route(
+            "/api/projects/{id}/limits",
+            axum::routing::put(delivery::set_limits),
+        )
         .route("/api/projects/{id}/agents", get(get_project_agents))
         .route(
             "/api/projects/{id}/agents/{role}/{agent_id}",
@@ -199,6 +237,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/replan/abandon", post(abandon_replan))
         .route("/api/projects/{id}/report", post(submit_report))
         .route("/api/projects/{id}/merge", post(merge_project))
+        .route(
+            "/api/projects/{id}/merge/assist",
+            get(resources::merge_status)
+                .post(resources::request_merge)
+                .delete(resources::cancel_merge),
+        )
         .route("/api/projects/{id}/tasks", post(create_task))
         .route("/api/projects/{id}/tasks/{task_id}/retry", post(retry_task))
         .route(
@@ -207,7 +251,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/projects/{id}/tasks/{task_id}/agents",
-            get(get_task_agent_pool).patch(set_task_agents),
+            get(get_task_agent_pool),
         )
         .route(
             "/api/projects/{id}/tasks/{task_id}/agents/{role}/{agent_id}",
@@ -243,6 +287,7 @@ pub fn router(state: AppState) -> Router {
             get(task_verifications),
         )
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/history", get(delivery::job_history))
         .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/api/jobs/{id}/output", get(get_job_output))
         .route("/api/jobs/{id}/activity", get(get_job_activity))

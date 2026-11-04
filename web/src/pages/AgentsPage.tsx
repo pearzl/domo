@@ -16,6 +16,7 @@ import { api, errorMessage } from "../api";
 import { SkeletonLines } from "../components/Skeleton";
 import { AgentCard } from "../components/AgentCard";
 import { AgentPoolPanel } from "../components/AgentPoolPanel";
+import { GlobalQueue } from "../components/TeamOperations";
 import {
   AgentFormPanel,
   buildAvailability,
@@ -226,6 +227,7 @@ export function AgentsPage() {
         </section>
       ) : null}
 
+      <GlobalQueue />
       {team ? (
         <AgentPoolPanel
           title="默认团队"

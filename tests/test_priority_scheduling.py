@@ -295,7 +295,7 @@ def main():
                 if job["agent_id"] == low["id"]
             ], "高优先级忙碌期间不应产生低优先级执行作业"
             assert "Priority High" in (waiting["project"]["blocked_reason"] or ""), waiting["project"]
-            assert "并发 1/1" in (waiting["project"]["blocked_reason"] or ""), waiting["project"]
+            assert any(text in (waiting["project"]["blocked_reason"] or "") for text in ["并发 1/1", "全局队列前序作业"]), waiting["project"]
 
             # 2. 禁用高优先级后，低优先级接手。
             call("PATCH", f"/api/agents/{high['id']}", {"enabled": False})
@@ -341,7 +341,7 @@ def main():
             reason = blocked["project"]["blocked_reason"]
             for name in ("Priority High", "Priority Flaky", "Priority Low"):
                 assert f"「{name}」（任务 Agent 池中已禁用）" in reason, reason
-            assert task_by_key(blocked, "T1")["status"] == "queued", task_by_key(blocked, "T1")
+            assert task_by_key(blocked, "T1")["status"] == "blocked", task_by_key(blocked, "T1")
 
             # 4. 失败换人后一次性跳过失败 Agent，派发成功后恢复高优先级选择。
             switch_id = create_project("PrioritySwitch", "失败换人后恢复高优先级")

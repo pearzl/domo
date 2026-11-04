@@ -254,7 +254,7 @@ def main():
                 if item["id"] == project_id
             )
             assert summary["merged_at"] == merged_at, summary
-            assert summary["attention"] is None, summary
+            assert summary["attention_items"] == [], summary
 
             # ---- 合入后追加任务：旧合入记录失效，重新提供合入入口 ----------------
             print("--> 合入后追加任务")

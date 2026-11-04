@@ -7,49 +7,12 @@ import {
   currentUsageReport,
   usageGroupName,
 } from "../presentation/usage";
+import { UsageMetricValue } from "./UsageMetricValue";
 import {
   Badge,
   Empty,
-  formatCost,
   formatMillis,
-  formatTokens,
 } from "../ui";
-
-function usageAllUnknown(totals: UsageTotals): boolean {
-  return totals.jobs > 0 && totals.known_jobs === 0;
-}
-
-function usagePartial(totals: UsageTotals): boolean {
-  return totals.known_jobs > 0 && totals.known_jobs < totals.jobs;
-}
-
-function MetricValue({
-  value,
-  totals,
-  format,
-}: {
-  value: number;
-  totals: UsageTotals;
-  format: (value: number) => string;
-}) {
-  if (usageAllUnknown(totals)) {
-    return (
-      <span className="muted" title="全部作业未记录用量">
-        —
-      </span>
-    );
-  }
-  return (
-    <>
-      {format(value)}
-      {usagePartial(totals) ? (
-        <span className="muted usage-coverage-note">
-          （{totals.known_jobs}/{totals.jobs} 个作业）
-        </span>
-      ) : null}
-    </>
-  );
-}
 
 function UsageCoverageBadge({ totals }: { totals: UsageTotals }) {
   if (totals.jobs === 0) return null;
@@ -153,46 +116,22 @@ export function UsageTable({
                   </td>
                   <td className="num">{group.jobs}</td>
                   <td className="num">
-                    <MetricValue
-                      value={group.input_tokens}
-                      totals={group}
-                      format={formatTokens}
-                    />
+                    <UsageMetricValue totals={group} metric="input_tokens" />
                   </td>
                   <td className="num">
-                    <MetricValue
-                      value={group.output_tokens}
-                      totals={group}
-                      format={formatTokens}
-                    />
+                    <UsageMetricValue totals={group} metric="output_tokens" />
                   </td>
                   <td className="num">
-                    <MetricValue
-                      value={group.cache_read_tokens}
-                      totals={group}
-                      format={formatTokens}
-                    />
+                    <UsageMetricValue totals={group} metric="cache_read_tokens" />
                   </td>
                   <td className="num">
-                    <MetricValue
-                      value={group.cache_write_tokens}
-                      totals={group}
-                      format={formatTokens}
-                    />
+                    <UsageMetricValue totals={group} metric="cache_write_tokens" />
                   </td>
                   <td className="num">
-                    <MetricValue
-                      value={group.reasoning_tokens}
-                      totals={group}
-                      format={formatTokens}
-                    />
+                    <UsageMetricValue totals={group} metric="reasoning_tokens" />
                   </td>
                   <td className="num">
-                    <MetricValue
-                      value={group.cost}
-                      totals={group}
-                      format={formatCost}
-                    />
+                    <UsageMetricValue totals={group} metric="cost" />
                   </td>
                   <td className="num">{formatMillis(group.duration_ms)}</td>
                   <td className="num">

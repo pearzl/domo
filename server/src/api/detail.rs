@@ -58,6 +58,8 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
     let jobs = job_rows
         .into_iter()
         .map(|job| JobSummary {
+            execution_job_id: job.execution_job_id,
+            contract_id: job.contract_id,
             id: job.id,
             project_id: job.project_id,
             task_id: job.task_id,
@@ -98,6 +100,8 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
     };
     let proposal = proposal_raw.and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
     Ok(ProjectDetail {
+        attention_items: crate::attention::items(&state.db, &project, merged_into_base).await?,
+        delivery: crate::delivery::snapshot(&state.db, id).await?,
         project,
         merged_at: merged_at.clone(),
         merged_commit: merged_commit.clone(),
@@ -165,6 +169,12 @@ pub(super) fn task_views(rows: Vec<TaskRow>) -> Vec<TaskView> {
         .map(|row| {
             let position = positions.get(&row.id).copied();
             let mut view = TaskView::from_row(row);
+            if view.stage == TASK_STAGE_PENDING
+                && view.status.as_deref() == Some(STATUS_QUEUED)
+                && !deps_complete(&view.deps, &completed)
+            {
+                view.status = None;
+            }
             view.queue_position = position;
             view.waiting_reason = task_waiting_reason(&view, &completed);
             view
@@ -178,13 +188,19 @@ pub(super) fn task_waiting_reason(task: &TaskView, completed: &HashSet<String>) 
         Some(STATUS_PAUSED) => return Some("任务已暂停".into()),
         Some(STATUS_PAUSING) => return Some("暂停中，等待在途作业结束".into()),
         Some(STATUS_BLOCKED) => {
+            if task.last_failure_kind.as_deref() == Some("configuration") {
+                return task
+                    .last_error
+                    .clone()
+                    .or_else(|| Some("请检查 Agent 配置".into()));
+            }
             return Some(
                 if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
                     "等待人工验收".into()
                 } else {
                     "等待人工裁决".into()
                 },
-            )
+            );
         }
         _ => {}
     }

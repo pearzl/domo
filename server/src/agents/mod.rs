@@ -92,6 +92,24 @@ macro_rules! adapter_registry {
             )+
             None
         }
+
+        fn dispatch_session(kind: &str, job_id: &str) -> Option<String> {
+            $(
+                if kind == <$adapter as AgentAdapter>::KIND {
+                    return <$adapter as AgentAdapter>::session_for_job(job_id, None);
+                }
+            )+
+            None
+        }
+
+        async fn dispatch_finish(context: FinishContext<'_>) -> JobUsage {
+            $(
+                if context.agent.kind == <$adapter as AgentAdapter>::KIND {
+                    return <$adapter>::default().finish_job(context).await;
+                }
+            )+
+            JobUsage::PerTurn
+        }
     };
 }
 
@@ -147,44 +165,12 @@ pub async fn execute(
 /// Session id a fresh job starts under. Continuations keep the id reported by
 /// the previous run, so this only consults the adapter's derived value.
 pub fn session_for_job(agent: &AgentRow, job_id: &str) -> Option<String> {
-    let kind = agent.kind.as_str();
-    if kind == <MockAdapter as AgentAdapter>::KIND {
-        return MockAdapter::session_for_job(job_id, None);
-    }
-    if kind == <OpencodeAdapter as AgentAdapter>::KIND {
-        return OpencodeAdapter::session_for_job(job_id, None);
-    }
-    if kind == <CliAdapter as AgentAdapter>::KIND {
-        return CliAdapter::session_for_job(job_id, None);
-    }
-    if kind == <CodexAdapter as AgentAdapter>::KIND {
-        return CodexAdapter::session_for_job(job_id, None);
-    }
-    if kind == <WorkbuddyAdapter as AgentAdapter>::KIND {
-        return WorkbuddyAdapter::session_for_job(job_id, None);
-    }
-    None
+    dispatch_session(&agent.kind, job_id)
 }
 
 /// Settles usage after the final turn through the adapter that owns the job.
 pub async fn finish_job(context: FinishContext<'_>) -> JobUsage {
-    let kind = context.agent.kind.as_str();
-    if kind == <MockAdapter as AgentAdapter>::KIND {
-        return MockAdapter.finish_job(context).await;
-    }
-    if kind == <OpencodeAdapter as AgentAdapter>::KIND {
-        return OpencodeAdapter.finish_job(context).await;
-    }
-    if kind == <CliAdapter as AgentAdapter>::KIND {
-        return CliAdapter.finish_job(context).await;
-    }
-    if kind == <CodexAdapter as AgentAdapter>::KIND {
-        return CodexAdapter.finish_job(context).await;
-    }
-    if kind == <WorkbuddyAdapter as AgentAdapter>::KIND {
-        return WorkbuddyAdapter.finish_job(context).await;
-    }
-    JobUsage::PerTurn
+    dispatch_finish(context).await
 }
 
 /// Applies the adapter's settlement to the usage merged from the turns.

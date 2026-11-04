@@ -1,6 +1,4 @@
 import type { ReactNode } from "react";
-import { AnimatedNumber } from "./components/AnimatedNumber";
-import { progressPercent } from "./presentation/animatedNumber";
 
 export const STAGE_LABELS: Record<string, string> = {
   analysis: "项目分析",
@@ -267,29 +265,23 @@ export function TaskStateBadge({ stage, status }: { stage: string; status?: stri
   return <Badge tone={tone}>{taskStateLabel(stage, status)}</Badge>;
 }
 
-/// 进度条：宽度与文本按减少动效降级；数字与“完成/总数”文本在变化时逐位滚动。
-/// 进度条本身没有项目上下文，会话键按接口传入的项目 id 组合，缺省时按全局会话记忆。
+/// 任务完成比例；进度条宽度限定在 0..100%。
 export function Progress({
   total,
   completed,
-  session = "global",
 }: {
   total: number;
   completed: number;
-  session?: string;
 }) {
-  const percent = progressPercent(total, completed);
+  const percent = Number.isFinite(total) && total > 0 && Number.isFinite(completed)
+    ? Math.min(100, Math.max(0, Math.round(completed / total * 100))) : 0;
   return (
     <div className="progress" aria-label={`${completed}/${total}`}>
       <div className="progress-track">
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
       <span className="progress-text">
-        <AnimatedNumber
-          session={session}
-          slot="progress:count"
-          value={`${completed}/${total}`}
-        />
+        {completed}/{total}
       </span>
     </div>
   );

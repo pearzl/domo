@@ -142,6 +142,7 @@ export function JobDetailView({
               {formatTime(job.finished_at)}
               {pid ? ` · PID ${pid}` : ""}
             </div>
+            <a href={`/api/jobs/${encodeURIComponent(job.id)}/history`} target="_blank" rel="noreferrer">查看重试前的历史输入、输出与费用记录</a>
             <div className="job-meta">
               用量：
               {job.usage_known

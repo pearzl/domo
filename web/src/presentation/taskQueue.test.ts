@@ -23,8 +23,6 @@ function task(overrides: Partial<Task> = {}): Task {
     human_gate: null,
     forced_agent_id: null,
     forced_agent_role: null,
-    executor_agent_id: null,
-    verifier_agent_id: null,
     stage: "pending",
     status: null,
     agent_id: null,

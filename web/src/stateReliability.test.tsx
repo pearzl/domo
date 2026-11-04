@@ -109,6 +109,7 @@ function button(renderer: ReactTestRenderer, label: string): ReactTestInstance {
 
 function jobSummary(overrides: Partial<JobSummary> = {}): JobSummary {
   return {
+    execution_job_id: null,
     id: "job-1",
     project_id: "p1",
     task_id: null,
@@ -192,6 +193,7 @@ const EMPTY_USAGE: UsageReport = {
     duration_ms: 0,
     known_jobs: 0,
     unknown_jobs: 0,
+    known_metrics: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, cost: 0 },
   },
   groups: [],
 };
@@ -262,6 +264,30 @@ describe("作业详情状态", () => {
 });
 
 describe("后台读取与操作错误", () => {
+  it("项目详情读取串行，等待中的多个刷新合并为一次后续读取", async () => {
+    const detail = { project: project({ stage: "executing" }), tasks: [], jobs: [] } as unknown as ProjectDetail;
+    let resolveFirst!: (value: ProjectDetail) => void;
+    vi.mocked(api.getProject)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
+      .mockResolvedValue(detail);
+    const controller: { current?: ProjectPageController } = {};
+    function Harness() {
+      controller.current = useProjectPageController({ id: "p1" });
+      return null;
+    }
+    await act(async () => { rendered = create(<Harness />); });
+    await act(async () => {
+      void controller.current!.refresh(true);
+      void controller.current!.refresh(true);
+      void controller.current!.refresh(true);
+    });
+    expect(api.getProject).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveFirst(detail); });
+    await settle();
+    expect(api.getProject).toHaveBeenCalledTimes(2);
+    expect(controller.current!.detail).toBe(detail);
+  });
+
   it("项目详情心跳成功后仍保留操作错误", async () => {
     const detail = {
       project: project({ stage: "executing" }),

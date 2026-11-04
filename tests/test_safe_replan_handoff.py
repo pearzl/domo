@@ -136,7 +136,7 @@ def main():
                 for task in detail["tasks"]
                 if task["id"] == parent["id"] or task["parent_id"] == parent["id"]
             ]
-            assert all(task["status"] == "canceled" for task in family), family
+            assert all(task["status"] == "canceled" if task["stage"] != "completed" else task["status"] is None for task in family), family
             analysis_job = sorted(
                 (job for job in detail["jobs"] if job["role"] == "analysis"),
                 key=lambda job: job["created_at"],
@@ -145,7 +145,7 @@ def main():
             retained_prompt = prompt.split("完整保留的交付任务链", 1)[1].split(
                 "不保留任务", 1
             )[0]
-            assert all(child["key"] not in retained_prompt for child in children), prompt
+            assert all(child["key"] in retained_prompt for child in children if child["stage"] == "completed"), prompt
             canceled_prompt = prompt.split("不保留任务", 1)[1]
             assert any(child["key"] in canceled_prompt for child in children), prompt
             for child in children:
@@ -155,7 +155,7 @@ def main():
                         cwd=repo,
                         check=False,
                     )
-                    assert result.returncode != 0, child
+                    assert result.returncode == 0, child
 
             print("旧作业静默、Git 交接与派生任务链测试通过")
 

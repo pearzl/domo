@@ -30,6 +30,7 @@ function job(
   overrides: Partial<JobSummary> = {},
 ): JobSummary {
   return {
+    execution_job_id: role === "verifier" ? "e1" : null,
     id,
     project_id: "p1",
     task_id: "t1",
@@ -74,8 +75,6 @@ function task(overrides: Partial<Task> = {}): Task {
     human_gate: null,
     forced_agent_id: null,
     forced_agent_role: null,
-    executor_agent_id: null,
-    verifier_agent_id: null,
     stage: "running",
     status: null,
     agent_id: null,
@@ -133,6 +132,7 @@ function record(
   overrides: Partial<VerificationRecord> & { id: string; round: number },
 ): VerificationRecord {
   return {
+    execution_job_id: "e1",
     attempt: overrides.round,
     status: "succeeded",
     passed: true,
@@ -256,7 +256,7 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
           job("e1", "executor", 0),
           job("v1", "verifier", 2),
           job("e2", "executor", 5),
-          job("v2", "verifier", 7),
+          job("v2", "verifier", 7, { execution_job_id: "e2" }),
         ],
         history([
           record({ id: "v1", round: 1 }),
@@ -282,8 +282,9 @@ describe("TaskHistoryBlock 按执行轮渲染", () => {
   });
 
   it("未关联执行轮的验收作业在轮次列表上方给出数量与最近状态提示", () => {
-    const early = job("v0", "verifier", 0, { created_at: beforeFirst(59) });
+    const early = job("v0", "verifier", 0, { execution_job_id: null, created_at: beforeFirst(59) });
     const unanchored = job("v1", "verifier", 6, {
+      execution_job_id: null,
       status: "failed",
       error: "验收进程异常退出",
     });

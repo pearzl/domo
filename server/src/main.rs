@@ -3,8 +3,10 @@ mod agents;
 mod api;
 mod artifacts;
 mod attention;
+mod backup;
 mod config;
 mod db;
+mod delivery;
 mod domain;
 mod event_preview;
 mod events;
@@ -15,7 +17,9 @@ mod opencode;
 mod paths;
 mod platform;
 mod prompts;
+mod queue;
 mod replan;
+mod resources;
 mod runner;
 mod scheduler;
 mod state;
@@ -42,7 +46,11 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env().context("读取配置失败")?;
+    if backup::cli(&cfg).await? {
+        return Ok(());
+    }
     tokio::fs::create_dir_all(&cfg.data_root).await?;
+    let _lease = backup::lease(&cfg.data_root)?;
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
     tokio::fs::create_dir_all(&cfg.log_root).await?;
 

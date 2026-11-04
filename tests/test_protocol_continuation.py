@@ -63,7 +63,12 @@ if role == "executor":
     artifact.write_text("T1", encoding="utf-8")
     result = {"kind": "done", "summary": "继续后完成"}
 elif role == "verifier":
-    result = {"pass": True, "reason": "产物齐全", "issues": []}
+    context = json.loads((job_dir / "context.json").read_text(encoding="utf-8"))
+    result = {"pass": True, "reason": "产物齐全", "issues": [], "evidence": {
+        "contract_id": context["contract"]["id"], "artifact_version": context["artifact_version"],
+        "artifacts": ["domo_mock/T1.txt"], "risks": [], "human_checks": [],
+        "criteria": [{"criterion": item, "passed": True, "checks": [{"method": "检查产物文件", "result": "存在"}]}
+                     for item in context["task"]["acceptance"]]}}
 elif role == "analysis":
     result = {
         "kind": "plan",
@@ -97,6 +102,10 @@ elif role == "summary":
     result = {"kind": "report", "report": "# 报告\\n\\n完成。"}
 else:
     result = {"kind": "done", "summary": "完成"}
+if role == "project_acceptance":
+    context = json.loads((job_dir / "context.json").read_text(encoding="utf-8"))
+    result["contract_id"] = context["contract"]["id"]
+    result["artifact_version"] = context["artifact_version"]
 (job_dir / "result.json").write_text(
     json.dumps(result, ensure_ascii=False), encoding="utf-8"
 )

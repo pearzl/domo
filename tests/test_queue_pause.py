@@ -9,7 +9,7 @@
   5. 强制暂停终止在途进程，任务进入已暂停且项目不会因此错误阻塞；
   6. 项目强制暂停终止所有在途作业并进入已暂停；
   7. 限流、供应商波动、永久错误分别进入冷却、有限重试、直接换人；
-  8. Agent 池耗尽后任务阻塞并可通过人工裁决入口处理；
+  8. Agent 池全部冷却时任务自动等待，并保留人工换人入口；
   9. 冷却截止时间与失败分类在项目详情中可读。
 
 使用内置 mock Agent 与本地 sleep CLI Agent，不访问外网；临时数据全部放在
@@ -563,7 +563,7 @@ def main():
             assert forced_project["forced"] is True, forced_project
             detail = call("GET", f"/api/projects/{force_id}")
             assert detail["project"]["status"] == "paused", detail["project"]
-            assert task_by_key(detail, "T1")["status"] == "paused", detail["tasks"]
+            assert task_by_key(detail, "T1")["status"] == "queued", detail["tasks"]
             assert not [job for job in detail["jobs"] if job["status"] == "running"], detail["jobs"]
             time.sleep(0.5)
             detail = call("GET", f"/api/projects/{force_id}")
@@ -656,7 +656,7 @@ def main():
             assert agent_by_id(detail, permanent_agent["id"])["failure_kind"] == "permanent"
             assert task_by_key(detail, "T1")["last_failure_kind"] == "permanent", detail["tasks"]
 
-            # 7. 池耗尽：任务阻塞，保留人工裁决入口与冷却数据。
+            # 7. 冷却中的池自动等待，保留人工换人与冷却数据。
             exhausted_agent_global = call(
                 "POST",
                 "/api/agents",
@@ -680,17 +680,20 @@ def main():
             confirm(exhausted_id)
             detail = wait_project(
                 exhausted_id,
-                lambda item: item["project"]["status"] == "blocked"
+                lambda item: item["project"]["status"] == "running"
                 and any(
-                    task["key"] == "T1" and task["status"] == "blocked"
+                    task["key"] == "T1"
+                    and task["status"] == "queued"
+                    and task["last_failure_kind"] == "rate_limit"
+                    and "冷却" in (task["waiting_reason"] or "")
                     for task in item["tasks"]
                 ),
-                "池耗尽后任务阻塞",
+                "池耗尽后自动等待冷却",
             )
             t1 = task_by_key(detail, "T1")
             assert t1["last_failure_kind"] == "rate_limit", t1
-            assert t1["waiting_reason"] == "等待人工裁决", t1
-            assert detail["project"]["status"] == "blocked", detail["project"]
+            assert "冷却" in (t1["waiting_reason"] or ""), t1
+            assert detail["project"]["status"] == "running", detail["project"]
             exhausted_agent = agent_by_id(detail, exhausted_agent_global["id"])
             assert exhausted_agent["failure_kind"] == "rate_limit", exhausted_agent
             assert exhausted_agent["cooldown_until"], exhausted_agent

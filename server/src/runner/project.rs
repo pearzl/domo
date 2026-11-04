@@ -366,7 +366,7 @@ pub(super) async fn handle_project_job_failure(
              WHERE id = ?",
         )
         .bind(failure.switch)
-        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(agent.map(|agent| agent.id.as_str()))
         .bind(failure.switch)
         .bind(failure.switch.then_some(ROLE_PLANNER))
         .bind(now())
@@ -404,7 +404,7 @@ pub(super) async fn handle_project_job_failure(
     .bind(failure.status())
     .bind(&failure.blocked_reason)
     .bind(failure.switch)
-    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(agent.map(|agent| agent.id.as_str()))
     .bind(failure.switch)
     .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())

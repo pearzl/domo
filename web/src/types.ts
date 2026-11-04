@@ -46,6 +46,14 @@ export interface FailureSummary {
   retry_after_ms: number | null;
 }
 
+export type UsageAggregateMetric =
+  | "input_tokens"
+  | "output_tokens"
+  | "cache_read_tokens"
+  | "cache_write_tokens"
+  | "reasoning_tokens"
+  | "cost";
+
 export interface UsageTotals {
   jobs: number;
   input_tokens: number;
@@ -57,6 +65,7 @@ export interface UsageTotals {
   duration_ms: number;
   known_jobs: number;
   unknown_jobs: number;
+  known_metrics: Record<UsageAggregateMetric, number>;
 }
 
 export interface UsageGroup extends UsageTotals {
@@ -155,6 +164,15 @@ export interface TaskAgentPool {
 
 /** 单条验收作业摘要：验收记录接口按所属执行轮返回验收者的解析结论。 */
 export interface VerificationRecord {
+  execution_job_id: string | null;
+  evidence?: {
+    contract_id: number;
+    artifact_version: string | null;
+    artifacts: string[];
+    risks: string[];
+    human_checks: string[];
+    criteria: { criterion: string; passed: boolean; checks: { method: string; result: string }[] }[];
+  } | null;
   id: string;
   /** 所属执行轮，从 1 开始，0 表示没有可关联的执行作业。 */
   round: number;
@@ -192,7 +210,20 @@ export interface ProjectAttentionTask {
   title: string;
 }
 
+export interface AttentionAction {
+  id: string;
+  kind: ProjectAttention;
+  task: ProjectAttentionTask | null;
+  reason: string | null;
+  since: string;
+  affected_tasks: number;
+  blocks_milestone: boolean;
+  blocks_summary: boolean;
+  project_advancing: boolean;
+}
+
 export interface ProjectSummary {
+  attention_items: AttentionAction[];
   id: string;
   name: string;
   goal: string;
@@ -204,9 +235,6 @@ export interface ProjectSummary {
   stage: string;
   status: string | null;
   blocked_reason: string | null;
-  attention: ProjectAttention | null;
-  /** 待办关联的任务；项目级待办可能为空。 */
-  attention_task?: ProjectAttentionTask | null;
   task_total: number;
   task_completed: number;
   replan_reason: string | null;
@@ -263,8 +291,6 @@ export interface Task {
   human_gate: string | null;
   forced_agent_id: string | null;
   forced_agent_role: string | null;
-  executor_agent_id: string | null;
-  verifier_agent_id: string | null;
   stage: string;
   status: string | null;
   agent_id: string | null;
@@ -318,6 +344,7 @@ export interface ProjectArchiveRefs {
 }
 
 export interface JobSummary {
+  execution_job_id: string | null;
   id: string;
   project_id: string;
   task_id: string | null;
@@ -427,6 +454,17 @@ export interface AnalysisProposal {
 }
 
 export interface ProjectDetail {
+  attention_items: AttentionAction[];
+  delivery?: {
+    replans?: { generation: number; goal: string; draft: AnalysisProposal | null; state: string; reason: string | null }[];
+    acceptance?: { contract_id?: number; artifact_version?: string | null; criteria: { criterion: string; verdict: string; evidence: string[]; gap: string }[] } | null;
+    merge_operation?: { phase: string; base_before: string; project_before: string; error: string | null } | null;
+    current_contract_id: number | null;
+    contracts: { id: number; goal: string; proposal: AnalysisProposal | null; source: string; created_at: string }[];
+    limits: { cost_budget: number | null; task_attempt_limit: number | null; replan_limit: number | null };
+    known_cost: number;
+    unknown_cost_jobs: number;
+  };
   project: Project;
   merged_at: string | null;
   merged_commit: string | null;

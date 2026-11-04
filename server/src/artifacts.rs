@@ -33,8 +33,8 @@ pub type ArtifactsResult<T> = std::result::Result<T, ArtifactsError>;
 pub const ARTIFACTS_RELEASING: &str = "releasing";
 
 /// Releases the worktree and branch of one task after its changes have been
-/// merged. A task with unfinished derived tasks keeps its artifacts because the
-/// children use its branch as their base. Dirty worktrees are left untouched.
+/// merged. A task with unfinished derived tasks keeps its integration checkout.
+/// Dirty worktrees are left untouched.
 pub async fn cleanup_task(
     state: &AppState,
     project: &ProjectRow,

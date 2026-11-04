@@ -7,8 +7,11 @@ import type {
   UsageTotals,
 } from "./types";
 import { UsageTable } from "./components/UsageGroupsTable";
+import { UsageSummary } from "./components/UsageSummary";
+import { UsageMetricValue } from "./components/UsageMetricValue";
 
 function totals(overrides: Partial<UsageTotals> = {}): UsageTotals {
+  const known = overrides.known_jobs ?? 3;
   return {
     jobs: 3,
     input_tokens: 1200,
@@ -20,6 +23,7 @@ function totals(overrides: Partial<UsageTotals> = {}): UsageTotals {
     duration_ms: 60000,
     known_jobs: 3,
     unknown_jobs: 0,
+    known_metrics: { input_tokens: known, output_tokens: known, cache_read_tokens: known, cache_write_tokens: known, reasoning_tokens: known, cost: known },
     ...overrides,
   };
 }
@@ -72,6 +76,20 @@ function render(dimension: "project" | "agent" | "role", report: UsageReport | n
 }
 
 describe("UsageTable", () => {
+  it("token 完整但费用缺失时表格和项目概览不显示零费用", () => {
+    const tokenOnly = totals({ cost: 0, known_metrics: { input_tokens: 3, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, cost: 0 } });
+    const report = { ...PROJECT_REPORT, totals: tokenOnly, groups: [group({ ...tokenOnly, project_id: "p1" })] };
+    const table = render("project", report);
+    const summary = renderToStaticMarkup(<UsageSummary projectId="p1" usage={{ totals: tokenOnly, by_agent: [], by_role: [] }} />);
+    const cost = renderToStaticMarkup(<UsageMetricValue totals={tokenOnly} metric="cost" />);
+    expect(cost).toContain(">—</span>");
+    expect(cost).not.toContain(">0<");
+    for (const markup of [table, summary]) {
+      expect(markup).not.toContain("0.0000");
+      expect(markup).toContain("2/3");
+    }
+    expect(summary).toContain("费用覆盖 0/3");
+  });
   it("一次只渲染一张表，换维度后表头与行数据随之变化", () => {
     const project = render("project", PROJECT_REPORT);
     const agent = render("agent", AGENT_REPORT);

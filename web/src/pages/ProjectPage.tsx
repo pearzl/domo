@@ -20,6 +20,8 @@
  * 5. 开启系统“减少动效”：以上动画全部只淡入不位移，状态点与骨架不再循环。
  */
 import { api } from "../api";
+import { DeliveryPanel } from "../components/DeliveryPanel";
+import { ResourcePanel } from "../components/ResourcePanel";
 import { SkeletonLines } from "../components/Skeleton";
 import { InputBox } from "../components/InputBox";
 import { EventTimeline } from "../components/EventTimeline";
@@ -533,6 +535,9 @@ export function ProjectPage({
         tabIndex={0}
       >
         {activeBlock === "overview" ? (
+          <>
+          <DeliveryPanel detail={detail} onSaved={() => void refresh()} />
+          <ResourcePanel detail={detail} onSaved={() => void refresh()} />
           <ProjectOverview
             detail={detail}
             onOpenTab={openGuidanceTab}
@@ -542,6 +547,7 @@ export function ProjectPage({
             busy={busy}
             merging={merging}
           />
+          </>
         ) : activeBlock === "analysis" ? (
           analysisBlock
         ) : activeBlock === "tasks" ? (

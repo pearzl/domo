@@ -43,7 +43,26 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
             other => return Err(anyhow!("mock 不支持角色 {other}")),
         },
     };
-    let result = attach_mock_usage(result, &context);
+    let mut result = attach_mock_usage(result, &context);
+    if spec.role == JOB_ROLE_ACCEPTANCE && result.get("criteria").is_some() {
+        result["contract_id"] = context["contract"]["id"].clone();
+        result["artifact_version"] = context["artifact_version"].clone();
+    }
+    if spec.role == JOB_ROLE_VERIFIER && result.get("pass").is_some() {
+        let pass = result["pass"].as_bool().unwrap_or(false);
+        let criteria = context["task"]["acceptance"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let key = context["task"]["key"].as_str().unwrap_or_default();
+        let path = format!("domo_mock/{key}.txt");
+        let exists = spec.cwd.join(&path).is_file();
+        result["evidence"] = serde_json::json!({"contract_id": context["contract"]["id"],
+            "artifact_version": context["artifact_version"], "artifacts": [path], "risks": [], "human_checks": [],
+            "criteria": criteria.iter().map(|criterion| serde_json::json!({"criterion": criterion,
+                "passed": pass, "checks": [{"method": format!("检查 {path} 是否存在"),
+                    "result": format!("文件存在：{exists}；mock 验收结论：{}", result["reason"])}]})).collect::<Vec<_>>()});
+    }
     let path = spec.job_dir.join("result.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&result)?).await?;
     let stdout = format!("mock job {} finished\n", spec.job_id);
@@ -212,7 +231,11 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return mock_replan_plan(context, reason);
+        let mut result = mock_replan_plan(context, reason);
+        if std::env::var("DOMO_MOCK_ANALYSIS_GOAL_OVERRIDE").is_ok() {
+            result["goal"] = serde_json::json!(proposed_goal);
+        }
+        return result;
     }
     let skip = goal.contains("[skipforce]") || mode == CONFIRM_AUTO;
     let force_plan = std::env::var("DOMO_MOCK_ANALYSIS_FORCE_PLAN").is_ok_and(|value| value == "1");

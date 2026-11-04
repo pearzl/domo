@@ -98,14 +98,14 @@ export function filterProjects(
 }
 
 export function projectNeedsAttention(project: ProjectSummary): boolean {
-  return project.attention !== null;
+  return project.attention_items.length > 0;
 }
 
 export function matchProjectAttention(
   project: ProjectSummary,
   attention: ProjectAttention,
 ): boolean {
-  return project.attention === attention;
+  return project.attention_items.some((item) => item.kind === attention);
 }
 
 export function matchProjectStage(

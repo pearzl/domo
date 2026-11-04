@@ -3,7 +3,6 @@ import { ProjectGoal } from "./ProjectOverview";
 import { CopyButton } from "./CopyButton";
 import { RichContent } from "./RichContent";
 import { StageBadge, StatusBadge, formatTime } from "../ui";
-import { AnimatedNumber } from "./AnimatedNumber";
 
 export interface ProjectHeaderProps {
   detail: ProjectDetail;
@@ -60,7 +59,6 @@ export function ProjectHeader({
         <div>
           <h1>{project.name}</h1>
           <ProjectStatusBar
-            session={`project:${project.id}`}
             stage={project.stage}
             status={project.status}
             taskTotal={activeTasks.length}
@@ -188,15 +186,12 @@ export function ProjectHeader({
 /// 标题下的状态条：阶段、状态、任务进度与当前运行作业数。
 /// 阶段与状态徽标以取值为 key，刷新后状态变化即重挂载并淡入。
 export function ProjectStatusBar({
-  session,
   stage,
   status,
   taskTotal,
   taskCompleted,
   runningJobs,
 }: {
-  /// 项目会话键，数字滚动按它记忆上一次进度与作业数。
-  session: string;
   stage: string;
   status: string | null;
   taskTotal: number;
@@ -223,22 +218,14 @@ export function ProjectStatusBar({
       <span className="project-status-item">
         <span className="meta-label">任务进度</span>
         <span className="project-status-value">
-          <AnimatedNumber
-            session={session}
-            slot="tasks:progress"
-            value={`${taskCompleted}/${taskTotal}`}
-          />
+          {taskCompleted}/{taskTotal}
           <span className="muted"> · {percent}%</span>
         </span>
       </span>
       <span className="project-status-item">
         <span className="meta-label">运行作业</span>
         <span className="project-status-value">
-          <AnimatedNumber
-            session={session}
-            slot="jobs:running"
-            value={`${runningJobs} 个`}
-          />
+          {runningJobs} 个
         </span>
       </span>
     </div>

@@ -273,6 +273,7 @@ def main():
                     ("verifier", verifier["id"]),
                 ],
             )
+            call("PUT", f"/api/projects/{isolation_project}/limits", {"task_attempt_limit": 3})
             call("POST", f"/api/projects/{isolation_project}/confirm", {})
 
             observation = {"max_running": 0, "pairs": set()}
@@ -337,12 +338,14 @@ def main():
 
             t1_jobs = jobs_of(detail, task_id=t1["id"], role="executor")
             t1_jobs.sort(key=lambda job: job["started_at"])
-            retry_job = t1_jobs[1]
             t2_job = jobs_of(detail, task_id=t2["id"], role="executor")[0]
-            assert started_job(retry_job) < datetime.fromisoformat(
+            t3_job = jobs_of(detail, task_id=t3["id"], role="executor")[0]
+            # 全局 FIFO 中 T3 已在等待，重试必须排在它之后；槽位释放
+            # 由 T3 能在 T2 结束前开始来验证，不要求重试插队。
+            assert started_job(t3_job) < datetime.fromisoformat(
                 t2_job["finished_at"]
             ), "卡死作业失败后，槽位没有立即释放"
-            # 只使用单一 Agent 的池子没有下一优先级可用，第三次卡死后进入人工裁决。
+            # 累计尝试上限耗尽后进入人工裁决；其他任务的成功不重置任务累计次数。
             assert any(
                 event["kind"] == "job_stalled" and "卡死" in event["message"]
                 for event in detail["events"]
@@ -361,7 +364,8 @@ def main():
                 ), f"{key} 应在同一 Agent 上正常完成：{jobs}"
 
             agents = {agent["id"]: agent for agent in call("GET", "/api/agents")}
-            assert agents[stall_agent["id"]]["transient_failures"] >= 3, agents[stall_agent["id"]]
+            # Agent 计数是连续故障数，T2/T3 成功会清零；累计三次失败已由作业历史核验。
+            assert agents[stall_agent["id"]]["transient_failures"] >= 1, agents[stall_agent["id"]]
 
             t1_pid_path = os.path.join(str(temp), "t1.pid")
             with open(t1_pid_path, encoding="utf-8") as handle:

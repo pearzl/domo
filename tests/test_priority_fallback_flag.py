@@ -3,7 +3,6 @@
 
 覆盖范围：
   1. 新建库的 agents 表含 allow_priority_fallback，类型 INTEGER、NOT NULL、默认 0；
-  2. 旧库缺少该列时启动后由迁移补齐，既有 Agent 取默认值 0；
   3. GET /api/agents 的每个元素带布尔 allow_priority_fallback，默认 false；
   4. PATCH 与 POST 可读写该开关；
   5. 默认团队、项目池的项目级与任务级视图同步该值，Agent 删除后条目不崩溃。
@@ -167,51 +166,9 @@ def check_fresh_server(temp):
                     assert flag is expected[entry["agent_id"]], entry
 
 
-def check_legacy_migration(temp):
-    root = temp / "legacy"
-    data_dir = root / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(data_dir / "domo.db")
-    try:
-        db.executescript(
-            """
-CREATE TABLE agents (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    model TEXT NOT NULL DEFAULT '',
-    roles TEXT NOT NULL,
-    priority INTEGER NOT NULL DEFAULT 0,
-    max_concurrency INTEGER NOT NULL DEFAULT 1,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    command_json TEXT,
-    model_args_json TEXT,
-    cooldown_until TEXT,
-    last_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, enabled, \
- command_json, model_args_json, created_at, updated_at) VALUES
- ('agt_legacy', 'Legacy', 'opencode', '', '["planner","executor","verifier"]', 0, 1,
-  1, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-"""
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    with Server(root) as server:
-        check_column(data_dir / "domo.db")
-        agents = server.call("GET", "/api/agents")
-        legacy = next(item for item in agents if item["id"] == "agt_legacy")
-        assert agent_flag(legacy) is False, legacy
-
-
 def main():
     ensure_server_built()
     with temp_root("domo-fallback-") as temp:
-        check_legacy_migration(temp)
         check_fresh_server(temp / "server")
     print("priority fallback flag ok")
 

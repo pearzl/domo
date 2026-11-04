@@ -52,17 +52,7 @@ pub(super) async fn handle_verdict(
             .bind(&task.id)
             .execute(&state.db)
             .await?;
-            sqlx::query(
-                "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-                 THEN status ELSE ? END, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND replan_active = 0",
-            )
-            .bind(STATUS_BLOCKED)
-            .bind(&blocked_reason)
-            .bind(now())
-            .bind(&project.id)
-            .execute(&state.db)
-            .await?;
+            // 里程碑 gate 只阻塞当前任务；项目可推进性由调度器统一计算。
             emit(
                 &state.db,
                 &state.bus,
@@ -205,6 +195,19 @@ pub(super) async fn handoff_merge_conflict(
     merge_error: &git::GitError,
     agent: &AgentRow,
 ) -> Result<()> {
+    let _guard = state.schedule_lock.lock().await;
+    handoff_merge_conflict_unlocked(state, project, task, merge_error, Some(&agent.id)).await
+}
+
+/// Caller holds the scheduler lock through Git conflict preparation and the
+/// task transition, including milestone acceptance initiated through the API.
+pub(crate) async fn handoff_merge_conflict_unlocked(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+    merge_error: &git::GitError,
+    agent_id: Option<&str>,
+) -> Result<()> {
     let reason = format!("验收通过但合并失败：{merge_error:#}");
     let worktree = match prepare_task_worktree(state, project, Some(task)).await {
         Ok(path) => path,
@@ -248,18 +251,17 @@ pub(super) async fn handoff_merge_conflict(
          请直接编辑冲突文件消除冲突标记，保留任务需要的改动；DOMO 会负责提交并在解决后重新验收。",
         conflicts.join("、")
     );
-    let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
     let issues = merge_issues(&task.verifier_issues, std::slice::from_ref(&issue));
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, verifier_issues = ?, last_error = ?, agent_id = ?, \
-         waiting_reason = NULL, updated_at = ? WHERE id = ?",
+          human_gate = NULL, waiting_reason = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_EXECUTING)
     .bind(pause.unwrap_or(STATUS_QUEUED))
     .bind(&issues)
     .bind(&issue)
-    .bind(&agent.id)
+    .bind(agent_id)
     .bind(now())
     .bind(&task.id)
     .execute(&state.db)
@@ -280,15 +282,14 @@ pub(super) async fn handoff_merge_conflict(
     Ok(())
 }
 
-pub(super) async fn block_task_after_merge_failure(
+async fn block_task_after_merge_failure(
     state: &AppState,
     project: &ProjectRow,
     task: &TaskRow,
     reason: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
     sqlx::query(
-        "UPDATE tasks SET stage = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, last_error = ?, updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_VERIFYING)
     .bind(STATUS_BLOCKED)
@@ -330,7 +331,15 @@ pub(super) async fn handle_verifier_failure(
         || (!kind.is_agent_failure() && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
-        && !has_usable_agent(state, &project.id, ROLE_VERIFIER, Some(&agent.id)).await?
+        && kind == FailureKind::Permanent
+        && !has_usable_agent(
+            state,
+            &project.id,
+            ROLE_VERIFIER,
+            Some(&agent.id),
+            Some(task),
+        )
+        .await?
     {
         blocked = true;
     }

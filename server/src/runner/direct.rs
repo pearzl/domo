@@ -103,7 +103,12 @@ pub(super) async fn handle_direct_failure(
              WHERE id = ?",
         )
         .bind(failure.switch)
-        .bind(failure.switch.then_some(ROLE_PLANNER))
+        .bind(
+            failure
+                .switch
+                .then(|| agent.map(|agent| agent.id.as_str()))
+                .flatten(),
+        )
         .bind(failure.switch)
         .bind(failure.switch.then_some(ROLE_PLANNER))
         .bind(now())
@@ -123,18 +128,17 @@ pub(super) async fn handle_direct_failure(
     }
     sqlx::query(
         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-         THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, proposal = NULL, \
-         confirmed_at = NULL, \
+         THEN status ELSE ? END, blocked_reason = ?, completion_mode = ?, \
          avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \
          avoid_agent_role = CASE WHEN ? THEN ? ELSE avoid_agent_role END, \
          updated_at = ? WHERE id = ?",
     )
-    .bind(STAGE_ANALYSIS)
+    .bind(STAGE_EXECUTING)
     .bind(failure.status())
     .bind(&failure.blocked_reason)
-    .bind(COMPLETION_TASKS)
+    .bind(COMPLETION_DIRECT)
     .bind(failure.switch)
-    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(failure.switch.then(|| agent.map(|agent| agent.id.as_str())).flatten())
     .bind(failure.switch)
     .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())

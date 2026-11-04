@@ -25,6 +25,7 @@ const STDERR_MARKER = "STDERR_MARKER_d4e5f6";
 
 function job(index: number): JobSummary & { result?: string | null } {
   return {
+    execution_job_id: null,
     id: `job-${index}`,
     project_id: "p1",
     task_id: null,

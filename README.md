@@ -27,8 +27,6 @@ cd web && npm install && npm run build && cd ..
 cd server && cargo run --release
 ```
 
-Windows 使用同样的命令。在 Windows 的 PowerShell、cmd 或 Git Bash 中运行会启动 Windows 版后端，可调用 Windows 上安装的 Agent；在 WSL 中运行的是 Linux 版后端，只能使用 WSL 内的可执行文件。Windows 数据默认保存在 `%USERPROFILE%\.domo`，可用 `DOMO_DATA_ROOT`、`DOMO_WORKSPACE_ROOT`、`DOMO_LOG_ROOT` 覆盖。npm 安装的 `opencode`、`codebuddy` 等 `.cmd` 入口会被自动解析为实际可执行文件；命令行工具不在 `PATH` 中时用 `DOMO_*_BIN` 指向 `.exe` 路径。
-
 
 ## 测试
 
@@ -49,7 +47,8 @@ Windows 使用 `python tests/run.py`。单个用例可直接运行，例如 `pyt
 - **团队分工**：团队由三类角色组成。**规划者**负责项目分析和任务拆解，**执行者**负责执行，**验收者**负责核查。
 - **动态调度**：可根据任务不同使用不同的 Agent 和模型，支持按优先级的顺序调度、错误退避和限额保护。
 - **审计与回溯**：整个执行过程，包括每次对 Agent 调用的输入与输出有完整记录。
-- **自备 Agent**：内置支持 OpenCode、Codex CLI、WorkBuddy（CodeBuddy Code CLI，可执行文件 `codebuddy`）和自定义 CLI 四类 Agent。前三类内置默认命令，只需填写名称与模型；自定义 CLI 通过命令模板描述参数，模板占位符包括 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}`，未写 `{prompt}` 时提示词从 stdin 传入。可执行文件不在 `PATH` 中时用 `DOMO_CODEX_BIN`、`DOMO_WORKBUDDY_BIN` 指向文件路径，例如 `DOMO_CODEX_BIN=/opt/bin/codex DOMO_WORKBUDDY_BIN=/opt/bin/codebuddy cd server && cargo run --release`。
+- **消耗边界**：可设置项目费用预算
+- **自备 Agent**：调用用户已配置的Agent，目前支持 OpenCode、Codex CLI、CodeBuddy和自定义 CLI 四类 Agent。
 - **Git 软件交付**：通过 worktree 进行隔离，支持同一工程下多个项目并行，并提供任务分支与项目交付分支的合入能力。
 - **完全本地**：数据、日志和产物都保存在本地。
 

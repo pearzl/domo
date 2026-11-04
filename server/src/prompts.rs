@@ -226,7 +226,7 @@ fn analysis_prompt(data: &PromptData) -> String {
         if auto {
             "当前为自动确认模式：方案足够明确时可以把 skip_confirmation 设为 true；重规划草稿生成后由 DOMO 直接应用。"
         } else {
-            "当前为人工确认模式：skip_confirmation 必须为 false，DOMO 会等待用户确认方案后开始执行；重规划草稿不受此限制，生成后自动应用。"
+            "当前为人工确认模式：skip_confirmation 必须为 false，首次分析和重规划都必须等待用户确认方案后开始执行。"
         },
         conversation_history(data),
         result_rules(
@@ -326,7 +326,7 @@ fn replan_section(data: &PromptData) -> String {
         "\n## 重规划上下文\n\
          重规划原因（来源：{source}）：\n{reason}\n\
          \n完整保留的交付任务链（不要重新规划、不要重复实现）：\n{completed}\n\
-         \n不保留任务（未完成任务及其完整派生链；其中已完成子任务也不属于交付分支保留成果）：\n{canceled}\n\
+         \n不保留任务（未完成任务；已经独立验收并交付的子任务仍保留）：\n{canceled}\n\
          \n## 重规划约束\n\
          - 必须沿用当前项目目标，重规划不得修改目标；只有用户主动提交新目标才能改变它；\n\
          - 新计划只包含仍需完成的工作，不要重复已完成任务；\n\
@@ -387,14 +387,14 @@ fn executor_prompt(data: &PromptData) -> String {
     let derivation = match &data.derived_from {
         Some(parent) => format!(
             "\n## 派生任务约束\n\
-             本任务是从父任务 {} {} 派生的子任务。完成工作后跳过验收阶段，{}。\n\
+             本任务是从父任务 {} {} 派生的子任务。完成工作后接受独立验收，里程碑还需人工验收，{}。\n\
              禁止再次派生新的子任务；如果任务仍然过于复杂，请在结果中说明失败原因或请求重新规划。\n",
             parent.key,
             parent.title,
             if plain_workspace(data) {
                 "产物直接保留在普通工作区"
             } else {
-                "由 DOMO 直接提交并合入父任务分支"
+                "验收通过后由 DOMO 合入项目交付分支"
             }
         ),
         None => String::new(),
@@ -727,12 +727,7 @@ fn summary_prompt(data: &PromptData) -> String {
         .filter(|message| message.role == REPORT_MESSAGE_ROLE)
         .collect();
     let feedback = if reviews.is_empty() {
-        // 兼容只保存了最新一条意见的历史项目。
-        data.report_feedback
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .map(|value| format!("\n## 用户对上一版报告的意见\n{value}\n"))
-            .unwrap_or_default()
+        String::new()
     } else {
         let items = reviews
             .iter()
@@ -997,7 +992,7 @@ mod tests {
         });
         let child_prompt = render(&child);
         assert!(child_prompt.contains("## 派生任务约束"), "缺少派生约束标题");
-        assert!(child_prompt.contains("跳过验收阶段"), "缺少跳过验收说明");
+        assert!(child_prompt.contains("接受独立验收"), "缺少独立验收说明");
         assert!(
             child_prompt.contains("禁止再次派生新的子任务"),
             "缺少禁止再次派生说明"

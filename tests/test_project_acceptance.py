@@ -152,6 +152,7 @@ def test_acceptance_loop_blocks_for_human(temp, repo):
             detail = call("GET", f"/api/projects/{project_id}")
             if (
                 detail["project"]["stage"] == "analysis"
+                and detail["project"]["confirm_mode"] == "manual"
                 and (detail.get("proposal") or {}).get("replan_impact")
                 and not any(
                     job["role"] == "analysis" and job["status"] == "running"

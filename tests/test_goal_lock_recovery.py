@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""direct 失败与普通重分析不能解除已确认目标锁。"""
+"""direct 协议失败保持执行阶段和目标锁，重规划不能暗改目标。"""
 
 from harness import Server, ensure_server_built, init_repo, temp_root, wait_for
 
@@ -54,20 +54,18 @@ def main():
                     )
 
                 detail = wait(
-                    lambda item: item["project"]["stage"] == "analysis"
-                    and item["project"]["confirmed_at"] is None
+                    lambda item: item["project"]["stage"] == "executing"
+                    and item["project"]["status"] == "blocked"
+                    and item["project"]["confirmed_at"] is not None
                     and any(job["role"] == "direct" for job in item["jobs"]),
-                    "direct 失败后回到分析",
+                    "direct 协议失败保持执行阶段",
                 )
                 assert detail["project"]["goal"] == goal, detail["project"]
                 server.env.pop("DOMO_MOCK_DIRECT_FAIL_GOAL")
                 server.env["DOMO_MOCK_ANALYSIS_GOAL_OVERRIDE"] = "普通分析绕过目标"
                 server.restart()
-                server.call(
-                    "POST",
-                    f"/api/projects/{pid}/analysis/messages",
-                    {"message": "普通消息不能修改目标", "confirm_mode": mode},
-                )
+                server.call("POST", f"/api/projects/{pid}/replan", {"reason": "验证目标锁"})
+                server.call("PATCH", f"/api/projects/{pid}/analysis/policy", {"mode": mode})
                 detail = wait(
                     lambda item: item.get("proposal") is None
                     and any(event["kind"] == "plan_invalid" for event in item["events"]),
@@ -105,8 +103,9 @@ def main():
                 wait_for(
                     lambda: (
                         lambda detail: detail
-                        if detail["project"]["stage"] == "analysis"
-                        and detail["project"]["confirmed_at"] is None
+                        if detail["project"]["stage"] == "executing"
+                        and detail["project"]["status"] == "blocked"
+                        and detail["project"]["confirmed_at"] is not None
                         and any(job["role"] == "direct" for job in detail["jobs"])
                         else None
                     )(server.call("GET", f"/api/projects/{pid}")),
@@ -117,11 +116,8 @@ def main():
                 if force_plan:
                     server.env["DOMO_MOCK_ANALYSIS_FORCE_PLAN"] = "1"
                 server.restart()
-                server.call(
-                    "POST",
-                    f"/api/projects/{pid}/analysis/messages",
-                    {"message": "普通分析在途", "confirm_mode": "manual"},
-                )
+                server.call("POST", f"/api/projects/{pid}/replan", {"reason": "验证在途分析"})
+                server.call("PATCH", f"/api/projects/{pid}/analysis/policy", {"mode": "manual"})
                 wait_for(
                     lambda: (
                         lambda detail: detail

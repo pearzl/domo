@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import type { AuditEvent, JobSummary, Task } from "../types";
 import { api, errorMessage } from "../api";
 import { RichContent } from "./RichContent";
+import { CONFIG_KINDS, KEY_JOB_KINDS, JOB_KINDS, isKeyEventKind } from "../presentation/events";
+export { isKeyEventKind } from "../presentation/events";
 import {
   Badge,
   JOB_STATUS_LABELS,
@@ -25,45 +27,8 @@ const FILTERS: Array<{ key: EventFilter; label: string }> = [
 
 const PREVIEW_CHARS = 400;
 
-const JOB_KINDS = new Set([
-  "job_queued",
-  "job_started",
-  "job_continued",
-  "job_finished",
-  "job_failed",
-  "job_stalled",
-  "job_stall_recovered",
-  "job_recovered",
-]);
-
-/// 配置类事件在“关键”视图里属于噪音，只保留在“配置”视图。
-const CONFIG_KINDS = new Set([
-  "project_agents_updated",
-  "task_agents_updated",
-  "default_team_updated",
-  "agent_usage_reset",
-  "analysis_policy_updated",
-  "agent_unavailable",
-]);
-
-/// “关键”视图里作业只保留失败、卡死与恢复；正常排队、开始、结束留在“作业”视图。
-/// 与 presentation/execution.ts 的关键事件集合保持一致。
-const KEY_JOB_KINDS = new Set([
-  "job_failed",
-  "job_stalled",
-  "job_recovered",
-  "job_stall_recovered",
-]);
-
 /// 连续出现的同类配置事件折叠成一组，展开后仍逐条可读。
-const GROUP_KINDS = new Set([
-  "project_agents_updated",
-  "task_agents_updated",
-  "default_team_updated",
-  "agent_usage_reset",
-  "analysis_policy_updated",
-  "agent_unavailable",
-]);
+const GROUP_KINDS = CONFIG_KINDS;
 
 const KIND_LABELS: Record<string, string> = {
   goal_confirmed: "目标已确认",
@@ -237,12 +202,6 @@ function matchesFilter(kind: string, filter: EventFilter): boolean {
   if (filter === "jobs") return isJobKind(kind);
   if (filter === "config") return isConfigKind(kind);
   return isKeyEventKind(kind);
-}
-
-export function isKeyEventKind(kind: string): boolean {
-  if (isConfigKind(kind)) return false;
-  if (isJobKind(kind)) return KEY_JOB_KINDS.has(kind);
-  return true;
 }
 
 /// 关键视图按作业整体保留：某个作业出现失败、卡死或恢复时带上它的全部阶段。

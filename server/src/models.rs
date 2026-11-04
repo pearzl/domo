@@ -355,6 +355,7 @@ pub struct AnalysisProposal {
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct ProjectRow {
+    pub contract_id: Option<i64>,
     pub id: String,
     pub name: String,
     pub goal: String,
@@ -429,6 +430,7 @@ impl ProjectRow {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRow {
+    pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
     pub seq: i64,
@@ -443,8 +445,6 @@ pub struct TaskRow {
     pub human_gate: Option<String>,
     pub forced_agent_id: Option<String>,
     pub forced_agent_role: Option<String>,
-    pub executor_agent_id: Option<String>,
-    pub verifier_agent_id: Option<String>,
     pub stage: String,
     pub status: Option<String>,
     pub agent_id: Option<String>,
@@ -470,6 +470,8 @@ pub struct TaskRow {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct JobRow {
+    pub execution_job_id: Option<String>,
+    pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
     pub task_id: Option<String>,
@@ -517,6 +519,7 @@ pub struct EventRow {
     pub job_id: Option<String>,
     pub kind: String,
     pub message: String,
+    pub payload: String,
     pub created_at: String,
 }
 
@@ -531,6 +534,7 @@ pub struct EventView {
     pub job_id: Option<String>,
     pub kind: String,
     pub message: String,
+    pub payload: serde_json::Value,
     pub message_length: usize,
     pub message_truncated: bool,
     pub created_at: String,
@@ -546,6 +550,7 @@ impl EventView {
             job_id: row.job_id,
             kind: row.kind,
             message: preview.message,
+            payload: serde_json::from_str(&row.payload).unwrap_or(serde_json::Value::Null),
             message_length: preview.message_length,
             message_truncated: preview.message_truncated,
             created_at: row.created_at,
@@ -562,6 +567,7 @@ impl EventView {
             job_id: row.job_id,
             kind: row.kind,
             message: row.message,
+            payload: serde_json::from_str(&row.payload).unwrap_or(serde_json::Value::Null),
             message_length,
             message_truncated: false,
             created_at: row.created_at,
@@ -588,7 +594,21 @@ pub struct ProjectAttentionTask {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AttentionItem {
+    pub id: String,
+    pub kind: ProjectAttention,
+    pub task: Option<ProjectAttentionTask>,
+    pub reason: Option<String>,
+    pub since: String,
+    pub affected_tasks: usize,
+    pub blocks_milestone: bool,
+    pub blocks_summary: bool,
+    pub project_advancing: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
+    pub attention_items: Vec<AttentionItem>,
     pub id: String,
     pub name: String,
     pub goal: String,
@@ -599,8 +619,6 @@ pub struct ProjectSummary {
     pub stage: String,
     pub status: Option<String>,
     pub blocked_reason: Option<String>,
-    pub attention: Option<ProjectAttention>,
-    pub attention_task: Option<ProjectAttentionTask>,
     pub task_total: i64,
     pub task_completed: i64,
     pub replan_reason: Option<String>,
@@ -615,6 +633,7 @@ pub struct ProjectSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
+    pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
     pub seq: i64,
@@ -630,8 +649,6 @@ pub struct TaskView {
     pub human_gate: Option<String>,
     pub forced_agent_id: Option<String>,
     pub forced_agent_role: Option<String>,
-    pub executor_agent_id: Option<String>,
-    pub verifier_agent_id: Option<String>,
     pub stage: String,
     pub status: Option<String>,
     pub agent_id: Option<String>,
@@ -654,6 +671,7 @@ pub struct TaskView {
 impl TaskView {
     pub fn from_row(row: TaskRow) -> Self {
         Self {
+            contract_id: row.contract_id,
             id: row.id,
             project_id: row.project_id,
             seq: row.seq,
@@ -669,8 +687,6 @@ impl TaskView {
             human_gate: row.human_gate,
             forced_agent_id: row.forced_agent_id,
             forced_agent_role: row.forced_agent_role,
-            executor_agent_id: row.executor_agent_id,
-            verifier_agent_id: row.verifier_agent_id,
             stage: row.stage,
             status: row.status,
             agent_id: row.agent_id,
@@ -694,6 +710,8 @@ impl TaskView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobSummary {
+    pub execution_job_id: Option<String>,
+    pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
     pub task_id: Option<String>,
@@ -721,6 +739,8 @@ pub struct JobSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobView {
+    pub execution_job_id: Option<String>,
+    pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
     pub task_id: Option<String>,
@@ -753,6 +773,8 @@ pub struct JobView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectDetail {
+    pub attention_items: Vec<AttentionItem>,
+    pub delivery: serde_json::Value,
     pub project: ProjectRow,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
@@ -792,7 +814,10 @@ pub struct AnalysisPolicyRequest {
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct ConfirmAnalysisRequest {}
+pub struct ConfirmAnalysisRequest {
+    /// 界面确认时提交所审查的完整草稿，用于拒绝过期确认。
+    pub proposal: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {
@@ -853,6 +878,8 @@ pub struct MilestoneRejectRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ArbitrationRequest {
+    #[serde(default)]
+    pub risk_confirmed: bool,
     pub action: String,
     pub agent_id: Option<String>,
     #[serde(alias = "message", alias = "content", alias = "text")]
@@ -949,33 +976,6 @@ pub struct TaskQueueRequest {
     pub direction: Option<String>,
     #[serde(default)]
     pub position: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TaskAgentsRequest {
-    #[serde(default, deserialize_with = "deserialize_optional_agent")]
-    pub executor_agent_id: Option<Option<String>>,
-    #[serde(default, deserialize_with = "deserialize_optional_agent")]
-    pub verifier_agent_id: Option<Option<String>>,
-}
-
-/// Missing fields leave the current override unchanged; explicit null or an
-/// empty string clears it.
-pub fn deserialize_optional_agent<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<String>::deserialize(deserializer)?;
-    Ok(Some(value.and_then(|text| {
-        let text = text.trim();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text.to_string())
-        }
-    })))
 }
 
 /// Distinguishes a missing configuration field from an explicit null so a PATCH

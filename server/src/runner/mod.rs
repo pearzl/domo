@@ -24,6 +24,7 @@ mod direct;
 mod executor;
 mod failure;
 mod lifecycle;
+mod merge;
 mod project;
 mod prompt;
 mod verifier;
@@ -41,19 +42,19 @@ use self::common::{
 };
 use self::direct::{handle_direct_failure, handle_direct_success};
 use self::executor::{
-    handle_derived_task_success, handle_executor_derive, handle_executor_failure,
-    handle_executor_success, validate_derive_request,
+    handle_executor_derive, handle_executor_failure, handle_executor_success,
+    validate_derive_request,
 };
 use self::lifecycle::{fail_runtime, finish_job, mark_archived_job, mark_canceled_job};
 use self::project::{
     handle_acceptance_failure, handle_project_acceptance, handle_report, handle_summary_failure,
 };
 use self::prompt::{build_context, build_prompt_data};
+pub(crate) use self::verifier::handoff_merge_conflict_unlocked;
 use self::verifier::{handle_verdict, handle_verifier_failure};
 use self::worktree::{ensure_worktree_root, prepare_task_worktree, prepare_verify_worktree};
 
-/// A clean run without a result file gets up to five continuation rounds in the
-/// same job before the protocol failure is settled.
+/// Missing or invalid results get up to five correction rounds in the same job.
 const MAX_CONTINUATIONS: usize = 5;
 /// A timeout may resume the same session with a fresh run window. The total
 /// job time stays bounded by this count plus the initial run.
@@ -76,7 +77,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if job.status != JOB_STATUS_RUNNING {
         return Ok(());
     }
-    let project = load_project(&state.db, &job.project_id)
+    if job.role == "merge_conflict" {
+        return merge::run(state, &job).await;
+    }
+    let mut project = load_project(&state.db, &job.project_id)
         .await?
         .ok_or_else(|| anyhow!("项目不存在"))?;
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
@@ -94,6 +98,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     let Some(agent) = agent else {
         return Err(anyhow!("作业没有关联可用 Agent"));
     };
+    let contract = crate::delivery::job_contract(&state.db, &job.id).await?;
+    if job.role != JOB_ROLE_ANALYSIS {
+        if let Some(goal) = contract["goal"].as_str() {
+            project.goal = goal.to_string();
+        }
+        if !contract["proposal"].is_null() {
+            project.proposal = Some(contract["proposal"].to_string());
+        }
+    }
 
     let job_dir = paths::job_dir(&PathBuf::from(&project.workspace), &job.id);
     fs::create_dir_all(&job_dir).await?;
@@ -120,13 +133,38 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         PathBuf::from(&project.repo_path)
     };
     ensure_worktree_root(&cwd, project.is_git()).await?;
+    if let Err(error) = crate::resources::workspace_preflight(state, &project, &job).await {
+        let reason = format!("工作区检查未通过：{error:#}");
+        crate::resources::block_workspace(state, &project, &job, &reason).await?;
+        return Ok(());
+    }
     if job.role == JOB_ROLE_DIRECT && project.is_git() {
         let _guard = state.git_lock.lock().await;
         git::reset_hard(&cwd).await?;
     }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
-    let full_prompt = prompts::render(&prompt_data);
+    let artifact_version = if project.is_git() {
+        serde_json::json!(git::commit_of(&cwd, "HEAD").await?)
+    } else {
+        serde_json::Value::Null
+    };
+    let mut full_prompt = format!(
+        "{}\n\n## 交付契约快照\n{}\n",
+        prompts::render(&prompt_data),
+        contract
+    );
+    let shared =
+        crate::resources::shared_snapshot(state, &project, Some(&job), task.as_ref()).await?;
+    full_prompt.push_str(&format!("\n## 项目共享信息（固定输入版本）\n{}\n只加载相关有效记录；运行中可通过给出的只读 API 按需读取其他主题或版本，不因新记录自动改变本轮输入。结果 JSON 可提交 shared_updates 数组，每项包含 topic、body、scope（任务 key 数组，空数组为全项目）、evidence（非空证据引用数组）、supersedes（被替代记录 ID）、conflicts（存在结论分歧的记录 ID）和 reason（替代/分歧原因及影响）。记录按主题追加到独立仓库，不能修改交付契约。不得静默覆盖结论；分歧保留双方依据，优先由相关任务核验，影响方案或契约时才请求规划者。记录提交无需规划者逐条审批。\n", shared));
+    let artifacts = crate::resources::artifact_snapshot(state, &project).await?;
+    full_prompt.push_str(&format!("\n## 输入与产物边界\n{}\n普通工作区必须保留原始输入，默认把新交付物写到 outputs/ 等独立位置。只能修改自己任务的产物以及 permissions 中明确授权给当前任务的路径，不能覆盖其他历史产物。需要未授权原地修改时报告失败并请求用户在产物区域登记修改对象及理由。若输入或产物外部变化或前次中断，必须先检查现场，不得把停止进程当作文件回滚。\n", artifacts));
+    if job.role == JOB_ROLE_VERIFIER {
+        full_prompt.push_str(&format!("\n## 必填验收证据\n结果必须含 evidence 对象：contract_id={}，artifact_version={}，artifacts 为已检查的产物路径数组，risks 和 human_checks 为未覆盖风险及人工检查项数组。criteria 按任务验收标准的原文与顺序逐项填写，每项包含 criterion、passed 布尔值和非空 checks 数组；每个检查包含 method（实际运行命令或检查方法）和 result（实际结果，不得编造）。无产物或风险时数组可为空。普通工作区不提供历史内容回溯，检查时间由服务端记录。\n", contract["id"], artifact_version));
+    }
+    if job.role == JOB_ROLE_ACCEPTANCE {
+        full_prompt.push_str(&format!("\n项目验收结果必须包含 contract_id={} 和 artifact_version={}。criteria 必须按当前契约验收标准的原文与顺序逐项填写；判定 met 的条目必须附实际检查方法及结果，不得省略证据或只用任务已通过代替集成检查。\n", contract["id"], artifact_version));
+    }
     let resume = job.resume != 0;
     let prompt = if resume {
         prompts::continuation(&prompt_data)
@@ -137,7 +175,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if resume {
         fs::write(job_dir.join("resume.md"), &prompt).await?;
     }
-    let context = build_context(
+    let mut context = build_context(
         &project,
         task.as_ref(),
         &job,
@@ -146,6 +184,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         &prompt_data,
         &agent,
     );
+    context["contract"] = contract.clone();
+    context["artifact_version"] = artifact_version.clone();
+    context["shared"] = shared;
+    context["artifacts"] = artifacts;
     fs::write(
         job_dir.join("context.json"),
         serde_json::to_vec_pretty(&context)?,
@@ -266,8 +308,64 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             }
             break;
         }
-        let missing_result = fs::read_to_string(&result_path).await.ok().is_none();
-        if !missing_result
+        let current_result = fs::read_to_string(&result_path).await.ok();
+        let mut protocol_error = match current_result.as_deref() {
+            None => Some("Agent 没有写 result.json".to_string()),
+            Some(raw) if result_is_failure(&job.role, raw) => None,
+            Some(raw) => match parse_result(&job.role, raw) {
+                Err(error) => Some(error),
+                Ok(_) if job.role == JOB_ROLE_VERIFIER => crate::delivery::validate_evidence(
+                    raw,
+                    &contract,
+                    &prompt_data
+                        .task
+                        .as_ref()
+                        .map(|task| task.acceptance.clone())
+                        .unwrap_or_default(),
+                    &artifact_version,
+                )
+                .err(),
+                Ok(_) if job.role == JOB_ROLE_ACCEPTANCE => {
+                    crate::delivery::validate_project_evidence(
+                        raw,
+                        &contract,
+                        &prompt_data.acceptance_criteria,
+                        &artifact_version,
+                    )
+                    .err()
+                }
+                Ok(_) => None,
+            },
+        };
+        if protocol_error.is_none() {
+            if let Some(raw) = current_result.as_deref() {
+                if let Some(value) =
+                    crate::domain::extract_json(raw).and_then(|v| v.get("shared_updates").cloned())
+                {
+                    match serde_json::from_value::<Vec<crate::resources::SharedInput>>(value) {
+                        Ok(records) => {
+                            if let Err(error) = crate::resources::publish(
+                                state,
+                                &project,
+                                job.task_id.as_deref(),
+                                Some(&job.id),
+                                &records,
+                            )
+                            .await
+                            {
+                                protocol_error = Some(format!(
+                                    "共享记录提交冲突，请提交者修正后重试：{error:#}"
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            protocol_error = Some(format!("shared_updates 格式错误：{error}"))
+                        }
+                    }
+                }
+            }
+        }
+        if protocol_error.is_none()
             || continuations >= MAX_CONTINUATIONS
             || !continuation_allowed(state, &job, &project, task.as_ref()).await?
         {
@@ -277,7 +375,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         if remaining.is_zero() {
             break;
         }
-        let follow_up = prompts::continuation(&prompt_data);
+        let follow_up = format!(
+            "{}\n请修正结果协议错误：{}\n请覆盖结果文件并提交完整有效结果。\n",
+            prompts::continuation(&prompt_data),
+            protocol_error.unwrap_or_default()
+        );
         fs::write(
             job_dir.join(format!("continuation-{}.md", continuations + 1)),
             &follow_up,
@@ -297,7 +399,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(&job.id),
             "job_continued",
             format!(
-                "{}作业正常结束但没有写结果文件，已追加第 {} 轮继续提示",
+                "{}作业结果协议不完整，已追加第 {} 轮继续提示",
                 role_label(&job.role),
                 continuations + 1
             ),
@@ -412,7 +514,14 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Some(if result_is_failure(&job.role, raw) {
                     parse_error
                 } else {
-                    format!("结果协议不合法: {parse_error}")
+                    format!(
+                        "结果协议不合法{}: {parse_error}",
+                        if continuations >= MAX_CONTINUATIONS {
+                            "，协议继续次数用尽"
+                        } else {
+                            ""
+                        }
+                    )
                 }),
             ),
         }
@@ -431,6 +540,67 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     } else {
         None
     };
+    if status == JOB_STATUS_SUCCEEDED {
+        if let Some(value) = result_text
+            .as_deref()
+            .and_then(crate::domain::extract_json)
+            .and_then(|v| v.get("shared_updates").cloned())
+        {
+            let outcome = match serde_json::from_value::<Vec<crate::resources::SharedInput>>(value)
+            {
+                Ok(records) => {
+                    crate::resources::publish(
+                        state,
+                        &project,
+                        job.task_id.as_deref(),
+                        Some(&job.id),
+                        &records,
+                    )
+                    .await
+                }
+                Err(error) => Err(error.into()),
+            };
+            if let Err(reason) = outcome {
+                status = JOB_STATUS_FAILED;
+                parsed = None;
+                error = Some(format!(
+                    "结果协议不合法，协议继续次数用尽：共享记录提交失败 {reason:#}"
+                ));
+            }
+        }
+    }
+    if status == JOB_STATUS_SUCCEEDED && job.role == JOB_ROLE_VERIFIER {
+        if let Some(raw) = result_text.as_deref() {
+            if let Err(reason) = crate::delivery::validate_evidence(
+                raw,
+                &contract,
+                &prompt_data
+                    .task
+                    .as_ref()
+                    .map(|task| task.acceptance.clone())
+                    .unwrap_or_default(),
+                &artifact_version,
+            ) {
+                status = JOB_STATUS_FAILED;
+                parsed = None;
+                error = Some(format!("结果协议不合法，协议继续次数用尽：{reason}"));
+            }
+        }
+    }
+    if status == JOB_STATUS_SUCCEEDED && job.role == JOB_ROLE_ACCEPTANCE {
+        if let Some(raw) = result_text.as_deref() {
+            if let Err(reason) = crate::delivery::validate_project_evidence(
+                raw,
+                &contract,
+                &prompt_data.acceptance_criteria,
+                &artifact_version,
+            ) {
+                status = JOB_STATUS_FAILED;
+                parsed = None;
+                error = Some(format!("结果协议不合法，协议继续次数用尽：{reason}"));
+            }
+        }
+    }
     if job.role == JOB_ROLE_ANALYSIS {
         // A failed analysis is settled only after the failure handling decides
         // whether to switch agents; otherwise the job stays running and the
@@ -526,6 +696,29 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 }
                 return Ok(());
             }
+            if let Err(error) =
+                crate::resources::workspace_settle(state, &project, &job, &cwd, &artifact_version)
+                    .await
+            {
+                finish_job(
+                    state,
+                    &job,
+                    JOB_STATUS_FAILED,
+                    result_text,
+                    &run,
+                    Some(&format!("工作区交付检查未通过：{error:#}")),
+                    None,
+                )
+                .await?;
+                crate::resources::block_workspace(
+                    state,
+                    &project,
+                    &job,
+                    &format!("工作区交付检查未通过：{error:#}"),
+                )
+                .await?;
+                return Ok(());
+            }
             let transition = handle_direct_success(state, &project, &summary, &report).await;
             let finished = finish_job(
                 state,
@@ -596,6 +789,34 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     }
                     return Ok(());
                 }
+                if let Err(error) = crate::resources::workspace_settle(
+                    state,
+                    &project,
+                    &job,
+                    &cwd,
+                    &artifact_version,
+                )
+                .await
+                {
+                    finish_job(
+                        state,
+                        &job,
+                        JOB_STATUS_FAILED,
+                        result_text,
+                        &run,
+                        Some(&format!("工作区交付检查未通过：{error:#}")),
+                        None,
+                    )
+                    .await?;
+                    crate::resources::block_workspace(
+                        state,
+                        &project,
+                        &job,
+                        &format!("工作区交付检查未通过：{error:#}"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 let transition =
                     handle_executor_derive(state, &project, task, &summary, &tasks, &agent).await;
                 let finished = finish_job(
@@ -647,11 +868,36 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     }
                     return Ok(());
                 }
-                let transition = if task.parent_id.is_some() {
-                    handle_derived_task_success(state, &project, task, &summary, &agent).await
-                } else {
-                    handle_executor_success(state, &project, task, &summary, &agent).await
-                };
+                if let Err(error) = crate::resources::workspace_settle(
+                    state,
+                    &project,
+                    &job,
+                    &cwd,
+                    &artifact_version,
+                )
+                .await
+                {
+                    finish_job(
+                        state,
+                        &job,
+                        JOB_STATUS_FAILED,
+                        result_text,
+                        &run,
+                        Some(&format!("工作区交付检查未通过：{error:#}")),
+                        None,
+                    )
+                    .await?;
+                    crate::resources::block_workspace(
+                        state,
+                        &project,
+                        &job,
+                        &format!("工作区交付检查未通过：{error:#}"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let transition =
+                    handle_executor_success(state, &project, task, &summary, &agent).await;
                 let finished = finish_job(
                     state,
                     &job,

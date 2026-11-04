@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::models::{
     default_team_row_to_pool, parse_string_list, string_list_json, AgentRow, DefaultTeamRow,
     ProjectAgentEntry, ProjectAgentPool, ProjectAgentRow, ProjectRolePool, TaskAgentPool,
-    TaskAgentRow, TaskRow, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
+    TaskAgentRow, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
 };
 use crate::usage::UsageError;
 
@@ -24,8 +24,8 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Usage(#[from] UsageError),
-    #[error("Agent {agent_id} 不存在")]
-    AgentNotFound { agent_id: String },
+    #[error("数据库结构不受支持；请使用空数据目录，不支持历史数据库迁移")]
+    UnsupportedSchema,
 }
 
 pub type DbResult<T> = std::result::Result<T, DbError>;
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
+    contract_id INTEGER,
+    blocked_kind TEXT,
     name TEXT NOT NULL,
     goal TEXT NOT NULL,
     repo_path TEXT NOT NULL,
@@ -128,13 +130,6 @@ CREATE TABLE IF NOT EXISTS task_agents (
 CREATE INDEX IF NOT EXISTS idx_task_agents_role
     ON task_agents(task_id, role, priority);
 
-CREATE TABLE IF NOT EXISTS task_agent_roles (
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    initialized_at TEXT NOT NULL,
-    PRIMARY KEY (task_id, role)
-);
-
 CREATE TABLE IF NOT EXISTS default_team (
     role TEXT NOT NULL,
     agent_id TEXT NOT NULL,
@@ -148,6 +143,7 @@ CREATE TABLE IF NOT EXISTS default_team (
 
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
+    contract_id INTEGER,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     queue_order INTEGER NOT NULL DEFAULT 0,
@@ -161,8 +157,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     human_gate TEXT,
     forced_agent_id TEXT,
     forced_agent_role TEXT,
-    executor_agent_id TEXT,
-    verifier_agent_id TEXT,
     stage TEXT NOT NULL,
     status TEXT,
     agent_id TEXT,
@@ -186,11 +180,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, seq);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(project_id, queue_order, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_key ON tasks(project_id, key)
     WHERE COALESCE(status, '') != 'canceled';
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
+    contract_id INTEGER,
+    execution_job_id TEXT REFERENCES jobs(id),
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -238,6 +236,7 @@ CREATE TABLE IF NOT EXISTS events (
     task_id TEXT,
     job_id TEXT,
     kind TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
     message TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -269,335 +268,26 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
         .max_connections(5)
         .connect_with(options)
         .await?;
-    sqlx::raw_sql(SCHEMA).execute(&pool).await?;
-    migrate(&pool).await?;
-    seed_defaults(&pool).await?;
-    Ok(pool)
-}
-
-async fn migrate(pool: &SqlitePool) -> DbResult<()> {
-    ensure_column(pool, "projects", "replan_reason", "TEXT").await?;
-    ensure_column(pool, "projects", "replan_source", "TEXT").await?;
-    ensure_column(pool, "projects", "replan_requested_at", "TEXT").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "replan_active",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(pool, "projects", "replan_proposal", "TEXT").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "replan_generation",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(pool, "projects", "replan_previous_stage", "TEXT").await?;
-    ensure_column(pool, "projects", "replan_previous_goal", "TEXT").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "replan_cleanup_needed",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(
-        pool,
-        "jobs",
-        "replan_generation",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(pool, "projects", "acceptance", "TEXT").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "acceptance_passed",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(
-        pool,
-        "projects",
-        "acceptance_round",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(pool, "projects", "acceptance_at", "TEXT").await?;
-    rename_column(pool, "projects", "goal_confirm_mode", "confirm_mode").await?;
-    rename_column(pool, "projects", "goal_proposal", "proposal").await?;
-    rename_column(pool, "projects", "goal_confirmed_at", "confirmed_at").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "confirm_mode",
-        "TEXT NOT NULL DEFAULT 'manual'",
-    )
-    .await?;
-    ensure_column(pool, "projects", "proposal", "TEXT").await?;
-    sqlx::raw_sql("UPDATE projects SET proposal = NULL WHERE proposal LIKE '%\"kind\":\"ready\"%'")
-        .execute(pool)
-        .await?;
-    ensure_column(pool, "projects", "confirmed_at", "TEXT").await?;
-    ensure_column(pool, "projects", "goal_locked_at", "TEXT").await?;
-    sqlx::raw_sql(
-        "UPDATE projects SET goal_locked_at = COALESCE(confirmed_at, updated_at) \
-         WHERE goal_locked_at IS NULL AND (confirmed_at IS NOT NULL \
-         OR stage NOT IN ('analysis', 'goal_confirm', 'planning') \
-         OR replan_requested_at IS NOT NULL OR report IS NOT NULL \
-         OR EXISTS (SELECT 1 FROM tasks WHERE tasks.project_id = projects.id) \
-         OR EXISTS (SELECT 1 FROM jobs WHERE jobs.project_id = projects.id \
-         AND jobs.role IN ('direct', 'project_acceptance', 'summary')))",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::raw_sql(
-        "INSERT OR IGNORE INTO replan_cleanup \
-         (project_id, generation, requested_at, status, created_at) \
-         SELECT id, CASE WHEN replan_active = 1 THEN replan_generation - 1 \
-         ELSE replan_generation END, CASE WHEN replan_active = 1 THEN '' \
-         ELSE replan_requested_at END, 'pending', updated_at FROM projects \
-         WHERE replan_cleanup_needed = 1 AND ((replan_active = 0 AND replan_requested_at IS NOT NULL) \
-         OR (replan_active = 1 AND replan_generation > 0))",
-    )
-    .execute(pool)
-    .await?;
-    ensure_column(
-        pool,
-        "projects",
-        "completion_mode",
-        "TEXT NOT NULL DEFAULT 'tasks'",
-    )
-    .await?;
-    ensure_column(pool, "projects", "merged_at", "TEXT").await?;
-    ensure_column(pool, "projects", "merged_commit", "TEXT").await?;
-    ensure_column(
-        pool,
-        "projects",
-        "workspace_type",
-        "TEXT NOT NULL DEFAULT 'git'",
-    )
-    .await?;
-    ensure_column(pool, "projects", "avoid_agent_id", "TEXT").await?;
-    ensure_column(pool, "projects", "avoid_agent_role", "TEXT").await?;
-    ensure_column(pool, "projects", "retry_agent_id", "TEXT").await?;
-    ensure_column(pool, "projects", "retry_role", "TEXT").await?;
-    ensure_column(pool, "events", "job_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "guidance", "TEXT NOT NULL DEFAULT ''").await?;
-    ensure_column(pool, "tasks", "parent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "milestone", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "tasks", "human_gate", "TEXT").await?;
-    ensure_column(pool, "tasks", "forced_agent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "forced_agent_role", "TEXT").await?;
-    ensure_column(pool, "tasks", "executor_agent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "verifier_agent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "queue_order", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "tasks", "last_failure_kind", "TEXT").await?;
-    ensure_column(pool, "tasks", "waiting_reason", "TEXT").await?;
-    ensure_column(pool, "tasks", "avoid_agent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "avoid_agent_role", "TEXT").await?;
-    ensure_column(pool, "tasks", "retry_agent_id", "TEXT").await?;
-    ensure_column(pool, "tasks", "retry_role", "TEXT").await?;
-    ensure_column(pool, "tasks", "artifacts_released_at", "TEXT").await?;
-    // Completed tasks without a recorded worktree predate artifact release
-    // tracking. Their branches remain in the archive namespace, so the row is
-    // marked as released to keep the audit view accurate.
-    sqlx::raw_sql(
-        "UPDATE tasks SET artifacts_released_at = updated_at \
-         WHERE stage = 'completed' AND worktree IS NULL AND artifacts_released_at IS NULL",
-    )
-    .execute(pool)
-    .await?;
-    ensure_column(pool, "agents", "failure_kind", "TEXT").await?;
-    ensure_column(
-        pool,
-        "agents",
-        "transient_failures",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    ensure_column(pool, "jobs", "failure_kind", "TEXT").await?;
-    ensure_column(pool, "jobs", "input_tokens", "INTEGER").await?;
-    ensure_column(pool, "jobs", "output_tokens", "INTEGER").await?;
-    ensure_column(pool, "jobs", "cache_read_tokens", "INTEGER").await?;
-    ensure_column(pool, "jobs", "cache_write_tokens", "INTEGER").await?;
-    ensure_column(pool, "jobs", "reasoning_tokens", "INTEGER").await?;
-    ensure_column(pool, "jobs", "cost", "REAL").await?;
-    ensure_column(pool, "jobs", "duration_ms", "INTEGER").await?;
-    ensure_column(pool, "jobs", "usage_known", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "jobs", "resume", "INTEGER NOT NULL DEFAULT 0").await?;
-    ensure_column(pool, "agents", "availability_json", "TEXT").await?;
-    ensure_column(pool, "agents", "usage_limit_json", "TEXT").await?;
-    ensure_column(pool, "agents", "usage_reset_at", "TEXT").await?;
-    ensure_column(
-        pool,
-        "agents",
-        "allow_priority_fallback",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
-    sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_jobs_agent ON jobs(agent_id, created_at)")
-        .execute(pool)
-        .await?;
-    sqlx::raw_sql(
-        "UPDATE projects SET stage = 'analysis' WHERE stage IN ('goal_confirm', 'planning');
-         UPDATE jobs SET role = 'analysis' WHERE role IN ('confirm', 'goal');
-         UPDATE tasks SET queue_order = seq WHERE queue_order = 0 AND seq > 0;",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::raw_sql(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(project_id, queue_order, seq)",
-    )
-    .execute(pool)
-    .await?;
-    ensure_column(
-        pool,
-        "project_agents",
-        "agent_name",
-        "TEXT NOT NULL DEFAULT ''",
-    )
-    .await?;
-    sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)")
-        .execute(pool)
-        .await?;
-
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(pool)
+        .fetch_one(&pool)
         .await?;
-    if version >= 1 {
-        return Ok(());
-    }
-
-    let mut conn = pool.acquire().await?;
-    sqlx::raw_sql("PRAGMA foreign_keys = OFF")
-        .execute(&mut *conn)
-        .await?;
-    let migrated = sqlx::raw_sql(
-        "BEGIN IMMEDIATE;
-         CREATE TABLE tasks_migrated (
-             id TEXT PRIMARY KEY,
-             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-             seq INTEGER NOT NULL,
-             queue_order INTEGER NOT NULL DEFAULT 0,
-             key TEXT NOT NULL,
-             title TEXT NOT NULL,
-             description TEXT NOT NULL,
-             acceptance TEXT NOT NULL,
-             deps TEXT NOT NULL,
-             parent_id TEXT,
-             milestone INTEGER NOT NULL DEFAULT 0,
-             human_gate TEXT,
-             forced_agent_id TEXT,
-             forced_agent_role TEXT,
-             executor_agent_id TEXT,
-             verifier_agent_id TEXT,
-             stage TEXT NOT NULL,
-             status TEXT,
-             agent_id TEXT,
-             last_agent_id TEXT,
-             avoid_agent_id TEXT,
-             avoid_agent_role TEXT,
-             retry_agent_id TEXT,
-             retry_role TEXT,
-             worktree TEXT,
-             branch TEXT,
-             artifacts_released_at TEXT,
-             attempts INTEGER NOT NULL DEFAULT 0,
-             rejections INTEGER NOT NULL DEFAULT 0,
-             last_error TEXT,
-             last_failure_kind TEXT,
-             waiting_reason TEXT,
-             result_summary TEXT,
-             verifier_issues TEXT NOT NULL DEFAULT '[]',
-             guidance TEXT NOT NULL DEFAULT '',
-             created_at TEXT NOT NULL,
-             updated_at TEXT NOT NULL
-         );
-         INSERT INTO tasks_migrated (
-             id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
-             milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
-             verifier_agent_id, stage, status,
-             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
-             worktree, branch, artifacts_released_at,
-             attempts, rejections, last_error,
-             last_failure_kind, waiting_reason,
-             result_summary, verifier_issues, guidance, created_at, updated_at
-         )
-         SELECT
-             id, project_id, seq, queue_order, key, title, description, acceptance, deps, parent_id,
-             milestone, human_gate, forced_agent_id, forced_agent_role, executor_agent_id,
-             verifier_agent_id, stage, status,
-             agent_id, last_agent_id, avoid_agent_id, avoid_agent_role, retry_agent_id, retry_role,
-             worktree, branch, artifacts_released_at,
-             attempts, rejections, last_error,
-             last_failure_kind, waiting_reason,
-             result_summary, verifier_issues, guidance, created_at, updated_at
-         FROM tasks;
-         DROP TABLE tasks;
-         ALTER TABLE tasks_migrated RENAME TO tasks;
-         UPDATE tasks SET queue_order = seq WHERE queue_order = 0 AND seq > 0;
-         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, seq);
-         CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
-         CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(project_id, queue_order, seq);
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_key ON tasks(project_id, key)
-             WHERE COALESCE(status, '') != 'canceled';
-         PRAGMA user_version = 1;
-         COMMIT;",
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     )
-    .execute(&mut *conn)
-    .await;
-    let enabled = sqlx::raw_sql("PRAGMA foreign_keys = ON")
-        .execute(&mut *conn)
-        .await;
-    migrated?;
-    enabled?;
-    Ok(())
-}
-
-async fn rename_column(pool: &SqlitePool, table: &str, old: &str, new: &str) -> DbResult<()> {
-    let old_exists: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
-    ))
-    .bind(old)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
-    let new_exists: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
-    ))
-    .bind(new)
-    .fetch_one(pool)
-    .await?;
-    if old_exists > 0 && new_exists == 0 {
-        sqlx::raw_sql(&format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new}"))
-            .execute(pool)
-            .await?;
+    if tables > 0 && version != 2 {
+        return Err(DbError::UnsupportedSchema);
     }
-    Ok(())
-}
-
-async fn ensure_column(
-    pool: &SqlitePool,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> DbResult<()> {
-    let exists: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
-    ))
-    .bind(column)
-    .fetch_one(pool)
-    .await?;
-    if exists == 0 {
-        sqlx::raw_sql(&format!(
-            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        ))
-        .execute(pool)
+    sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    crate::delivery::initialize(&pool).await?;
+    crate::resources::initialize(&pool).await?;
+    crate::queue::initialize(&pool).await?;
+    seed_defaults(&pool).await?;
+    sqlx::raw_sql("PRAGMA user_version = 2")
+        .execute(&pool)
         .await?;
-    }
-    Ok(())
+    Ok(pool)
 }
 
 async fn seed_defaults(pool: &SqlitePool) -> DbResult<()> {
@@ -972,142 +662,27 @@ async fn build_role_pools(
     Ok(role_pools)
 }
 
-/// 任务 Agent 池：首次访问时从项目池对应角色快照初始化；任务上遗留的
-/// executor_agent_id/verifier_agent_id 会迁移为只含该 Agent 的单 Agent 池。
-/// 项目池后来的变化不会改写已初始化的任务池。每个角色的初始化状态单独记录，
-/// 因此某角色被清空后不会因为其他角色的操作重新从项目池填充。
-pub async fn ensure_task_agents(
-    pool: &SqlitePool,
-    project_id: &str,
-    task_id: &str,
-) -> DbResult<()> {
-    let initialized: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM task_agent_roles WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_one(pool)
-            .await?;
-    if initialized as usize >= TASK_POOL_ROLES.len() {
-        return Ok(());
-    }
-    ensure_project_agents(pool, project_id).await?;
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    ensure_task_agents_tx(&mut tx, task_id).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 /// 在已有事务内初始化任务池：调用方创建任务时在同一事务内完成快照。
-/// `task_agent_roles` 记录每个角色是否已经快照，空角色同样算已初始化。
-/// 调用方应保证项目 Agent 池已存在。
-pub async fn ensure_task_agents_tx(
+/// 空池也是有效快照；读取与调度均不重新填充。调用方应保证项目池已存在。
+pub async fn initialize_task_agents_tx(
     executor: &mut sqlx::SqliteConnection,
     task_id: &str,
 ) -> DbResult<()> {
-    let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
-        .bind(task_id)
-        .fetch_optional(&mut *executor)
-        .await?;
-    let Some(task) = task else {
-        return Ok(());
-    };
-    let initialized: Vec<(String,)> =
-        sqlx::query_as("SELECT role FROM task_agent_roles WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_all(&mut *executor)
-            .await?;
-    // 兼容已有任务池数据：角色下已有条目但缺少初始化记录时视为已初始化。
-    let populated: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT role FROM task_agents WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_all(&mut *executor)
-            .await?;
     let timestamp = crate::domain::now();
-    let agents = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
-        .fetch_all(&mut *executor)
-        .await?;
-    let project_rows = sqlx::query_as::<_, ProjectAgentRow>(
-        "SELECT * FROM project_agents WHERE project_id = ? AND role IN (?, ?) \
-         ORDER BY role ASC, priority ASC, agent_id ASC",
+    sqlx::query(
+        "INSERT INTO task_agents \
+         (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+         SELECT ?, role, agent_id, agent_name, priority, enabled, ?, ? FROM project_agents \
+         WHERE project_id = (SELECT project_id FROM tasks WHERE id = ?) AND role IN (?, ?)",
     )
-    .bind(&task.project_id)
+    .bind(task_id)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(task_id)
     .bind(ROLE_EXECUTOR)
     .bind(ROLE_VERIFIER)
-    .fetch_all(&mut *executor)
+    .execute(executor)
     .await?;
-    for role in TASK_POOL_ROLES {
-        let already_initialized = initialized.iter().any(|(value,)| value == role);
-        let has_entries = populated.iter().any(|(value,)| value == role);
-        if already_initialized || has_entries {
-            sqlx::query(
-                "INSERT OR IGNORE INTO task_agent_roles (task_id, role, initialized_at) \
-                 VALUES (?, ?, ?)",
-            )
-            .bind(task_id)
-            .bind(role)
-            .bind(&timestamp)
-            .execute(&mut *executor)
-            .await?;
-            continue;
-        }
-        // 旧覆盖字段迁移：Agent 存在且具备该角色时迁移为单 Agent 池；
-        // 否则按项目池对应角色快照初始化。
-        let legacy = match *role {
-            ROLE_EXECUTOR => task.executor_agent_id.as_deref(),
-            ROLE_VERIFIER => task.verifier_agent_id.as_deref(),
-            _ => None,
-        };
-        let migrated = legacy.and_then(|agent_id| {
-            agents.iter().find(|agent| {
-                agent.id == agent_id
-                    && parse_string_list(&agent.roles)
-                        .iter()
-                        .any(|item| item == role)
-            })
-        });
-        if let Some(agent) = migrated {
-            sqlx::query(
-                "INSERT OR IGNORE INTO task_agents \
-                 (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
-            )
-            .bind(task_id)
-            .bind(role)
-            .bind(&agent.id)
-            .bind(&agent.name)
-            .bind(agent.enabled)
-            .bind(&timestamp)
-            .bind(&timestamp)
-            .execute(&mut *executor)
-            .await?;
-        } else {
-            for row in project_rows.iter().filter(|row| row.role == *role) {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO task_agents \
-                     (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(task_id)
-                .bind(role)
-                .bind(&row.agent_id)
-                .bind(&row.agent_name)
-                .bind(row.priority)
-                .bind(row.enabled)
-                .bind(&timestamp)
-                .bind(&timestamp)
-                .execute(&mut *executor)
-                .await?;
-            }
-        }
-        sqlx::query(
-            "INSERT OR IGNORE INTO task_agent_roles (task_id, role, initialized_at) \
-             VALUES (?, ?, ?)",
-        )
-        .bind(task_id)
-        .bind(role)
-        .bind(&timestamp)
-        .execute(&mut *executor)
-        .await?;
-    }
     Ok(())
 }
 
@@ -1116,7 +691,6 @@ pub async fn load_task_agent_pool(
     project_id: &str,
     task_id: &str,
 ) -> DbResult<TaskAgentPool> {
-    ensure_task_agents(pool, project_id, task_id).await?;
     let rows = sqlx::query_as::<_, TaskAgentRow>(
         "SELECT * FROM task_agents WHERE task_id = ? ORDER BY role ASC, priority ASC, agent_id ASC",
     )
@@ -1134,95 +708,40 @@ pub async fn load_task_agent_pool(
     })
 }
 
-/// 把任务池某角色覆盖为只含该 Agent 的单 Agent 池：旧覆盖接口映射到这里，
-/// 对应“池中只有一个 Agent 时等价于指定该 Agent”。
-pub async fn set_single_task_agent(
-    pool: &SqlitePool,
-    task_id: &str,
-    role: &str,
-    agent_id: &str,
-) -> DbResult<()> {
-    let agent = load_agent(pool, agent_id)
-        .await?
-        .ok_or_else(|| DbError::AgentNotFound {
-            agent_id: agent_id.to_string(),
-        })?;
-    let timestamp = crate::domain::now();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    ensure_task_agents_tx(&mut tx, task_id).await?;
-    sqlx::query("DELETE FROM task_agents WHERE task_id = ? AND role = ?")
-        .bind(task_id)
-        .bind(role)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO task_agents \
-         (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, 0, 1, ?, ?)",
-    )
-    .bind(task_id)
-    .bind(role)
-    .bind(&agent.id)
-    .bind(&agent.name)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO task_agent_roles (task_id, role, initialized_at) \
-         VALUES (?, ?, ?)",
-    )
-    .bind(task_id)
-    .bind(role)
-    .bind(&timestamp)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// 把任务池某角色重置为项目池对应角色的当前快照（视角同初始化：整段覆盖）。
-/// 兼容入口把“清除覆盖”映射到这里；优先级与启停按项目池当时状态复制。
-pub async fn reset_task_agent_role(
-    pool: &SqlitePool,
-    project_id: &str,
-    task_id: &str,
-    role: &str,
-) -> DbResult<()> {
-    ensure_project_agents(pool, project_id).await?;
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    ensure_task_agents_tx(&mut tx, task_id).await?;
-    let project_rows = sqlx::query_as::<_, ProjectAgentRow>(
-        "SELECT * FROM project_agents WHERE project_id = ? AND role = ? \
-         ORDER BY priority ASC, agent_id ASC",
-    )
-    .bind(project_id)
-    .bind(role)
-    .fetch_all(&mut *tx)
-    .await?;
-    sqlx::query("DELETE FROM task_agents WHERE task_id = ? AND role = ?")
-        .bind(task_id)
-        .bind(role)
-        .execute(&mut *tx)
-        .await?;
-    let timestamp = crate::domain::now();
-    for row in &project_rows {
-        sqlx::query(
-            "INSERT OR IGNORE INTO task_agents \
-             (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(task_id)
-        .bind(role)
-        .bind(&row.agent_id)
-        .bind(&row.agent_name)
-        .bind(row.priority)
-        .bind(row.enabled)
-        .bind(&timestamp)
-        .bind(&timestamp)
-        .execute(&mut *tx)
-        .await?;
+    #[tokio::test]
+    async fn rejects_other_schema_versions_without_rewriting_data() {
+        let root = std::env::temp_dir().join(format!("domo-schema-{}", Uuid::new_v4()));
+        let path = root.join("domo.db");
+        let pool = connect(&path).await.unwrap();
+        sqlx::raw_sql("PRAGMA user_version = 99")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            connect(&path).await,
+            Err(DbError::UnsupportedSchema)
+        ));
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 99);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agents")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            count
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(root);
     }
-    tx.commit().await?;
-    Ok(())
 }

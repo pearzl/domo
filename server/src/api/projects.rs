@@ -3,7 +3,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::attention::{project_attention, ProjectAttentionState};
 use crate::domain::{self, now, short_id};
 use crate::events::emit;
 use crate::git;
@@ -14,9 +13,7 @@ use crate::state::AppState;
 
 use super::agents::validate_role;
 use super::detail::load_detail;
-use super::helpers::{
-    load_project_task, parse_list, plan_role_reorder, require_project, role_label,
-};
+use super::helpers::{load_project_task, plan_role_reorder, require_project, role_label};
 use super::ApiError;
 
 pub(super) async fn list_projects(
@@ -42,60 +39,10 @@ pub(super) async fn list_projects(
         .bind(&row.id)
         .fetch_one(&state.db)
         .await?;
-        let latest_project_job_status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM jobs WHERE project_id = ? AND task_id IS NULL \
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-        )
-        .bind(&row.id)
-        .fetch_optional(&state.db)
-        .await?;
-        let analysis_running: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND task_id IS NULL \
-             AND role = 'analysis' AND status = 'running'",
-        )
-        .bind(&row.id)
-        .fetch_one(&state.db)
-        .await?;
         let merged_into_base = row.is_git()
             && (row.merged_at.is_some() || super::detail::project_merged_into_base(&row).await);
-        let proposal_raw = if row.replan_active != 0 {
-            row.replan_proposal.as_deref()
-        } else {
-            row.proposal.as_deref()
-        };
-        let attention = project_attention(ProjectAttentionState {
-            stage: &row.stage,
-            status: row.status.as_deref(),
-            goal: &row.goal,
-            blocked_reason: row.blocked_reason.as_deref(),
-            proposal_pending: proposal_raw
-                .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok())
-                .is_some(),
-            report_ready: row
-                .report
-                .as_deref()
-                .is_some_and(|report| !report.is_empty()),
-            merged_into_base,
-            requires_merge: row.is_git(),
-            latest_project_job_failed: latest_project_job_status.as_deref()
-                == Some(JOB_STATUS_FAILED),
-            analysis_running: analysis_running > 0,
-        });
-        let attention_task = if attention.is_some() {
-            sqlx::query_as::<_, (String, String, String)>(
-                "SELECT id, key, title FROM tasks WHERE project_id = ? AND status = ? \
-                 AND stage != ? ORDER BY queue_order ASC, seq ASC LIMIT 1",
-            )
-            .bind(&row.id)
-            .bind(STATUS_BLOCKED)
-            .bind(TASK_STAGE_COMPLETED)
-            .fetch_optional(&state.db)
-            .await?
-            .map(|(id, key, title)| ProjectAttentionTask { id, key, title })
-        } else {
-            None
-        };
         projects.push(ProjectSummary {
+            attention_items: crate::attention::items(&state.db, &row, merged_into_base).await?,
             id: row.id,
             name: row.name,
             goal: row.goal,
@@ -106,8 +53,6 @@ pub(super) async fn list_projects(
             stage: row.stage,
             status: row.status,
             blocked_reason: row.blocked_reason,
-            attention,
-            attention_task,
             task_total: total,
             task_completed: completed,
             replan_reason: row.replan_reason,
@@ -166,6 +111,11 @@ pub(super) async fn create_project(
         .trim()
         .to_string();
     let repo_input = crate::platform::expand_tilde(request.repo_path.trim());
+    if request.repo_path.trim().is_empty() {
+        return Err(ApiError::bad("工作区目录不能为空"));
+    }
+    // 创建与派发共用锁，目录检查和占用登记不能被另一创建请求穿插。
+    let _guard = state.schedule_lock.lock().await;
     let project_id = domain::new_id("prj");
     let workspace = paths::project_workspace(&state.cfg.workspace_root, &project_id);
     let (repo, base, branch, repo_worktree) = if workspace_type == WORKSPACE_PLAIN {
@@ -182,6 +132,22 @@ pub(super) async fn create_project(
         let repo = repo_input
             .canonicalize()
             .unwrap_or_else(|_| repo_input.clone());
+        let occupied: Vec<String> = sqlx::query_scalar(
+            "SELECT repo_path FROM projects WHERE workspace_type = 'plain' \
+             AND COALESCE(status, '') != 'archived'",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        for path in occupied {
+            let other = std::path::PathBuf::from(path);
+            let other = other.canonicalize().unwrap_or(other);
+            if repo.starts_with(&other) || other.starts_with(&repo) {
+                return Err(ApiError::conflict(format!(
+                    "目录与未归档普通工作区 {} 重叠，请先归档原项目或选择独立目录",
+                    other.display()
+                )));
+            }
+        }
         (repo, String::new(), String::new(), None)
     } else {
         if !repo_input.is_dir() {
@@ -267,6 +233,9 @@ pub(super) async fn create_project(
         .await?;
     }
     crate::db::ensure_project_agents(&state.db, &project_id).await?;
+    let created = require_project(&state, &project_id).await?;
+    crate::resources::initialize_inputs(&state, &created).await?;
+    crate::resources::shared_snapshot(&state, &created, None, None).await?;
     emit(
         &state.db,
         &state.bus,
@@ -307,6 +276,7 @@ pub(super) async fn update_project_agent(
     Path((project_id, role, agent_id)): Path<(String, String, String)>,
     Json(request): Json<ProjectAgentUpdateRequest>,
 ) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
     let project = require_project(&state, &project_id).await?;
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(ApiError::bad("项目已归档"));
@@ -412,6 +382,7 @@ pub(super) async fn update_project_agent(
     )
     .await;
     state.notify_scheduler();
+    crate::delivery::wake_configuration(&state.db, Some(&project_id)).await?;
     let pool = crate::db::load_project_agent_pool(&state.db, &project_id).await?;
     Ok(Json(pool))
 }
@@ -494,7 +465,6 @@ pub(super) async fn update_task_agent(
     let task = load_project_task(&state, &project_id, &task_id).await?;
     ensure_task_pool_mutable(&task)?;
     let role = validate_task_pool_role(role.trim())?;
-    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
     let current = sqlx::query_as::<_, TaskAgentRow>(
         "SELECT * FROM task_agents WHERE task_id = ? AND role = ? AND agent_id = ?",
     )
@@ -595,6 +565,7 @@ pub(super) async fn update_task_agent(
     )
     .await;
     state.notify_scheduler();
+    crate::delivery::wake_configuration(&state.db, Some(&project_id)).await?;
     let pool = crate::db::load_task_agent_pool(&state.db, &project_id, &task.id).await?;
     Ok(Json(pool))
 }
@@ -634,107 +605,6 @@ pub(super) async fn move_task_agent_to(
     }
     tx.commit().await?;
     Ok(())
-}
-
-/// 旧的任务 Agent 覆盖接口，作为兼容入口保留：指定 Agent 映射为“只含该
-/// Agent 的单 Agent 池”，清除覆盖映射为“重置为项目池快照”。旧字段只是
-/// 只读兼容展示，调度只看任务池。
-pub(super) async fn set_task_agents(
-    State(state): State<AppState>,
-    Path((project_id, task_id)): Path<(String, String)>,
-    Json(request): Json<TaskAgentsRequest>,
-) -> Result<Json<TaskView>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    // 兼容入口同样先完成两角色的懒初始化，避免只写入一个角色。
-    crate::db::ensure_task_agents(&state.db, &project_id, &task.id).await?;
-    let mut changes: Vec<(&str, &str)> = Vec::new();
-    if let Some(value) = &request.executor_agent_id {
-        changes.push((ROLE_EXECUTOR, value.as_deref().unwrap_or("")));
-    }
-    if let Some(value) = &request.verifier_agent_id {
-        changes.push((ROLE_VERIFIER, value.as_deref().unwrap_or("")));
-    }
-    for (role, raw) in &changes {
-        let mut snapshot = String::new();
-        if !raw.is_empty() {
-            snapshot = resolve_task_agent_from_single(&state, raw, role).await?;
-        }
-        if snapshot.is_empty() {
-            crate::db::reset_task_agent_role(&state.db, &project_id, &task.id, role).await?;
-        } else {
-            crate::db::set_single_task_agent(&state.db, &task.id, role, &snapshot).await?;
-        }
-    }
-    if !changes.is_empty() {
-        let executor = if changes.iter().any(|(role, _)| role == &ROLE_EXECUTOR) {
-            request
-                .executor_agent_id
-                .as_ref()
-                .and_then(|value| value.as_ref())
-                .cloned()
-        } else {
-            task.executor_agent_id.clone()
-        };
-        let verifier = if changes.iter().any(|(role, _)| role == &ROLE_VERIFIER) {
-            request
-                .verifier_agent_id
-                .as_ref()
-                .and_then(|value| value.as_ref())
-                .cloned()
-        } else {
-            task.verifier_agent_id.clone()
-        };
-        sqlx::query(
-            "UPDATE tasks SET executor_agent_id = ?, verifier_agent_id = ?, updated_at = ? \
-             WHERE id = ?",
-        )
-        .bind(&executor)
-        .bind(&verifier)
-        .bind(now())
-        .bind(&task.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project_id),
-            Some(&task.id),
-            "task_agents_updated",
-            format!(
-                "任务 {} 的 Agent 覆盖已更新（执行：{}，验收：{}）",
-                task.key,
-                executor.as_deref().unwrap_or("跟随项目池"),
-                verifier.as_deref().unwrap_or("跟随项目池")
-            ),
-        )
-        .await;
-    }
-    state.notify_scheduler();
-    let row = load_project_task(&state, &project_id, &task.id).await?;
-    Ok(Json(TaskView::from_row(row)))
-}
-
-pub(super) async fn resolve_task_agent_from_single(
-    state: &AppState,
-    agent_id: &str,
-    role: &str,
-) -> Result<String, ApiError> {
-    let Some(agent) = crate::db::load_agent(&state.db, agent_id).await? else {
-        return Err(ApiError::not_found(format!("Agent {agent_id} 不存在")));
-    };
-    if !parse_list(&agent.roles).iter().any(|item| item == role) {
-        return Err(ApiError::bad(format!(
-            "Agent {} 不能承担{}角色",
-            agent.name,
-            role_label(role)
-        )));
-    }
-    Ok(agent.id)
 }
 
 pub(super) async fn update_project_goal(

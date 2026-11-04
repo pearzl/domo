@@ -189,18 +189,37 @@ pub(super) async fn accept_milestone(
             git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
         };
         if let Err(error) = merge {
-            let reason = format!("人工验收通过但合并失败：{error:#}");
-            restore_milestone_gate_unlocked(&state, &task.id, &reason).await?;
             emit(
                 &state.db,
                 &state.bus,
                 Some(&project_id),
                 Some(&task.id),
                 "milestone_merge_conflict",
-                format!("任务 {} 人工验收合并失败：{reason}", task.key),
+                format!(
+                    "任务 {} 人工验收通过{}，合并失败：{error:#}",
+                    task.key,
+                    if note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{note}")
+                    }
+                ),
             )
             .await;
-            return Err(ApiError::from(error));
+            crate::runner::handoff_merge_conflict_unlocked(
+                &state,
+                &project,
+                &task,
+                &error,
+                task.agent_id.as_deref(),
+            )
+            .await?;
+            sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+                THEN status ELSE 'running' END, blocked_reason = NULL, updated_at = ? WHERE id = ?")
+                .bind(now()).bind(&project_id).execute(&state.db).await?;
+            drop(_guard);
+            state.notify_scheduler();
+            return load_detail(&state, &project_id).await.map(Json);
         }
     }
 

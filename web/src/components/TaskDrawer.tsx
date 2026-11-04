@@ -221,7 +221,22 @@ export function TaskDrawer({
   const resultSection = (
     <ResultSummary taskId={task.id} summary={task.result_summary} jobs={jobs} />
   );
-  const verificationSection = <VerificationRecapBlock recap={verificationRecapValue} />;
+  const verificationSection = <>
+    <VerificationRecapBlock recap={verificationRecapValue} />
+    {verificationHistory.history?.verifications.filter(record => record.evidence).map(record => (
+      <details key={record.id}><summary>第 {record.round} 轮验收证据 · 契约 #{record.evidence!.contract_id}</summary>
+        <p>产物版本：{record.evidence!.artifact_version ?? "普通工作区当前产物，不提供历史内容恢复"}</p>
+        <p>检查时间：{record.finished_at ?? "—"}</p>
+        {record.evidence!.criteria.map((criterion, index) => <div key={index}>
+          <strong>{criterion.passed ? "通过" : "拒绝"} · {criterion.criterion}</strong>
+          <ul>{criterion.checks.map((check, i) => <li key={i}>{check.method} → {check.result}</li>)}</ul>
+        </div>)}
+        <p>已检查产物：{record.evidence!.artifacts.join("、") || "无文件产物"}</p>
+        <p>未覆盖风险：{record.evidence!.risks.join("；") || "无声明"}</p>
+        <p>人工检查项：{record.evidence!.human_checks.join("；") || "无声明"}</p>
+      </details>
+    ))}
+  </>;
   // 作业记录：从执行历史跳转时，目标作业即使不在最近几条也保持可见并展开。
   const jobsSection = (
     <section>

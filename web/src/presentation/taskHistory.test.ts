@@ -9,7 +9,6 @@ import {
   alignHistory,
   filterFailedRounds,
   groupExecutionRounds,
-  recordRounds,
   roundAnchorId,
   taskHistory,
   unlinkedVerifiersLabel,
@@ -25,6 +24,7 @@ function beforeFirst(minute: number): string {
 
 function job(overrides: Partial<JobSummary> & { id: string }): JobSummary {
   return {
+    execution_job_id: overrides.role === "verifier" ? "e1" : null,
     project_id: "p1",
     task_id: "t1",
     role: "executor",
@@ -56,6 +56,7 @@ function record(
 ): VerificationRecord {
   return {
     attempt: 1,
+    execution_job_id: "e1",
     status: "succeeded",
     passed: true,
     reason: "符合验收标准",
@@ -95,6 +96,7 @@ const verifier1 = job({
 });
 const verifier2 = job({
   id: "v2",
+  execution_job_id: "e2",
   role: "verifier",
   attempt: 1,
   created_at: at(15),
@@ -102,6 +104,15 @@ const verifier2 = job({
 });
 
 describe("按执行轮聚合验收尝试", () => {
+  it("显式关联优先于时间，缺失执行作业时不猜测归属", () => {
+    const verifier = job({ id: "linked", role: "verifier", execution_job_id: "e2", created_at: beforeFirst(0) });
+    const result = groupExecutionRounds([executor1, executor2], [verifier]);
+    expect(result.rounds[0].verifiers).toEqual([]);
+    expect(result.rounds[1].verifiers.map(entry => entry.id)).toEqual(["linked"]);
+    const missing = groupExecutionRounds([executor1], [verifier]);
+    expect(missing.rounds[0].verifiers).toEqual([]);
+    expect(missing.unlinked.map(entry => entry.id)).toEqual(["linked"]);
+  });
   it("1 次执行 + 3 次验收（2 次失败）只产生 1 轮并汇总为 3 次尝试、2 次失败", () => {
     const rejected = job({ id: "v1", role: "verifier", created_at: at(5) });
     const crashed = job({
@@ -214,10 +225,11 @@ describe("未关联执行的验收作业", () => {
   it("早于全部执行作业且接口 round=0 的验收作业计入 unlinked，不占用轮次", () => {
     const early = job({
       id: "v0",
+      execution_job_id: null,
       role: "verifier",
       created_at: beforeFirst(59),
     });
-    const unanchored = job({ id: "v1", role: "verifier", created_at: at(5) });
+    const unanchored = job({ id: "v1", role: "verifier", execution_job_id: null, created_at: at(5) });
     const result = taskHistory(
       [executor1, early, unanchored],
       history([record({ id: "v1", round: 0 })]),
@@ -326,7 +338,7 @@ describe("乱序、截断与筛选", () => {
   });
 
   it("验收记录截断缺少最早轮次的记录时编号不重排", () => {
-    const lateVerifier = job({ id: "v3", role: "verifier", created_at: at(25) });
+    const lateVerifier = job({ id: "v3", role: "verifier", execution_job_id: "e3", created_at: at(25) });
     const rounds = alignHistory(
       [executor1, executor2, executor3, lateVerifier],
       history([record({ id: "v3", round: 3 })], true),
@@ -334,7 +346,6 @@ describe("乱序、截断与筛选", () => {
     expect(rounds.map((round) => round.round)).toEqual([1, 2, 3]);
     expect(rounds[0].verifiers).toEqual([]);
     expect(rounds[2].verifiers.map((entry) => entry.id)).toEqual(["v3"]);
-    expect(recordRounds(history([record({ id: "v3", round: 3 })], true)).get("v3")).toBe(3);
   });
 
   it("执行作业被截断缺少最早轮次时编号顺延，验收仍归入对应轮", () => {
@@ -342,11 +353,13 @@ describe("乱序、截断与筛选", () => {
     const lateExecutor2 = job({ id: "e4", created_at: at(30) });
     const lateVerifier1 = job({
       id: "v3",
+      execution_job_id: "e3",
       role: "verifier",
       created_at: at(25),
     });
     const lateVerifier2 = job({
       id: "v4",
+      execution_job_id: "e4",
       role: "verifier",
       created_at: at(35),
     });
@@ -366,22 +379,18 @@ describe("乱序、截断与筛选", () => {
     expect(rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v3"]);
     expect(rounds[1].executor?.id).toBe("e4");
     expect(rounds[1].verifiers.map((entry) => entry.id)).toEqual(["v4"]);
-    // 接口轮次保持执行轮编号，本地轮次按现存执行作业顺延。
-    expect(recordRounds(records).get("v3")).toBe(3);
-    expect(recordRounds(records).get("v4")).toBe(4);
   });
 
   it("分组纯函数只按执行作业成轮", () => {
     const grouping = groupExecutionRounds(
       [executor1, executor2],
       [verifier1],
-      new Map(),
     );
     expect(grouping.rounds.map((entry) => entry.round)).toEqual([1, 2]);
     expect(grouping.rounds[0].verifiers.map((entry) => entry.id)).toEqual(["v1"]);
     expect(grouping.unlinked).toEqual([]);
 
-    const onlyVerifier = groupExecutionRounds([], [verifier1], new Map());
+    const onlyVerifier = groupExecutionRounds([], [verifier1]);
     expect(onlyVerifier.rounds).toEqual([]);
     expect(onlyVerifier.unlinked.map((entry) => entry.id)).toEqual(["v1"]);
   });

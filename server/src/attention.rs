@@ -65,6 +65,135 @@ fn blocked_attention(latest_project_job_failed: bool) -> ProjectAttention {
     }
 }
 
+/// Human gates are independent of the project's ability to run other work.
+pub(crate) async fn items(
+    pool: &sqlx::SqlitePool,
+    project: &crate::models::ProjectRow,
+    merged_into_base: bool,
+) -> Result<Vec<crate::models::AttentionItem>, sqlx::Error> {
+    use crate::models::*;
+    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
+        return Ok(Vec::new());
+    }
+    let latest_project_job_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM jobs WHERE project_id = ? AND task_id IS NULL \
+         ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(&project.id)
+    .fetch_optional(pool)
+    .await?;
+    let analysis_running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jobs WHERE project_id = ? AND task_id IS NULL \
+         AND role = 'analysis' AND status = 'running'",
+    )
+    .bind(&project.id)
+    .fetch_one(pool)
+    .await?;
+    let proposal = if project.replan_active != 0 {
+        project.replan_proposal.as_deref()
+    } else {
+        project.proposal.as_deref()
+    };
+    let project_attention = project_attention(ProjectAttentionState {
+        stage: &project.stage,
+        status: project.status.as_deref(),
+        goal: &project.goal,
+        blocked_reason: project.blocked_reason.as_deref(),
+        proposal_pending: proposal.is_some(),
+        report_ready: project
+            .report
+            .as_deref()
+            .is_some_and(|report| !report.is_empty()),
+        merged_into_base,
+        requires_merge: project.is_git(),
+        latest_project_job_failed: latest_project_job_status.as_deref() == Some(JOB_STATUS_FAILED),
+        analysis_running: analysis_running > 0,
+    });
+    let tasks =
+        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE project_id = ? ORDER BY seq")
+            .bind(&project.id)
+            .fetch_all(pool)
+            .await?;
+    let mut result = Vec::new();
+    for task in tasks.iter().filter(|task| {
+        task.status.as_deref() == Some(STATUS_BLOCKED) && task.stage != TASK_STAGE_COMPLETED
+    }) {
+        let mut affected = std::collections::HashSet::from([task.key.clone()]);
+        loop {
+            let before = affected.len();
+            for candidate in &tasks {
+                if parse_string_list(&candidate.deps)
+                    .iter()
+                    .any(|dep| affected.contains(dep))
+                {
+                    affected.insert(candidate.key.clone());
+                }
+            }
+            if before == affected.len() {
+                break;
+            }
+        }
+        let since: Option<String> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM events WHERE task_id = ? AND kind = 'task_state_changed' \
+             AND json_extract(payload, '$.status') = 'blocked'",
+        )
+        .bind(&task.id)
+        .fetch_one(pool)
+        .await?;
+        result.push(AttentionItem {
+            id: task.id.clone(),
+            kind: if task.human_gate.is_some() {
+                ProjectAttention::Review
+            } else {
+                ProjectAttention::Blocked
+            },
+            task: Some(ProjectAttentionTask {
+                id: task.id.clone(),
+                key: task.key.clone(),
+                title: task.title.clone(),
+            }),
+            reason: task.last_error.clone(),
+            since: since.unwrap_or_else(|| task.updated_at.clone()),
+            affected_tasks: affected.len().saturating_sub(1),
+            blocks_milestone: tasks
+                .iter()
+                .any(|candidate| candidate.milestone != 0 && affected.contains(&candidate.key)),
+            blocks_summary: true,
+            project_advancing: project.status.as_deref() == Some(STATUS_RUNNING),
+        });
+    }
+    if let Some(kind) = project_attention {
+        if result.is_empty()
+            || matches!(kind, ProjectAttention::Confirm | ProjectAttention::Merge)
+            || project.stage == STAGE_SUMMARIZING
+        {
+            let since: Option<String> = sqlx::query_scalar(
+                "SELECT MAX(created_at) FROM events WHERE project_id = ? AND task_id IS NULL \
+                 AND (kind IN ('analysis_questions', 'analysis_proposed', 'analysis_direct', 'report_ready') \
+                 OR (kind = 'project_state_changed' AND json_extract(payload, '$.status') = 'blocked'))",
+            ).bind(&project.id).fetch_one(pool).await?;
+            result.push(AttentionItem {
+                id: project.id.clone(),
+                kind,
+                task: None,
+                reason: project.blocked_reason.clone(),
+                since: since.unwrap_or_else(|| project.updated_at.clone()),
+                affected_tasks: tasks
+                    .iter()
+                    .filter(|task| {
+                        task.stage != TASK_STAGE_COMPLETED
+                            && task.status.as_deref() != Some(STATUS_CANCELED)
+                    })
+                    .count(),
+                blocks_milestone: false,
+                blocks_summary: project.stage != STAGE_COMPLETED,
+                project_advancing: project.status.as_deref() == Some(STATUS_RUNNING),
+            });
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,52 +1,13 @@
 import type { AuditEvent, JobSummary, Project, Task } from "../types";
 /// 任务阶段文案统一取自 ui.tsx，执行现场与任务列表不会出现两套措辞。
-import { taskStageLabel } from "../ui";
+import { ROLE_LABELS, taskStageLabel } from "../ui";
+import { isKeyEventKind as isKeyEvent } from "./events";
+export { isKeyEventKind as isKeyEvent } from "./events";
 
 /// 执行现场只读取项目详情里已有的 tasks / jobs / events，不发起任何请求。
 /// 页面是否刷新由外层已有的取数决定，这里只做纯派生。
 
 export const RECENT_EVENT_LIMIT = 3;
-
-/// 与 ui.tsx 的角色标签一致；表现层保持纯粹，不依赖组件模块。
-const ROLE_TEXT: Record<string, string> = {
-  analysis: "项目分析",
-  direct: "直接完成",
-  planner: "规划",
-  executor: "执行",
-  verifier: "验收",
-  project_acceptance: "项目验收",
-  summary: "总结",
-};
-
-/// 配置类事件在执行现场属于噪音，只在事件时间线的“配置”视图展示。
-const CONFIG_KINDS = new Set([
-  "project_agents_updated",
-  "task_agents_updated",
-  "default_team_updated",
-  "agent_usage_reset",
-  "analysis_policy_updated",
-  "agent_unavailable",
-]);
-
-/// “关键”事件里保留的作业节点：失败、卡死与恢复，其余作业阶段由运行中作业承担。
-/// 与 components/EventTimeline.tsx 的关键过滤集合保持一致。
-const KEY_JOB_KINDS = new Set([
-  "job_failed",
-  "job_stalled",
-  "job_recovered",
-  "job_stall_recovered",
-]);
-
-const JOB_KINDS = new Set([
-  "job_queued",
-  "job_started",
-  "job_continued",
-  "job_finished",
-  "job_failed",
-  "job_stalled",
-  "job_stall_recovered",
-  "job_recovered",
-]);
 
 export interface ExecutionInput {
   project: Project;
@@ -138,7 +99,7 @@ export function runningJobs(
       return {
         id: job.id,
         role: job.role,
-        roleLabel: ROLE_TEXT[job.role] ?? job.role,
+        roleLabel: ROLE_LABELS[job.role] ?? job.role,
         agentName: job.agent_name,
         taskKey: task?.key ?? null,
         taskTitle: task?.title ?? null,
@@ -244,12 +205,6 @@ export function recentKeyEvents(
     taskKey: event.task_id ? taskMap.get(event.task_id)?.key ?? null : null,
     jobId: event.job_id,
   }));
-}
-
-export function isKeyEvent(kind: string): boolean {
-  if (CONFIG_KINDS.has(kind)) return false;
-  if (JOB_KINDS.has(kind)) return KEY_JOB_KINDS.has(kind);
-  return true;
 }
 
 /// 没有运行中作业时，先说明阻塞与暂停，再给出下一个排队任务，最后回到阶段说明。

@@ -59,8 +59,6 @@ function task(overrides: Partial<Task> = {}): Task {
     human_gate: null,
     forced_agent_id: null,
     forced_agent_role: null,
-    executor_agent_id: null,
-    verifier_agent_id: null,
     stage: "pending",
     status: null,
     agent_id: null,
@@ -84,6 +82,7 @@ function task(overrides: Partial<Task> = {}): Task {
 
 function job(overrides: Partial<JobSummary> = {}): JobSummary {
   return {
+    execution_job_id: null,
     id: "j1",
     project_id: "p1",
     task_id: null,

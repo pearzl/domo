@@ -330,6 +330,7 @@ function proposal(): AnalysisProposal {
 
 function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
   return {
+    attention_items: [],
     project: project("executing"),
     tasks: [],
     jobs: [],
@@ -353,6 +354,7 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
         duration_ms: 0,
         known_jobs: 0,
         unknown_jobs: 0,
+        known_metrics: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, cost: 0 },
       },
       by_agent: [],
       by_role: [],
@@ -362,6 +364,7 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
 }
 
 function usageTotals(overrides: Partial<UsageTotals> = {}): UsageTotals {
+  const known = overrides.known_jobs ?? 0;
   return {
     jobs: 0,
     input_tokens: 0,
@@ -373,6 +376,7 @@ function usageTotals(overrides: Partial<UsageTotals> = {}): UsageTotals {
     duration_ms: 0,
     known_jobs: 0,
     unknown_jobs: 0,
+    known_metrics: { input_tokens: known, output_tokens: known, cache_read_tokens: known, cache_write_tokens: known, reasoning_tokens: known, cost: known },
     ...overrides,
   };
 }
@@ -453,6 +457,9 @@ describe("ProjectOverview 当前需要你处理", () => {
           status: "blocked",
           blocked_reason: "规划服务不可用",
         }),
+        attention_items: [{ id: "p1", kind: "failed", task: null, reason: "规划服务不可用",
+          since: "2026-01-10T10:00:00Z", affected_tasks: 0, blocks_milestone: false,
+          blocks_summary: true, project_advancing: false }],
         jobs: [job("failed", { id: "job-failed" })],
       }),
     );

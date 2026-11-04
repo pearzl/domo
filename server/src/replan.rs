@@ -98,6 +98,29 @@ async fn request_inner(
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Ok(None);
     }
+    let limits = crate::delivery::limits(&state.db, project_id).await?;
+    if limits
+        .replan_limit
+        .is_some_and(|limit| project.replan_generation >= limit)
+    {
+        let reason = format!(
+            "项目重规划次数达到上限，累计 {} 次；请提高限制后重新发起重规划",
+            project.replan_generation
+        );
+        sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing') THEN status ELSE 'blocked' END, \
+            blocked_reason = ?, updated_at = ? WHERE id = ?")
+            .bind(&reason).bind(now()).bind(project_id).execute(&state.db).await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(project_id),
+            None,
+            "project_limit_reached",
+            &reason,
+        )
+        .await;
+        return Ok(None);
+    }
     if expected.is_some_and(|expected| {
         project.replan_generation != expected.replan_generation
             || project.stage != STAGE_SUMMARIZING
@@ -646,29 +669,12 @@ pub(crate) fn partition_tasks(tasks: Vec<TaskRow>) -> TaskPartition {
         .into_iter()
         .filter(|task| task.status.as_deref() != Some(STATUS_CANCELED))
         .collect();
-    let mut canceled: HashSet<String> = active
+    let canceled: HashSet<String> = active
         .iter()
         .filter(|task| task.stage != TASK_STAGE_COMPLETED)
         .map(|task| task.id.clone())
         .collect();
-    loop {
-        let before = canceled.len();
-        for task in &active {
-            let parent_canceled = task
-                .parent_id
-                .as_ref()
-                .is_some_and(|parent| canceled.contains(parent));
-            let child_canceled = active.iter().any(|child| {
-                child.parent_id.as_deref() == Some(task.id.as_str()) && canceled.contains(&child.id)
-            });
-            if parent_canceled || child_canceled {
-                canceled.insert(task.id.clone());
-            }
-        }
-        if canceled.len() == before {
-            break;
-        }
-    }
+    // 已完成子任务已经独立验收并交付，不能随未完成父任务一起作废。
     let (canceled_tasks, retained): (Vec<TaskRow>, Vec<TaskRow>) = active
         .into_iter()
         .partition(|task| canceled.contains(&task.id));

@@ -132,6 +132,12 @@ pub(crate) async fn apply_analysis_plan(
         crate::replan::validate_apply_tx(&mut tx, project, proposal_json).await?;
         Some(crate::replan::supersede_tx(&mut tx, &project.id, &timestamp).await?)
     } else {
+        if current.stage != STAGE_ANALYSIS
+            || (current.proposal.as_deref() != Some(proposal_json)
+                && current.confirm_mode != CONFIRM_AUTO)
+        {
+            return Err(crate::replan::StaleReplan.into());
+        }
         let existing: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
              AND COALESCE(status, '') != ?",
@@ -190,7 +196,7 @@ pub(crate) async fn apply_analysis_plan(
         .bind(&timestamp)
         .execute(&mut *tx)
         .await?;
-        crate::db::ensure_task_agents_tx(&mut tx, &task_id).await?;
+        crate::db::initialize_task_agents_tx(&mut tx, &task_id).await?;
     }
     if project.replan_active != 0 {
         crate::replan::enqueue_cleanup_tx(
@@ -359,10 +365,8 @@ pub(super) async fn handle_analysis_plan(
     };
     let proposal_json = serde_json::to_string(&proposal)?;
     let confirm_mode = latest_confirm_mode(state, &project.id).await?;
-    // 重规划草稿生成后由 DOMO 直接应用，不受方案确认方式与影响范围影响。
-    let auto = project.replan_active != 0
-        || project.confirmed_at.is_some()
-        || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
+    // 首次分析和重规划使用相同的确认策略。
+    let auto = skip_confirmation && confirm_mode == CONFIRM_AUTO;
     if project.replan_active != 0
         && !crate::replan::store_draft(state, project, &proposal_json).await?
     {
@@ -510,10 +514,7 @@ pub(super) async fn handle_analysis_direct(
     };
     let proposal_json = serde_json::to_string(&proposal)?;
     let confirm_mode = latest_confirm_mode(state, &project.id).await?;
-    // 重规划草稿生成后由 DOMO 直接应用，不受方案确认方式与影响范围影响。
-    let auto = project.replan_active != 0
-        || project.confirmed_at.is_some()
-        || (skip_confirmation && confirm_mode == CONFIRM_AUTO);
+    let auto = skip_confirmation && confirm_mode == CONFIRM_AUTO;
     let content =
         analysis_proposal_content(summary, Some(&goal), &[], &[], &[], plan, verification);
     if project.replan_active != 0
@@ -606,6 +607,26 @@ pub(super) async fn handle_analysis_direct(
             "方案已由自动确认通过，开始直接完成",
         )
         .await;
+    } else if project.replan_active != 0 {
+        sqlx::query(
+            "UPDATE projects SET replan_proposal = ?, status = CASE WHEN status IN \
+             ('pausing', 'paused', 'archived') THEN status ELSE 'blocked' END, \
+             blocked_reason = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(&proposal_json)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "analysis_direct",
+            "重规划直接完成草稿等待人工确认",
+        )
+        .await;
     } else {
         sqlx::query(
             "UPDATE projects SET goal = ?, proposal = ?, stage = ?, \
@@ -672,7 +693,7 @@ pub(super) async fn handle_analysis_failure(
     .bind(failure.status())
     .bind(&failure.blocked_reason)
     .bind(failure.switch)
-    .bind(failure.switch.then_some(ROLE_PLANNER))
+    .bind(failure.switch.then(|| agent.map(|agent| agent.id.as_str())).flatten())
     .bind(failure.switch)
     .bind(failure.switch.then_some(ROLE_PLANNER))
     .bind(now())

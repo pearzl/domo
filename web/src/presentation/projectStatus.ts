@@ -4,6 +4,7 @@ import type {
   Message,
   Project,
   ProjectAttention,
+  AttentionAction,
   Task,
 } from "../types";
 /// 任务阶段文案统一取自 ui.tsx，概览与任务列表不会出现两套措辞。
@@ -12,6 +13,7 @@ import { retryableProjectJobId } from "./jobSelection";
 
 /// 概览只读取项目详情中已有的数据，不触发额外请求。
 export interface ProjectStatusInput {
+  attentionItems: AttentionAction[];
   project: Project;
   tasks: Task[];
   jobs: JobSummary[];
@@ -133,33 +135,7 @@ export function projectStatus(input: ProjectStatusInput): ProjectStatus {
 export function projectAttention(
   input: ProjectStatusInput,
 ): ProjectAttention | null {
-  const { project } = input;
-  if (
-    project.status === "archived" ||
-    project.status === "paused" ||
-    project.status === "pausing"
-  ) {
-    return null;
-  }
-  if (project.stage === "analysis") {
-    if (analysisNeedsManualHandling(project)) return blockedAttention(input);
-    if (projectHasRunningJob(input.jobs, "analysis")) return null;
-    if (input.proposal) return "confirm";
-    return project.status === "blocked" ? "blocked" : null;
-  }
-  if (project.stage === "summarizing") {
-    if (project.report) return "review";
-    return project.status === "blocked" ? blockedAttention(input) : null;
-  }
-  if (project.stage === "completed") {
-    if (project.workspace_type === "plain") return null;
-    return project.merged_at || input.mergedIntoBase ? null : "merge";
-  }
-  return project.status === "blocked" ? blockedAttention(input) : null;
-}
-
-function blockedAttention(input: ProjectStatusInput): ProjectAttention {
-  return retryableProjectJobId(input.project, input.jobs) ? "failed" : "blocked";
+  return input.attentionItems[0]?.kind ?? null;
 }
 
 /// 概览的“当前需要你处理”只描述现状与下一步，不执行任何项目操作。
@@ -180,6 +156,13 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
       null,
       { resume: true },
     );
+  }
+
+  const taskAction = input.attentionItems.find((item) => item.task !== null);
+  if (taskAction?.task) {
+    return guidance("warn", "需要处理", `处理任务 ${taskAction.task.key}`,
+      taskAction.reason ?? "查看任务验收或人工裁决。", null,
+      { tab: "tasks", action: "去处理任务" });
   }
 
   // 分析阶段的阻塞来自等待目标、提问、方案确认或无法自动处理的失败。

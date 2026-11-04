@@ -222,8 +222,6 @@ describe("styles.css 减少动效覆盖", () => {
     for (const selector of [
       ".motion-rise",
       ".project-panel",
-      ".animated-number-digit.is-up",
-      ".animated-number-digit.is-down",
     ]) {
       expect(selectors).toContain(selector);
     }
@@ -233,8 +231,6 @@ describe("styles.css 减少动效覆盖", () => {
     for (const selector of [
       ".skeleton",
       ".status-dot",
-      ".animated-number-digit.is-up",
-      ".animated-number-digit.is-down",
       ".task-row",
       ".project-status-fade",
       ".motion-fade",
@@ -378,20 +374,10 @@ describe("styles.css 减少动效覆盖完整性", () => {
       expect(rule?.names.map(({ name }) => name)).toEqual(["motion-fade-in"]);
     });
 
-    it("概览与用量摘要里的数值滚动只淡入", () => {
-      for (const selector of [
-        ".overview-value .animated-number-digit.is-up",
-        ".overview-value .animated-number-digit.is-down",
-        ".usage-summary-value .animated-number-digit.is-up",
-        ".usage-summary-value .animated-number-digit.is-down",
-      ]) {
-        expect(covered.has(selector)).toBe(true);
-      }
-      const body = mainSource.match(
-        /\.overview-value \.animated-number-digit\.is-up,[\s\S]*?\.usage-summary-value \.animated-number-digit\.is-down\s*\{([^}]*)\}/,
-      );
-      expect(body).not.toBeNull();
-      expect(body?.[1] ?? "").toContain("animation-name: motion-fade-in");
+    it("数值没有逐位滚动样式或缓存驱动动画", () => {
+      expect(stylesSource).not.toContain("animated-number");
+      expect(keyframeNames(stylesSource).has("motion-digit-up")).toBe(false);
+      expect(keyframeNames(stylesSource).has("motion-digit-down")).toBe(false);
     });
 
     it("概览网格重排与用量摘要卡片没有引入位移或缩放动画", () => {

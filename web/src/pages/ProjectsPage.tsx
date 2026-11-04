@@ -269,15 +269,15 @@ function renderProjectCards(
           </Badge>
           <StageBadge stage={project.stage} />
           <StatusBadge status={project.status} />
-          {project.attention ? (
+          {project.attention_items[0] ? (
             <Badge
               tone={
-                project.attention === "failed" || project.attention === "blocked"
+                project.attention_items[0].kind === "failed" || project.attention_items[0].kind === "blocked"
                   ? "danger"
                   : "success"
               }
             >
-              {PROJECT_ATTENTION_LABELS[project.attention]}
+              {PROJECT_ATTENTION_LABELS[project.attention_items[0].kind]}
             </Badge>
           ) : null}
           {project.merged_at ? (
@@ -309,7 +309,6 @@ function renderProjectCards(
         <Progress
           total={project.task_total}
           completed={project.task_completed}
-          session={`project:${project.id}`}
         />
       </div>
     </article>

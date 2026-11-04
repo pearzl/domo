@@ -23,6 +23,8 @@ const VERIFICATION_EXCERPT_CHARS: usize = 500;
 
 #[derive(Debug, Serialize)]
 pub(super) struct VerificationSummary {
+    pub(super) execution_job_id: Option<String>,
+    pub(super) evidence: Option<Value>,
     pub(super) id: String,
     /// 所属执行轮，从 1 开始，0 表示没有可关联的执行作业。
     pub(super) round: i64,
@@ -83,9 +85,8 @@ pub(super) async fn task_verifications(
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
-    let executions: Vec<(String, String)> = sqlx::query_as(
-        "SELECT created_at, id FROM jobs WHERE task_id = ? AND role = ? \
-         ORDER BY created_at ASC, id ASC",
+    let executions: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE task_id = ? AND role = ? ORDER BY created_at ASC, id ASC",
     )
     .bind(&task.id)
     .bind(JOB_ROLE_EXECUTOR)
@@ -103,8 +104,18 @@ pub(super) async fn task_verifications(
         .map(|job| {
             let verdict = verification_verdict(job.result.as_deref());
             VerificationSummary {
+                evidence: job
+                    .result
+                    .as_deref()
+                    .and_then(domain::extract_json)
+                    .and_then(|value| value.get("evidence").cloned()),
+                round: job
+                    .execution_job_id
+                    .as_ref()
+                    .and_then(|id| executions.iter().position(|execution| execution == id))
+                    .map_or(0, |index| index as i64 + 1),
+                execution_job_id: job.execution_job_id,
                 id: job.id,
-                round: execution_round(&executions, &job.created_at),
                 attempt: job.attempt,
                 status: job.status,
                 passed: verdict.passed,
@@ -132,14 +143,6 @@ pub(super) async fn task_verifications(
         truncated: total > VERIFICATION_HISTORY_LIMIT,
         verifications,
     }))
-}
-
-/// 执行轮编号：`executions` 按 `(created_at, id)` 升序排列，验收归属创建时间不晚于它的最近一个执行作业。
-pub(super) fn execution_round(executions: &[(String, String)], verified_at: &str) -> i64 {
-    executions
-        .iter()
-        .take_while(|(created_at, _)| created_at.as_str() <= verified_at)
-        .count() as i64
 }
 
 pub(super) fn verification_verdict(result: Option<&str>) -> VerificationVerdict {
@@ -317,6 +320,9 @@ pub(super) async fn submit_arbitration(
     let mut event_message = format!("人工裁决：重试任务 {}", task.key);
     match action.as_str() {
         ARBITRATION_SWITCH_AGENT => {
+            if !request.risk_confirmed {
+                return Err(ApiError::bad("人工指定会绕过角色、启停、冷却、可用时段和用量限额，可能产生额外费用；请明确确认风险"));
+            }
             let agent_id = request
                 .agent_id
                 .as_deref()
@@ -326,13 +332,6 @@ pub(super) async fn submit_arbitration(
             let Some(agent) = crate::db::load_agent(&state.db, agent_id).await? else {
                 return Err(ApiError::not_found("Agent 不存在"));
             };
-            if !parse_list(&agent.roles).iter().any(|item| item == role) {
-                return Err(ApiError::bad(format!(
-                    "Agent {} 不能承担{}角色",
-                    agent.name,
-                    role_label(role)
-                )));
-            }
             forced_agent_id = Some(agent.id.clone());
             forced_agent_role = Some(role.to_string());
             event_kind = "arbitration_switch_agent";
@@ -384,6 +383,18 @@ pub(super) async fn submit_arbitration(
         }
     }
     let mut tx = state.db.begin().await?;
+    if action == ARBITRATION_SWITCH_AGENT {
+        sqlx::query("DELETE FROM retry_requests WHERE task_id = ?")
+            .bind(&task.id)
+            .execute(&mut *tx)
+            .await?;
+    } else if let (Some(job), Some(agent_id)) = (&latest_job, &retry_agent) {
+        // A retry recorded during project pause keeps its job/session, but the
+        // scheduler cannot resume it until the project restriction is lifted.
+        sqlx::query("INSERT INTO retry_requests(task_id, job_id, agent_id, role, requested_at) VALUES(?, ?, ?, ?, ?) \
+            ON CONFLICT(task_id) DO UPDATE SET job_id = excluded.job_id, agent_id = excluded.agent_id, role = excluded.role, requested_at = excluded.requested_at")
+            .bind(&task.id).bind(&job.id).bind(agent_id).bind(role).bind(now()).execute(&mut *tx).await?;
+    }
     sqlx::query(
         "UPDATE tasks SET status = ?, attempts = ?, rejections = ?, agent_id = NULL, \
          last_agent_id = CASE WHEN ? THEN NULL ELSE last_agent_id END, \
@@ -436,9 +447,9 @@ pub(super) async fn submit_arbitration(
     load_detail(&state, &project_id).await.map(Json)
 }
 
-/// The manual retry target is the agent that ran the latest failed job of the
-/// role being retried. It bypasses its cooldown once, and the backoff is
-/// cleared only when the retried dispatch succeeds.
+/// Only the latest job of the role can be resumed, and only while it is failed.
+/// An earlier failure superseded by another job must not revive its old session.
+/// The retry target bypasses cooldown once; backoff clears on successful dispatch.
 pub(super) async fn latest_failed_job(
     state: &AppState,
     project_id: &str,
@@ -448,39 +459,34 @@ pub(super) async fn latest_failed_job(
     let job = match task_id {
         Some(task_id) => {
             sqlx::query_as::<_, JobRow>(
-                "SELECT * FROM jobs WHERE task_id = ? AND role = ? AND status = ? \
+                "SELECT * FROM jobs WHERE task_id = ? AND role = ? \
                  ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(task_id)
             .bind(role)
-            .bind(JOB_STATUS_FAILED)
             .fetch_optional(&state.db)
             .await?
         }
         None => {
             sqlx::query_as::<_, JobRow>(
                 "SELECT * FROM jobs WHERE project_id = ? AND task_id IS NULL AND role = ? \
-                 AND status = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(project_id)
             .bind(role)
-            .bind(JOB_STATUS_FAILED)
             .fetch_optional(&state.db)
             .await?
         }
     };
-    Ok(job)
+    Ok(job.filter(|job| job.status == JOB_STATUS_FAILED))
 }
 
-pub(super) async fn role_agents(state: &AppState, role: &str) -> Result<Vec<AgentRow>, ApiError> {
+pub(super) async fn role_agents(state: &AppState, _role: &str) -> Result<Vec<AgentRow>, ApiError> {
     let rows =
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, id ASC")
             .fetch_all(&state.db)
             .await?;
-    Ok(rows
-        .into_iter()
-        .filter(|agent| parse_list(&agent.roles).iter().any(|item| item == role))
-        .collect())
+    Ok(rows)
 }
 
 pub(super) fn arbitration_role(task: &TaskRow) -> &'static str {
@@ -506,65 +512,18 @@ pub(super) async fn retry_task(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let Some(task) =
-        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
-            .bind(&task_id)
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?
-    else {
-        return Err(ApiError::not_found("任务不存在"));
-    };
-    if task.stage == TASK_STAGE_COMPLETED {
-        return Err(ApiError::bad("任务已完成"));
-    }
-    if task.status.as_deref() != Some(STATUS_BLOCKED) {
-        return Err(ApiError::bad("只有阻塞中的任务可以重试"));
-    }
-    {
-        let _guard = state.schedule_lock.lock().await;
-        let role = arbitration_role(&task);
-        let retry_agent = latest_failed_job(&state, &project_id, Some(&task.id), role)
-            .await?
-            .and_then(|job| job.agent_id);
-        sqlx::query(
-            "UPDATE tasks SET status = ?, attempts = 0, rejections = 0, agent_id = NULL, \
-             last_agent_id = NULL, avoid_agent_id = NULL, avoid_agent_role = NULL, \
-             last_error = NULL, last_failure_kind = NULL, waiting_reason = NULL, \
-             retry_agent_id = ?, retry_role = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(STATUS_QUEUED)
-        .bind(retry_agent)
-        .bind(role)
-        .bind(now())
-        .bind(&task.id)
-        .execute(&state.db)
-        .await?;
-        sqlx::query(
-            "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(STATUS_RUNNING)
-        .bind(now())
-        .bind(&project_id)
-        .execute(&state.db)
-        .await?;
-    }
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&project_id),
-        Some(&task.id),
-        "task_retry",
-        format!("人工要求重试任务 {}", task.key),
+    // Both task retry entries share gate validation, session reuse and the
+    // project-level pause restriction.
+    let _ = submit_arbitration(
+        State(state),
+        Path((project_id, task_id)),
+        Json(ArbitrationRequest {
+            action: ARBITRATION_RETRY.into(),
+            agent_id: None,
+            guidance: None,
+            risk_confirmed: false,
+        }),
     )
-    .await;
-    state.notify_scheduler();
+    .await?;
     Ok(Json(json!({"ok": true})))
 }

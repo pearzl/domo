@@ -123,6 +123,13 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
     if job.status != JOB_STATUS_RUNNING {
         return Ok(());
     }
+    if job.role == "merge_conflict" {
+        sqlx::query("UPDATE merge_requests SET state = 'failed', error = ? WHERE job_id = ?")
+            .bind(reason)
+            .bind(job_id)
+            .execute(&state.db)
+            .await?;
+    }
     let finished_at = now();
     let duration_ms = job
         .started_at
@@ -152,7 +159,12 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
             mark_canceled_job(state, &job, "项目代际已变化，取消过期运行时结算").await?;
             return Ok(());
         }
-        if job.replan_generation > 0 && current_project.replan_active == 0 {
+        // Only the analysis job belongs to the replan draft itself. Execution,
+        // acceptance and summary jobs keep that generation after it is applied.
+        if job.role == JOB_ROLE_ANALYSIS
+            && job.replan_generation > 0
+            && current_project.replan_active == 0
+        {
             mark_canceled_job(state, &job, "重规划已结束，取消过期运行时结算").await?;
             return Ok(());
         }

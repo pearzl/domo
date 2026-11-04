@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 重规划引发的项目分析失败后，调度器在原 Agent 上继续重试，不回到等待人工输入；
-  2. 重试耗尽后项目阻塞，人工重试失败作业仍会派发新的项目分析作业。
+  2. 供应商重试耗尽后保留自动恢复等待，不产生人工待办；可放弃重规划恢复旧报告。
 
 使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
 退出码 0 表示全部通过。
@@ -106,13 +106,13 @@ def main():
             )
             detail = wait_project(
                 project_id,
-                lambda item: item["project"]["status"] == "blocked"
-                and "503" in (item["project"]["blocked_reason"] or "")
+                lambda item: item["project"]["status"] == "running"
+                and "冷却" in (item["project"]["blocked_reason"] or "")
                 and not any(
                     job["role"] == "analysis" and job["status"] == "running"
                     for job in item["jobs"]
                 ),
-                "重规划后的项目分析重试耗尽",
+                "重规划后的项目分析等待冷却",
             )
             assert detail["project"]["report"], "分析失败不应清空旧报告"
             assert detail["tasks"] and all(
@@ -126,24 +126,8 @@ def main():
                 job["status"] == "failed" and job["failure_kind"] == "transient"
                 for job in retried
             ), retried
-            assert project_summary()["attention"] == "failed"
-
-            # 人工重试最新失败作业仍会派发新的项目分析作业。
-            call("POST", f"/api/jobs/{retried[-1]['id']}/retry", {})
-            detail = wait_project(
-                project_id,
-                lambda item: len(analysis_jobs(item)) == len(jobs) + 1
-                and item["project"]["status"] == "blocked"
-                and "503" in (item["project"]["blocked_reason"] or "")
-                and not any(
-                    job["role"] == "analysis" and job["status"] == "running"
-                    for job in item["jobs"]
-                ),
-                "人工重试后重新派发项目分析",
-            )
-            jobs = analysis_jobs(detail)
-            assert jobs[-1]["agent_id"] == flaky, jobs[-1]
-            assert jobs[-1]["status"] == "failed", jobs[-1]
+            assert project_summary()["attention_items"] == []
+            assert not project_summary()["attention_items"]
 
             detail = call("POST", f"/api/projects/{project_id}/replan/abandon")
             assert detail["project"]["stage"] == "summarizing", detail["project"]

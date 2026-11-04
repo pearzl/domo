@@ -9,6 +9,7 @@ import {
 } from "../ui";
 import { agentFailureStatus } from "../presentation/agentFailure";
 import { nextRoleTab, resolveActiveRole, roleTabs } from "../presentation/agentPool";
+import { AgentAdvice } from "./TeamOperations";
 
 export interface AgentPoolPanelProps {
   /** 面板标题，例如"项目 Agent 池"或"默认团队"。 */
@@ -151,6 +152,7 @@ export function AgentPoolPanel({
     >
       <summary>{title}</summary>
       <p className="subtitle">{subtitle}</p>
+      <AgentAdvice roles={roles} />
       <div
         className="agent-pool-tabs"
         role="tablist"

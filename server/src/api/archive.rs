@@ -101,6 +101,28 @@ pub(super) async fn dirty_worktrees(
             });
         }
     }
+    let jobs: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM jobs WHERE project_id = ? AND role = 'merge_conflict'")
+            .bind(&project.id)
+            .fetch_all(&state.db)
+            .await?;
+    for job in jobs {
+        let path = paths::job_dir(&PathBuf::from(&project.workspace), &job).join("resolution");
+        if path.exists()
+            && git::status_porcelain(&path)
+                .await
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(true)
+        {
+            dirty.push(DirtyWorktree {
+                task_id: None,
+                key: None,
+                title: None,
+                label: format!("合入冲突处理现场 {job}"),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
     Ok(dirty)
 }
 

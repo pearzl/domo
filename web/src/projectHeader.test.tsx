@@ -57,6 +57,7 @@ function task(index: number, completed: boolean): Task {
 
 function runningJob(): JobSummary {
   return {
+    execution_job_id: null,
     id: "job-1",
     project_id: "p1",
     task_id: null,

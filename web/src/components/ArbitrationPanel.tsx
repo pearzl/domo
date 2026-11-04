@@ -60,6 +60,7 @@ export function ArbitrationPanel({
     action: "retry" | "switch_agent" | "guide";
     agent_id?: string;
     guidance?: string;
+    risk_confirmed?: boolean;
   }) {
     setBusy(true);
     setError("");
@@ -170,6 +171,7 @@ export function ArbitrationPanel({
             </button>
           </div>
           <div className="arbitration-switch">
+            <p className="muted">人工指定会绕过角色能力、启停、冷却、可用时段和用量限额，可能产生额外费用；并发满额时仍等待该 Agent。</p>
             <select
               value={agentId}
               onChange={(event) => setAgentId(event.target.value)}
@@ -186,9 +188,11 @@ export function ArbitrationPanel({
             <button
               className="secondary"
               disabled={disabled || busy || !agentId}
-              onClick={() =>
-                void submit({ action: "switch_agent", agent_id: agentId })
-              }
+              onClick={() => {
+                if (window.confirm("确认本次人工指定？可能产生额外费用、使用不具备目标角色的 Agent，并绕过正常可用性限制。")) {
+                  void submit({ action: "switch_agent", agent_id: agentId, risk_confirmed: true });
+                }
+              }}
             >
               换 Agent 执行
             </button>
