@@ -74,6 +74,15 @@ pub(super) async fn run(state: &AppState, job: &JobRow) -> Result<()> {
         state.cfg.job_timeout,
     )
     .await?;
+    let usage = agents::finish_job(agents::FinishContext {
+        agent: &agent,
+        job_id: &job.id,
+        session_id: run.session_id.as_deref().or(spec.session_id.as_deref()),
+        process_failed: run.process_failure(),
+        shutting_down: state.is_shutting_down(),
+    })
+    .await;
+    run.usage = agents::apply_usage(run.usage, usage);
     state.unregister_job(&job_dir);
     let raw = tokio::fs::read_to_string(job_dir.join("result.json"))
         .await

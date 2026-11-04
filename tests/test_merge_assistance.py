@@ -89,6 +89,8 @@ def main():
             assert detail["project"]["stage"] == "completed" and detail["project"]["status"] is None
             merge_jobs = [j for j in detail["jobs"] if j["role"] == "merge_conflict"]
             assert len(merge_jobs) == 3 and merge_jobs[-1]["agent_id"] == selected["id"], merge_jobs
+            assert merge_jobs[-1]["cost"] == 0.25 and merge_jobs[-1]["usage_known"], merge_jobs[-1]
+            assert merge_jobs[-1]["input_tokens"] == 10 and merge_jobs[-1]["output_tokens"] == 10, merge_jobs[-1]
             assert not any(j["role"] == "verifier" for j in detail["jobs"])
             assert git(["rev-parse", "main"], repo).strip() == detail["project"]["merged_commit"]
             assert git(["rev-list", "--merges", f"{old_base}..main"], repo).strip() == ""
