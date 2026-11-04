@@ -58,7 +58,8 @@ Windows 使用 `python tests/run.py`。单个用例可直接运行，例如 `pyt
 
 | 文档 | 内容 |
 |---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | 产品设计：主要功能介绍，设计思路说明 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 产品设计：核心能力、用户行为、流程状态与界面设计 |
+| [docs/TECH.md](docs/TECH.md) | 技术设计：架构边界、持久化、运行协议、Git 算法与扩展约束 |
 | [docs/DEV.md](docs/DEV.md) | 开发模式和约定：目录、文档职责、测试与变更要求 |
 
 ## 技术栈
