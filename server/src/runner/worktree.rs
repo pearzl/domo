@@ -9,6 +9,49 @@ use crate::models::*;
 use crate::paths;
 use crate::state::AppState;
 
+pub(crate) struct TaskMergeTarget {
+    pub worktree: PathBuf,
+    pub branch: String,
+    pub label: &'static str,
+}
+
+/// Children integrate into their parent's checkout; only root tasks publish to
+/// the project delivery branch. Recreating a checkout reuses its saved branch.
+pub(crate) async fn task_merge_target(
+    state: &AppState,
+    project: &ProjectRow,
+    task: &TaskRow,
+) -> Result<TaskMergeTarget> {
+    if let Some(parent_id) = &task.parent_id {
+        let parent =
+            sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+                .bind(parent_id)
+                .bind(&project.id)
+                .fetch_one(&state.db)
+                .await?;
+        if parent.stage == TASK_STAGE_COMPLETED || parent.status.as_deref() == Some(STATUS_CANCELED)
+        {
+            return Err(anyhow!("父任务已完成或取消，不能接收子任务成果"));
+        }
+        let branch = parent
+            .branch
+            .clone()
+            .ok_or_else(|| anyhow!("父任务缺少执行分支"))?;
+        let worktree = prepare_task_worktree(state, project, Some(&parent)).await?;
+        Ok(TaskMergeTarget {
+            worktree,
+            branch,
+            label: "父任务分支",
+        })
+    } else {
+        Ok(TaskMergeTarget {
+            worktree: paths::project_repo(&PathBuf::from(&project.workspace)),
+            branch: project.branch.clone(),
+            label: "项目交付分支",
+        })
+    }
+}
+
 /// Every Git job runs in a dedicated worktree root; a mismatch means the agent
 /// would read or write another checkout, so the job is rejected before spawn.
 /// 普通工作区直接在所选目录中运行，只校验目录存在。
@@ -45,18 +88,6 @@ pub(super) async fn prepare_task_worktree(
     if let Some(worktree) = &task.worktree {
         let path = PathBuf::from(worktree);
         if path.join(".git").exists() {
-            if task.stage == TASK_STAGE_EXECUTING && task.parent_id.is_none() {
-                let children: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND stage = 'completed'",
-                )
-                .bind(&task.id)
-                .fetch_one(&state.db)
-                .await?;
-                if children > 0 {
-                    let _guard = state.git_lock.lock().await;
-                    git::merge_for_execution(&path, &project.branch).await?;
-                }
-            }
             return Ok(path);
         }
     }
@@ -69,7 +100,18 @@ pub(super) async fn prepare_task_worktree(
         task.seq,
         slug(&task.key)
     );
-    let base_branch = project.branch.clone();
+    let base_branch = if let Some(parent_id) = &task.parent_id {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT branch FROM tasks WHERE id = ? AND project_id = ?",
+        )
+        .bind(parent_id)
+        .bind(&project.id)
+        .fetch_one(&state.db)
+        .await?
+        .ok_or_else(|| anyhow!("父任务缺少执行分支，无法创建子任务工作区"))?
+    } else {
+        project.branch.clone()
+    };
     {
         let _guard = state.git_lock.lock().await;
         if path.exists() {

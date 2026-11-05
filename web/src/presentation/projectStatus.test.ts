@@ -286,7 +286,7 @@ describe("projectGuidance", () => {
     expect(guidance.action).toBe("去处理阻塞");
   });
 
-  it("项目级失败作业提供直接重试与作业深链", () => {
+  it("项目级失败作业提供人工执行与作业深链", () => {
     const guidance = projectGuidance(
       input({
         project: project({
@@ -365,7 +365,7 @@ describe("projectGuidance", () => {
         jobs: [job({ id: "summary-failed", role: "summary", status: "failed" })],
       }),
     );
-    expect(guidance.title).toBe("重试失败作业");
+    expect(guidance.title).toBe("处理失败作业");
     expect(guidance.retryJobId).toBe("summary-failed");
     expect(guidance.tab).toBe("info");
   });

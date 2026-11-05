@@ -224,6 +224,16 @@ pub async fn gate(
     project_id: &str,
     task_id: Option<&str>,
 ) -> Result<Option<String>> {
+    gate_with_reserved_attempt(pool, project_id, task_id, false).await
+}
+
+/// The running continuation already owns one persisted dispatch reservation.
+pub async fn gate_with_reserved_attempt(
+    pool: &SqlitePool,
+    project_id: &str,
+    task_id: Option<&str>,
+    reserved: bool,
+) -> Result<Option<String>> {
     let config = limits(pool, project_id).await?;
     let (cost, unknown): (f64, i64) = sqlx::query_as(
         "SELECT CAST(COALESCE(SUM(cost), 0) AS REAL), COALESCE(SUM(cost IS NULL), 0) FROM accounting_jobs WHERE project_id = ?",
@@ -240,7 +250,7 @@ pub async fn gate(
         .bind(task_id)
         .fetch_one(pool)
         .await?;
-        if count >= limit {
+        if count.saturating_sub(i64::from(reserved)) >= limit {
             return Ok(Some(format!(
                 "任务自动执行尝试已达到上限 {limit}，累计 {count} 次；请提高限制后继续"
             )));

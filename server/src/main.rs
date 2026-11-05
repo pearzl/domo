@@ -5,6 +5,7 @@ mod artifacts;
 mod attention;
 mod backup;
 mod config;
+mod continuation;
 mod db;
 mod delivery;
 mod domain;

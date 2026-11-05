@@ -1,12 +1,8 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 
 use crate::domain::now;
 use crate::events::emit;
-use crate::git;
 use crate::models::*;
-use crate::paths;
 use crate::state::AppState;
 
 use super::failure::plan_project_failure;
@@ -81,10 +77,6 @@ pub(super) async fn handle_direct_failure(
     agent: Option<&AgentRow>,
     process_failure: bool,
 ) -> Result<()> {
-    if project.is_git() {
-        let _guard = state.git_lock.lock().await;
-        let _ = git::reset_hard(&paths::project_repo(&PathBuf::from(&project.workspace))).await;
-    }
     let failure = plan_project_failure(
         state,
         project,

@@ -422,20 +422,6 @@ pub async fn load_agent(pool: &SqlitePool, id: &str) -> DbResult<Option<AgentRow
     )
 }
 
-/// Manual retry clears the backoff of the one agent that receives the retried
-/// dispatch, after that dispatch succeeds.
-pub async fn clear_agent_backoff(pool: &SqlitePool, id: &str) -> DbResult<()> {
-    sqlx::query(
-        "UPDATE agents SET cooldown_until = NULL, failure_kind = NULL, transient_failures = 0, \
-         updated_at = ? WHERE id = ?",
-    )
-    .bind(crate::domain::now())
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// A project inherits a snapshot of the default team configuration when it is
 /// first touched. Priorities are normalized per role so project changes only
 /// reorder the project's own pool. Entries whose global agent has been deleted

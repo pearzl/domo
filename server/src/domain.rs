@@ -190,6 +190,39 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
     }
 }
 
+/// Writing results declare the exact files DOMO may stage. Keep the declaration
+/// in the immutable raw result so audit consumers can inspect the model's choice.
+pub fn commit_files(raw: &str) -> Result<Vec<String>, String> {
+    let value = extract_json(raw).ok_or("结果不是合法 JSON")?;
+    let files = value
+        .get("commit_files")
+        .and_then(Value::as_array)
+        .ok_or("写作业结果缺少 commit_files 文件数组；没有入库改动时显式填写 []")?;
+    let mut paths = Vec::new();
+    for item in files {
+        let path = item
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .ok_or("commit_files 必须是非空路径字符串数组")?;
+        if !valid_commit_path(path) {
+            return Err(format!("commit_files 包含不安全路径: {path}"));
+        }
+        if !paths.iter().any(|p| p == path) {
+            paths.push(path.to_string());
+        }
+    }
+    Ok(paths)
+}
+
+pub fn valid_commit_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['\0', '\\', ':', '*', '?', '[', ']'])
+        && !path.starts_with('/')
+        && !path.split('/').any(|part| {
+            part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
+        })
+}
+
 fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
     if value.get("kind").and_then(Value::as_str) == Some("plan") {
         let parsed = parse_analysis_result(value)?;
@@ -911,7 +944,7 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 
 /// Matches an HTTP status code as a standalone token so timestamps and file
 /// sizes do not become failure signals.
-fn contains_status_code(text: &str, code: &str) -> bool {
+pub(crate) fn contains_status_code(text: &str, code: &str) -> bool {
     text.match_indices(code).any(|(index, _)| {
         let before = text[..index].chars().next_back();
         let after = text[index + code.len()..].chars().next();
@@ -1027,6 +1060,20 @@ fn parse_amount(text: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn writing_results_require_an_explicit_file_array() {
+        assert!(super::commit_files(r#"{"kind":"done"}"#).is_err());
+        assert!(super::commit_files(r#"{"commit_files":"src/file"}"#).is_err());
+        assert!(super::commit_files(r#"{"commit_files":[null]}"#).is_err());
+        assert!(super::commit_files(r#"{"commit_files":[""]}"#).is_err());
+        assert!(super::commit_files(r#"{"commit_files":[]}"#)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            super::commit_files(r#"{"commit_files":["old","new","old"]}"#).unwrap(),
+            vec!["old", "new"]
+        );
+    }
     use super::*;
 
     fn task(key: &str, deps: &[&str]) -> PlanTask {

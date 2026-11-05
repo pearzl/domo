@@ -1,5 +1,5 @@
 /// 项目详情页的派生视图：只读取项目快照与页面的临时状态，
-/// 把阶段判定、筛选、徽标与重试入口统一在这里计算，组件只负责呈现。
+/// 把阶段判定、筛选、徽标与作业操作定位统一在这里计算，组件只负责呈现。
 import type { ProjectDetail } from "../types";
 import { analysisThread } from "./analysisThread";
 import { retryableProjectJobId } from "./jobSelection";

@@ -220,17 +220,33 @@ describe("归档只读", () => {
     }
   });
 
-  it("作业详情在只读模式下不渲染重试入口", () => {
+  it("作业详情在只读模式下不渲染继续或新会话入口", () => {
     const markup = renderToStaticMarkup(
       <JobDetailView
-        job={jobSummary({ status: "failed" })}
+        job={jobSummary({ status: "failed", can_continue: true })}
         retryable
         readOnly
         onRetry={() => {}}
+        onRestart={() => {}}
       />,
     );
-    expect(markup).not.toContain("让这个失败作业重新排队");
-    expect(markup).not.toContain(">重试</button>");
+    expect(markup).not.toContain(">继续</button>");
+    expect(markup).not.toContain(">新会话执行</button>");
+  });
+
+  it("人工停止的作业按服务端资格显示继续，未知诊断不伪装为确定错误", () => {
+    const markup = renderToStaticMarkup(<JobDetailView
+      job={jobSummary({ status: "canceled", can_continue: true })}
+      onRetry={() => {}} onRestart={() => {}}
+    />);
+    expect(markup).toContain(">继续</button>");
+    expect(markup).toContain(">新会话执行</button>");
+    const ineligible = renderToStaticMarkup(<JobDetailView
+      job={jobSummary({ status: "failed", can_continue: false })}
+      retryable onRetry={() => {}} onRestart={() => {}}
+    />);
+    expect(ineligible).not.toContain(">继续</button>");
+    expect(ineligible).toContain(">新会话执行</button>");
   });
 });
 

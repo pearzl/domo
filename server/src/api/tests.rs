@@ -137,6 +137,33 @@ async fn verification_test_state() -> (AppState, PathBuf) {
     (state, root)
 }
 
+#[tokio::test]
+async fn continuation_ledger_counts_only_unaccounted_usage() {
+    let (state, root) = verification_test_state().await;
+    sqlx::query("INSERT INTO job_runs(job_id, project_id, role, input_tokens, cost, duration_ms, usage_known, created_at, snapshot) VALUES('continued', 'prj_test', 'executor', 10, 0.25, 100, 1, '2026-01-01T00:00:00Z', '{}')")
+        .execute(&state.db).await.unwrap();
+    let current = crate::usage::UsageRecord {
+        input_tokens: Some(50),
+        cost: Some(0.75),
+        duration_ms: Some(300),
+        ..Default::default()
+    };
+    let delta = crate::continuation::usage_delta(&state, "continued", Some(current))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delta.input_tokens, Some(40));
+    assert_eq!(delta.cost, Some(0.5));
+    assert_eq!(delta.duration_ms, Some(200));
+    assert_eq!(delta.output_tokens, None);
+    assert!(crate::continuation::usage_delta(&state, "continued", None)
+        .await
+        .unwrap()
+        .is_none());
+    state.db.close().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_verification_job(
     state: &AppState,
@@ -173,7 +200,7 @@ async fn insert_verification_job(
 }
 
 #[tokio::test]
-async fn retry_target_requires_the_latest_role_job_to_be_failed() {
+async fn retry_target_requires_the_latest_role_job_to_be_failed_or_explicitly_stopped() {
     let (state, root) = verification_test_state().await;
     assert!(
         latest_failed_job(&state, "prj_test", Some("tsk_a"), ROLE_EXECUTOR)
@@ -200,14 +227,17 @@ async fn retry_target_requires_the_latest_role_job_to_be_failed() {
         )
         .await;
     }
-    for status in [
-        JOB_STATUS_FAILED,
-        JOB_STATUS_SUCCEEDED,
-        JOB_STATUS_CANCELED,
-        JOB_STATUS_RUNNING,
+    for (status, reason, eligible) in [
+        (JOB_STATUS_FAILED, None, true),
+        (JOB_STATUS_SUCCEEDED, None, false),
+        (JOB_STATUS_CANCELED, None, false),
+        (JOB_STATUS_CANCELED, Some("user_stopped"), true),
+        (JOB_STATUS_CANCELED, Some("other"), false),
+        (JOB_STATUS_RUNNING, None, false),
     ] {
-        sqlx::query("UPDATE jobs SET status = ? WHERE id = 'job_latest'")
+        sqlx::query("UPDATE jobs SET status = ?, failure_kind = ? WHERE id = 'job_latest'")
             .bind(status)
+            .bind(reason)
             .execute(&state.db)
             .await
             .unwrap();
@@ -216,8 +246,8 @@ async fn retry_target_requires_the_latest_role_job_to_be_failed() {
             .unwrap();
         assert_eq!(
             target.as_ref().map(|job| job.id.as_str()),
-            (status == JOB_STATUS_FAILED).then_some("job_latest"),
-            "latest status: {status}"
+            eligible.then_some("job_latest"),
+            "latest status: {status}, reason: {reason:?}"
         );
     }
     state.db.close().await;

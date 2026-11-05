@@ -87,6 +87,19 @@ pub fn render(data: &PromptData) -> String {
     }
 }
 
+/// Artifact ownership does not limit writes in an isolated Git worktree. Plain
+/// workspaces need explicit permission to overwrite another task's files.
+pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> String {
+    let rules = if !matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+        "登记的输入与产物供本作业只读参考；产物归属和 permissions 不授予本角色修改交付文件的权限。验证报告、临时数据与结果文件仍遵循本角色的写入边界。"
+    } else if plain_workspace(data) {
+        "普通工作区必须保留原始输入，默认把新交付物写到 outputs/ 等独立位置。只能修改自己任务的产物以及 permissions 中明确授权给当前任务的路径，不能覆盖其他历史产物。需要未授权原地修改时报告失败并请求用户在产物区域登记修改对象及理由。若输入或产物外部变化或前次中断，必须先检查现场，不得把停止进程当作文件回滚。"
+    } else {
+        "Git 工作区通过独立分支和 worktree 隔离改动。可在当前工作区内按任务或直接完成的目标修改已有源码、配置、测试、文档及前序任务产物；不因产物归属其他任务或 permissions 为空而要求额外的逐路径覆盖授权。修改不得超出已确认目标、任务范围及明确的用户约束。主工作树和其他工作区保持只读，不得修改其文件；Git 暂存、提交与合并由 DOMO 负责。前次作业中断时先检查现场，不把停止进程当作文件回滚。"
+    };
+    format!("\n## 输入与产物边界\n{artifacts}\n{rules}\n")
+}
+
 fn replan_review_prompt(data: &PromptData) -> String {
     format!("{}你负责重规划决策与方案生成，必须在本作业中完成判断和必要的新方案，不另行请求一次规划作业。\n\
         审批固定上下文 reviewer=parent 时，你代表父任务执行者，只能重新安排该父任务的未完成子任务；reviewer=planner 时，你代表项目规划者，可以替换项目的未完成任务计划。\n\
@@ -179,11 +192,17 @@ fn verification_rules() -> &'static str {
 }
 
 fn result_rules(data: &PromptData, schema: &str) -> String {
+    let commit_rule = if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+        "\n- done、derive、direct_done 结果必须含 commit_files 字符串数组，逐文件列出需要入库的新增、修改和删除路径（相对当前工作区；重命名列出新旧路径）；无改动显式填 []。DOMO 只提交清单内的文件，不执行全量暂存。不得填写目录、通配符、越界或符号链接路径。临时日志、缓存、构建产物、下载包不入库；清单外改动保留但不交付，不能隐瞒完成目标所需文件。合并冲突必须处理完整并列出全部冲突路径。普通工作区也提供此清单作为交付声明，但不调用 Git。\n"
+    } else {
+        ""
+    };
     format!(
         "\n## 结果文件（必须执行）\n\
          把唯一的结果 JSON 写入：{}\n\
          - 单个合法 JSON 对象，不加 Markdown 代码围栏；\n\
          - 即使失败也必须写入，验收方只读取该文件；\n\
+         {commit_rule}\
          - 结构必须符合 schema：\n{}\n",
         data.result_path, schema
     )
@@ -277,14 +296,14 @@ fn direct_prompt(data: &PromptData) -> String {
          {}\
          \n## 项目分析对话\n{}\n\
          \n## 输出 schema\n\
-         {{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告，包含变更、自检结果和风险\"}}\n\
+         {{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告，包含变更、自检结果和风险\",\"commit_files\":[\"path/to/file\"]}}\n\
          {}",
         common_header(data),
         feedback,
         conversation_history(data),
         result_rules(
             data,
-            "{\"kind\":\"direct_done\",\"summary\":\"...\",\"report\":\"Markdown 报告\"}"
+            "{\"kind\":\"direct_done\",\"summary\":\"...\",\"report\":\"Markdown 报告\",\"commit_files\":[\"path/to/file\"]}"
         )
     )
 }
@@ -348,7 +367,7 @@ fn replan_section(data: &PromptData) -> String {
         "\n## 重规划上下文\n\
          重规划原因（来源：{source}）：\n{reason}\n\
          \n完整保留的交付任务链（不要重新规划、不要重复实现）：\n{completed}\n\
-         \n不保留任务（未完成任务；已经独立验收并交付的子任务仍保留）：\n{canceled}\n\
+         \n不保留任务（未完成任务及随父任务取消的整个子任务族）：\n{canceled}\n\
          \n## 重规划约束\n\
          - 必须沿用当前项目目标，重规划不得修改目标；只有用户主动提交新目标才能改变它；\n\
          - 新计划只包含仍需完成的工作，不要重复已完成任务；\n\
@@ -393,7 +412,7 @@ fn executor_prompt(data: &PromptData) -> String {
             .join("\n")
     };
     let issues = if data.verifier_issues.is_empty() {
-        "（首次执行，暂无验收反馈）".to_string()
+        "（暂无待处理验收问题）".to_string()
     } else {
         data.verifier_issues
             .iter()
@@ -416,7 +435,7 @@ fn executor_prompt(data: &PromptData) -> String {
             if plain_workspace(data) {
                 "产物直接保留在普通工作区"
             } else {
-                "验收通过后由 DOMO 合入项目交付分支"
+                "从父任务分支检出，验收通过后由 DOMO 合回父任务分支；父任务整合并通过验收后才合入项目交付分支"
             }
         ),
         None => String::new(),
@@ -461,14 +480,14 @@ fn executor_prompt(data: &PromptData) -> String {
          - 无法完成时写清原因，不伪造成功；\n"
     };
     let schema = if data.derived_from.is_some() {
-        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
+        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\",\"commit_files\":[\"path/to/file\"]}、\
          {\"kind\":\"failed\",\"reason\":\"失败原因\"} 或 \
          {\"kind\":\"replan\",\"reason\":\"需要重新规划的原因\"}"
     } else {
-        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\"}、\
+        "{\"kind\":\"done\",\"summary\":\"完成了什么、测试运行情况\",\"details\":\"可选\",\"commit_files\":[\"path/to/file\"]}、\
          {\"kind\":\"failed\",\"reason\":\"失败原因\"}、\
          {\"kind\":\"replan\",\"reason\":\"需要重新规划的原因\"} 或 \
-         {\"kind\":\"derive\",\"summary\":\"为什么需要派生\",\"tasks\":[{\"key\":\"T1.1\",\"title\":\"短标题\",\"description\":\"详细目标和边界\",\"acceptance\":[\"可核查的验收标准\"],\"deps\":[]}]}"
+         {\"kind\":\"derive\",\"summary\":\"为什么需要派生\",\"commit_files\":[\"path/to/file\"],\"tasks\":[{\"key\":\"T1.1\",\"title\":\"短标题\",\"description\":\"详细目标和边界\",\"acceptance\":[\"可核查的验收标准\"],\"deps\":[]}]}"
     };
     format!(
         "{}你当前扮演**执行者**，只负责下面任务。第 {} 次执行。\n\
@@ -477,11 +496,12 @@ fn executor_prompt(data: &PromptData) -> String {
          \n## 人工指导\n{}\n\
          \n## 验收标准\n{}\n\
          \n## 前置任务结果\n{}\n\
-         \n## 上一轮反馈（必须逐条处理）\n{}\n\
+          \n## 当前待处理反馈（必须逐条处理）\n{}\n\
          {}\
          \n## 执行要求\n\
          - 由你决定实现与核验方式，满足任务与验收标准；\n\
-         - 如实核验并说明结果，不伪造；\n\
+          - 如实核验并说明结果，不伪造；\n\
+          - 对当前反馈逐项修复并给出对应验证证据；发现字段、接口或文档不一致时检查全部同类定义，不只修补被点名的位置。过去作业中的已解决问题不作为新的待修复要求，但仍须满足完整验收标准；\n\
          - 不要在工作区以外读写文件；\n\
          {git_rules}\
          - 仅当事实前提错误、无法按描述完成或约束冲突需上级决策时输出 replan；子任务交由父任务执行者，普通任务交由项目规划者，在同一决策作业中生成替代方案或拒绝并指导继续；请求本身不停止其他任务；\n\
@@ -533,7 +553,7 @@ fn verifier_prompt(data: &PromptData) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let issues = if data.verifier_issues.is_empty() {
-        "（无历史拒绝记录）".to_string()
+        "（暂无待复核问题）".to_string()
     } else {
         data.verifier_issues
             .iter()
@@ -553,7 +573,7 @@ fn verifier_prompt(data: &PromptData) -> String {
         )
     } else {
         (
-            "你当前扮演**验收者**，在任务分支的独立验收工作区核验执行结果。项目交付分支会在验收通过后由 DOMO 自动合并；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在项目交付分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。",
+            "你当前扮演**验收者**，在任务分支的独立验收工作区核验执行结果。验收通过后由 DOMO 自动合并：子任务合回父任务分支，普通任务合入项目交付分支；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在合入目标分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。",
             "验收工作区在结束后会被删除；需要保留的验证报告写入作业目录；",
         )
     };
@@ -562,12 +582,13 @@ fn verifier_prompt(data: &PromptData) -> String {
          \n## 任务\n{} - {}\n\n{}\n\
          \n## 人工指导\n{}\n\
          \n## 验收标准\n{}\n\
-         \n## 历史问题与拒绝意见\n{}\n\
+          \n## 上一轮待处理问题（本轮必须复核）\n{}\n\
          \n## 改动规模\n{}\n\
          \n## 验收要求\n\
          - 以任务描述和验收标准为唯一判据，由你决定核验方式，不扩大范围；\n\
          - 如实验证，不能只看执行者的自述，也不能伪造核验结果；\n\
-         - 如果历史问题包含合并冲突，先确认执行者已解决冲突并消除冲突标记，再按任务验收标准复核；冲突处理本身不作为验收标准；\n\
+          - 按当前产物完整核验全部验收标准，并复核上一轮问题；issues 必须是本轮确认仍未解决问题的完整清单，不是增量或历史汇总。已解决问题不得继续列入 issues，通过时 issues 必须为空；已解决项及复核证据写入 reason 或 evidence；\n\
+          - 如果待复核问题包含合并冲突，先确认执行者已解决冲突并消除冲突标记，再按任务验收标准复核；冲突处理本身不作为验收标准；\n\
          - 发现真实缺陷、验证失败、遗漏或伪造，判定不通过；\n\
          - {workspace_note}\n\
          {}\
@@ -1065,6 +1086,76 @@ mod tests {
     }
 
     #[test]
+    fn feedback_is_a_complete_current_list_not_a_history_accumulator() {
+        let mut data = sample_data(JOB_ROLE_EXECUTOR);
+        data.verifier_issues = vec!["接口与文档不一致".into()];
+        let executor = render(&data);
+        assert!(executor.contains("当前待处理反馈（必须逐条处理）"));
+        assert!(executor.contains("逐项修复并给出对应验证证据"));
+        assert!(executor.contains("检查全部同类定义"));
+        data.role = JOB_ROLE_VERIFIER.into();
+        let verifier = render(&data);
+        assert!(verifier.contains("本轮确认仍未解决问题的完整清单"));
+        assert!(verifier.contains("不是增量或历史汇总"));
+        assert!(verifier.contains("已解决问题不得继续列入 issues"));
+        assert!(verifier.contains("通过时 issues 必须为空"));
+        assert!(verifier.contains("完整核验全部验收标准"));
+    }
+
+    #[test]
+    fn artifact_write_boundaries_follow_workspace_type() {
+        let artifacts = serde_json::json!({
+            "items": [{"path": "shared.cpp", "task_id": "previous-task"}],
+            "permissions": []
+        });
+        for role in [JOB_ROLE_EXECUTOR, JOB_ROLE_DIRECT] {
+            let mut data = sample_data(role);
+            let git = artifact_context(&data, &artifacts);
+            assert!(git.contains("前序任务产物"));
+            assert!(git.contains("permissions 为空"));
+            assert!(git.contains("明确的用户约束"));
+            assert!(git.contains("主工作树和其他工作区保持只读"));
+            assert!(git.contains("Git 暂存、提交与合并由 DOMO 负责"));
+            assert!(!git.contains("只能修改自己任务的产物"));
+            assert!(!git.contains("请求用户在产物区域登记"));
+
+            data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
+            let plain = artifact_context(&data, &artifacts);
+            assert!(plain.contains("必须保留原始输入"));
+            assert!(plain.contains("只能修改自己任务的产物"));
+            assert!(plain.contains("permissions 中明确授权给当前任务的路径"));
+            assert!(plain.contains("请求用户在产物区域登记修改对象及理由"));
+            assert!(!plain.contains("不因产物归属其他任务"));
+            for prompt in [git, plain] {
+                assert!(prompt.contains("shared.cpp"));
+                assert!(prompt.contains("previous-task"));
+                assert!(prompt.contains("先检查现场"));
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_context_does_not_grant_writes_to_readonly_roles() {
+        for role in [
+            JOB_ROLE_ANALYSIS,
+            JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
+            JOB_ROLE_SUMMARY,
+            JOB_ROLE_REPLAN_REVIEW,
+        ] {
+            for workspace_type in [crate::models::WORKSPACE_GIT, crate::models::WORKSPACE_PLAIN] {
+                let mut data = sample_data(role);
+                data.workspace_type = workspace_type.into();
+                let prompt = artifact_context(&data, &serde_json::json!({"permissions": []}));
+                assert!(prompt.contains("只读参考"), "{role}/{workspace_type}");
+                assert!(prompt.contains("不授予本角色修改交付文件的权限"));
+                assert!(!prompt.contains("只能修改自己任务的产物"));
+                assert!(!prompt.contains("可在当前工作区内按任务"));
+            }
+        }
+    }
+
+    #[test]
     fn verification_permissions_allow_reports_and_protect_deliverables() {
         for role in [JOB_ROLE_VERIFIER, JOB_ROLE_ACCEPTANCE] {
             for workspace_type in ["git", crate::models::WORKSPACE_PLAIN] {
@@ -1192,8 +1283,8 @@ mod tests {
             "验收者缺少合并冲突流程说明"
         );
         assert!(
-            verifier.contains("历史问题与拒绝意见"),
-            "验收者缺少历史问题标题"
+            verifier.contains("上一轮待处理问题（本轮必须复核）"),
+            "验收者缺少当前待复核问题标题"
         );
         let analysis = render_role(JOB_ROLE_ANALYSIS);
         assert!(

@@ -174,7 +174,9 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ direction }) },
     ),
   retryJob: (id: string) =>
-    request<ProjectDetail>(`/api/jobs/${id}/retry`, { method: "POST" }),
+    request<ProjectDetail>(`/api/jobs/${id}/continue`, { method: "POST" }),
+  restartJob: (id: string) =>
+    request<ProjectDetail>(`/api/jobs/${id}/restart`, { method: "POST" }),
   retryTask: (projectId: string, taskId: string) =>
     request<{ ok: boolean }>(
       `/api/projects/${projectId}/tasks/${taskId}/retry`,

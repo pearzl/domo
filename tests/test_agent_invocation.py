@@ -60,7 +60,7 @@ artifact = pathlib.Path.cwd() / "domo_mock" / "T1.txt"
 artifact.parent.mkdir(parents=True, exist_ok=True)
 artifact.write_text("T1", encoding="utf-8")
 usage = json.loads(os.environ.get("FAKE_USAGE") or "{}")
-result = {"kind": "done", "summary": "cli executor finished"}
+result = {"kind": "done", "summary": "cli executor finished", "commit_files": ["domo_mock/T1.txt"]}
 if usage:
     result["usage"] = usage
 (job_dir / "result.json").write_text(
@@ -116,7 +116,7 @@ if args[:1] == ["run"]:
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("T1", encoding="utf-8")
     (job_dir / "result.json").write_text(
-        json.dumps({"kind": "done", "summary": "opencode executor finished"}, ensure_ascii=False),
+        json.dumps({"kind": "done", "summary": "opencode executor finished", "commit_files": ["domo_mock/T1.txt"]}, ensure_ascii=False),
         encoding="utf-8",
     )
     print(json.dumps({

@@ -53,7 +53,7 @@ started = time.time()
 os.makedirs("domo_mock", exist_ok=True)
 with open("domo_mock/T1.txt", "w", encoding="utf-8") as handle:
     handle.write("hello from %s\\n" % kind)
-result = {"summary": "%s executor finished" % kind, "acceptance": ["domo_mock/T1.txt 存在"]}
+result = {"summary": "%s executor finished" % kind, "acceptance": ["domo_mock/T1.txt 存在"], "commit_files": ["domo_mock/T1.txt"]}
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
     json.dump(result, handle, ensure_ascii=False)
 duration_ms = int((time.time() - started) * 1000)

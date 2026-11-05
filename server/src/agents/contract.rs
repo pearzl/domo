@@ -177,6 +177,77 @@ fn sessions_follow_the_adapter_contract() {
     }
 }
 
+#[test]
+fn recovery_and_diagnostics_are_owned_by_registered_adapters() {
+    for (kind, event, session) in [
+        (
+            AGENT_CODEX,
+            r#"{"type":"thread.started","thread_id":"actual-codex"}"#,
+            "actual-codex",
+        ),
+        (
+            AGENT_WORKBUDDY,
+            r#"{"type":"system","subtype":"init","session_id":"actual-workbuddy"}"#,
+            "actual-workbuddy",
+        ),
+    ] {
+        let agent = AgentRow::test_fixture(kind);
+        assert_eq!(
+            recover_session(&agent, JOB_ID, event, None).as_deref(),
+            Some(session)
+        );
+        assert!(recover_session(&agent, JOB_ID, "", None).is_none());
+        assert_eq!(
+            recover_session(&agent, JOB_ID, "", Some(session)).as_deref(),
+            Some(session)
+        );
+    }
+    let agent = AgentRow::test_fixture(AGENT_OPENCODE);
+    assert_eq!(
+        recover_session(&agent, JOB_ID, "", None),
+        session_for_job(&agent, JOB_ID)
+    );
+    let mut cli = AgentRow::test_fixture(AGENT_CLI);
+    cli.command_json = Some(r#"["fixture","--session={session_id}"]"#.into());
+    assert_eq!(
+        recover_session(&cli, JOB_ID, "", Some("original")).as_deref(),
+        Some("original")
+    );
+    assert!(recover_session(&AgentRow::test_fixture(AGENT_MOCK), JOB_ID, "", None).is_none());
+    for (kind, event) in [
+        (
+            AGENT_CODEX,
+            r#"{"type":"turn.failed","error":{"code":"invalid_api_key"}}"#,
+        ),
+        (
+            AGENT_WORKBUDDY,
+            r#"{"type":"result","is_error":true,"error":{"code":"invalid_api_key"}}"#,
+        ),
+        (
+            AGENT_OPENCODE,
+            r#"{"type":"error","error":{"code":"invalid_api_key"}}"#,
+        ),
+        (AGENT_CLI, r#"{"error":{"code":"invalid_api_key"}}"#),
+    ] {
+        let run = AgentRun {
+            stdout: event.into(),
+            stderr: String::new(),
+            exit_code: Some(1),
+            timed_out: false,
+            stalled: false,
+            session_id: None,
+            usage: None,
+        };
+        let diagnostic = diagnose(&AgentRow::test_fixture(kind), &run);
+        assert_eq!(
+            diagnostic.kind,
+            super::diagnostic::ErrorKind::Authentication
+        );
+        assert!(!diagnostic.automatic());
+        assert!(!diagnostic.session_unavailable());
+    }
+}
+
 #[tokio::test]
 async fn finish_job_defaults_to_per_turn_and_opencode_is_authoritative() {
     for kind in [AGENT_MOCK, AGENT_CLI, AGENT_CODEX, AGENT_WORKBUDDY] {

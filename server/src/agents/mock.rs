@@ -76,6 +76,22 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         },
     };
     let mut result = attach_mock_usage(result, &context);
+    if matches!(
+        result["kind"].as_str(),
+        Some("done" | "derive" | "direct_done")
+    ) {
+        let files = if result["kind"] == "direct_done" {
+            vec!["domo_mock/direct.txt".to_string()]
+        } else if result["kind"] == "derive" {
+            Vec::new()
+        } else {
+            vec![format!(
+                "domo_mock/{}.txt",
+                context["task"]["key"].as_str().unwrap_or("T1")
+            )]
+        };
+        result["commit_files"] = serde_json::json!(files);
+    }
     if spec.role == JOB_ROLE_ACCEPTANCE && result.get("criteria").is_some() {
         result["contract_id"] = context["contract"]["id"].clone();
         result["artifact_version"] = context["artifact_version"].clone();

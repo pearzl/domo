@@ -6,11 +6,12 @@
   2. 重启服务并降低执行延迟后，人工重试失败作业；
   3. 项目继续完成并产出报告。
 
-使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
+使用内置 mock 规划/验收和可终止的脚本执行者，不访问外网；临时数据隔离。
 退出码 0 表示全部通过。
 """
 
 import time
+import sys
 
 from harness import (
     Server,
@@ -27,6 +28,18 @@ def main():
     with temp_root("domo-failure-") as temp:
         repo = temp / "repo"
         init_repo(repo)
+        delay = temp / "delay"
+        delay.write_text("2.5")
+        executor = temp / "executor.py"
+        executor.write_text('''import json, os, pathlib, sys, time
+time.sleep(float(pathlib.Path(sys.argv[1]).read_text()))
+job = pathlib.Path(os.environ["DOMO_JOB_DIR"])
+context = json.loads((job / "context.json").read_text())
+key = context["task"]["key"]
+out = pathlib.Path("domo_mock") / (key + ".txt")
+out.parent.mkdir(exist_ok=True); out.write_text(key)
+(job / "result.json").write_text(json.dumps({"kind":"done", "summary":"delivered", "commit_files":[str(out).replace("\\\\", "/")]}))
+''')
         ensure_server_built()
 
         with Server(
@@ -34,7 +47,6 @@ def main():
             env={
                 "DOMO_JOB_TIMEOUT_SECS": "1",
                 "DOMO_MOCK_DELAY_MS": "50",
-                "DOMO_MOCK_EXECUTOR_DELAY_MS": "2500",
             },
         ) as server:
             pending_goals = {}
@@ -107,10 +119,12 @@ def main():
                 {
                     "name": "Timeout Mock",
                     "kind": "mock",
-                    "roles": ["planner", "executor", "verifier"],
+                    "roles": ["planner", "verifier"],
                     "max_concurrency": 2,
                 },
             )
+            call("POST", "/api/agents", {"name":"Timed Executor", "kind":"cli", "roles":["executor"],
+                "command":[sys.executable, str(executor), str(delay)]})
 
             # 新建项目的项目池继承默认团队。
             project = call(
@@ -147,7 +161,8 @@ def main():
             project_id = project["id"]
 
             # 重启服务并缩短执行延迟。
-            server.restart(env={"DOMO_MOCK_EXECUTOR_DELAY_MS": "10"})
+            server.restart()
+            delay.write_text("0.01")
 
             detail = call("GET", f"/api/projects/{project_id}")
             blocked_task = next(task for task in detail["tasks"] if task["status"] == "blocked")

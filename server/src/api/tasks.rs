@@ -65,6 +65,14 @@ pub(super) async fn create_task(
         request.deps,
     )
     .map_err(ApiError::bad)?;
+    if rows
+        .iter()
+        .any(|row| row.parent_id.is_some() && task.deps.contains(&row.key))
+    {
+        return Err(ApiError::bad(
+            "跨任务族依赖必须指向父任务，不能直接依赖派生子任务",
+        ));
+    }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let max_seq: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM tasks WHERE project_id = ?")
@@ -206,6 +214,12 @@ pub(super) async fn pause_task(
             .await?;
             for job in &running {
                 crate::agents::kill_job_dir(&paths::job_dir(&workspace, &job.id));
+                crate::continuation::interrupted(
+                    &state,
+                    job,
+                    crate::agents::StopReason::UserStopped,
+                )
+                .await?;
                 let finished_at = now();
                 let duration_ms = job
                     .started_at
@@ -213,7 +227,7 @@ pub(super) async fn pause_task(
                     .and_then(|started| usage::elapsed_ms(Some(started), &finished_at));
                 sqlx::query(
                     "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \
-                     finished_at = ? WHERE id = ? AND status = 'running'",
+                     finished_at = ?, failure_kind = 'user_stopped' WHERE id = ? AND status = 'running'",
                 )
                 .bind(JOB_STATUS_CANCELED)
                 .bind("任务被强制暂停，作业已终止")
@@ -303,7 +317,13 @@ pub(super) async fn resume_task(
             "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
              WHERE id = ? AND status IN (?, ?)",
         )
-        .bind(STATUS_QUEUED)
+        .bind(
+            if crate::continuation::pending_manual(&state, &project, Some(&task.id)).await? {
+                STATUS_BLOCKED
+            } else {
+                STATUS_QUEUED
+            },
+        )
         .bind(now())
         .bind(&task.id)
         .bind(STATUS_PAUSING)
@@ -345,7 +365,15 @@ pub(super) async fn resume_task(
         Some(&project_id),
         Some(&task.id),
         "task_resumed",
-        format!("任务 {} 已恢复，回到原阶段重新排队", task.key),
+        format!(
+            "任务 {} 已恢复，{}",
+            task.key,
+            if task.status.as_deref() == Some(STATUS_BLOCKED) {
+                "等待选择继续原会话或新会话执行"
+            } else {
+                "回到原阶段重新排队"
+            }
+        ),
     )
     .await;
     state.notify_scheduler();
@@ -791,6 +819,12 @@ pub(super) async fn pause_project(
             .await?;
             for job in &running {
                 crate::agents::kill_job_dir(&paths::job_dir(&workspace, &job.id));
+                crate::continuation::interrupted(
+                    &state,
+                    job,
+                    crate::agents::StopReason::UserStopped,
+                )
+                .await?;
                 let finished_at = now();
                 let duration_ms = job
                     .started_at
@@ -798,7 +832,7 @@ pub(super) async fn pause_project(
                     .and_then(|started| usage::elapsed_ms(Some(started), &finished_at));
                 sqlx::query(
                     "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \
-                     finished_at = ? WHERE id = ? AND status = 'running'",
+                     finished_at = ?, failure_kind = 'user_stopped' WHERE id = ? AND status = 'running'",
                 )
                 .bind(JOB_STATUS_CANCELED)
                 .bind("项目被强制暂停，作业已终止")
@@ -817,6 +851,18 @@ pub(super) async fn pause_project(
             .bind(TASK_STAGE_COMPLETED)
             .execute(&state.db)
             .await?;
+            for job in &running {
+                if crate::continuation::pending_manual(&state, &project, job.task_id.as_deref())
+                    .await?
+                {
+                    crate::continuation::block_interrupted(
+                        &state,
+                        job,
+                        "作业被强制停止，请选择继续或新会话执行",
+                    )
+                    .await?;
+                }
+            }
             sqlx::query(
                 "UPDATE projects SET status = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
             )
@@ -876,7 +922,8 @@ pub(super) async fn resume_project(
     let analysis_pending = project.stage == STAGE_ANALYSIS
         && crate::runner::analysis_needs_dispatch(&state.db, &project).await?;
     let waiting_human = (project.stage == STAGE_ANALYSIS && !analysis_pending)
-        || (project.stage == STAGE_SUMMARIZING && project.report.is_some());
+        || (project.stage == STAGE_SUMMARIZING && project.report.is_some())
+        || crate::continuation::pending_manual(&state, &project, None).await?;
     {
         let _guard = state.schedule_lock.lock().await;
         // 项目恢复只解除项目级派发限制，任务自己的暂停状态保持不变。

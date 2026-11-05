@@ -158,8 +158,10 @@ pub(super) async fn run_agent_job(
 
     if timed_out {
         run.timed_out = true;
-        run.stdout.clear();
-        run.stderr = format!("作业超时（{} 秒），进程已终止", timeout.as_secs());
+        run.stderr.push_str(&format!(
+            "\n作业超时（{} 秒），进程已终止",
+            timeout.as_secs()
+        ));
     }
     if let Some(reason) = stalled {
         // Windows reports an exit code for a process killed by `taskkill`, so

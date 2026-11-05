@@ -41,6 +41,7 @@ use self::common::{
     load_job, load_project, load_task, parsed_error, result_is_failure, role_label,
 };
 use self::direct::{handle_direct_failure, handle_direct_success};
+pub(crate) use self::executor::cleanup_task_artifacts;
 use self::executor::{
     handle_executor_derive, handle_executor_failure, handle_executor_success,
     validate_derive_request,
@@ -52,13 +53,15 @@ use self::project::{
 use self::prompt::{build_context, build_prompt_data};
 pub(crate) use self::verifier::handoff_merge_conflict_unlocked;
 use self::verifier::{handle_verdict, handle_verifier_failure};
+pub(crate) use self::worktree::task_merge_target;
 use self::worktree::{ensure_worktree_root, prepare_task_worktree, prepare_verify_worktree};
 
 /// Missing or invalid results get up to five correction rounds in the same job.
 const MAX_CONTINUATIONS: usize = 5;
-/// A timeout may resume the same session with a fresh run window. The total
-/// job time stays bounded by this count plus the initial run.
-const MAX_TIMEOUT_CONTINUATIONS: usize = 2;
+/// Automatic recovery and manual continuation share this additional-round cap.
+/// Each automatic recovery starts a fresh run window; protocol correction has
+/// its own bound and does not reset the continuation count.
+const MAX_TIMEOUT_CONTINUATIONS: u64 = crate::continuation::MAX_CONTINUES;
 
 pub async fn execute_job(state: AppState, job_id: String) {
     if let Err(error) = run_job(&state, &job_id).await {
@@ -66,6 +69,15 @@ pub async fn execute_job(state: AppState, job_id: String) {
         if let Err(inner) = fail_runtime(&state, &job_id, &format!("{error:#}")).await {
             tracing::error!(job_id, error = %inner, "记录作业失败状态时出错");
         }
+    }
+    if let Ok(Some(workspace)) = sqlx::query_scalar::<_, String>(
+        "SELECT p.workspace FROM projects p JOIN jobs j ON j.project_id = p.id WHERE j.id = ?",
+    )
+    .bind(&job_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        state.unregister_job(&paths::job_dir(&PathBuf::from(workspace), &job_id));
     }
     state.notify_scheduler();
 }
@@ -109,16 +121,44 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let job_dir = paths::job_dir(&PathBuf::from(&project.workspace), &job.id);
+    let collect = job.resume == 2;
+    let resumed = if job.resume == 1 {
+        match crate::continuation::validate(state, &job).await {
+            Ok(record) => Some(record),
+            Err(error) => {
+                let _ = fs::remove_file(job_dir.join("continuation.json")).await;
+                crate::continuation::reject_started(state, &job, &error.to_string()).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let mut timeout_continuations = resumed.as_ref().map_or(0, |r| r.turns + 1);
     fs::create_dir_all(&job_dir).await?;
     state.register_job(job_dir.clone());
     let result_path = job_dir.join("result.json");
-    let _ = fs::remove_file(&result_path).await;
-    let _ = fs::write(job_dir.join("stdout.log"), b"").await;
-    let _ = fs::write(job_dir.join("stderr.log"), b"").await;
+    if !collect {
+        let _ = fs::remove_file(&result_path).await;
+    }
+    if resumed.is_none() && !collect {
+        let _ = fs::write(job_dir.join("stdout.log"), b"").await;
+        let _ = fs::write(job_dir.join("stderr.log"), b"").await;
+    } else if !collect {
+        append_log_separator(&job_dir).await?;
+    }
 
     let workspace = PathBuf::from(&project.workspace);
     let review = job.role == JOB_ROLE_REPLAN_REVIEW;
-    let cwd = if review {
+    let cwd = if resumed.is_some() || collect {
+        let context: serde_json::Value =
+            serde_json::from_slice(&fs::read(job_dir.join("context.json")).await?)?;
+        PathBuf::from(
+            context["cwd"]
+                .as_str()
+                .ok_or_else(|| anyhow!("继续作业缺少工作区"))?,
+        )
+    } else if review {
         job_dir.clone()
     } else if project.is_git() {
         match job.role.as_str() {
@@ -138,20 +178,24 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     ensure_worktree_root(&cwd, project.is_git() && !review).await?;
     if let Err(error) = if review {
         Ok(())
-    } else {
+    } else if resumed.is_none() && !collect {
         crate::resources::workspace_preflight(state, &project, &job).await
+    } else {
+        // The original writer may resume its unfinished files. Keep the pending
+        // write marker; settlement still enforces ownership and write rights.
+        Ok(())
     } {
         let reason = format!("工作区检查未通过：{error:#}");
         crate::resources::block_workspace(state, &project, &job, &reason).await?;
         return Ok(());
     }
-    if job.role == JOB_ROLE_DIRECT && project.is_git() {
-        let _guard = state.git_lock.lock().await;
-        git::reset_hard(&cwd).await?;
-    }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
-    let artifact_version = if project.is_git() && !review {
+    let artifact_version = if collect {
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(job_dir.join("context.json")).await?)?;
+        original["artifact_version"].clone()
+    } else if project.is_git() && !review {
         serde_json::json!(git::commit_of(&cwd, "HEAD").await?)
     } else {
         serde_json::Value::Null
@@ -176,7 +220,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             artifacts
         ));
     } else {
-        full_prompt.push_str(&format!("\n## 输入与产物边界\n{}\n普通工作区必须保留原始输入，默认把新交付物写到 outputs/ 等独立位置。只能修改自己任务的产物以及 permissions 中明确授权给当前任务的路径，不能覆盖其他历史产物。需要未授权原地修改时报告失败并请求用户在产物区域登记修改对象及理由。若输入或产物外部变化或前次中断，必须先检查现场，不得把停止进程当作文件回滚。\n", artifacts));
+        full_prompt.push_str(&prompts::artifact_context(&prompt_data, &artifacts));
     }
     if job.role == JOB_ROLE_VERIFIER {
         full_prompt.push_str(&format!("\n## 必填验收证据\n结果必须含 evidence 对象：contract_id={}，artifact_version={}，artifacts 为已检查的产物路径数组，risks 和 human_checks 为未覆盖风险及人工检查项数组。criteria 按任务验收标准的原文与顺序逐项填写，每项包含 criterion、passed 布尔值和非空 checks 数组；每个检查包含 method（实际运行命令或检查方法）和 result（实际结果，不得编造）。无产物或风险时数组可为空。普通工作区不提供历史内容回溯，检查时间由服务端记录。\n", contract["id"], artifact_version));
@@ -184,9 +228,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if job.role == JOB_ROLE_ACCEPTANCE {
         full_prompt.push_str(&format!("\n项目验收结果必须包含 contract_id={} 和 artifact_version={}。criteria 必须按当前契约验收标准的原文与顺序逐项填写；判定 met 的条目必须附实际检查方法及结果，不得省略证据或只用任务已通过代替集成检查。\n", contract["id"], artifact_version));
     }
-    let resume = job.resume != 0;
+    let resume = job.resume == 1;
     let prompt = if resume {
-        prompts::continuation(&prompt_data)
+        format!("{}\n上一轮已中断。先检查文件、已有结果和可能的残留操作，避免重复副作用，再继续原工作。以下是当前上下文，若与会话历史不一致以当前有效要求为准：\n{}", prompts::continuation(&prompt_data), full_prompt)
     } else {
         full_prompt.clone()
     };
@@ -266,30 +310,100 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         job_dir: job_dir.clone(),
         prompt,
         original_prompt: full_prompt,
-        session_id: agents::session_for_job(&agent, &job.id),
+        session_id: resumed
+            .as_ref()
+            .map(|r| r.session.clone())
+            .or_else(|| agents::session_for_job(&agent, &job.id)),
         continuation: resume,
         progress: progress.clone(),
     };
-    let mut run =
-        run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout).await?;
+    let mut continuations = resumed.as_ref().map_or(0, |r| r.protocol_rounds);
+    if !collect {
+        crate::continuation::starting(
+            &agent,
+            &job,
+            &job_dir,
+            resumed.as_ref().map(|r| r.session.as_str()),
+            timeout_continuations,
+            continuations,
+        )
+        .await?;
+    }
+    let mut run = if collect {
+        let stdout = fs::read_to_string(job_dir.join("stdout.log"))
+            .await
+            .unwrap_or_default();
+        let session_id = agents::recover_session(&agent, &job.id, &stdout, None);
+        agents::AgentRun {
+            stdout,
+            stderr: fs::read_to_string(job_dir.join("stderr.log"))
+                .await
+                .unwrap_or_default(),
+            exit_code: Some(0),
+            timed_out: false,
+            stalled: false,
+            session_id,
+            usage: None,
+        }
+    } else {
+        run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout).await?
+    };
     spec.session_id = run.session_id.clone();
-    let mut combined_stdout = run.stdout.clone();
-    let mut combined_stderr = run.stderr.clone();
-    let mut continuations = 0;
-    let mut timeout_continuations = 0;
+    let mut combined_stdout = if resume {
+        format!(
+            "{}\n--- 继续执行 ---\n{}",
+            job.stdout.as_deref().unwrap_or_default(),
+            run.stdout
+        )
+    } else {
+        run.stdout.clone()
+    };
+    let mut combined_stderr = if resume {
+        format!(
+            "{}\n--- 继续执行 ---\n{}",
+            job.stderr.as_deref().unwrap_or_default(),
+            run.stderr
+        )
+    } else {
+        run.stderr.clone()
+    };
     loop {
+        if collect {
+            break;
+        }
         let process_ok = run.exit_code == Some(0) && !run.timed_out && !run.stalled;
         if !process_ok {
-            // A timeout is a process failure, but the session still holds the
-            // work context. Resume the same session with a short continuation
-            // prompt and a fresh run window.
-            let retryable = run.timed_out;
+            // Only supervisor timeouts or normalized structured temporary
+            // provider failures authorize automatic resumption. Unknown,
+            // stalled, account and configuration errors remain human choices.
+            let raw = fs::read_to_string(&result_path).await.ok();
+            let record = crate::continuation::checkpoint(
+                &agent,
+                &job,
+                &job_dir,
+                &run,
+                raw.as_deref(),
+                timeout_continuations,
+                continuations,
+            )
+            .await?;
+            let retryable = record.as_ref().is_some_and(|r| {
+                r.eligible
+                    && r.diagnostic.automatic()
+                    && r.diagnostic.retry_after_ms.unwrap_or(0) <= 0
+            }) && crate::delivery::gate(&state.db, &project.id, None)
+                .await?
+                .is_none();
             if retryable
+                && continuations < MAX_CONTINUATIONS
                 && timeout_continuations < MAX_TIMEOUT_CONTINUATIONS
                 && continuation_allowed(state, &job, &project, task.as_ref()).await?
             {
                 timeout_continuations += 1;
-                let follow_up = prompts::continuation(&prompt_data);
+                let follow_up = format!(
+                    "{}\n上一轮异常中断，请检查现场及已执行操作，避免重复副作用。",
+                    prompts::continuation(&prompt_data)
+                );
                 fs::write(
                     job_dir.join(format!("timeout-continuation-{timeout_continuations}.md")),
                     &follow_up,
@@ -307,7 +421,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     Some(&job.id),
                     "job_continued",
                     format!(
-                        "{}作业超时，已追加第 {} 轮继续提示（复用同一会话）",
+                        "{}作业临时中断，已追加第 {} 轮自动继续提示（复用同一会话）",
                         role_label(&job.role),
                         timeout_continuations
                     ),
@@ -315,6 +429,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 .await;
                 run_timeout = state.cfg.job_timeout;
                 job_deadline = Instant::now() + run_timeout;
+                crate::continuation::starting(
+                    &agent,
+                    &job,
+                    &job_dir,
+                    spec.session_id.as_deref(),
+                    timeout_continuations,
+                    continuations,
+                )
+                .await?;
                 let next =
                     run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout)
                         .await?;
@@ -368,6 +491,28 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(_) => None,
             },
         };
+        if protocol_error.is_none() && !review {
+            if let Some(raw) = current_result.as_deref() {
+                if matches!(
+                    parse_result(&job.role, raw),
+                    Ok(ParsedResult::ExecutorDone { .. }
+                        | ParsedResult::ExecutorDerive { .. }
+                        | ParsedResult::DirectDone { .. })
+                ) {
+                    protocol_error = match crate::domain::commit_files(raw) {
+                        Err(error) => Some(error),
+                        Ok(files) if project.is_git() => {
+                            let _guard = state.git_lock.lock().await;
+                            git::validate_commit_files(&cwd, &files)
+                                .await
+                                .err()
+                                .map(|e| e.to_string())
+                        }
+                        Ok(_) => None,
+                    };
+                }
+            }
+        }
         if protocol_error.is_none() && !review {
             if let Some(raw) = current_result.as_deref() {
                 if let Some(value) =
@@ -436,6 +581,16 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             ),
         )
         .await;
+        continuations += 1;
+        crate::continuation::starting(
+            &agent,
+            &job,
+            &job_dir,
+            spec.session_id.as_deref(),
+            timeout_continuations,
+            continuations,
+        )
+        .await?;
         let next =
             run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, remaining).await?;
         combined_stdout.push_str("\n--- 继续执行 ---\n");
@@ -446,8 +601,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         run = next;
         run.usage = usage;
         spec.session_id = run.session_id.clone();
-        continuations += 1;
     }
+    let interruption_run = run.clone();
     run.stdout = combined_stdout;
     run.stderr = combined_stderr;
     if !state.is_shutting_down() {
@@ -463,16 +618,48 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         shutting_down: state.is_shutting_down(),
     })
     .await;
+    let authoritative = matches!(&usage, agents::JobUsage::Authoritative(_));
     run.usage = agents::apply_usage(run.usage, usage);
-    state.unregister_job(&job_dir);
+    if resume && authoritative {
+        run.usage = crate::continuation::usage_delta(state, &job.id, run.usage).await?;
+    }
 
     let raw_result = fs::read_to_string(&result_path).await.ok();
-    if job.role == JOB_ROLE_VERIFIER && project.is_git() {
+    let current = load_job(&state.db, &job.id).await?;
+    let mut record = if current
+        .as_ref()
+        .is_some_and(|j| j.status == JOB_STATUS_RUNNING)
+    {
+        crate::continuation::checkpoint(
+            &agent,
+            &job,
+            &job_dir,
+            &interruption_run,
+            raw_result.as_deref(),
+            timeout_continuations,
+            continuations,
+        )
+        .await?
+    } else {
+        crate::continuation::load(&job_dir).await.ok()
+    };
+    if state.is_shutting_down()
+        && current
+            .as_ref()
+            .is_some_and(|j| j.status == JOB_STATUS_RUNNING)
+    {
+        crate::continuation::interrupted(state, &job, agents::StopReason::ServiceInterrupted)
+            .await?;
+        record = crate::continuation::load(&job_dir).await.ok();
+    }
+    let has_checkpoint = record.as_ref().is_some_and(|r| r.eligible);
+    if job.role == JOB_ROLE_VERIFIER && project.is_git() && !has_checkpoint {
         // The verifier workspace is disposable and must not leak into later work.
         let _guard = state.git_lock.lock().await;
         let _ = git::remove_worktree(&paths::project_repo(&workspace), &cwd).await;
     }
     if project.is_git()
+        && !has_checkpoint
         && matches!(
             job.role.as_str(),
             JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
@@ -502,6 +689,17 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         return Ok(());
     };
     if current_job.status != JOB_STATUS_RUNNING {
+        if current_job.status == JOB_STATUS_CANCELED
+            && current_job.failure_kind.as_deref() == Some("user_stopped")
+        {
+            // A forced stop remains canceled until the human chooses an action,
+            // but its completed output/usage settlement must not disappear.
+            let usage = run.usage.as_ref();
+            sqlx::query("UPDATE jobs SET stdout = ?, stderr = ?, input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, reasoning_tokens = ?, cost = ?, usage_known = ? WHERE id = ? AND status = 'canceled' AND failure_kind = 'user_stopped'")
+                .bind(&run.stdout).bind(&run.stderr).bind(usage.and_then(|u| u.input_tokens)).bind(usage.and_then(|u| u.output_tokens))
+                .bind(usage.and_then(|u| u.cache_read_tokens)).bind(usage.and_then(|u| u.cache_write_tokens)).bind(usage.and_then(|u| u.reasoning_tokens))
+                .bind(usage.and_then(|u| u.cost)).bind(i64::from(usage.is_some_and(|u| u.known()))).bind(&job.id).execute(&state.db).await?;
+        }
         return Ok(());
     }
     if let Some(task_id) = &job.task_id {
@@ -512,7 +710,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
     }
 
-    let process_ok = run.exit_code == Some(0) && !run.timed_out && !run.stalled;
+    // An already produced valid outcome is applied/validated rather than
+    // asking the model to repeat work after an exit/collection interruption.
+    let process_ok = (run.exit_code == Some(0) && !run.timed_out && !run.stalled)
+        || crate::continuation::valid_outcome(&job.role, raw_result.as_deref());
     let (mut status, result_text, mut error) = if !process_ok {
         let reason = if run.timed_out {
             "Agent 作业超时".to_string()
@@ -573,6 +774,35 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     } else {
         None
     };
+    if matches!(
+        parsed,
+        Some(
+            ParsedResult::ExecutorDone { .. }
+                | ParsedResult::ExecutorDerive { .. }
+                | ParsedResult::DirectDone { .. }
+        )
+    ) {
+        let validation =
+            match crate::domain::commit_files(result_text.as_deref().unwrap_or_default()) {
+                Ok(files) if project.is_git() => git::validate_commit_files(&cwd, &files)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            };
+        if let Err(reason) = validation {
+            status = JOB_STATUS_FAILED;
+            error = Some(format!(
+                "结果协议不合法{}：{reason}",
+                if continuations >= MAX_CONTINUATIONS {
+                    "，协议继续次数用尽"
+                } else {
+                    ""
+                }
+            ));
+            parsed = None;
+        }
+    }
     if status == JOB_STATUS_SUCCEEDED && !review {
         if let Some(value) = result_text
             .as_deref()
@@ -671,6 +901,52 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
         return Ok(());
     }
+    if status == JOB_STATUS_FAILED
+        && run.process_failure()
+        && !crate::continuation::valid_outcome(&job.role, result_text.as_deref())
+        && record.as_ref().is_some_and(|r| !r.session.is_empty())
+        && !review
+    {
+        let reason = error.as_deref().unwrap_or("Agent 异常中断");
+        let kind = record
+            .as_ref()
+            .and_then(|r| r.diagnostic.failure_kind())
+            .unwrap_or(crate::domain::FailureKind::Transient);
+        self::failure::apply_agent_failure(state, &agent, reason, kind).await?;
+        if let Some(delay) = record
+            .as_ref()
+            .and_then(|r| r.diagnostic.retry_after_ms)
+            .filter(|ms| *ms > 0)
+        {
+            let until = chrono::Duration::try_milliseconds(delay)
+                .and_then(|duration| chrono::Utc::now().checked_add_signed(duration))
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+                .to_rfc3339();
+            sqlx::query("UPDATE agents SET cooldown_until = CASE WHEN cooldown_until IS NULL OR cooldown_until < ? THEN ? ELSE cooldown_until END WHERE id = ?")
+                .bind(&until).bind(&until).bind(&agent.id).execute(&state.db).await?;
+        }
+        let _guard = state.schedule_lock.lock().await;
+        if finish_job(
+            state,
+            &job,
+            status,
+            result_text.clone(),
+            &run,
+            error.as_deref(),
+            None,
+        )
+        .await?
+        {
+            if job.role == ROLE_EXECUTOR {
+                sqlx::query("UPDATE tasks SET attempts = attempts + 1 WHERE id = ?")
+                    .bind(&job.task_id)
+                    .execute(&state.db)
+                    .await?;
+            }
+            crate::continuation::block_interrupted(state, &job, reason).await?;
+        }
+        return Ok(());
+    }
     if job.role == JOB_ROLE_ANALYSIS {
         // A failed analysis is settled only after the failure handling decides
         // whether to switch agents; otherwise the job stays running and the
@@ -743,7 +1019,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             let message = format!("domo(direct): {} ({})", project.name, short_id(&job.id));
             let commit = if project.is_git() {
                 let _guard = state.git_lock.lock().await;
-                git::commit_all(&cwd, &message).await
+                git::commit_files(
+                    &cwd,
+                    &message,
+                    &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
+                        .map_err(anyhow::Error::msg)?,
+                )
+                .await
             } else {
                 Ok(false)
             };
@@ -835,7 +1117,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 );
                 let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
-                    git::commit_all(&cwd, &message).await
+                    git::commit_files(
+                        &cwd,
+                        &message,
+                        &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
+                            .map_err(anyhow::Error::msg)?,
+                    )
+                    .await
                 } else {
                     Ok(false)
                 };
@@ -914,7 +1202,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 );
                 let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
-                    git::commit_all(&cwd, &message).await
+                    git::commit_files(
+                        &cwd,
+                        &message,
+                        &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
+                            .map_err(anyhow::Error::msg)?,
+                    )
+                    .await
                 } else {
                     Ok(false)
                 };

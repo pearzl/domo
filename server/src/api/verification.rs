@@ -12,8 +12,7 @@ use crate::models::*;
 use crate::state::AppState;
 
 use super::detail::load_detail;
-use super::helpers::{load_project_task, parse_list, require_project, role_label};
-use super::jobs::resume_task_job;
+use super::helpers::{load_project_task, require_project, role_label};
 use super::ApiError;
 
 /// 任务验收历史固定保留最新这么多条，响应中的 `truncated` 说明是否还有更早的记录。
@@ -380,40 +379,11 @@ pub(super) async fn submit_arbitration(
         project.status.as_deref(),
         Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
     );
-    if !paused {
-        if let Some(job) = &latest_job {
-            resume_task_job(&state, &project, &task, job, &next_guidance, role).await?;
-            let message = if action == ARBITRATION_GUIDE {
-                format!("人工裁决：任务 {} 收到指导并复用原作业会话继续", task.key)
-            } else {
-                format!("人工裁决：任务 {} 重试并复用原作业会话", task.key)
-            };
-            emit(
-                &state.db,
-                &state.bus,
-                Some(&project_id),
-                Some(&task.id),
-                event_kind,
-                message,
-            )
-            .await;
-            state.notify_scheduler();
-            return load_detail(&state, &project_id).await.map(Json);
-        }
-    }
     let mut tx = state.db.begin().await?;
-    if action == ARBITRATION_SWITCH_AGENT {
-        sqlx::query("DELETE FROM retry_requests WHERE task_id = ?")
-            .bind(&task.id)
-            .execute(&mut *tx)
-            .await?;
-    } else if let (Some(job), Some(agent_id)) = (&latest_job, &retry_agent) {
-        // A retry recorded during project pause keeps its job/session, but the
-        // scheduler cannot resume it until the project restriction is lifted.
-        sqlx::query("INSERT INTO retry_requests(task_id, job_id, agent_id, role, requested_at) VALUES(?, ?, ?, ?, ?) \
-            ON CONFLICT(task_id) DO UPDATE SET job_id = excluded.job_id, agent_id = excluded.agent_id, role = excluded.role, requested_at = excluded.requested_at")
-            .bind(&task.id).bind(&job.id).bind(agent_id).bind(role).bind(now()).execute(&mut *tx).await?;
-    }
+    sqlx::query("DELETE FROM retry_requests WHERE task_id = ?")
+        .bind(&task.id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "UPDATE tasks SET status = ?, attempts = ?, rejections = ?, agent_id = NULL, \
          last_agent_id = CASE WHEN ? THEN NULL ELSE last_agent_id END, \
@@ -466,9 +436,7 @@ pub(super) async fn submit_arbitration(
     load_detail(&state, &project_id).await.map(Json)
 }
 
-/// Only the latest job of the role can be resumed, and only while it is failed.
-/// An earlier failure superseded by another job must not revive its old session.
-/// The retry target bypasses cooldown once; backoff clears on successful dispatch.
+/// Locate the latest failed or explicitly stopped run for new-session context.
 pub(super) async fn latest_failed_job(
     state: &AppState,
     project_id: &str,
@@ -497,7 +465,11 @@ pub(super) async fn latest_failed_job(
             .await?
         }
     };
-    Ok(job.filter(|job| job.status == JOB_STATUS_FAILED))
+    Ok(job.filter(|job| {
+        job.status == JOB_STATUS_FAILED
+            || (job.status == JOB_STATUS_CANCELED
+                && job.failure_kind.as_deref() == Some("user_stopped"))
+    }))
 }
 
 pub(super) async fn role_agents(state: &AppState, _role: &str) -> Result<Vec<AgentRow>, ApiError> {
@@ -516,23 +488,11 @@ pub(super) fn arbitration_role(task: &TaskRow) -> &'static str {
     }
 }
 
-pub(super) fn append_issue(existing: &str, issue: &str) -> String {
-    let mut issues: Vec<String> = parse_list(existing);
-    if !issues.iter().any(|item| item == issue) {
-        issues.push(issue.to_string());
-    }
-    while issues.len() > 20 {
-        issues.remove(0);
-    }
-    serde_json::to_string(&issues).unwrap_or_else(|_| "[]".into())
-}
-
 pub(super) async fn retry_task(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    // Both task retry entries share gate validation, session reuse and the
-    // project-level pause restriction.
+    // Legacy task retry is a new-session arbitration, never a session resume.
     let _ = submit_arbitration(
         State(state),
         Path((project_id, task_id)),

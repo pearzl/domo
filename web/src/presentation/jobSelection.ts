@@ -1,12 +1,16 @@
 import type { JobSummary, Project } from "../types";
 
-/// 取最近一个失败作业：作业按时间顺序排列，只有末尾作业失败时才提供重试入口。
+/// 最新失败或人工停止作业提供新会话操作；“继续”读取服务端资格。
 export function latestFailedJobId(jobs: JobSummary[]): string | null {
   const last = jobs[jobs.length - 1];
-  return last?.status === "failed" ? last.id : null;
+  return last?.status === "failed" ||
+    (last?.status === "canceled" && last.failure_kind === "user_stopped") ||
+    last?.can_continue
+    ? last.id
+    : null;
 }
 
-/// 项目阻塞且当前没有报告待验收时，最近的项目级失败作业可直接重试。
+/// 项目阻塞且没有报告待验收时，最近的项目级失败作业提供人工执行入口。
 export function retryableProjectJobId(
   project: Project,
   jobs: JobSummary[],

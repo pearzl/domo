@@ -27,6 +27,8 @@ pub enum GitError {
     SquashProbeIo { cause: std::io::Error },
     #[error("合并失败: {detail}")]
     SquashFailed { detail: String },
+    #[error("合并目标工作区有未提交改动，保留现场: {path}")]
+    DirtyMergeTarget { path: String },
     #[error("执行 git merge {branch} 失败: {cause}")]
     MergeProbeIo {
         branch: String,
@@ -269,6 +271,121 @@ pub async fn commit_all(dir: &Path, message: &str) -> GitResult<bool> {
     Ok(true)
 }
 
+/// Validate exact repo-relative file paths; no globs, directories or symlink
+/// traversal. Deleted paths and both sides of a rename are valid declarations.
+pub async fn validate_commit_files(dir: &Path, files: &[String]) -> GitResult<()> {
+    let root = tokio::fs::canonicalize(dir).await?;
+    for file in files {
+        if !crate::domain::valid_commit_path(file) {
+            return Err(GitError::SquashFailed {
+                detail: format!("commit_files 包含不安全路径: {file}"),
+            });
+        }
+        let path = root.join(file);
+        let mut parent = path.parent();
+        while let Some(p) = parent {
+            if p == root {
+                break;
+            }
+            if tokio::fs::symlink_metadata(p)
+                .await
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err(GitError::SquashFailed {
+                    detail: format!("commit_files 路径穿过符号链接: {file}"),
+                });
+            }
+            parent = p.parent();
+        }
+        if tokio::fs::symlink_metadata(&path)
+            .await
+            .is_ok_and(|m| !m.is_file())
+        {
+            return Err(GitError::SquashFailed {
+                detail: format!("commit_files 只接受普通文件或删除路径: {file}"),
+            });
+        }
+        let tracked = run_git(
+            dir,
+            &[
+                "--literal-pathspecs",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                file,
+            ],
+        )
+        .await
+        .is_ok();
+        if !tracked && !path.is_file() {
+            return Err(GitError::SquashFailed {
+                detail: format!("commit_files 文件不存在且未被跟踪: {file}"),
+            });
+        }
+        if !tracked
+            && run_git(dir, &["check-ignore", "--quiet", "--", file])
+                .await
+                .is_ok()
+        {
+            return Err(GitError::SquashFailed {
+                detail: format!("commit_files 包含被忽略的文件: {file}"),
+            });
+        }
+    }
+    // A resolved merge cannot be committed with an omitted conflicted path.
+    let conflicts = run_git(dir, &["diff", "--name-only", "-z", "--diff-filter=U"]).await?;
+    if conflicts
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .any(|p| !files.iter().any(|file| file == p))
+    {
+        return Err(GitError::SquashFailed {
+            detail: "commit_files 必须包含全部冲突路径".into(),
+        });
+    }
+    let staged = run_git(
+        dir,
+        &["diff", "--cached", "--name-only", "--no-renames", "-z"],
+    )
+    .await?;
+    if staged
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .any(|p| !files.iter().any(|file| file == p))
+    {
+        return Err(GitError::SquashFailed {
+            detail: "暂存区包含 commit_files 之外的路径，请保留现场并核对清单".into(),
+        });
+    }
+    Ok(())
+}
+
+pub async fn commit_files(dir: &Path, message: &str, files: &[String]) -> GitResult<bool> {
+    validate_commit_files(dir, files).await?;
+    if !files.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "add", "-A", "--"];
+        args.extend(files.iter().map(String::as_str));
+        run_git(dir, &args).await?;
+    }
+    // Resolving a conflict by keeping HEAD can leave an unchanged tree, but
+    // its merge still needs a commit to conclude MERGE_HEAD.
+    let merging = run_git(dir, &["rev-parse", "--verify", "MERGE_HEAD"])
+        .await
+        .is_ok();
+    if run_git(dir, &["diff", "--cached", "--name-only"])
+        .await?
+        .trim()
+        .is_empty()
+        && !merging
+    {
+        return Ok(false);
+    }
+    let mut args = GIT_IDENTITY.to_vec();
+    args.extend(["commit", "-m", message]);
+    run_git(dir, &args).await?;
+    Ok(true)
+}
+
 pub async fn diff_between(dir: &Path, from: &str, to: &str) -> GitResult<String> {
     run_git(dir, &["diff", "--stat", &format!("{from}..{to}")]).await
 }
@@ -280,6 +397,11 @@ pub async fn reset_hard(dir: &Path) -> GitResult<()> {
 }
 
 pub async fn squash_merge(project_ws: &Path, task_branch: &str, message: &str) -> GitResult<bool> {
+    if !status_porcelain(project_ws).await?.trim().is_empty() {
+        return Err(GitError::DirtyMergeTarget {
+            path: project_ws.display().to_string(),
+        });
+    }
     let merge = Command::new("git")
         .arg("-C")
         .arg(project_ws)
@@ -354,25 +476,6 @@ async fn abort_merge(dir: &Path) {
         .args(["merge", "--abort"])
         .output()
         .await;
-}
-
-/// Integrates accepted dependencies before the executor runs. File conflicts
-/// remain for that executor; unrelated errors abort without discarding files.
-pub async fn merge_for_execution(worktree: &Path, branch: &str) -> GitResult<()> {
-    let mut args = GIT_IDENTITY.to_vec();
-    args.extend(["merge", "--no-edit", branch]);
-    match run_git(worktree, &args).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            let conflicts = run_git(worktree, &["diff", "--name-only", "--diff-filter=U"]).await?;
-            if conflicts.trim().is_empty() {
-                abort_merge(worktree).await;
-                Err(error)
-            } else {
-                Ok(())
-            }
-        }
-    }
 }
 
 pub async fn has_branch(repo: &Path, branch: &str) -> bool {
@@ -584,6 +687,109 @@ detached
     }
 
     #[tokio::test]
+    async fn declared_files_commit_only_exact_add_edit_delete_and_rename_paths() {
+        let repo = std::env::temp_dir().join(format!("domo-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        for name in ["edit.txt", "delete.txt", "old.txt", "omitted.txt"] {
+            std::fs::write(repo.join(name), "base").unwrap();
+        }
+        std::fs::write(repo.join(".gitignore"), "build/\n").unwrap();
+        commit_all(&repo, "initial").await.unwrap();
+        std::fs::write(repo.join("edit.txt"), "edited").unwrap();
+        std::fs::remove_file(repo.join("delete.txt")).unwrap();
+        std::fs::rename(repo.join("old.txt"), repo.join("new.txt")).unwrap();
+        let special_name = if cfg!(windows) {
+            "space and unicode 文.txt"
+        } else {
+            "space and\nnewline.txt"
+        };
+        std::fs::write(repo.join(special_name), "added").unwrap();
+        std::fs::write(repo.join("omitted.txt"), "keep outside commit").unwrap();
+        std::fs::create_dir(repo.join("build")).unwrap();
+        std::fs::write(repo.join("build/log"), "ignored").unwrap();
+        let files =
+            ["edit.txt", "delete.txt", "old.txt", "new.txt", special_name].map(str::to_string);
+        assert!(commit_files(&repo, "delivery", &files).await.unwrap());
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:edit.txt"]).await.unwrap(),
+            "edited"
+        );
+        assert!(run_git(&repo, &["show", "HEAD:delete.txt"]).await.is_err());
+        assert!(run_git(&repo, &["show", "HEAD:old.txt"]).await.is_err());
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:new.txt"]).await.unwrap(),
+            "base"
+        );
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:omitted.txt"]).await.unwrap(),
+            "base"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("omitted.txt")).unwrap(),
+            "keep outside commit"
+        );
+        assert!(run_git(&repo, &["show", "HEAD:build/log"]).await.is_err());
+        assert!(!commit_files(&repo, "empty", &[]).await.unwrap());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn declared_files_reject_unsafe_ignored_and_undeclared_index_paths() {
+        let repo = std::env::temp_dir().join(format!("domo-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("dir")).unwrap();
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(repo.join("outside.txt"), "base").unwrap();
+        commit_all(&repo, "initial").await.unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored").unwrap();
+        for path in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "/absolute",
+            "C:/file",
+            "a\\b",
+            ".git/config",
+            "a//b",
+            "*.txt",
+            "dir",
+            "missing.txt",
+            "ignored.txt",
+        ] {
+            assert!(
+                validate_commit_files(&repo, &[path.into()]).await.is_err(),
+                "{path}"
+            );
+        }
+        std::fs::write(repo.join("outside.txt"), "staged").unwrap();
+        run_git(&repo, &["add", "outside.txt"]).await.unwrap();
+        assert!(commit_files(&repo, "must not commit", &[]).await.is_err());
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:outside.txt"]).await.unwrap(),
+            "base"
+        );
+        assert_eq!(
+            run_git(&repo, &["show", ":outside.txt"]).await.unwrap(),
+            "staged"
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(repo.join("outside.txt"), repo.join("link")).unwrap();
+            std::os::unix::fs::symlink(repo.join("dir"), repo.join("linkdir")).unwrap();
+            for path in ["link", "linkdir/file"] {
+                assert!(
+                    validate_commit_files(&repo, &[path.into(), "outside.txt".into()])
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
     async fn is_worktree_rejects_plain_and_nested_directories() {
         let root = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
         let repo = root.join("repo");
@@ -656,6 +862,38 @@ detached
     }
 
     #[tokio::test]
+    async fn squash_merge_preserves_dirty_target_and_source_refs() {
+        let repo = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]).await.unwrap();
+        std::fs::write(repo.join("shared.txt"), "base\n").unwrap();
+        commit_all(&repo, "initial").await.unwrap();
+        run_git(&repo, &["checkout", "-b", "child"]).await.unwrap();
+        std::fs::write(repo.join("shared.txt"), "child\n").unwrap();
+        commit_all(&repo, "child change").await.unwrap();
+        let child = commit_of(&repo, "child").await.unwrap();
+        run_git(&repo, &["checkout", "main"]).await.unwrap();
+        let parent = commit_of(&repo, "main").await.unwrap();
+        std::fs::write(repo.join("shared.txt"), "parent unsaved\n").unwrap();
+        std::fs::write(repo.join("untracked.txt"), "keep").unwrap();
+        assert!(matches!(
+            squash_merge(&repo, "child", "merge").await,
+            Err(GitError::DirtyMergeTarget { .. })
+        ));
+        assert_eq!(commit_of(&repo, "main").await.unwrap(), parent);
+        assert_eq!(commit_of(&repo, "child").await.unwrap(), child);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("shared.txt")).unwrap(),
+            "parent unsaved\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("untracked.txt")).unwrap(),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
     async fn merge_conflict_files_leave_conflicts_in_the_worktree() {
         let repo = std::env::temp_dir().join(format!("domo-git-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&repo).unwrap();
@@ -723,6 +961,16 @@ detached
         assert_eq!(unmerged.trim(), "shared.txt");
         let content = std::fs::read_to_string(repo.join("shared.txt")).unwrap();
         assert!(content.contains("<<<<<<<"), "{content}");
+        assert!(validate_commit_files(&repo, &[]).await.is_err());
+        let head_content = run_git(&repo, &["show", "HEAD:shared.txt"]).await.unwrap();
+        std::fs::write(repo.join("shared.txt"), head_content).unwrap();
+        assert!(commit_files(&repo, "resolved", &["shared.txt".into()])
+            .await
+            .unwrap());
+        assert!(run_git(&repo, &["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&repo);
     }

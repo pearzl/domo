@@ -7,6 +7,7 @@ mod cli;
 mod codex;
 #[cfg(test)]
 mod contract;
+mod diagnostic;
 mod mock;
 mod opencode;
 mod process;
@@ -45,6 +46,7 @@ pub use adapter::{
 };
 pub use cli::CliAdapter;
 pub use codex::CodexAdapter;
+pub use diagnostic::{Diagnosis, StopReason};
 pub use mock::MockAdapter;
 pub use opencode::OpencodeAdapter;
 pub use process::{job_process_alive, kill_job_dir};
@@ -100,6 +102,27 @@ macro_rules! adapter_registry {
                     return <$adapter as AgentAdapter>::session_for_job(job_id, None);
                 }
             )+
+            None
+        }
+
+        fn dispatch_resume(config: &AgentConfig) -> bool {
+            $( if config.kind == <$adapter as AgentAdapter>::KIND {
+                return <$adapter as AgentAdapter>::supports_resume(config);
+            } )+
+            false
+        }
+
+        fn dispatch_diagnose(config: &AgentConfig, run: &AgentRun) -> Diagnosis {
+            $( if config.kind == <$adapter as AgentAdapter>::KIND {
+                return <$adapter as AgentAdapter>::diagnose(config, run);
+            } )+
+            diagnostic::diagnose(diagnostic::Protocol::Generic, run)
+        }
+
+        fn dispatch_recover(config: &AgentConfig, job_id: &str, stdout: &str, previous: Option<&str>) -> Option<String> {
+            $( if config.kind == <$adapter as AgentAdapter>::KIND {
+                return <$adapter as AgentAdapter>::recover_session(config, job_id, stdout, previous);
+            } )+
             None
         }
 
@@ -167,6 +190,23 @@ pub async fn execute(
 /// the previous run, so this only consults the adapter's derived value.
 pub fn session_for_job(agent: &AgentRow, job_id: &str) -> Option<String> {
     dispatch_session(&agent.kind, job_id)
+}
+
+pub fn supports_resume(agent: &AgentRow) -> bool {
+    dispatch_resume(&AgentConfig::from_row(agent))
+}
+
+pub fn diagnose(agent: &AgentRow, run: &AgentRun) -> Diagnosis {
+    dispatch_diagnose(&AgentConfig::from_row(agent), run)
+}
+
+pub fn recover_session(
+    agent: &AgentRow,
+    job_id: &str,
+    stdout: &str,
+    previous: Option<&str>,
+) -> Option<String> {
+    dispatch_recover(&AgentConfig::from_row(agent), job_id, stdout, previous)
 }
 
 /// Settles usage after the final turn through the adapter that owns the job.

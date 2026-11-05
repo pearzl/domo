@@ -289,6 +289,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/history", get(delivery::job_history))
         .route("/api/jobs/{id}/retry", post(retry_job))
+        .route("/api/jobs/{id}/continue", post(retry_job))
+        .route("/api/jobs/{id}/restart", post(jobs::restart_job))
         .route("/api/jobs/{id}/output", get(get_job_output))
         .route("/api/jobs/{id}/activity", get(get_job_activity))
         .route("/api/events", get(list_events))

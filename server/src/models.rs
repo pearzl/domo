@@ -452,8 +452,6 @@ pub struct TaskRow {
     pub last_agent_id: Option<String>,
     pub avoid_agent_id: Option<String>,
     pub avoid_agent_role: Option<String>,
-    pub retry_agent_id: Option<String>,
-    pub retry_role: Option<String>,
     pub worktree: Option<String>,
     pub branch: Option<String>,
     pub artifacts_released_at: Option<String>,
@@ -498,6 +496,8 @@ pub struct JobRow {
     pub usage_known: i64,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// 0: ordinary execution; 1: explicit same-session continuation;
+    /// 2: recover an already written result without invoking the Agent.
     pub resume: i64,
     pub replan_generation: i64,
     pub created_at: String,
@@ -711,6 +711,8 @@ impl TaskView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobSummary {
+    pub can_continue: bool,
+    pub diagnostic: Option<crate::agents::Diagnosis>,
     pub execution_job_id: Option<String>,
     pub contract_id: Option<i64>,
     pub id: String,
@@ -740,6 +742,8 @@ pub struct JobSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobView {
+    pub can_continue: bool,
+    pub diagnostic: Option<crate::agents::Diagnosis>,
     pub execution_job_id: Option<String>,
     pub contract_id: Option<i64>,
     pub id: String,

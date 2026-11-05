@@ -285,6 +285,7 @@ pub(super) fn build_context(
         "diff_stat": data.diff_stat,
         "acceptance_criteria": data.acceptance_criteria,
         "acceptance_result": data.acceptance_result,
+        "report_feedback": data.report_feedback,
         "project_summary": data.project_summary,
         "project_assumptions": data.project_assumptions,
     })

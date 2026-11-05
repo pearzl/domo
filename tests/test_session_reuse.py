@@ -84,7 +84,7 @@ if role == "executor":
     artifact = pathlib.Path(os.getcwd()) / "domo_mock" / "T1.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("T1", encoding="utf-8")
-    result = {"kind": "done", "summary": "继续后完成"}
+    result = {"kind": "done", "summary": "继续后完成", "commit_files": ["domo_mock/T1.txt"]}
 elif role == "verifier":
     context = json.loads((job_dir / "context.json").read_text(encoding="utf-8"))
     result = {"pass": True, "reason": "产物齐全", "issues": [], "evidence": {
@@ -124,7 +124,7 @@ elif role == "project_acceptance":
 elif role == "summary":
     result = {"kind": "report", "report": "# 报告\\n\\n完成。"}
 else:
-    result = {"kind": "done", "summary": "完成"}
+    result = {"kind": "done", "summary": "完成", "commit_files": []}
 if role == "project_acceptance":
     context = json.loads((job_dir / "context.json").read_text(encoding="utf-8"))
     result["contract_id"] = context["contract"]["id"]

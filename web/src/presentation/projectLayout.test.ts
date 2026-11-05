@@ -451,7 +451,7 @@ describe("ProjectOverview 当前需要你处理", () => {
     expect(withCallback).toContain("去验收报告");
   });
 
-  it("项目级失败显示重试与查看失败作业入口", () => {
+  it("项目级失败显示处置说明与查看失败作业入口", () => {
     const markup = renderOverview(
       detail({
         project: project("analysis", {
@@ -465,7 +465,7 @@ describe("ProjectOverview 当前需要你处理", () => {
       }),
     );
     expect(markup).toContain("当前需要你处理");
-    expect(markup).toContain("重试失败作业");
+    expect(markup).toContain("处理失败作业");
     expect(markup).toContain("查看失败作业");
   });
 

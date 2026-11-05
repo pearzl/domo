@@ -55,6 +55,7 @@ export function TaskDrawer({
   onClose,
   onRetry,
   onRetryJob,
+  onRestartJob,
   onSaveGuidance,
   onToggleMilestone,
   onRefresh,
@@ -68,6 +69,7 @@ export function TaskDrawer({
   onClose: () => void;
   onRetry: () => void;
   onRetryJob: (jobId: string) => void;
+  onRestartJob?: (jobId: string) => void;
   onSaveGuidance: (guidance: string) => Promise<boolean>;
   onToggleMilestone: () => void;
   onRefresh: () => Promise<void>;
@@ -253,7 +255,8 @@ export function TaskDrawer({
             job={job}
             retryable={job.id === retryableJobId}
             readOnly={archived}
-            onRetry={() => onRetryJob(job.id)}
+             onRetry={() => onRetryJob(job.id)}
+             onRestart={onRestartJob ? () => onRestartJob(job.id) : undefined}
             focusNonce={job.id === focusJob.jobId ? focusJob.nonce : 0}
           />
         )}
@@ -268,9 +271,9 @@ export function TaskDrawer({
       <section className="task-feedback" data-drawer-block="feedback">
         <h3>{DRAWER_FEEDBACK_TITLE}</h3>
         {!resultFirst && verificationRecapValue.conclusion === "rejected" ? <div className="latest-feedback"><strong>最近一次验收未通过，修复后需重新核验</strong>{verificationRecapValue.reason ? <RichContent content={verificationRecapValue.reason} format="markdown" /> : null}</div> : null}
-        <details className="reference-fold historical-feedback">
-          <summary>历史验收反馈（{verifierFeedback(task.verifier_issues).length} 条）</summary>
-          <p className="muted">以下为过去作业报告的反馈，不代表当前仍存在这些问题。当前结论以最新验收和任务状态为准。</p>
+        <details className="reference-fold current-feedback">
+          <summary>当前待处理反馈（{verifierFeedback(task.verifier_issues).length} 条）</summary>
+          <p className="muted">以下为最近一次验收或合入返回的待处理问题，修复后需重新核验。历轮反馈与证据保留在作业历史中。</p>
         <ul>
           {verifierFeedback(task.verifier_issues).map((issue, index) => (
             <li key={`${index}-${issue}`}>

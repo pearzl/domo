@@ -22,8 +22,17 @@ pub(super) async fn finish_job(
     error: Option<&str>,
     _parsed: Option<ParsedResult>,
 ) -> Result<bool> {
+    let diagnostic = crate::continuation::diagnostic(state, job).await;
     let failure_kind = if status == JOB_STATUS_FAILED {
-        error.map(|reason| domain::classify_failure(reason, run.process_failure()).as_str())
+        error.map(|reason| {
+            let kind = if run.process_failure() {
+                diagnostic.as_ref().and_then(|d| d.failure_kind())
+            } else {
+                None
+            };
+            kind.unwrap_or_else(|| domain::classify_failure(reason, run.process_failure()))
+                .as_str()
+        })
     } else {
         None
     };
@@ -136,6 +145,8 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
         .as_deref()
         .and_then(|started| crate::usage::elapsed_ms(Some(started), &finished_at));
     let project_id = job.project_id.clone();
+    let resumable =
+        crate::continuation::interrupted(state, &job, agents::StopReason::LaunchError).await?;
     let job_agent = match &job.agent_id {
         Some(agent_id) => crate::db::load_agent(&state.db, agent_id).await?,
         None => None,
@@ -215,6 +226,10 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
         Ok(())
     }
     .await;
+    if resumable {
+        let _guard = state.schedule_lock.lock().await;
+        crate::continuation::block_interrupted(state, &job, reason).await?;
+    }
     // The running row keeps replan's quiet handoff closed until business callbacks settle.
     let updated = sqlx::query(
         "UPDATE jobs SET status = ?, error = ?, duration_ms = COALESCE(duration_ms, ?), \

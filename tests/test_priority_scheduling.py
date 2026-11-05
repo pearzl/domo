@@ -52,7 +52,7 @@ with open(os.path.join(cwd, "domo_mock", f"{key}.txt"), "w", encoding="utf-8") a
     handle.write(key + "\\n")
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
     json.dump(
-        {"kind": "done", "summary": f"高优先级 CLI 完成 {key}"},
+        {"kind": "done", "summary": f"高优先级 CLI 完成 {key}", "commit_files": [f"domo_mock/{key}.txt"]},
         handle,
         ensure_ascii=False,
     )
@@ -93,7 +93,7 @@ with open(os.path.join(cwd, "domo_mock", f"{key}.txt"), "w", encoding="utf-8") a
     handle.write(key + "\\n")
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
     json.dump(
-        {"kind": "done", "summary": f"换人 Agent 完成 {key}"},
+        {"kind": "done", "summary": f"换人 Agent 完成 {key}", "commit_files": [f"domo_mock/{key}.txt"]},
         handle,
         ensure_ascii=False,
     )

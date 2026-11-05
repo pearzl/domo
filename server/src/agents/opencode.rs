@@ -24,6 +24,14 @@ impl AgentAdapter for OpencodeAdapter {
         Ok(())
     }
 
+    fn supports_resume(_config: &AgentConfig) -> bool {
+        true
+    }
+
+    fn diagnose(_config: &AgentConfig, run: &AgentRun) -> super::diagnostic::Diagnosis {
+        super::diagnostic::diagnose(super::diagnostic::Protocol::Opencode, run)
+    }
+
     fn session_for_job(job_id: &str, existing: Option<&str>) -> Option<String> {
         Some(
             existing

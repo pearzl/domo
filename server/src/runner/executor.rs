@@ -184,7 +184,7 @@ pub(super) async fn handle_executor_derive(
     Ok(())
 }
 
-pub(super) async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRow, task: &TaskRow) {
+pub(crate) async fn cleanup_task_artifacts(state: &AppState, project: &ProjectRow, task: &TaskRow) {
     if let Err(error) = crate::artifacts::cleanup_task(state, project, task, false)
         .await
         .context("清理任务工作区失败")

@@ -53,7 +53,7 @@ DOMO 的 CLI Agent 模板：
 
 `{job_dir}` 作为额外可写目录时，Agent 才能把 `result.json` 写到作业目录。若作业目录已经在 `{cwd}` 内，可省略该参数。
 
-命令模板支持 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}` 和 `{session_id}`。模板包含 `{session_id}` 时，DOMO 认为该 CLI 支持会话复用，继续轮次会把同一 ID 传给模板。
+命令模板支持 `{prompt}`、`{job_dir}`、`{cwd}`、`{model}`、`{model_args}` 和 `{session_id}`。会话标识参与实际命令参数展开时，DOMO 视为具备恢复能力，继续轮次传入原 ID；仅在未使用的模型参数模板中出现占位符不算支持。恢复是否成功仍取决于 CLI，不因显式 ID 就假定外部会话一定存在。
 
 ### 1.2 参数语义
 

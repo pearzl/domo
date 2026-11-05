@@ -28,6 +28,7 @@ export function JobDetailView({
   retryable = false,
   readOnly = false,
   onRetry,
+  onRestart,
   focusNonce = 0,
 }: {
   job: JobSummary;
@@ -35,6 +36,7 @@ export function JobDetailView({
   /** 只读项目保留作业内容，但不提供变更操作。 */
   readOnly?: boolean;
   onRetry?: () => void;
+  onRestart?: () => void;
   /** 大于 0 时展开该作业并滚动到可见位置；用于从执行历史跳转。 */
   focusNonce?: number;
 }) {
@@ -121,28 +123,39 @@ export function JobDetailView({
           {job.exit_code !== null ? (
             <span className="muted">exit {job.exit_code}</span>
           ) : null}
-          {!readOnly && retryable && onRetry ? (
+           {!readOnly && job.can_continue && onRetry ? (
             <button
               className="secondary"
-              title="让这个失败作业重新排队"
+               title="尝试恢复原会话；请确认外部条件，仍受冷却、预算和队列限制"
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 onRetry();
               }}
             >
-              重试
+               继续
             </button>
-          ) : null}
+           ) : null}
+           {!readOnly && (retryable || job.can_continue) && onRestart ? (
+             <button className="secondary" title="创建新会话检查当前文件现场后重新执行" onClick={(event) => {
+               event.preventDefault(); event.stopPropagation(); onRestart();
+             }}>新会话执行</button>
+           ) : null}
         </summary>
         {open ? (
           <div className="job-body">
-            <div className="job-meta">
-              创建 {formatTime(job.created_at)} · 开始 {formatTime(job.started_at)} · 结束{" "}
+             <div className="job-meta">
+               创建 {formatTime(job.created_at)} · 开始 {formatTime(job.started_at)} · 结束{" "}
               {formatTime(job.finished_at)}
               {pid ? ` · PID ${pid}` : ""}
-            </div>
-            <a href={`/api/jobs/${encodeURIComponent(job.id)}/history`} target="_blank" rel="noreferrer">查看重试前的历史输入、输出与费用记录</a>
+             </div>
+             {job.diagnostic ? <div className="job-meta">
+               上次结束：{{ completed: "正常结束", timeout: "运行超时", stalled: "长时间无输出", process_exit: "进程异常退出", service_interrupted: "服务中断", user_stopped: "人工停止", launch_error: "启动或运行设施错误" }[job.diagnostic.stop]}
+               {" · "}诊断：{{ network: "网络异常", provider_transient: "供应商临时错误", rate_limit: "限流", authentication: "认证或权限", quota: "余额或配额", configuration: "配置错误", session_unavailable: "原会话不可恢复", context_limit: "上下文硬限制", cli: "CLI 错误", unknown: "未知原因" }[job.diagnostic.kind]}
+               {" · "}依据：{{ supervisor: "DOMO 终止记录", structured: "适配器结构化事件", text: "文本推断，非确定结论", unknown: "无可靠诊断" }[job.diagnostic.evidence]}
+               {job.diagnostic.code ? ` · ${job.diagnostic.code}` : ""}
+             </div> : null}
+            <a href={`/api/jobs/${encodeURIComponent(job.id)}/history`} target="_blank" rel="noreferrer">查看继续前的历史输入、输出与费用记录</a>
             <div className="job-meta">
               用量：
               {job.usage_known

@@ -405,7 +405,8 @@ export function ProjectPage({
                 retryable={job.id === retryableProjectJobId}
                 readOnly={archived}
                 focusNonce={job.id === selectedJobId ? 1 : 0}
-                onRetry={() => run(() => api.retryJob(job.id))}
+                 onRetry={() => run(() => api.retryJob(job.id))}
+                 onRestart={() => run(() => api.restartJob(job.id))}
               />
             )}
           />
@@ -540,7 +541,8 @@ export function ProjectPage({
           <ProjectOverview
             detail={detail}
             onOpenTab={openGuidanceTab}
-            onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
+             onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
+             onRestartJob={(jobId) => run(() => api.restartJob(jobId))}
             onMerge={() => void handleMerge()}
             onResume={() => void run(() => api.resumeProject(project.id))}
             busy={busy}
@@ -619,7 +621,8 @@ export function ProjectPage({
               await api.retryTask(project.id, selectedTask.id);
             })
           }
-          onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
+           onRetryJob={(jobId) => run(() => api.retryJob(jobId))}
+           onRestartJob={(jobId) => run(() => api.restartJob(jobId))}
           onSaveGuidance={(guidance) =>
             run(async () => {
               await api.saveTaskGuidance(project.id, selectedTask.id, guidance);

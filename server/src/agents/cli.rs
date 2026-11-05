@@ -35,6 +35,19 @@ impl AgentAdapter for CliAdapter {
         )
     }
 
+    fn supports_resume(config: &AgentConfig) -> bool {
+        let command = &config.command[config.command.len().min(1)..];
+        let uses_model_args = command.iter().any(|arg| arg == "{model_args}")
+            || (!config.model.trim().is_empty()
+                && !command.iter().any(|arg| arg.contains("{model}")));
+        command.iter().any(|arg| arg.contains("{session_id}"))
+            || (uses_model_args
+                && config
+                    .model_args
+                    .iter()
+                    .any(|arg| arg.contains("{session_id}")))
+    }
+
     async fn run_turn(&self, context: TurnContext<'_>) -> Result<AgentRun> {
         run_command_template(context).await
     }
@@ -58,10 +71,7 @@ async fn run_command_template(context: TurnContext<'_>) -> Result<AgentRun> {
     let model_args = &context.config.model_args;
     let model = context.config.model.trim();
     let session_id = context.spec.session_id.clone().unwrap_or_default();
-    let resume_aware = command
-        .iter()
-        .chain(model_args.iter())
-        .any(|arg| arg.contains("{session_id}"));
+    let resume_aware = CliAdapter::supports_resume(context.config);
     let mut expanded_model_args = Vec::new();
     if !model.is_empty() {
         expanded_model_args = model_args
@@ -95,7 +105,11 @@ async fn run_command_template(context: TurnContext<'_>) -> Result<AgentRun> {
                 }
             }
             "{model_args}" => args.extend(expanded_model_args.iter().cloned()),
-            other => args.push(other.replace("{model}", model)),
+            other => args.push(
+                other
+                    .replace("{model}", model)
+                    .replace("{session_id}", &session_id),
+            ),
         }
     }
     if !model.is_empty()
@@ -124,6 +138,26 @@ mod tests {
     use super::super::adapter::{AgentSpec, JobProgress};
     use super::*;
     use crate::models::JOB_ROLE_EXECUTOR;
+
+    #[test]
+    fn resume_capability_requires_a_session_argument_that_is_actually_expanded() {
+        let mut config = AgentConfig {
+            command: vec!["cli".into()],
+            model_args: vec!["--session={session_id}".into()],
+            ..Default::default()
+        };
+        assert!(!CliAdapter::supports_resume(&config));
+        config.command.push("{model_args}".into());
+        assert!(CliAdapter::supports_resume(&config));
+        config.command = vec!["cli".into(), "{model}".into()];
+        config.model = "configured-model".into();
+        assert!(!CliAdapter::supports_resume(&config));
+        config.command = vec!["cli".into()];
+        assert!(CliAdapter::supports_resume(&config));
+        config.model.clear();
+        config.command.push("--session={session_id}".into());
+        assert!(CliAdapter::supports_resume(&config));
+    }
 
     fn spec(continuation: bool, session_id: Option<&str>) -> AgentSpec {
         AgentSpec {

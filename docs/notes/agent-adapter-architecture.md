@@ -14,6 +14,7 @@
 | `server/src/agents/workbuddy.rs` | WorkBuddy CLI Agent。 |
 | `server/src/agents/cli.rs` | 自定义命令模板 Agent。 |
 | `server/src/agents/process.rs` | 外部进程启动、输出采集、超时与进程组终止。 |
+| `server/src/agents/diagnostic.rs` | 统一停止原因、错误类别与证据来源，各协议的作业级错误归一化。 |
 | `server/src/runner/` | 作业生命周期、续轮、看门狗、结果解析与持久化。 |
 | `server/src/api.rs` | HTTP 请求校验与响应组装。 |
 | `server/src/activity.rs` | 作业活动流格式识别与投影。 |
@@ -21,16 +22,17 @@
 
 适配层不持有数据库连接，也不组装 HTTP 响应。调用方把 `AgentRow`、作业描述和超时传入 `server/src/agents/mod.rs` 的门面函数，拿回 `AgentRun` 或 `JobUsage`。
 
-## 2. 四类业务能力
+## 2. 业务能力
 
-平台把 Agent 调用归纳为四类业务能力。每类能力对应一组 `AgentAdapter` 方法，并由 `server/src/agents/mod.rs` 的门面函数转发。
+平台把 Agent 调用归纳为配置、会话、执行、诊断和用量结算能力。每类能力对应一组 `AgentAdapter` 方法，并由 `server/src/agents/mod.rs` 的同一注册表转发。
 
 | 业务能力 | 平台需要解决的问题 | trait 方法 | 门面函数 | 调用方 |
 |---|---|---|---|---|
 | 配置可用性 | 该类型是否必须提供命令模板；当前配置能否启动 | `requires_command_template`、`validate` | `requires_command_template`、`validate_config` | `server/src/api.rs` 的 `require_command_if_needed`；`server/src/agents/mod.rs` 的 `run_with` |
-| 作业会话 | 新作业使用哪个会话标识；续轮是否沿用已有会话 | `session_for_job` | `session_for_job` | `server/src/runner/mod.rs` 的 `run_job` |
+| 作业会话 | 初始化会话、声明恢复能力、进程丢失后读取实际恢复标识 | `session_for_job`、`supports_resume`、`recover_session` | 同名门面 | runner、继续策略与启动恢复 |
 | 执行一轮 | 用什么参数、从哪个通道投递提示词、如何采集进程结果 | `run_turn` | `execute` | `server/src/runner/agent.rs` 的 `run_agent_job` |
 | 作业用量结算 | 最后一轮结束后，用量取逐轮记录还是适配器账本 | `finish_job` | `finish_job` | `server/src/runner/mod.rs` 的 `run_job` |
+| 结束诊断 | 从当前类型的结构化事件判断作业级错误，保留未知与来源 | `diagnose` | `diagnose` | 继续策略与失败持久化 |
 
 ### 2.1 配置可用性
 
@@ -41,6 +43,8 @@
 ### 2.2 作业会话
 
 `session_for_job(job_id, existing)` 返回该作业应使用的会话标识。`existing` 是上一轮运行报告的会话；返回 `None` 表示该类型不需要会话标识。`server/src/runner/mod.rs` 在作业开始时调用 `agents::session_for_job(&agent, &job.id)` 初始化 `AgentSpec.session_id`，续轮沿用上一轮 `AgentRun.session_id`。
+
+`supports_resume(config)` 只声明实际调用方式具备原会话恢复能力，不承诺外部会话一定存在。`recover_session(config, job_id, stdout, previous)` 用于服务重启、强制停止或异常退出：Codex/WorkBuddy 内置适配器从实际协议事件提取标识，缺失时沿用先前保存的真实标识；OpenCode 与 CLI 可使用显式指定的会话标识。CLI 的 `{session_id}` 必须出现在实际展开的参数中，不能仅凭未使用的模板字段声明支持。
 
 ### 2.3 执行一轮
 
@@ -76,11 +80,17 @@
 | `JobUsage::PerTurn` | 保留逐轮 `AgentRun.usage`；`server/src/runner/agent.rs` 在续轮之间用 `merge_usage` 合并。 |
 | `JobUsage::Authoritative(Option<UsageRecord>)` | 用适配器账本值替换逐轮记录；`None` 表示账本明确没有可用量。 |
 
-`finish_job` 的默认实现返回 `JobUsage::PerTurn`。`OpencodeAdapter` 覆盖该默认实现：`finalize_plan(process_failed, shutting_down)` 决定 `Skip`、`FetchOnly` 或 `SettleThenFetch`，再通过 `crate::opencode::fetch_usage` 与 `crate::opencode::settle` 取得 `Authoritative` 结果。
+`finish_job` 的默认实现返回 `JobUsage::PerTurn`。`OpencodeAdapter` 在服务未关闭时通过 `crate::opencode::fetch_usage` 读取权威账本；关闭期间返回 `PerTurn`，避免读取尚未稳定的账本。
 
 `FinishContext` 包含 `agent`、`job_id`、`session_id`、`process_failed`、`shutting_down`。`server/src/runner/mod.rs` 用 `FinishContext` 调用 `agents::finish_job`，遇到 `Authoritative` 时整体替换 `AgentRun.usage`，包括替换为 `None`。
 
 结算后的用量由 `server/src/runner/lifecycle.rs` 写入作业行：优先使用 `AgentRun.usage`，缺失时读取结果文件的 `usage` 字段（`UsageRecord::from_result`）。适配器不直接写数据库。
+
+### 2.5 统一结束诊断
+
+`diagnose(config, run)` 返回 `Diagnosis`：停止经过 `stop`、错误类别 `kind`、证据来源 `evidence`、可用的 HTTP 状态、供应商码、重试时间与摘要。内置适配器只解析各自作业级错误事件；配置命令模板的 Codex/WorkBuddy 转交 CLI 诊断。工具结果、推理和引用文本不作为结构化作业故障，最终正常结束不会被中间错误覆盖。
+
+无法识别的内容保持未知，stderr 文本推断不授权自动继续。可靠的超时事实或结构化网络/供应商临时错误可以交给有界自动策略；卡死、未知、账户和配置故障供人决定。明确结构化会话或上下文硬错误表示原会话不能继续。适配器不决定暂停、派发、预算或业务返工，这些由作业策略和调度执行。
 
 ## 3. AgentAdapter 契约
 
@@ -92,6 +102,9 @@
 | `requires_command_template` | `fn requires_command_template(config: &AgentConfig) -> bool` | 无 | 声明该类型是否必须配置命令模板。 |
 | `validate` | `fn validate(config: &AgentConfig) -> Result<()>` | 无 | 拒绝无法运行的配置。 |
 | `session_for_job` | `fn session_for_job(job_id: &str, existing: Option<&str>) -> Option<String>` | 无 | 派生或沿用作业会话标识。 |
+| `supports_resume` | `fn supports_resume(config: &AgentConfig) -> bool` | `false` | 声明实际调用支持原会话恢复。 |
+| `recover_session` | `fn recover_session(config: &AgentConfig, job_id: &str, stdout: &str, previous: Option<&str>) -> Option<String>` | 通用结构化标识或显式指定标识 | 从持久化输出和先前标识恢复原会话。 |
+| `diagnose` | `fn diagnose(config: &AgentConfig, run: &AgentRun) -> Diagnosis` | 通用 CLI 诊断 | 提供统一错误类别及依据。 |
 | `run_turn` | `fn run_turn<'a>(&'a self, context: TurnContext<'a>) -> impl Future<Output = Result<AgentRun>> + Send + 'a` | 无 | 执行一轮并返回 `AgentRun`。 |
 | `finish_job` | `fn finish_job<'a>(&'a self, context: FinishContext<'a>) -> impl Future<Output = JobUsage> + Send + 'a` | `JobUsage::PerTurn` | 结算作业用量。 |
 
@@ -159,7 +172,7 @@ async fn run_with<A: AgentAdapter>(
 
 分发不依赖 trait object，也不在 `server/src/runner/mod.rs` 或 `server/src/api.rs` 中按类型写分支。`server/src/runner/mod.rs` 只调用 `agents::session_for_job`、`agents::execute` 和 `agents::finish_job`；`server/src/api.rs` 只调用 `agents::kinds`、`agents::requires_command_template` 和 `agents::validate_config`。
 
-`KINDS`、配置校验与执行分发由宏生成；`session_for_job` 和 `finish_job` 两个门面按同一份清单逐项匹配 `KIND`，位置同在 `server/src/agents/mod.rs`。适配器需要专门会话派生或非默认结算时，在该文件的对应门面中登记分支；其余类型沿用 `None` 或 `PerTurn`。
+`KINDS`、配置校验、执行、会话、恢复能力、诊断与结算分发都由同一宏生成。适配器覆盖所需 trait 方法后只需加入清单，调用方不按类型登记额外分支。
 
 ## 5. 五类适配器差异
 

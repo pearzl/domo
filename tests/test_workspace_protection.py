@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""普通目录原地覆盖保护：精确授权、失败费用、文件现场检查和中断恢复。
-脚本化执行者故意改写输入，验证检测而非沙箱/自动回滚语义。
+"""普通目录原地覆盖保护与 Git worktree 写入边界：精确授权、失败费用、
+文件现场检查和中断恢复。脚本化执行者改写输入，验证普通目录的检测而非
+沙箱/自动回滚语义，以及 Git 项目不要求额外逐路径授权且主工作树保持不变。
 """
 import sys
-from harness import Server, temp_root, wait_for
+from harness import Server, git, init_repo, temp_root, wait_for
 
 SCRIPT = r'''
-import json, os, pathlib
+import json, os, pathlib, sys
+prompt = sys.stdin.read()
+context = json.loads(pathlib.Path(os.environ["DOMO_JOB_DIR"], "context.json").read_text(encoding="utf-8"))
+if context["project"]["workspace_type"] == "git":
+    assert "不因产物归属其他任务或 permissions 为空" in prompt
+    assert "只能修改自己任务的产物" not in prompt
+    assert "请求用户在产物区域登记" not in prompt
+else:
+    assert "只能修改自己任务的产物" in prompt
+    assert "permissions 中明确授权给当前任务的路径" in prompt
 pathlib.Path("source.txt").write_text("agent-written input", encoding="utf-8")
 output = pathlib.Path("domo_mock/T1.txt")
 output.parent.mkdir(exist_ok=True)
 output.write_text("T1", encoding="utf-8")
-result = {"kind":"done", "summary":"updated source", "usage":{"cost":0.5, "input_tokens":10, "output_tokens":5}}
+result = {"kind":"done", "summary":"updated source", "commit_files":["source.txt", "domo_mock/T1.txt"], "usage":{"cost":0.5, "input_tokens":10, "output_tokens":5}}
 pathlib.Path(os.environ["DOMO_JOB_DIR"], "result.json").write_text(json.dumps(result), encoding="utf-8")
 '''
 
@@ -63,7 +73,26 @@ def main():
                     call("POST", base + "/workspace/inspect", {"reason": "已核对未授权覆盖，保留当前内容，不自动重试"})
                     assert not call("GET", base + "/artifacts")["check"]["interrupted"]
                 call("POST", base + "/archive?force=true", {})
-            print("普通工作区精确写入授权、未授权覆盖阻塞、费用保留与重启检查通过")
+
+            repo = root / "git-repo"
+            init_repo(repo)
+            (repo / "source.txt").write_text("original input", encoding="utf-8")
+            git(["add", "source.txt"], repo)
+            git(["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"], repo)
+            p = call("POST", "/api/projects", {"name": "Git 原地修改", "repo_path": str(repo), "base_branch": "main", "goal": "[single] 更新输入", "confirm_mode": "auto"})["project"]
+            base = f"/api/projects/{p['id']}"
+            detail = wait_for(lambda: (d if (d := call("GET", base))["project"]["report"] else None), "Git 无逐路径授权完成", 30)
+            assert all(task["stage"] == "completed" for task in detail["tasks"]), detail
+            assert call("GET", base + "/artifacts")["permissions"] == []
+            assert (repo / "source.txt").read_text(encoding="utf-8") == "original input"
+            assert git(["show", p["branch"] + ":source.txt"], repo) == "agent-written input"
+            for job in detail["jobs"]:
+                if job["role"] in {"analysis", "verifier", "acceptance", "summary"}:
+                    prompt = call("GET", f"/api/jobs/{job['id']}")["prompt"]
+                    assert "不授予本角色修改交付文件的权限" in prompt
+                    assert "只能修改自己任务的产物" not in prompt
+            call("POST", base + "/archive", {})
+            print("普通工作区覆盖授权与恢复、Git 隔离修改和只读角色提示通过")
 
 
 if __name__ == "__main__":

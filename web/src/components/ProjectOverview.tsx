@@ -82,6 +82,7 @@ export function ProjectOverview({
   detail,
   onOpenTab,
   onRetryJob,
+  onRestartJob,
   onMerge,
   onResume,
   busy = false,
@@ -90,6 +91,7 @@ export function ProjectOverview({
   detail: ProjectDetail;
   onOpenTab?: (tab: GuidanceTab, jobId?: string) => void;
   onRetryJob?: (jobId: string) => void;
+  onRestartJob?: (jobId: string) => void;
   onMerge?: () => void;
   onResume?: () => void;
   busy?: boolean;
@@ -131,6 +133,8 @@ export function ProjectOverview({
           activity={activity}
           onOpenTab={onOpenTab}
           onRetryJob={onRetryJob}
+          onRestartJob={onRestartJob}
+          canContinue={jobs.some((job) => job.id === status.guidance.retryJobId && job.can_continue)}
           onMerge={onMerge}
           onResume={onResume}
           busy={busy}
@@ -198,6 +202,8 @@ function Guidance({
   activity,
   onOpenTab,
   onRetryJob,
+  onRestartJob,
+  canContinue,
   onMerge,
   onResume,
   busy,
@@ -208,6 +214,8 @@ function Guidance({
   activity: ActivitySummary;
   onOpenTab?: (tab: GuidanceTab, jobId?: string) => void;
   onRetryJob?: (jobId: string) => void;
+  onRestartJob?: (jobId: string) => void;
+  canContinue: boolean;
   onMerge?: () => void;
   onResume?: () => void;
   busy: boolean;
@@ -287,15 +295,19 @@ function Guidance({
       ) : null}
       {hasActions ? (
         <div className="overview-jump-row">
-          {guidance.retryJobId ? (
+          {guidance.retryJobId && canContinue ? (
             <button
               type="button"
               className="primary overview-jump"
               disabled={busy}
               onClick={() => onRetryJob?.(guidance.retryJobId!)}
             >
-              重试失败作业
+              继续
             </button>
+          ) : null}
+          {guidance.retryJobId && onRestartJob ? (
+            <button type="button" className="secondary overview-jump" disabled={busy}
+              onClick={() => onRestartJob(guidance.retryJobId!)}>新会话执行</button>
           ) : null}
           {guidance.merge ? (
             <button

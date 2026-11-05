@@ -84,8 +84,9 @@ def test_pause(root):
         assert call("GET", base)["project"]["status"] == "paused"
         call("POST", base + "/resume", {})
         d = wait_detail(call, base, lambda d: bool(d["project"]["report"]), "任务恢复完成")
-        assert next(j for j in d["jobs"] if j["id"] == retry_job["id"])["status"] == "succeeded"
-        assert len(call("GET", f"/api/jobs/{retry_job['id']}/history")["runs"]) == 1
+        assert next(j for j in d["jobs"] if j["id"] == retry_job["id"])["status"] == "failed"
+        assert any(j["role"] == "executor" and j["status"] == "succeeded" and j["id"] != retry_job["id"] for j in d["jobs"])
+        assert call("GET", f"/api/jobs/{retry_job['id']}/history")["runs"] == []
 
 
 def test_runtime_replan(root):
@@ -223,7 +224,7 @@ def test_milestone_conflict_and_artifact(root):
 TOKEN_WRITER = r'''
 import json, os, pathlib
 p = pathlib.Path("domo_mock/T1.txt"); p.parent.mkdir(exist_ok=True); p.write_text("T1", encoding="utf-8")
-pathlib.Path(os.environ["DOMO_JOB_DIR"], "result.json").write_text(json.dumps({"kind":"done", "summary":"written",
+pathlib.Path(os.environ["DOMO_JOB_DIR"], "result.json").write_text(json.dumps({"kind":"done", "summary":"written", "commit_files":["domo_mock/T1.txt"],
     "usage":{"input_tokens":123, "output_tokens":12}}), encoding="utf-8")
 '''
 

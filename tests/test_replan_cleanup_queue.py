@@ -2,6 +2,7 @@
 """逐代际重规划清理在提交后崩溃时恢复，取消任务的脏工作区直接丢弃。"""
 
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -20,6 +21,8 @@ def main():
         repo = temp / "repo"
         init_repo(repo)
         ensure_server_built()
+        verifier = temp / "hold_verifier.py"
+        verifier.write_text("import time\nwhile True:\n    print('holding verification', flush=True)\n    time.sleep(0.1)\n", encoding="utf-8")
         env = {"DOMO_MOCK_DELAY_MS": "70", "DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY": "1"}
         with Server(temp, env=env) as server:
             call = server.call
@@ -31,10 +34,12 @@ def main():
                 {
                     "name": "Cleanup Queue Mock",
                     "kind": "mock",
-                    "roles": ["planner", "executor", "verifier"],
+                    "roles": ["planner", "executor"],
                     "max_concurrency": 2,
                 },
             )
+            call("POST", "/api/agents", {"name":"Held Verifier", "kind":"cli", "roles":["verifier"],
+                "command":[sys.executable, str(verifier)]})
             project = call(
                 "POST",
                 "/api/projects",
@@ -63,7 +68,8 @@ def main():
                 ),
                 "首轮旧任务验收在途",
             )
-            old_task = next(task for task in detail["tasks"] if task["worktree"])
+            running = next(job for job in detail["jobs"] if job["role"] == "verifier" and job["status"] == "running")
+            old_task = next(task for task in detail["tasks"] if task["id"] == running["task_id"])
             call("POST", f"/api/projects/{pid}/pause", {"force": True})
             call("POST", f"/api/projects/{pid}/replan", {"reason": "第一轮清理"})
             Path(old_task["worktree"], "dirty-replan-cleanup.txt").write_text("dirty")
@@ -120,6 +126,7 @@ def main():
             db.close()
             assert unreleased == 0, unreleased
             assert all(not Path(worktree).exists() for worktree in worktrees)
+            call("POST", f"/api/projects/{pid}/pause", {"force": True})
 
             print("两轮应用崩溃后的逐代际恢复与取消工作区丢弃测试通过")
 

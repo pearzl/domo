@@ -344,6 +344,17 @@ export interface ProjectArchiveRefs {
 }
 
 export interface JobSummary {
+  /** Server-authoritative session continuation qualification. */
+  can_continue?: boolean;
+  diagnostic?: {
+    stop: "completed" | "timeout" | "stalled" | "process_exit" | "service_interrupted" | "user_stopped" | "launch_error";
+    kind: "network" | "provider_transient" | "rate_limit" | "authentication" | "quota" | "configuration" | "session_unavailable" | "context_limit" | "cli" | "unknown";
+    evidence: "supervisor" | "structured" | "text" | "unknown";
+    status: number | null;
+    code: string | null;
+    retry_after_ms: number | null;
+    message: string;
+  } | null;
   execution_job_id: string | null;
   id: string;
   project_id: string;

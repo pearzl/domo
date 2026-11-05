@@ -55,7 +55,7 @@ export function ProjectReportPanel({
         <RichContent content={project.report} className="report" />
       ) : project.stage === "summarizing" ? (
         project.blocked_reason ? (
-          <p className="muted">报告生成失败，可在上方失败作业上重试。</p>
+          <p className="muted">报告生成失败，可在上方作业记录中选择适用的执行操作。</p>
         ) : (
           <p className="muted">规划者正在依据评议意见重写报告…</p>
         )

@@ -79,6 +79,10 @@ impl AppState {
         self.active_jobs.lock().remove(job_dir);
     }
 
+    pub fn job_active(&self, job_dir: &Path) -> bool {
+        self.active_jobs.lock().contains(job_dir)
+    }
+
     /// Kills every agent process group started by this process. Entries are
     /// validated against the recorded start time, so stale pid files are safe.
     pub fn kill_active_jobs(&self) {

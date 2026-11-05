@@ -129,19 +129,6 @@ pub(crate) async fn insert_message(
     Ok(())
 }
 
-pub(super) fn merge_issues(existing: &str, issues: &[String]) -> String {
-    let mut merged: Vec<String> = parse_json_list(existing);
-    for issue in issues {
-        if !merged.iter().any(|item| item == issue) {
-            merged.push(issue.clone());
-        }
-    }
-    while merged.len() > 20 {
-        merged.remove(0);
-    }
-    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into())
-}
-
 pub(super) fn parse_json_list(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }

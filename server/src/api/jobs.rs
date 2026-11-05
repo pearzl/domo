@@ -1,4 +1,4 @@
-//! 作业查询、重试与输出/活动读取。
+//! 作业查询、会话继续、新会话执行与输出/活动读取。
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
@@ -22,19 +22,23 @@ use super::detail::{job_duration, load_detail};
 use super::helpers::{parse_list, require_project, role_label};
 use super::ApiError;
 
-/// Marks a failed job for an in-place resume. The next `run_job` uses the same
-/// job id and therefore the same agent session.
+/// Reserves a failed or explicitly stopped job for in-place continuation.
+/// The history trigger archives its previous output and usage before reuse.
 pub(crate) async fn mark_job_resumed(
     conn: &mut sqlx::SqliteConnection,
     job_id: &str,
 ) -> Result<bool, sqlx::Error> {
+    // A forced-stop row is canceled for presentation, not a canceled task.
+    // Normalize only that explicit reason inside the dispatch transaction so
+    // the existing failed-run history trigger archives it consistently.
+    sqlx::query("UPDATE jobs SET status = 'failed' WHERE id = ? AND status = 'canceled' AND failure_kind = 'user_stopped'")
+        .bind(job_id).execute(&mut *conn).await?;
     let result = sqlx::query(
         "UPDATE jobs SET status = ?, started_at = NULL, finished_at = NULL, duration_ms = NULL, \
-         error = NULL, failure_kind = NULL, exit_code = NULL, pid = NULL, result = NULL, \
-         stdout = NULL, stderr = NULL, usage_known = 0, input_tokens = NULL, \
-         output_tokens = NULL, cache_read_tokens = NULL, cache_write_tokens = NULL, \
-         reasoning_tokens = NULL, cost = NULL, resume = 1 \
-         WHERE id = ? AND status = ?",
+          error = NULL, failure_kind = NULL, exit_code = NULL, pid = NULL, usage_known = 0, \
+          input_tokens = NULL, output_tokens = NULL, cache_read_tokens = NULL, \
+          cache_write_tokens = NULL, reasoning_tokens = NULL, cost = NULL, resume = 1 \
+          WHERE id = ? AND status = ?",
     )
     .bind(JOB_STATUS_RUNNING)
     .bind(job_id)
@@ -44,8 +48,8 @@ pub(crate) async fn mark_job_resumed(
     Ok(result.rows_affected() == 1)
 }
 
-/// Resumes the latest failed task job in place: the task and project return to
-/// running, the same agent keeps the job, and the session is reused.
+/// Queues an explicit attempt to resume the latest interrupted task job. The
+/// original Agent/session remain selected; normal dispatch gates still apply.
 pub(super) async fn resume_task_job(
     state: &AppState,
     project: &ProjectRow,
@@ -54,6 +58,9 @@ pub(super) async fn resume_task_job(
     guidance: &str,
     role: &str,
 ) -> Result<(), ApiError> {
+    crate::continuation::validate(state, job)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
     if let Some(reason) = crate::delivery::gate(
         &state.db,
         &project.id,
@@ -67,7 +74,7 @@ pub(super) async fn resume_task_job(
         project.status.as_deref(),
         Some(STATUS_PAUSING) | Some(STATUS_PAUSED) | Some(STATUS_ARCHIVED)
     ) {
-        return Err(ApiError::bad("项目已暂停或归档，不能直接重试"));
+        return Err(ApiError::bad("项目已暂停或归档，不能直接继续"));
     }
     let agent_id = job
         .agent_id
@@ -90,11 +97,11 @@ pub(super) async fn resume_task_job(
     let mut tx = state.db.begin().await?;
     let updated = sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_agent_id = ?, \
-         attempts = 0, rejections = 0, last_error = NULL, last_failure_kind = NULL, \
+          last_error = NULL, last_failure_kind = NULL, \
          waiting_reason = NULL, human_gate = NULL, avoid_agent_id = NULL, \
          avoid_agent_role = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
          retry_agent_id = NULL, retry_role = NULL, guidance = ?, updated_at = ? \
-         WHERE id = ? AND status = ?",
+          WHERE id = ? AND status IN ('blocked', 'queued')",
     )
     .bind(stage)
     .bind(STATUS_QUEUED)
@@ -103,7 +110,6 @@ pub(super) async fn resume_task_job(
     .bind(guidance)
     .bind(now())
     .bind(&task.id)
-    .bind(STATUS_BLOCKED)
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
@@ -138,10 +144,77 @@ pub(super) async fn retry_job(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::not_found("作业不存在"))?;
-    if job.status != JOB_STATUS_FAILED {
-        return Err(ApiError::bad("只有失败的作业可以重试"));
+    crate::continuation::validate(&state, &job)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
+    let project = require_project(&state, &job.project_id).await?;
+    if let Some(task_id) = &job.task_id {
+        let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&state.db)
+            .await?;
+        resume_task_job(&state, &project, &task, &job, &task.guidance, &job.role).await?;
+    } else {
+        if !matches!(
+            project.status.as_deref(),
+            Some(STATUS_BLOCKED | STATUS_RUNNING)
+        ) {
+            return Err(ApiError::conflict("项目尚未恢复，不能请求继续"));
+        }
+        let mut tx = state.db.begin().await?;
+        sqlx::query("INSERT INTO project_continuations(project_id, job_id) VALUES(?, ?)")
+            .bind(&project.id)
+            .bind(&job.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE projects SET status = ?, blocked_reason = NULL, retry_agent_id = ?, retry_role = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_RUNNING)
+        .bind(&job.agent_id)
+        .bind(ROLE_PLANNER)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        job.task_id.as_deref(),
+        "job_continue",
+        "请求继续原作业会话；派发仍受冷却、用量和队列限制",
+    )
+    .await;
+    state.notify_scheduler();
+    load_detail(&state, &project.id).await.map(Json)
+}
+
+pub(super) async fn restart_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectDetail>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let job = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::not_found("作业不存在"))?;
+    if job.status != JOB_STATUS_FAILED
+        && !(job.status == JOB_STATUS_CANCELED
+            && job.failure_kind.as_deref() == Some("user_stopped"))
+    {
+        return Err(ApiError::bad("只有失败或人工停止的作业可以新会话执行"));
     }
     let project = require_project(&state, &job.project_id).await?;
+    let dir = paths::job_dir(&PathBuf::from(&project.workspace), &job.id);
+    if state.job_active(&dir) || crate::agents::job_process_alive(&dir) {
+        return Err(ApiError::conflict(
+            "上一轮进程、输出与费用尚未结算，请稍后执行",
+        ));
+    }
     if let Some(reason) = crate::delivery::gate(
         &state.db,
         &project.id,
@@ -232,7 +305,7 @@ pub(super) async fn retry_job(
         project.status.as_deref(),
         Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
     );
-    let task_key = match job.task_id.as_deref() {
+    let task_key: Option<String> = match job.task_id.as_deref() {
         Some(task_id) => {
             let task =
                 sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
@@ -258,8 +331,19 @@ pub(super) async fn retry_job(
             if job.role != expected {
                 return Err(ApiError::bad("作业与任务当前阶段不一致"));
             }
-            resume_task_job(&state, &project, &task, &job, &task.guidance, &job.role).await?;
-            Some(task.key)
+            // Arbitration always creates a new job/session and keeps the files.
+            drop(_guard);
+            return super::verification::submit_arbitration(
+                State(state),
+                Path((project.id, task.id)),
+                Json(ArbitrationRequest {
+                    action: ARBITRATION_RETRY.into(),
+                    agent_id: None,
+                    guidance: None,
+                    risk_confirmed: false,
+                }),
+            )
+            .await;
         }
         None => {
             let stage_matches = match job.role.as_str() {
@@ -288,6 +372,10 @@ pub(super) async fn retry_job(
         }
     };
     if job.task_id.is_none() {
+        sqlx::query("DELETE FROM project_continuations WHERE project_id = ?")
+            .bind(&project.id)
+            .execute(&state.db)
+            .await?;
         sqlx::query(
             "UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
              THEN status ELSE ? END, blocked_reason = CASE WHEN ? THEN ? ELSE NULL END, \
@@ -303,16 +391,6 @@ pub(super) async fn retry_job(
         .bind(&project.id)
         .execute(&state.db)
         .await?;
-        if job.role == JOB_ROLE_ACCEPTANCE {
-            sqlx::query(
-                "UPDATE projects SET acceptance = NULL, acceptance_passed = 0, \
-                 acceptance_round = 0, acceptance_at = NULL, updated_at = ? WHERE id = ?",
-            )
-            .bind(now())
-            .bind(&project.id)
-            .execute(&state.db)
-            .await?;
-        }
     }
     let subject = task_key
         .map(|key| format!("任务 {key} "))
@@ -323,7 +401,7 @@ pub(super) async fn retry_job(
         Some(&project.id),
         job.task_id.as_deref(),
         "job_retry",
-        format!("人工重试{subject}{}作业", role_label(&job.role)),
+        format!("人工新会话执行{subject}{}作业", role_label(&job.role)),
     )
     .await;
     state.notify_scheduler();
@@ -350,7 +428,11 @@ pub(super) async fn get_job(
         None => job_pid_file(&state, &job).await,
     };
     let failure_summary = crate::failure::summarize(job.error.as_deref());
+    let can_continue = crate::continuation::can_continue(&state, &job).await;
+    let diagnostic = crate::continuation::diagnostic(&state, &job).await;
     Ok(Json(JobView {
+        can_continue,
+        diagnostic,
         execution_job_id: job.execution_job_id,
         contract_id: job.contract_id,
         id: job.id,

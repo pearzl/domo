@@ -1,21 +1,18 @@
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Result};
 
 use crate::domain::{self, now, FailureKind};
 use crate::events::emit;
 use crate::git;
 use crate::models::*;
-use crate::paths;
 use crate::state::AppState;
 
-use super::common::{load_task, merge_issues};
+use super::common::{load_task, models_list_json};
 use super::executor::cleanup_task_artifacts;
 use super::failure::{
     apply_agent_failure, failure_kind_label, has_usable_agent, protocol_failure_blocks,
     task_pause_intent,
 };
-use super::worktree::prepare_task_worktree;
+use super::worktree::{prepare_task_worktree, task_merge_target};
 
 pub(super) async fn handle_verdict(
     state: &AppState,
@@ -40,7 +37,7 @@ pub(super) async fn handle_verdict(
             let blocked_reason = format!("任务 {} 验收通过，等待人工验收：{verdict}", task.key);
             sqlx::query(
                 "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, human_gate = ?, \
-                 last_error = ?, forced_agent_id = NULL, forced_agent_role = NULL, updated_at = ? \
+                  last_error = ?, verifier_issues = '[]', forced_agent_id = NULL, forced_agent_role = NULL, updated_at = ? \
                  WHERE id = ?",
             )
             .bind(TASK_STAGE_VERIFYING)
@@ -82,11 +79,11 @@ pub(super) async fn handle_verdict(
             .branch
             .clone()
             .ok_or_else(|| anyhow!("任务缺少执行分支"))?;
-        let workspace = PathBuf::from(&project.workspace);
+        let target = task_merge_target(state, project, task).await?;
         let message = format!("domo(task-{}): {}", task.key, task.title);
         let merge = {
             let _guard = state.git_lock.lock().await;
-            git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
+            git::squash_merge(&target.worktree, &branch, &message).await
         };
         match merge {
             Ok(_) => {
@@ -95,7 +92,7 @@ pub(super) async fn handle_verdict(
                     project,
                     task,
                     agent,
-                    format!("任务 {} 验收通过并合并到项目分支", task.key),
+                    format!("任务 {} 验收通过并合并到{}", task.key, target.label),
                 )
                 .await?;
             }
@@ -113,7 +110,12 @@ pub(super) async fn handle_verdict(
             None if blocked => STATUS_BLOCKED,
             None => STATUS_QUEUED,
         };
-        let merged_issues = merge_issues(&task.verifier_issues, issues);
+        // Each verdict is a complete current list; old verdicts remain on jobs.
+        let current_issues = if issues.is_empty() {
+            models_list_json(&[reason.to_string()])
+        } else {
+            models_list_json(issues)
+        };
         sqlx::query(
             "UPDATE tasks SET stage = ?, status = ?, rejections = ?, verifier_issues = ?, \
              last_error = ?, agent_id = ?, waiting_reason = NULL, updated_at = ? WHERE id = ?",
@@ -121,7 +123,7 @@ pub(super) async fn handle_verdict(
         .bind(TASK_STAGE_EXECUTING)
         .bind(status)
         .bind(rejections)
-        .bind(&merged_issues)
+        .bind(&current_issues)
         .bind(reason)
         .bind(&agent.id)
         .bind(now())
@@ -161,7 +163,7 @@ async fn complete_verified_task(
     let guard = state.schedule_lock.lock().await;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
-         human_gate = NULL, forced_agent_id = NULL, forced_agent_role = NULL, \
+          human_gate = NULL, verifier_issues = '[]', forced_agent_id = NULL, forced_agent_role = NULL, \
          updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_COMPLETED)
@@ -209,6 +211,10 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
     agent_id: Option<&str>,
 ) -> Result<()> {
     let reason = format!("验收通过但合并失败：{merge_error:#}");
+    if matches!(merge_error, git::GitError::DirtyMergeTarget { .. }) {
+        return block_task_after_merge_failure(state, project, task, &reason).await;
+    }
+    let target = task_merge_target(state, project, task).await?;
     let worktree = match prepare_task_worktree(state, project, Some(task)).await {
         Ok(path) => path,
         Err(error) => {
@@ -223,7 +229,7 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
     };
     let conflicts = {
         let _guard = state.git_lock.lock().await;
-        git::merge_conflict_files(&worktree, &project.branch).await
+        git::merge_conflict_files(&worktree, &target.branch).await
     };
     let conflicts = match conflicts {
         Ok(files) if !files.is_empty() => files,
@@ -232,7 +238,7 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
                 state,
                 project,
                 task,
-                &format!("{reason}；任务分支与项目交付分支没有文件冲突"),
+                &format!("{reason}；任务分支与{}没有文件冲突", target.label),
             )
             .await;
         }
@@ -247,12 +253,13 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
         }
     };
     let issue = format!(
-        "验收通过后合并到项目交付分支时发生合并冲突，冲突文件：{}。工作区已处于合并冲突状态，\
-         请直接编辑冲突文件消除冲突标记，保留任务需要的改动；DOMO 会负责提交并在解决后重新验收。",
+        "验收通过后合并到{}时发生合并冲突，冲突文件：{}。工作区已处于合并冲突状态，\
+          请直接编辑冲突文件消除冲突标记，保留任务需要的改动；DOMO 会负责提交并在解决后重新验收。",
+        target.label,
         conflicts.join("、")
     );
     let pause = task_pause_intent(state, &task.id).await?;
-    let issues = merge_issues(&task.verifier_issues, std::slice::from_ref(&issue));
+    let issues = models_list_json(std::slice::from_ref(&issue));
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, verifier_issues = ?, last_error = ?, agent_id = ?, \
           human_gate = NULL, waiting_reason = NULL, updated_at = ? WHERE id = ?",
@@ -273,8 +280,9 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
         Some(&task.id),
         "merge_conflict",
         format!(
-            "任务 {} 合并冲突：合入项目分支失败，已退回执行者解决，之后重新验收：{}",
+            "任务 {} 合并冲突：合入{}失败，已退回执行者解决，之后重新验收：{}",
             task.key,
+            target.label,
             conflicts.join("、")
         ),
     )
@@ -289,11 +297,12 @@ async fn block_task_after_merge_failure(
     reason: &str,
 ) -> Result<()> {
     sqlx::query(
-        "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, last_error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, last_error = ?, verifier_issues = ?, updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_VERIFYING)
     .bind(STATUS_BLOCKED)
     .bind(reason)
+    .bind(models_list_json(&[reason.to_string()]))
     .bind(now())
     .bind(&task.id)
     .execute(&state.db)

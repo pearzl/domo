@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS retry_requests (
  task_id TEXT PRIMARY KEY REFERENCES tasks(id), job_id TEXT NOT NULL REFERENCES jobs(id),
  agent_id TEXT NOT NULL, role TEXT NOT NULL, requested_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_continuations (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), job_id TEXT NOT NULL REFERENCES jobs(id)
+);
 "#).execute(pool).await?;
     Ok(())
 }

@@ -70,8 +70,37 @@ pub(super) async fn job_history(
     .bind(&id)
     .fetch_all(&state.db)
     .await?;
+    let workspace: Option<String> = sqlx::query_scalar(
+        "SELECT p.workspace FROM projects p JOIN jobs j ON j.project_id = p.id WHERE j.id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+    let mut diagnostics = Vec::new();
+    if let Some(workspace) = workspace {
+        let dir = crate::paths::job_dir(&std::path::PathBuf::from(workspace), &id);
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| ApiError::internal(e.into()))?
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("diagnostic-") && name.ends_with(".json") {
+                    if let Ok(bytes) = tokio::fs::read(entry.path()).await {
+                        if let Ok(record) =
+                            serde_json::from_slice::<crate::continuation::Checkpoint>(&bytes)
+                        {
+                            diagnostics.push(record);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    diagnostics.sort_by_key(|r| (r.turns, r.protocol_rounds));
     Ok(Json(
-        json!({"runs": rows.into_iter().map(|(id, snapshot, cost, at)| {
+        json!({"diagnostics": diagnostics, "runs": rows.into_iter().map(|(id, snapshot, cost, at)| {
         json!({"id": id, "snapshot": serde_json::from_str::<Value>(&snapshot).unwrap_or(Value::Null),
             "cost": cost, "finished_at": at})
     }).collect::<Vec<_>>()}),

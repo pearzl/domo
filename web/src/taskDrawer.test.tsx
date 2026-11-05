@@ -277,6 +277,9 @@ describe("TaskDrawer 信息去重", () => {
     expect((withFeedback.match(new RegExp(`<h3>${DRAWER_FEEDBACK_TITLE}</h3>`, "g")) ?? []).length).toBe(1);
     expect(withFeedback).toContain('data-drawer-block="feedback"');
     expect(withFeedback).toContain("FEEDBACK_MARKER");
+    expect(withFeedback).toContain("当前待处理反馈（1 条）");
+    expect(withFeedback).toContain("历轮反馈与证据保留在作业历史中");
+    expect(withFeedback).not.toContain("不代表当前仍存在这些问题");
 
     for (const issues of [[], ["  ", ""]]) {
       const withoutFeedback = renderDrawer(task({ verifier_issues: issues }));
@@ -422,13 +425,14 @@ describe("TaskDrawer 信息去重", () => {
 });
 
 describe("TaskDrawer 作业记录", () => {
-  it("归档任务不渲染失败作业的重试入口", () => {
+  it("只有服务端确认可继续且非归档时才显示继续", () => {
     const current = task({ status: "blocked" });
-    const failed = { ...job(1), status: "failed" };
+    const failed = { ...job(1), status: "failed", can_continue: true };
     const active = renderDrawer(current, [failed]);
     const archived = renderDrawer(current, [failed], true);
-    expect(active).toContain("让这个失败作业重新排队");
-    expect(archived).not.toContain("让这个失败作业重新排队");
+    expect(active).toContain(">继续</button>");
+    expect(archived).not.toContain(">继续</button>");
+    expect(renderDrawer(current, [{ ...failed, can_continue: false }])).not.toContain(">继续</button>");
   });
 
   it("默认只展示最近若干条，并可展开全部", () => {

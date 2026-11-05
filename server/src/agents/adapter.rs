@@ -227,6 +227,27 @@ pub trait AgentAdapter: Default + Send + Sync + 'static {
     /// Session id a job runs under, given an existing continuation session.
     fn session_for_job(job_id: &str, existing: Option<&str>) -> Option<String>;
 
+    fn supports_resume(_config: &AgentConfig) -> bool {
+        false
+    }
+
+    fn diagnose(_config: &AgentConfig, run: &AgentRun) -> super::diagnostic::Diagnosis {
+        super::diagnostic::diagnose(super::diagnostic::Protocol::Generic, run)
+    }
+
+    /// Recover an actual or explicitly assigned session after process loss.
+    fn recover_session(
+        config: &AgentConfig,
+        job_id: &str,
+        stdout: &str,
+        previous: Option<&str>,
+    ) -> Option<String> {
+        if !Self::supports_resume(config) {
+            return None;
+        }
+        super::diagnostic::session(stdout).or_else(|| Self::session_for_job(job_id, previous))
+    }
+
     /// Runs one turn, including this kind's argument and prompt delivery.
     fn run_turn<'a>(
         &'a self,

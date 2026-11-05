@@ -44,6 +44,29 @@ impl AgentAdapter for CodexAdapter {
         }
         codex_turn(context.config.model.trim(), context.spec, context.timeout).await
     }
+
+    fn supports_resume(config: &AgentConfig) -> bool {
+        config.command.is_empty() || CliAdapter::supports_resume(config)
+    }
+
+    fn diagnose(config: &AgentConfig, run: &AgentRun) -> super::diagnostic::Diagnosis {
+        if !config.command.is_empty() {
+            return CliAdapter::diagnose(config, run);
+        }
+        super::diagnostic::diagnose(super::diagnostic::Protocol::Codex, run)
+    }
+
+    fn recover_session(
+        config: &AgentConfig,
+        job_id: &str,
+        stdout: &str,
+        previous: Option<&str>,
+    ) -> Option<String> {
+        if !config.command.is_empty() {
+            return CliAdapter::recover_session(config, job_id, stdout, previous);
+        }
+        parse_codex_session_id(stdout).or_else(|| previous.map(str::to_string))
+    }
 }
 
 async fn codex_turn(

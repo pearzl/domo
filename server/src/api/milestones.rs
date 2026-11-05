@@ -1,7 +1,5 @@
 //! 任务人工里程碑验收与人工指导。
 
-use std::path::PathBuf;
-
 use axum::extract::{Path, State};
 use axum::Json;
 
@@ -9,13 +7,11 @@ use crate::domain::now;
 use crate::events::emit;
 use crate::git;
 use crate::models::*;
-use crate::paths;
 use crate::replan;
 use crate::state::AppState;
 
 use super::detail::load_detail;
 use super::helpers::{load_project_task, require_project};
-use super::verification::append_issue;
 use super::ApiError;
 
 pub(super) async fn save_task_guidance(
@@ -176,7 +172,13 @@ pub(super) async fn accept_milestone(
                 .await?;
             return Err(ApiError::bad("任务缺少执行分支，无法完成人工验收"));
         };
-        let workspace = PathBuf::from(&project.workspace);
+        let target = match crate::runner::task_merge_target(&state, &project, &task).await {
+            Ok(target) => target,
+            Err(error) => {
+                restore_milestone_gate_unlocked(&state, &task.id, &error.to_string()).await?;
+                return Err(ApiError::internal(error));
+            }
+        };
         let message = format!("domo(task-{}): {}", task.key, task.title);
         if let Some(delay) = std::env::var("DOMO_MOCK_MILESTONE_MERGE_DELAY_MS")
             .ok()
@@ -186,7 +188,7 @@ pub(super) async fn accept_milestone(
         }
         let merge = {
             let _guard = state.git_lock.lock().await;
-            git::squash_merge(&paths::project_repo(&workspace), &branch, &message).await
+            git::squash_merge(&target.worktree, &branch, &message).await
         };
         if let Err(error) = merge {
             emit(
@@ -227,7 +229,7 @@ pub(super) async fn accept_milestone(
         let fresh_project = require_project(&state, &project_id).await?;
         sqlx::query(
             "UPDATE tasks SET stage = ?, status = NULL, human_gate = NULL, last_error = NULL, \
-             forced_agent_id = NULL, forced_agent_role = NULL, updated_at = ? WHERE id = ?",
+              forced_agent_id = NULL, forced_agent_role = NULL, verifier_issues = '[]', updated_at = ? WHERE id = ?",
         )
         .bind(TASK_STAGE_COMPLETED)
         .bind(now())
@@ -260,7 +262,11 @@ pub(super) async fn accept_milestone(
                     format!("：{note}")
                 },
                 if project.is_git() {
-                    "，已合并到项目交付分支"
+                    if task.parent_id.is_some() {
+                        "，已合并到父任务分支"
+                    } else {
+                        "，已合并到项目交付分支"
+                    }
                 } else {
                     "，普通工作区交付完成"
                 }
@@ -274,7 +280,15 @@ pub(super) async fn accept_milestone(
             Some(&task.id),
             "task_completed",
             if project.is_git() {
-                format!("任务 {} 人工验收通过并合并到项目分支", task.key)
+                format!(
+                    "任务 {} 人工验收通过并合并到{}",
+                    task.key,
+                    if task.parent_id.is_some() {
+                        "父任务分支"
+                    } else {
+                        "项目交付分支"
+                    }
+                )
             } else {
                 format!("任务 {} 人工验收通过，交付完成", task.key)
             },
@@ -285,6 +299,7 @@ pub(super) async fn accept_milestone(
         }
     }
     drop(_guard);
+    crate::runner::cleanup_task_artifacts(&state, &project, &task).await;
     state.notify_scheduler();
     load_detail(&state, &project_id).await.map(Json)
 }
@@ -357,7 +372,7 @@ pub(super) async fn reject_milestone(
         drop(_guard);
         return replan_rejected_milestone(&state, project, task, &reason, guidance).await;
     }
-    let issues = append_issue(&task.verifier_issues, &reason);
+    let issues = serde_json::json!([reason]).to_string();
     let guidance = guidance.unwrap_or_else(|| task.guidance.clone());
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, human_gate = NULL, agent_id = NULL, \

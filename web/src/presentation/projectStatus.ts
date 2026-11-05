@@ -65,7 +65,7 @@ export interface ProjectGuidance {
   action?: string;
   /// 信息页需要展开并定位的作业。
   jobId?: string;
-  /// 可直接重试的项目级失败作业。
+  /// 提供人工执行操作的最新项目级失败作业，继续资格由服务端单独判定。
   retryJobId?: string;
   /// 待合入项目提供直接合入动作。
   merge?: boolean;
@@ -417,8 +417,8 @@ function blockedGuidance(input: ProjectStatusInput): ProjectGuidance {
     return guidance(
       "danger",
       "失败",
-      "重试失败作业",
-      `${reason} 可重试最近的项目级失败作业，或查看失败详情。`,
+      "处理失败作业",
+      `${reason} 可查看失败详情并以新会话执行；仅符合恢复条件时提供原会话继续。`,
       null,
       {
         tab: "info",

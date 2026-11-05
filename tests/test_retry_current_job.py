@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""任务重试只复用当前角色最新且失败的作业，历史失败不能替代后续执行。
+"""人工返工和指导创建新作业与会话，历史失败不能替代后续执行。
 
 覆盖 Git/普通工作区、暂停/未暂停项目、任务重试/指导裁决入口。执行先失败、
 后续执行成功但连续三次验收拒绝时，人工返工创建新执行作业，保留历史失败，
@@ -48,9 +48,11 @@ def run_case(server, root, workspace, paused, action):
         and all(j["status"] != "running" for j in d["jobs"]), "连续验收拒绝后阻塞")
     task_id = before["tasks"][0]["id"]
     executions = [j for j in before["jobs"] if j["role"] == "executor"]
-    assert len(executions) == 4, executions
+    assert len(executions) == (5 if workspace == "plain" else 4), executions
     assert executions[0]["status"] == "failed", executions
-    assert all(j["status"] == "succeeded" for j in executions[1:]), executions
+    if workspace == "plain":
+        assert executions[1]["status"] == "failed" and "工作区检查" in executions[1]["error"], executions
+    assert all(j["status"] == "succeeded" for j in executions[-3:]), executions
     old_failed = executions[0]["id"]
     if paused:
         call("POST", base + "/pause", {})

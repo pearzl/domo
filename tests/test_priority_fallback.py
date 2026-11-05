@@ -63,7 +63,7 @@ with open(os.path.join(cwd, "domo_mock", key + ".txt"), "w", encoding="utf-8") a
     handle.write(key + "\\n")
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
     json.dump(
-        {"kind": "done", "summary": "占位 Agent 完成 " + key},
+        {"kind": "done", "summary": "占位 Agent 完成 " + key, "commit_files": ["domo_mock/" + key + ".txt"]},
         handle,
         ensure_ascii=False,
     )
@@ -405,7 +405,9 @@ def main():
                 spread = wait_project(
                     parallel_id,
                     lambda detail: agent_running(detail, a2["id"])
-                    and agent_running(detail, b2["id"]),
+                    and agent_running(detail, b2["id"])
+                    and any(event["kind"] == "job_queued" and event["task_id"] == task_by_key(detail, "T2")["id"] for event in detail["events"])
+                    and any("Fallback B2" in (task["waiting_reason"] or "") for task in detail["tasks"]),
                     "A2/B2 并行执行",
                     60,
                 )
@@ -453,7 +455,8 @@ def main():
                         and job["task_id"] == task_by_key(detail, "T3")["id"]
                         and job["agent_id"] == base["id"]
                         for job in detail["jobs"]
-                    ),
+                    )
+                    and any(event["kind"] == "job_queued" and event["task_id"] == task_by_key(detail, "T3")["id"] for event in detail["events"]),
                     "第三个任务派发给 Mock Core",
                     90,
                 )

@@ -690,12 +690,21 @@ pub(crate) fn partition_tasks(tasks: Vec<TaskRow>) -> TaskPartition {
         .into_iter()
         .filter(|task| task.status.as_deref() != Some(STATUS_CANCELED))
         .collect();
-    let canceled: HashSet<String> = active
+    let mut canceled: HashSet<String> = active
         .iter()
         .filter(|task| task.stage != TASK_STAGE_COMPLETED)
         .map(|task| task.id.clone())
         .collect();
-    // 已完成子任务已经独立验收并交付，不能随未完成父任务一起作废。
+    // A child's delivery belongs to its family, not to the project branch.
+    for task in &active {
+        if task
+            .parent_id
+            .as_ref()
+            .is_some_and(|id| canceled.contains(id))
+        {
+            canceled.insert(task.id.clone());
+        }
+    }
     let (canceled_tasks, retained): (Vec<TaskRow>, Vec<TaskRow>) = active
         .into_iter()
         .partition(|task| canceled.contains(&task.id));

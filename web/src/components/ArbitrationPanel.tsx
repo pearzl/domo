@@ -13,7 +13,7 @@ import {
   taskStateLabel,
 } from "../ui";
 
-/// 阻塞任务的人工裁决：查看失败上下文，重试、换 Agent 或记录指导后重新排队。
+/// 人工裁决以新会话执行；原会话继续由作业记录中的资格控制。
 export function ArbitrationPanel({
   projectId,
   task,
@@ -91,7 +91,7 @@ export function ArbitrationPanel({
         <>
           <div className="error-box">{contextError}</div>
           <button className="primary" disabled={disabled || busy} onClick={onLegacyRetry}>
-            重试此任务
+            新会话执行此任务
           </button>
         </>
       ) : null}
@@ -172,7 +172,7 @@ export function ArbitrationPanel({
               disabled={disabled || busy || !context.actions.includes("retry")}
               onClick={() => void submit({ action: "retry" })}
             >
-              {context.replan_request ? "重新决策" : "重试"}
+              {context.replan_request ? "重新决策" : "新会话执行"}
             </button>
           </div>
           {context.actions.includes("switch_agent") ? <div className="arbitration-switch">

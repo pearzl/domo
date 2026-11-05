@@ -55,9 +55,13 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    let jobs = job_rows
-        .into_iter()
-        .map(|job| JobSummary {
+    let mut jobs = Vec::with_capacity(job_rows.len());
+    for job in job_rows {
+        let can_continue = crate::continuation::can_continue(state, &job).await;
+        let diagnostic = crate::continuation::diagnostic(state, &job).await;
+        jobs.push(JobSummary {
+            can_continue,
+            diagnostic,
             execution_job_id: job.execution_job_id,
             contract_id: job.contract_id,
             id: job.id,
@@ -88,8 +92,8 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
             started_at: job.started_at,
             finished_at: job.finished_at,
             created_at: job.created_at,
-        })
-        .collect();
+        });
+    }
     let merged_at = project.merged_at.clone();
     let merged_commit = project.merged_commit.clone();
     let merged_into_base = project_merged_into_base(&project).await;

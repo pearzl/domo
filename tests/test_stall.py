@@ -55,7 +55,7 @@ for _ in range(12):
 with open(os.path.join(cwd, "domo_mock", f"{key}.txt"), "w", encoding="utf-8") as handle:
     handle.write(key + "\\n")
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
-    json.dump({"kind": "done", "summary": f"心跳完成 {key}"}, handle, ensure_ascii=False)
+    json.dump({"kind": "done", "summary": f"心跳完成 {key}", "commit_files": [f"domo_mock/{key}.txt"]}, handle, ensure_ascii=False)
 '''
 
 RECOVERY_SCRIPT = '''\
@@ -71,7 +71,7 @@ os.makedirs(os.path.join(cwd, "domo_mock"), exist_ok=True)
 with open(os.path.join(cwd, "domo_mock", f"{key}.txt"), "w", encoding="utf-8") as handle:
     handle.write(key + "\\n")
 with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
-    json.dump({"kind": "done", "summary": f"恢复 Agent 完成 {key}"}, handle, ensure_ascii=False)
+    json.dump({"kind": "done", "summary": f"恢复 Agent 完成 {key}", "commit_files": [f"domo_mock/{key}.txt"]}, handle, ensure_ascii=False)
 print(f"recovered {key}", flush=True)
 '''
 
