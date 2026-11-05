@@ -42,7 +42,15 @@ pub(super) async fn run(state: &AppState, job: &JobRow) -> Result<()> {
         ],
     )
     .await;
-    let prompt = format!("你正在处理用户显式发起的项目合入冲突，这是项目作业，不创建任务，也不调用验收者。\n项目 {}，原提交 {original}，目标 {} @ {base}。\n隔离目录 {} 已开始 rebase。错误与冲突：{initial:?}\n仅在该隔离目录编辑冲突文件；不要修改其他工作区、分支和引用。解决冲突后 git add；可使用 git -c core.editor=true rebase --continue 完成所有冲突步骤。保留项目与目标的有效修改，保持线性历史。DOMO 核对引用后会直接继续合入，不再请求验收或确认。\n完成后写 {}，格式 {{\"kind\":\"done\",\"summary\":\"解决内容\"}}；无法解决则写 {{\"kind\":\"failed\",\"reason\":\"原因\"}}。", project.name, project.base_branch, cwd.display(), job_dir.join("result.json").display());
+    let prompt = crate::prompts::merge_prompt(
+        &project.name,
+        &project.base_branch,
+        &original,
+        &base,
+        &cwd.to_string_lossy(),
+        &job_dir.join("result.json").to_string_lossy(),
+        &format!("{initial:?}"),
+    );
     tokio::fs::write(job_dir.join("prompt.md"), &prompt).await?;
     tokio::fs::write(job_dir.join("context.json"), json!({"job_id": job.id, "role": "merge_conflict", "base_commit": base, "project_commit": original, "cwd": cwd}).to_string()).await?;
     sqlx::query("UPDATE jobs SET prompt = ?, started_at = ? WHERE id = ?")

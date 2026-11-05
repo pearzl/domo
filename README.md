@@ -60,6 +60,7 @@ Windows 使用 `python tests/run.py`。单个用例可直接运行，例如 `pyt
 | [docs/DESIGN.md](docs/DESIGN.md) | 产品设计：核心能力、用户行为、流程状态与界面设计 |
 | [docs/TECH.md](docs/TECH.md) | 技术设计：架构边界、持久化、运行协议、Git 算法与扩展约束 |
 | [docs/DEV.md](docs/DEV.md) | 开发模式和约定：目录、文档职责、测试与变更要求 |
+| [提示词设计专题](docs/notes/agent-prompt-design.md) | Agent 提示词的设计依据、书写原则与审查注意事项 |
 
 ## 技术栈
 

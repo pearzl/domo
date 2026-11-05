@@ -48,7 +48,7 @@ if feedback:
         (out / "T1.txt").write_text("T1", encoding="utf-8")
         save({"kind": "done", "summary": "T1", "commit_files": ["domo_mock/T1.txt"]})
     else:
-        assert "不是增量或历史汇总" in prompt
+        assert "本轮确认仍未解决的完整缺口" in prompt
         passed = n >= (1 if empty else 2)
         issues = [] if passed or empty else (["OLD", "KEEP"] if n == 0 else ["KEEP", "NEW"])
         result = {"pass": passed, "reason": "EMPTY_REASON" if empty and not passed else "current check", "issues": issues}

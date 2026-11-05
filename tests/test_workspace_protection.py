@@ -11,12 +11,12 @@ import json, os, pathlib, sys
 prompt = sys.stdin.read()
 context = json.loads(pathlib.Path(os.environ["DOMO_JOB_DIR"], "context.json").read_text(encoding="utf-8"))
 if context["project"]["workspace_type"] == "git":
-    assert "不因产物归属其他任务或 permissions 为空" in prompt
-    assert "只能修改自己任务的产物" not in prompt
-    assert "请求用户在产物区域登记" not in prompt
+    assert "无需额外逐路径覆盖授权" in prompt
+    assert "未经授权的原始输入必须保留" not in prompt
+    assert "缺少覆盖授权时停止对应修改" not in prompt
 else:
-    assert "只能修改自己任务的产物" in prompt
-    assert "permissions 中明确授权给当前任务的路径" in prompt
+    assert "修改自己任务的产物" in prompt
+    assert "permissions 中授权给当前任务的精确路径" in prompt
 pathlib.Path("source.txt").write_text("agent-written input", encoding="utf-8")
 output = pathlib.Path("domo_mock/T1.txt")
 output.parent.mkdir(exist_ok=True)

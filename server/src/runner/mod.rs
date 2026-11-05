@@ -200,37 +200,32 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     } else {
         serde_json::Value::Null
     };
-    let mut full_prompt = format!(
-        "{}\n\n## 交付契约快照\n{}\n",
-        prompts::render(&prompt_data),
-        contract
-    );
     let shared =
         crate::resources::shared_snapshot(state, &project, Some(&job), task.as_ref()).await?;
-    if review {
-        full_prompt.push_str(&format!("\n## 项目共享信息（只读固定输入）\n{shared}\n审批只返回决策，不提交 shared_updates 或修改共享信息。\n"));
-    } else {
-        full_prompt.push_str(&format!("\n## 项目共享信息（固定输入版本）\n{}\n只加载相关有效记录；运行中可通过给出的只读 API 按需读取其他主题或版本，不因新记录自动改变本轮输入。结果 JSON 可提交 shared_updates 数组，每项包含 topic、body、scope（任务 key 数组，空数组为全项目）、evidence（非空证据引用数组）、supersedes（被替代记录 ID）、conflicts（存在结论分歧的记录 ID）和 reason（替代/分歧原因及影响）。记录按主题追加到独立仓库，不能修改交付契约。不得静默覆盖结论；分歧保留双方依据，优先由相关任务核验，影响方案或契约时才请求规划者。记录提交无需规划者逐条审批。\n", shared));
-    }
     let artifacts = crate::resources::artifact_snapshot(state, &project).await?;
-    if review {
-        full_prompt.push_str(&format!(
-            "\n## 审批固定上下文\n{}\n## 输入与产物（全部只读）\n{}\n",
-            crate::replan_review::context(state, &job).await?,
-            artifacts
-        ));
+    fs::write(
+        job_dir.join("artifacts.json"),
+        serde_json::to_vec(&artifacts)?,
+    )
+    .await?;
+    let review_context = if review {
+        Some(crate::replan_review::context(state, &job).await?)
     } else {
-        full_prompt.push_str(&prompts::artifact_context(&prompt_data, &artifacts));
-    }
-    if job.role == JOB_ROLE_VERIFIER {
-        full_prompt.push_str(&format!("\n## 必填验收证据\n结果必须含 evidence 对象：contract_id={}，artifact_version={}，artifacts 为已检查的产物路径数组，risks 和 human_checks 为未覆盖风险及人工检查项数组。criteria 按任务验收标准的原文与顺序逐项填写，每项包含 criterion、passed 布尔值和非空 checks 数组；每个检查包含 method（实际运行命令或检查方法）和 result（实际结果，不得编造）。无产物或风险时数组可为空。普通工作区不提供历史内容回溯，检查时间由服务端记录。\n", contract["id"], artifact_version));
-    }
-    if job.role == JOB_ROLE_ACCEPTANCE {
-        full_prompt.push_str(&format!("\n项目验收结果必须包含 contract_id={} 和 artifact_version={}。criteria 必须按当前契约验收标准的原文与顺序逐项填写；判定 met 的条目必须附实际检查方法及结果，不得省略证据或只用任务已通过代替集成检查。\n", contract["id"], artifact_version));
-    }
+        None
+    };
+    let full_prompt = prompts::render_with_inputs(
+        &prompt_data,
+        Some(&prompts::JobInputs {
+            contract: &contract,
+            artifact_version: &artifact_version,
+            shared: &shared,
+            artifacts: &artifacts,
+            review: review_context.as_ref(),
+        }),
+    );
     let resume = job.resume == 1;
     let prompt = if resume {
-        format!("继续。\n上一轮已中断。先检查文件、已有结果和可能的残留操作，避免重复副作用，再继续原工作。以下是当前有效的任务与输出契约，若与会话历史不一致以当前有效要求为准：\n{}", full_prompt)
+        prompts::continuation_with_prompt(&full_prompt)
     } else {
         full_prompt.clone()
     };
@@ -403,8 +398,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             {
                 timeout_continuations += 1;
                 let follow_up = format!(
-                    "{}\n上一轮异常中断，请检查现场及已执行操作，避免重复副作用。",
-                    prompts::continuation(&prompt_data)
+                    "上一轮异常中断。\n{}",
+                    prompts::continuation_with_prompt(&spec.original_prompt)
                 );
                 fs::write(
                     job_dir.join(format!("timeout-continuation-{timeout_continuations}.md")),
@@ -558,9 +553,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
         let protocol_error = protocol_error.unwrap_or_default();
         let follow_up = if current_result.is_none() {
-            prompts::missing_result_continuation(&prompt_data)
+            prompts::missing_result_continuation(&prompt_data, &spec.original_prompt)
         } else {
-            prompts::invalid_result_continuation(&prompt_data, &protocol_error)
+            prompts::invalid_result_continuation(
+                &prompt_data,
+                &protocol_error,
+                &spec.original_prompt,
+            )
         };
         fs::write(
             job_dir.join(format!("continuation-{}.md", continuations + 1)),

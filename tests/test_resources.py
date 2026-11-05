@@ -3,6 +3,7 @@
 输入输出分离、路径逃逸拒绝、外部编辑与中断检查、产物预览、归档保留。
 标准库 + mock，无模型或外网。
 """
+import json
 import sqlite3
 from harness import Server, git, temp_root, wait_for
 
@@ -38,8 +39,8 @@ def main():
             detail = wait_for(lambda: (d if (d := call("GET", base))["project"]["report"] else None), "报告", 30)
             job = next(j for j in detail["jobs"] if j["role"] == "executor")
             context_path = server.root / "ws" / (p["id"].split("_")[0] + "_" + p["id"].split("_")[1][:16]) / "jobs" / job["id"] / "context.json"
-            import json
             context = json.loads(context_path.read_text(encoding="utf-8"))
+            assert json.loads((context_path.parent / "artifacts.json").read_text(encoding="utf-8")) == context["artifacts"]
             assert context["shared"]["version"] == third["version"]
             assert not any(r["id"] == first_id for r in context["shared"]["records"])
             with sqlite3.connect(server.root / "data" / "domo.db") as db:
@@ -88,6 +89,29 @@ def main():
             advice = next(item for item in suggestions["items"] if item["agent_name"] == "resources")
             assert advice["calls"] > 0 and advice["advice"], advice
             assert any("样本不足" in text for text in advice["advice"]), advice
+
+            # Large multi-repository inventories stay in the immutable job input,
+            # not inline in every role's prompt. Explicit permissions remain available.
+            large = root / "large"
+            large.mkdir()
+            for index in range(150):
+                (large / f"source-{index:03}.txt").write_text("input", encoding="utf-8")
+            project = call("POST", "/api/projects", {"name": "large-input", "workspace_type": "plain",
+                "repo_path": str(large), "confirm_mode": "auto"})["project"]
+            large_base = f"/api/projects/{project['id']}"
+            call("POST", large_base + "/workspace/permissions", {"path": "source-149.txt", "reason": "允许修改测试输入"})
+            call("POST", large_base + "/analysis/messages", {"message": "[single] 生成报告"})
+            result = wait_for(lambda: (d if (d := call("GET", large_base))["project"]["report"] else None), "大清单项目完成", 30)
+            workspace = project["id"].split("_")[0] + "_" + project["id"].split("_")[1][:16]
+            for job in result["jobs"]:
+                job_dir = root / "ws" / workspace / "jobs" / job["id"]
+                snapshot = json.loads((job_dir / "artifacts.json").read_text(encoding="utf-8"))
+                assert len(snapshot["items"]) >= 150
+                assert snapshot["permissions"][0]["path"] == "source-149.txt"
+                prompt = (job_dir / "prompt.md").read_text(encoding="utf-8")
+                assert len(prompt) < 30_000, (job["role"], len(prompt))
+                assert '"snapshot_file"' in prompt and '"permission_count":1' in prompt
+                assert "source-149.txt" not in prompt
             print("共享仓库、版本引用、产物保护、外部变化与归档保留通过")
 
 

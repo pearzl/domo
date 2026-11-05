@@ -435,6 +435,7 @@ def run_cli_positional(temp, script):
             assert "结果文件" in prompt, prompt
         else:
             assert "继续" in prompt and "派生子任务" in prompt, prompt
+            assert prompt.count("# 本次作业") == 1, "续轮不应重复投递完整作业上下文"
             assert "INVOKE-CLI-POSITIONAL" in prompt, prompt
             assert "未能读取结果文件" in prompt, prompt
             assert str(Path(entry["job_dir"]) / "result.json") in prompt, prompt

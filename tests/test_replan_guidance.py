@@ -350,7 +350,7 @@ def main():
             assert "审批固定上下文" in planner_prompt
             assert "原计划与仓库现状冲突" in planner_prompt
             assert old_t1["key"] in planner_prompt and "completed" in planner_prompt
-            assert old_t2["key"] in planner_prompt and "决策与方案生成" in planner_prompt
+            assert old_t2["key"] in planner_prompt and "重规划决策者" in planner_prompt
             replan_reason = detail["project"]["replan_reason"]
             code, _ = call_error(
                 "POST",

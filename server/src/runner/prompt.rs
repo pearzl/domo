@@ -107,7 +107,7 @@ pub(super) async fn build_prompt_data(
         });
     }
     let partition = crate::replan::partition_tasks(rows);
-    for row in partition.retained.iter().chain(partition.canceled.iter()) {
+    for row in &partition.retained {
         summary_tasks.push(SummaryTaskInfo {
             key: row.key.clone(),
             title: row.title.clone(),

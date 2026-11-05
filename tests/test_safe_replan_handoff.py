@@ -142,7 +142,7 @@ def main():
                 key=lambda job: job["created_at"],
             )[-1]
             prompt = call("GET", f"/api/jobs/{analysis_job['id']}")["prompt"]
-            retained_prompt = prompt.split("完整保留的交付任务链", 1)[1].split(
+            retained_prompt = prompt.split("已完成任务及保留成果", 1)[1].split(
                 "不保留任务", 1
             )[0]
             assert all(child["key"] not in retained_prompt for child in children), prompt

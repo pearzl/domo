@@ -54,9 +54,10 @@ impl AgentAdapter for CliAdapter {
 }
 
 /// Continuation prompts are sent as-is when the agent can resume the original
-/// session. A fresh process receives the original prompt first.
+/// session. A fresh process needs the original prompt unless the continuation
+/// already carries it as its complete trailing context.
 pub(super) fn prompt_for_run(spec: &AgentSpec, can_resume: bool) -> String {
-    if spec.continuation && !can_resume {
+    if spec.continuation && !can_resume && !spec.prompt.ends_with(&spec.original_prompt) {
         format!("{}\n\n{}", spec.original_prompt, spec.prompt)
     } else {
         spec.prompt.clone()
@@ -187,5 +188,13 @@ mod tests {
         let run = spec(true, Some("session-1"));
         assert_eq!(prompt_for_run(&run, false), "原始提示\n\n继续");
         assert_eq!(prompt_for_run(&run, true), "继续");
+    }
+
+    #[test]
+    fn a_complete_continuation_is_not_prefixed_with_duplicate_context() {
+        let mut run = spec(true, None);
+        run.prompt = format!("具体校验错误\n\n{}", run.original_prompt);
+        assert_eq!(prompt_for_run(&run, false), run.prompt);
+        assert_eq!(prompt_for_run(&run, true), run.prompt);
     }
 }
