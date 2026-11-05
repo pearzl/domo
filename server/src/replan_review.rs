@@ -271,11 +271,8 @@ pub async fn validate_result(pool: &SqlitePool, job: &JobRow, raw: &str) -> Resu
     {
         return Err("重规划不能修改当前项目目标".into());
     }
-    if request.reviewer_task_id.is_some()
-        && (tasks.len() > crate::domain::MAX_DERIVED_TASKS
-            || tasks.iter().any(|task| !task.deps.is_empty()))
-    {
-        return Err("父任务替代方案最多 25 个子任务，子任务之间不能建立依赖".into());
+    if request.reviewer_task_id.is_some() {
+        crate::domain::validate_derive_scope(false, &std::collections::HashSet::new(), &tasks)?;
     }
     if let Some(parent_id) = request.reviewer_task_id {
         let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks t JOIN tasks child ON child.project_id = t.project_id WHERE child.parent_id = ? AND child.stage != 'completed' AND COALESCE(child.status, '') != 'canceled' AND t.id != ? AND COALESCE(t.parent_id, '') != ? AND COALESCE(t.status, '') != 'canceled' AND EXISTS (SELECT 1 FROM json_each(t.deps) WHERE value = child.key)")

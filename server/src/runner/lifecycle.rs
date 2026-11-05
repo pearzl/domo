@@ -30,8 +30,15 @@ pub(super) async fn finish_job(
             } else {
                 None
             };
-            kind.unwrap_or_else(|| domain::classify_failure(reason, run.process_failure()))
-                .as_str()
+            kind.unwrap_or_else(|| {
+                domain::classify_job_failure(
+                    &job.role,
+                    result.as_deref(),
+                    reason,
+                    run.process_failure(),
+                )
+            })
+            .as_str()
         })
     } else {
         None
@@ -189,7 +196,12 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
                         JOB_ROLE_EXECUTOR => {
                             if let Some(agent) = agent {
                                 handle_executor_failure(
-                                    state, &project, &task, reason, agent, true,
+                                    state,
+                                    &project,
+                                    &task,
+                                    reason,
+                                    agent,
+                                    domain::classify_failure(reason, true),
                                 )
                                 .await?;
                             } else {

@@ -224,6 +224,7 @@ def main():
             assert (
                 "project_retry",
                 "项目分析失败（限流），已切换 Agent 重试："
+                "Agent 进程退出码 Some(1): "
                 "HTTP 429 too many requests; retry after 4 seconds",
             ) in messages, messages
             assert any(

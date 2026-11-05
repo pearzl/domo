@@ -31,14 +31,17 @@ pub(crate) async fn mark_job_resumed(
     // A forced-stop row is canceled for presentation, not a canceled task.
     // Normalize only that explicit reason inside the dispatch transaction so
     // the existing failed-run history trigger archives it consistently.
-    sqlx::query("UPDATE jobs SET status = 'failed' WHERE id = ? AND status = 'canceled' AND failure_kind = 'user_stopped'")
+    sqlx::query("UPDATE jobs SET status = 'failed' WHERE id = ? AND status = 'canceled' AND failure_kind = 'user_stopped' AND NOT EXISTS (SELECT 1 FROM jobs AS newer WHERE newer.project_id = jobs.project_id AND newer.task_id IS jobs.task_id AND newer.role = jobs.role AND newer.rowid > jobs.rowid)")
         .bind(job_id).execute(&mut *conn).await?;
     let result = sqlx::query(
         "UPDATE jobs SET status = ?, started_at = NULL, finished_at = NULL, duration_ms = NULL, \
-          error = NULL, failure_kind = NULL, exit_code = NULL, pid = NULL, usage_known = 0, \
+          failure_kind = NULL, exit_code = NULL, pid = NULL, usage_known = 0, \
           input_tokens = NULL, output_tokens = NULL, cache_read_tokens = NULL, \
           cache_write_tokens = NULL, reasoning_tokens = NULL, cost = NULL, resume = 1 \
-          WHERE id = ? AND status = ?",
+          WHERE id = ? AND status = ? AND NOT EXISTS (\
+            SELECT 1 FROM jobs AS newer WHERE newer.project_id = jobs.project_id \
+            AND newer.task_id IS jobs.task_id AND newer.role = jobs.role \
+            AND newer.rowid > jobs.rowid)",
     )
     .bind(JOB_STATUS_RUNNING)
     .bind(job_id)
@@ -427,7 +430,8 @@ pub(super) async fn get_job(
         Some(pid) => Some(pid),
         None => job_pid_file(&state, &job).await,
     };
-    let failure_summary = crate::failure::summarize(job.error.as_deref());
+    let failure_summary =
+        crate::failure::summarize_classified(job.error.as_deref(), job.failure_kind.as_deref());
     let can_continue = crate::continuation::can_continue(&state, &job).await;
     let diagnostic = crate::continuation::diagnostic(&state, &job).await;
     Ok(Json(JobView {

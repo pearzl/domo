@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 首个执行作业返回 derive 后，子任务写入同一项目 DAG；
-  2. 子任务自动成为父任务前置，兄弟任务 deps 为空，父任务保持等待且没有失败；
+  2. 子任务自动成为父任务前置，兄弟任务支持依赖，父任务保持等待且没有失败；
   3. 子任务从父任务分支检出，经过独立验收后合回父任务分支；
   4. 全部子任务完成后父任务再次执行并通过验收，最终合入项目交付分支；
   5. 父任务 prompt 包含派生子任务及其结果，子任务 prompt 标记派生并禁止再次派生；
@@ -41,6 +41,7 @@ def main():
                 "DOMO_MOCK_DERIVE_ONCE": "1",
                 "DOMO_MOCK_DERIVE_GOAL": "[derive]",
                 "DOMO_MOCK_DERIVE_KEY": "T1",
+                "DOMO_MOCK_DERIVE_DEPENDENCIES": "1",
                 "DOMO_MOCK_INVALID_DERIVE_ONCE": "1",
                 "DOMO_MOCK_INVALID_DERIVE_GOAL": "[invalid-derive]",
                 "DOMO_MOCK_INVALID_DERIVE_KEY": "T1",
@@ -142,7 +143,7 @@ def main():
             # 新建项目的项目池继承默认团队。
 
             # 1. 合法派生：子任务进入 DAG，父任务等待。
-            project_id = new_project("Derive", "[derive] 将复杂任务派生为两个并行子任务")
+            project_id = new_project("Derive", "[derive] 将复杂任务派生为两个有依赖的子任务")
             detail = wait_project(
                 project_id,
                 lambda item: any(
@@ -156,8 +157,9 @@ def main():
             parent = tasks["T1"]
             children = [task for task in detail["tasks"] if task["parent_id"] == parent["id"]]
             assert {child["key"] for child in children} == {"T1.1", "T1.2"}, children
-            assert all(child["deps"] == [] for child in children), children
-            assert all(child["status"] in ("queued", "running") for child in children), children
+            assert tasks["T1.1"]["deps"] == [], children
+            assert tasks["T1.2"]["deps"] == ["T1.1"], children
+            assert all(child["status"] in (None, "queued", "running") for child in children), children
             assert set(parent["deps"]) == {"T1.1", "T1.2"}, parent
             assert parent["stage"] == "pending", parent
             assert parent["status"] is None, parent
@@ -236,6 +238,14 @@ def main():
             parent_file = git(["show", f"{branch}:domo_mock/T1.txt"], repo)
             assert "dep T1.1 was merged" in parent_file, parent_file
             assert "dep T1.2 was merged" in parent_file, parent_file
+            child_file = git(["show", f"{branch}:domo_mock/T1.2.txt"], repo)
+            assert "dep T1.1 was merged" in child_file, child_file
+            child_jobs = {
+                task["key"]: next(job for job in jobs if job["task_id"] == task["id"] and job["role"] == "executor")
+                for task in children
+            }
+            merged_event = next(event for event in detail["events"] if event["kind"] == "task_completed" and event["task_id"] == tasks["T1.1"]["id"])
+            assert child_jobs["T1.2"]["started_at"] >= merged_event["created_at"], child_jobs
 
             call("POST", f"/api/projects/{project_id}/report", {"action": "accept"})
             completed = call("GET", f"/api/projects/{project_id}")
@@ -248,6 +258,7 @@ def main():
                 invalid_id,
                 lambda item: any(
                     event["kind"] == "job_continued"
+                    and "本批次以外" in event["message"]
                     for event in item["events"]
                 ),
                 "非法派生结果触发同作业继续",
@@ -272,6 +283,7 @@ def main():
             )
             assert not any(task["parent_id"] for task in detail["tasks"]), detail["tasks"]
             assert {task["key"] for task in detail["tasks"]} == {"T1", "T2"}, detail["tasks"]
+            assert not any(job["status"] == "failed" for job in detail["jobs"]), detail["jobs"]
 
             print("派生流程测试通过")
             print(f"  项目分支: {branch}")

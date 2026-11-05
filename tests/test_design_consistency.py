@@ -121,12 +121,13 @@ def test_runtime_replan(root):
 
 
 PLANNER = r'''
-import json, os, pathlib
+import json, os, pathlib, sys
 jd = pathlib.Path(os.environ["DOMO_JOB_DIR"])
 c = json.loads((jd / "context.json").read_text(encoding="utf-8"))
 role = c["role"]
 if "fail-" + role in c["project"]["goal"]:
-    r = {"kind":"failed", "reason":"permanent error: invalid API key"}
+    sys.stderr.write("permanent error: invalid API key\n")
+    sys.exit(1)
 elif role == "analysis":
     r = {"kind":"plan", "summary":"生成报告", "acceptance":["报告存在"],
         "skip_confirmation":True, "tasks":[{"key":"T1", "title":"写报告", "description":"write domo_mock/T1.txt",

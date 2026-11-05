@@ -8,8 +8,7 @@ use crate::state::AppState;
 
 use super::common::{load_task, models_list_json, parse_json_list};
 use super::failure::{
-    apply_agent_failure, failure_kind_label, has_usable_agent, protocol_failure_blocks,
-    task_pause_intent,
+    apply_agent_failure, failure_kind_label, has_usable_agent, task_pause_intent,
 };
 
 pub(super) async fn handle_executor_success(
@@ -23,7 +22,7 @@ pub(super) async fn handle_executor_success(
     let pause = task_pause_intent(state, &task.id).await?;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_agent_id = NULL, \
-         last_error = NULL, waiting_reason = NULL, result_summary = ?, updated_at = ? WHERE id = ?",
+         last_error = NULL, attempts = 0, waiting_reason = NULL, result_summary = ?, updated_at = ? WHERE id = ?",
     )
     .bind(TASK_STAGE_VERIFYING)
     .bind(pause.unwrap_or(STATUS_QUEUED))
@@ -155,7 +154,7 @@ pub(super) async fn handle_executor_derive(
     }
     sqlx::query(
         "UPDATE tasks SET deps = ?, stage = ?, status = ?, agent_id = ?, last_agent_id = NULL, \
-         last_error = NULL, result_summary = ?, updated_at = ? WHERE id = ?",
+         last_error = NULL, attempts = 0, result_summary = ?, updated_at = ? WHERE id = ?",
     )
     .bind(models_list_json(&deps))
     .bind(TASK_STAGE_PENDING)
@@ -223,19 +222,14 @@ pub(super) async fn handle_executor_failure(
     task: &TaskRow,
     reason: &str,
     agent: &AgentRow,
-    process_failure: bool,
+    kind: FailureKind,
 ) -> Result<()> {
-    let kind = domain::classify_failure(reason, process_failure);
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
-    let attempts = task.attempts + 1;
-    // Missing results have already consumed the continuation budget, so they
-    // block. A malformed result can be corrected on retry and uses the normal
-    // attempt budget.
-    let mut blocked = (kind == FailureKind::Protocol
-        && (protocol_failure_blocks(reason) || attempts >= 3))
-        || (!kind.is_agent_failure() && attempts >= 3);
+    let attempts = domain::task_failure_attempts(task.attempts, kind);
+    // Protocol errors have consumed the job's separate correction budget.
+    let mut blocked = kind == FailureKind::Protocol || (kind == FailureKind::Task && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && kind == FailureKind::Permanent

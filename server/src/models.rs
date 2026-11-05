@@ -455,6 +455,8 @@ pub struct TaskRow {
     pub worktree: Option<String>,
     pub branch: Option<String>,
     pub artifacts_released_at: Option<String>,
+    /// Task-level failures since the last valid outcome; excludes transport
+    /// failures and in-job protocol corrections. Job.attempt is the audit sequence.
     pub attempts: i64,
     pub rejections: i64,
     pub last_error: Option<String>,

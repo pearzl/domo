@@ -421,9 +421,8 @@ fn parse_verifier_result(value: &Value) -> Result<ParsedResult, String> {
     })
 }
 
-/// A failed project job reports the provider error as-is in `reason`, so the
-/// message carries the same markers (429, 503, …) that the executor protocol
-/// uses for failure classification.
+/// A project failure reason is user-authored task content, not evidence of
+/// provider health. Transport failures come from the agent process instead.
 fn parse_project_failure(value: &Value) -> Option<String> {
     let reason = value.get("reason").and_then(|v| v.as_str())?;
     (!reason.trim().is_empty()).then(|| reason.trim().to_string())
@@ -683,15 +682,7 @@ pub fn validate_derive(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, 
         if acceptance.is_empty() {
             return Err(format!("派生任务 {key} 缺少验收标准"));
         }
-        let deps: Vec<String> = raw
-            .deps
-            .into_iter()
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect();
-        if !deps.is_empty() {
-            return Err(format!("派生任务 {key} 的 deps 必须为空"));
-        }
+        let deps = normalize_deps(raw.deps);
         tasks.push(NormalizedTask {
             key,
             title,
@@ -700,7 +691,28 @@ pub fn validate_derive(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, 
             deps,
         });
     }
+    validate_derived_dependencies(&tasks)?;
     Ok(tasks)
+}
+
+/// A derivation is a closed DAG: references outside this batch (including the
+/// parent) would bypass its scope or create a parent/child dependency cycle.
+fn validate_derived_dependencies(tasks: &[NormalizedTask]) -> Result<(), String> {
+    let keys: HashSet<&str> = tasks.iter().map(|task| task.key.as_str()).collect();
+    for task in tasks {
+        for dep in &task.deps {
+            if dep == &task.key {
+                return Err(format!("派生任务 {} 不能依赖自身", task.key));
+            }
+            if !keys.contains(dep.as_str()) {
+                return Err(format!(
+                    "派生任务 {} 的 deps 引用了本批次以外的任务 {dep}",
+                    task.key
+                ));
+            }
+        }
+    }
+    detect_cycle(tasks)
 }
 
 pub fn validate_derive_scope(
@@ -719,9 +731,6 @@ pub fn validate_derive_scope(
     }
     let mut seen = HashSet::new();
     for task in tasks {
-        if !task.deps.is_empty() {
-            return Err(format!("派生任务 {} 的 deps 必须为空", task.key));
-        }
         if task.description.trim().is_empty() {
             return Err(format!("派生任务 {} 缺少描述", task.key));
         }
@@ -735,7 +744,7 @@ pub fn validate_derive_scope(
             return Err(format!("派生任务 key 重复: {}", task.key));
         }
     }
-    Ok(())
+    validate_derived_dependencies(tasks)
 }
 
 fn detect_cycle(tasks: &[NormalizedTask]) -> Result<(), String> {
@@ -864,11 +873,26 @@ impl FailureKind {
     }
 
     pub fn is_agent_failure(self) -> bool {
-        !matches!(self, FailureKind::Task)
+        matches!(
+            self,
+            FailureKind::RateLimit | FailureKind::Transient | FailureKind::Permanent
+        )
     }
 }
 
 pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
+    // A successful process reports task content, not transport evidence. Source
+    // references and business terminology must not affect provider backoff.
+    if !process_failure {
+        return if reason.starts_with("Agent 没有写 result.json")
+            || reason.starts_with("结果协议不合法")
+            || reason.starts_with("派生请求不合法:")
+        {
+            FailureKind::Protocol
+        } else {
+            FailureKind::Task
+        };
+    }
     let lowered = reason.to_lowercase();
     if contains_status_code(&lowered, "429")
         || contains_any(
@@ -905,14 +929,6 @@ pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
     {
         return FailureKind::Permanent;
     }
-    if !process_failure
-        && contains_any(
-            &lowered,
-            &["没有写 result.json", "结果协议不合法", "result protocol"],
-        )
-    {
-        return FailureKind::Protocol;
-    }
     if process_failure
         || contains_status_code(&lowered, "502")
         || contains_status_code(&lowered, "503")
@@ -936,6 +952,44 @@ pub fn classify_failure(reason: &str, process_failure: bool) -> FailureKind {
         return FailureKind::Transient;
     }
     FailureKind::Task
+}
+
+/// Valid executor failure results are task outcomes even if their user-authored
+/// reason happens to look like a DOMO diagnostic.
+pub fn classify_job_failure(
+    role: &str,
+    raw: Option<&str>,
+    reason: &str,
+    process_failure: bool,
+) -> FailureKind {
+    if !process_failure
+        && raw.is_some_and(|raw| {
+            matches!(
+                parse_result(role, raw),
+                Ok(ParsedResult::ExecutorFailed { .. })
+            ) || (matches!(
+                role,
+                crate::models::JOB_ROLE_ANALYSIS
+                    | crate::models::JOB_ROLE_DIRECT
+                    | crate::models::JOB_ROLE_ACCEPTANCE
+                    | crate::models::JOB_ROLE_SUMMARY
+            ) && extract_json(raw)
+                .is_some_and(|value| parse_project_failure(&value).is_some()))
+        })
+    {
+        FailureKind::Task
+    } else {
+        classify_failure(reason, process_failure)
+    }
+}
+
+/// Infrastructure retries do not spend the task's consecutive failure budget.
+pub fn task_failure_attempts(attempts: i64, kind: FailureKind) -> i64 {
+    if kind == FailureKind::Task {
+        attempts + 1
+    } else {
+        attempts
+    }
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -1343,24 +1397,60 @@ mod tests {
     fn parses_executor_derive_request() {
         let raw = r#"{"kind":"derive","summary":"拆分","tasks":[
             {"key":"T1.1","title":"a","description":"b","acceptance":["c"],"deps":[]},
-            {"key":"T1.2","title":"d","description":"e","acceptance":["f"],"deps":[]}
+            {"key":"T1.2","title":"d","description":"e","acceptance":["f"],"deps":[" T1.1 ","T1.1",""]}
         ]}"#;
         match parse_result(ROLE_EXECUTOR, raw).unwrap() {
             ParsedResult::ExecutorDerive { summary, tasks } => {
                 assert_eq!(summary, "拆分");
                 assert_eq!(tasks.len(), 2);
-                assert!(tasks.iter().all(|task| task.deps.is_empty()));
+                assert!(tasks[0].deps.is_empty());
+                assert_eq!(tasks[1].deps, vec!["T1.1"]);
             }
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_derive_with_dependencies() {
+    fn rejects_derive_with_external_dependencies() {
         let raw = r#"{"kind":"derive","summary":"拆分","tasks":[
             {"key":"T1.1","title":"a","description":"b","acceptance":["c"],"deps":["T1"]}
         ]}"#;
         assert!(parse_result(ROLE_EXECUTOR, raw).is_err());
+    }
+
+    #[test]
+    fn derivation_rejects_self_dependency_cycles_and_external_references() {
+        let active = HashSet::from(["T1".to_string(), "T2".to_string()]);
+        for tasks in [
+            vec![derive_task("T1.1", &["T1.1"])],
+            vec![
+                derive_task("T1.1", &["T1.2"]),
+                derive_task("T1.2", &["T1.1"]),
+            ],
+            vec![derive_task("T1.1", &["T2"])],
+            vec![derive_task("T1.1", &["T1"])],
+            vec![derive_task("T1.1", &["missing"])],
+        ] {
+            let normalized: Vec<_> = tasks
+                .iter()
+                .map(|task| NormalizedTask {
+                    key: task.key.clone(),
+                    title: task.title.clone(),
+                    description: task.description.clone(),
+                    acceptance: task.acceptance.clone(),
+                    deps: task.deps.clone(),
+                })
+                .collect();
+            assert!(validate_derive_scope(false, &active, &normalized).is_err());
+            assert!(validate_derive(tasks).is_err());
+        }
+        let tasks = validate_derive(vec![
+            derive_task("T1.3", &["T1.1", "T1.2"]),
+            derive_task("T1.2", &["T1.1"]),
+            derive_task("T1.1", &[]),
+        ])
+        .unwrap();
+        assert!(validate_derive_scope(false, &active, &tasks).is_ok());
     }
 
     #[test]
@@ -1520,11 +1610,11 @@ mod tests {
     #[test]
     fn classifies_rate_limit_transient_and_permanent() {
         assert_eq!(
-            classify_failure("HTTP 429 too many requests", false),
+            classify_failure("HTTP 429 too many requests", true),
             FailureKind::RateLimit
         );
         assert_eq!(
-            classify_failure("provider temporarily unavailable", false),
+            classify_failure("provider temporarily unavailable", true),
             FailureKind::Transient
         );
         assert_eq!(
@@ -1540,7 +1630,7 @@ mod tests {
             FailureKind::Transient
         );
         assert_eq!(
-            classify_failure("永久错误：Agent 配置无效", false),
+            classify_failure("永久错误：Agent 配置无效", true),
             FailureKind::Permanent
         );
         assert_eq!(
@@ -1565,6 +1655,25 @@ mod tests {
             classify_failure("request id 14290", false),
             FailureKind::Task
         );
+    }
+
+    #[test]
+    fn task_results_cannot_drive_provider_health_or_spend_other_budgets() {
+        for reason in [
+            "SDK credentials provider 含 session token；尚未完成验收",
+            "HTTP 429 quota network timeout unavailable forbidden；测试失败",
+            "结果协议不合法: 用户业务解析失败",
+            "aws.rs:401-403，认证与 status 字段未完成",
+        ] {
+            let raw = serde_json::json!({"kind":"failed", "reason":reason}).to_string();
+            assert_eq!(
+                classify_job_failure(ROLE_EXECUTOR, Some(&raw), reason, false),
+                FailureKind::Task
+            );
+        }
+        assert_eq!(task_failure_attempts(2, FailureKind::Transient), 2);
+        assert_eq!(task_failure_attempts(2, FailureKind::Task), 3);
+        assert_eq!(task_failure_attempts(2, FailureKind::Protocol), 2);
     }
 
     #[test]

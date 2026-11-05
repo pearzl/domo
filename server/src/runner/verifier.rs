@@ -9,8 +9,7 @@ use crate::state::AppState;
 use super::common::{load_task, models_list_json};
 use super::executor::cleanup_task_artifacts;
 use super::failure::{
-    apply_agent_failure, failure_kind_label, has_usable_agent, protocol_failure_blocks,
-    task_pause_intent,
+    apply_agent_failure, failure_kind_label, has_usable_agent, task_pause_intent,
 };
 use super::worktree::{prepare_task_worktree, task_merge_target};
 
@@ -117,7 +116,7 @@ pub(super) async fn handle_verdict(
             models_list_json(issues)
         };
         sqlx::query(
-            "UPDATE tasks SET stage = ?, status = ?, rejections = ?, verifier_issues = ?, \
+            "UPDATE tasks SET stage = ?, status = ?, attempts = 0, rejections = ?, verifier_issues = ?, \
              last_error = ?, agent_id = ?, waiting_reason = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(TASK_STAGE_EXECUTING)
@@ -162,7 +161,7 @@ async fn complete_verified_task(
 ) -> Result<()> {
     let guard = state.schedule_lock.lock().await;
     sqlx::query(
-        "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, \
+        "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, attempts = 0, \
           human_gate = NULL, verifier_issues = '[]', forced_agent_id = NULL, forced_agent_role = NULL, \
          updated_at = ? WHERE id = ?",
     )
@@ -331,13 +330,8 @@ pub(super) async fn handle_verifier_failure(
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
     let _guard = state.schedule_lock.lock().await;
     let pause = task_pause_intent(state, &task.id).await?;
-    let attempts = task.attempts + 1;
-    // Missing results have already consumed the continuation budget, so they
-    // block. A malformed result can be corrected on retry and uses the normal
-    // attempt budget.
-    let mut blocked = (kind == FailureKind::Protocol
-        && (protocol_failure_blocks(reason) || attempts >= 3))
-        || (!kind.is_agent_failure() && attempts >= 3);
+    let attempts = domain::task_failure_attempts(task.attempts, kind);
+    let mut blocked = kind == FailureKind::Protocol || (kind == FailureKind::Task && attempts >= 3);
     if kind.is_agent_failure()
         && effect.switch
         && kind == FailureKind::Permanent

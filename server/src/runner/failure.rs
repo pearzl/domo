@@ -6,12 +6,6 @@ use crate::state::AppState;
 
 use super::common::parse_json_list;
 
-/// A missing result is terminal after its continuation budget. A malformed
-/// result can be corrected on retry and stays within the task attempt budget.
-pub(super) fn protocol_failure_blocks(reason: &str) -> bool {
-    reason.contains("没有写 result.json") || reason.contains("协议继续次数用尽")
-}
-
 pub(super) struct AgentFailureEffect {
     pub(super) switch: bool,
 }
@@ -22,6 +16,9 @@ pub(super) async fn apply_agent_failure(
     reason: &str,
     kind: FailureKind,
 ) -> Result<AgentFailureEffect> {
+    if !kind.is_agent_failure() {
+        return Ok(AgentFailureEffect { switch: false });
+    }
     let mut switch = false;
     let mut transient_failures = agent.transient_failures;
     let mut cooldown: Option<String> = None;

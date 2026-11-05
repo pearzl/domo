@@ -313,7 +313,7 @@ def main():
             t1 = task_by_key(detail, "T1")
             t2 = task_by_key(detail, "T2")
             t3 = task_by_key(detail, "T3")
-            assert t1["attempts"] >= 3, t1
+            assert t1["attempts"] == 0, t1
             assert t1["status"] == "blocked", t1
             assert t1["last_failure_kind"] == "transient", t1
             assert "卡死" in (t1["last_error"] or ""), t1
@@ -328,6 +328,7 @@ def main():
             )
             failed_jobs = [job for job in stall_exec_jobs if job["status"] == "failed"]
             assert len(failed_jobs) == 3, f"T1 应按重试预算卡死 3 次：{failed_jobs}"
+            assert [job["attempt"] for job in failed_jobs] == [1, 2, 3], failed_jobs
             for stalled_job in failed_jobs:
                 assert stalled_job["task_id"] == t1["id"], f"只有 T1 应失败：{stalled_job}"
                 assert "卡死" in (stalled_job["error"] or ""), stalled_job
@@ -398,7 +399,7 @@ def main():
 
             detail = wait_project(switch_project, switch_done, "换 Agent 后完成")
             task = task_by_key(detail, "T1")
-            assert task["attempts"] >= 3, task
+            assert task["attempts"] == 0, task
             switch_jobs = sorted(
                 jobs_of(detail, task_id=task["id"], role="executor"),
                 key=lambda job: job["started_at"],

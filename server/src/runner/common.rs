@@ -6,8 +6,8 @@ use crate::events::emit;
 use crate::models::*;
 use crate::state::AppState;
 
-/// A project-level failure result is a valid protocol message carrying a
-/// provider or task reason. It must not be relabeled as a schema violation.
+/// A project-level failure result carries task content, not provider health
+/// evidence. It must not be relabeled as a schema violation.
 pub(super) fn result_is_failure(role: &str, raw: &str) -> bool {
     if !matches!(
         role,

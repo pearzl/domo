@@ -164,6 +164,62 @@ async fn continuation_ledger_counts_only_unaccounted_usage() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn resume_reservation_rejects_superseded_jobs_atomically() {
+    let (state, root) = verification_test_state().await;
+    for (id, status, timestamp) in [
+        ("old_failure", JOB_STATUS_FAILED, "2026-01-01T00:00:01Z"),
+        ("new_failure", JOB_STATUS_FAILED, "2026-01-01T00:00:01Z"),
+    ] {
+        insert_verification_job(
+            &state,
+            id,
+            "tsk_a",
+            ROLE_EXECUTOR,
+            status,
+            1,
+            None,
+            false,
+            timestamp,
+            None,
+        )
+        .await;
+    }
+    let mut conn = state.db.acquire().await.unwrap();
+    assert!(!super::jobs::mark_job_resumed(&mut conn, "old_failure")
+        .await
+        .unwrap());
+    sqlx::query("UPDATE jobs SET status = 'canceled', failure_kind = 'user_stopped' WHERE id = 'old_failure'")
+        .execute(&mut *conn).await.unwrap();
+    assert!(!super::jobs::mark_job_resumed(&mut conn, "old_failure")
+        .await
+        .unwrap());
+    let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = 'old_failure'")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(status, JOB_STATUS_CANCELED);
+    sqlx::query("UPDATE jobs SET error = 'current diagnostic' WHERE id = 'new_failure'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(super::jobs::mark_job_resumed(&mut conn, "new_failure")
+        .await
+        .unwrap());
+    assert!(!super::jobs::mark_job_resumed(&mut conn, "new_failure")
+        .await
+        .unwrap());
+    let error: Option<String> =
+        sqlx::query_scalar("SELECT error FROM jobs WHERE id = 'new_failure'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(error.as_deref(), Some("current diagnostic"));
+    drop(conn);
+    state.db.close().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_verification_job(
     state: &AppState,

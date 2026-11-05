@@ -3,9 +3,13 @@
 
 覆盖范围：
   1. Agent 进程退出码为 0 但没有写 result.json 时，DOMO 在同一作业、
-     同一 OpenCode session 内追加继续提示；继续后写入结果即成功。
-  2. 同一作业最多追加 5 轮继续提示；5 轮后仍没有结果时直接协议失败并
-     阻塞任务，不切换到下一优先级 Agent。
+     同一 OpenCode session 内追加包含缺失原因、当前契约和结果路径的提示；
+     Agent 只有收到这些信息才实际写入结果。
+   2. 同一作业最多追加 5 轮继续提示；5 轮后仍没有结果时直接协议失败并
+      阻塞任务，不切换到下一优先级 Agent。
+   3. 非法结果携带具体校验错误在同一会话内纠错；耗尽预算后直接阻塞。
+   4. 合法任务失败正文中的 provider、HTTP 状态码等不影响 Agent 健康；
+      人工重试携带上次错误和当前输出契约。
 
 使用脚本化 OpenCode 假 CLI 与内置 mock Agent，不访问外网；临时数据全部
 放在系统临时目录。退出码 0 表示全部通过。
@@ -49,14 +53,34 @@ with log_path.open("a", encoding="utf-8") as handle:
     }, ensure_ascii=False) + "\\n")
 
 marker = state_dir / session
+job_dir = pathlib.Path(os.environ["DOMO_JOB_DIR"])
+if model == "task-failure":
+    result = {"kind": "failed", "reason": "验收未完成：SDK credentials provider 含 session token；HTTP 429 quota network timeout；aws.rs:401-403"}
+    (job_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    sys.exit(0)
+if model in ("invalid", "invalid-never"):
+    if not marker.exists() or model == "invalid-never":
+        marker.write_text("1", encoding="utf-8")
+        (job_dir / "result.json").write_text('{"kind":"derive","tasks":[{"key":"T1.9","title":"bad","description":"bad","acceptance":["bad"],"deps":["T1"]}]}', encoding="utf-8")
+        sys.exit(0)
+    assert "具体校验错误" in prompt and "本批次以外" in prompt and "T1.9" in prompt, prompt
+    artifact = pathlib.Path.cwd() / "domo_mock" / "T1.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("T1", encoding="utf-8")
+    (job_dir / "result.json").write_text('{"kind":"done","summary":"协议纠错后完成","commit_files":["domo_mock/T1.txt"]}', encoding="utf-8")
+    sys.exit(0)
 if not marker.exists():
     marker.write_text("1", encoding="utf-8")
+    print("任务已完成，结果文件已写入，等待验收。", flush=True)
     sys.exit(0)
 
 if model == "never":
     sys.exit(0)
 
 job_dir = pathlib.Path(os.environ["DOMO_JOB_DIR"])
+assert "未能读取结果文件" in prompt, prompt
+assert str(job_dir / "result.json") in prompt, prompt
+assert "当前有效的任务与输出契约" in prompt, prompt
 if role == "executor":
     artifact = pathlib.Path(os.getcwd()) / "domo_mock" / "T1.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +235,7 @@ def main():
         assert executor_entries[0]["session"] == executor_entries[1]["session"], executor_entries
         assert "继续" in executor_entries[1]["prompt"], executor_entries[1]
         assert "派生子任务" in executor_entries[1]["prompt"], executor_entries[1]
+        assert "未能读取结果文件" in executor_entries[1]["prompt"], executor_entries[1]
 
         # 2. 最多 5 轮继续后仍无结果：协议失败并阻塞，不切换 Agent。
         log2 = temp / "opencode-2.jsonl"
@@ -259,6 +284,42 @@ def main():
         assert not backup_entries, backup_entries
         assert all(entry["session"] == never_entries[0]["session"] for entry in never_entries)
         assert all("继续" in entry["prompt"] for entry in never_entries[1:]), never_entries[1:]
+
+        # 3. 非法依赖与缺少结果使用同一有界纠错机制。
+        for model in ("invalid", "invalid-never", "task-failure"):
+            case_root = temp / model
+            case_root.mkdir()
+            env = {
+                **base_env,
+                "FAKE_OPENCODE_LOG": str(case_root / "calls.jsonl"),
+                "FAKE_OPENCODE_STATE": str(case_root / "state"),
+            }
+            blocked = model != "invalid"
+            detail, entries = run_case(
+                case_root, repo, env,
+                [
+                    {"name": "Mock Planner", "roles": ["planner", "verifier"]},
+                    {"name": "Test Executor", "roles": ["executor"], "model": model},
+                ],
+                model,
+                (lambda item: bool(item["tasks"]) and item["tasks"][0]["status"] == "blocked") if blocked else None,
+            )
+            jobs = [job for job in detail["jobs"] if job["role"] == "executor"]
+            assert not any(task["parent_id"] for task in detail["tasks"]), detail["tasks"]
+            calls = [entry for entry in entries if entry["role"] == "executor"]
+            agent = next(agent for agent in detail["agents"] if agent["name"] == "Test Executor")
+            assert agent["transient_failures"] == 0 and agent["cooldown_until"] is None, agent
+            if model == "invalid":
+                assert len(jobs) == 1 and jobs[0]["status"] == "succeeded", jobs
+                assert len(calls) == 2 and calls[0]["session"] == calls[1]["session"], calls
+            elif model == "invalid-never":
+                assert len(jobs) == 1 and jobs[0]["failure_kind"] == "protocol", jobs
+                assert len(calls) == 6 and len({entry["session"] for entry in calls}) == 1, calls
+            else:
+                assert len(jobs) == 3 and all(job["failure_kind"] == "task" for job in jobs), jobs
+                assert all(job["failure_summary"]["kind"] == "task" for job in jobs), jobs
+                assert not any(event["kind"] == "job_continued" for event in detail["events"]), detail["events"]
+                assert "SDK credentials provider" in calls[1]["prompt"], calls[1]
 
         print("结果协议继续与协议失败阻塞测试通过")
 

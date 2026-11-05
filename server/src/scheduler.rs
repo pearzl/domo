@@ -1463,11 +1463,14 @@ async fn spawn_task_job(
     .fetch_optional(&state.db)
     .await?;
     let job_id = resume.clone().unwrap_or_else(|| domain::new_id("job"));
-    let attempt = if role == ROLE_VERIFIER {
-        task.rejections + 1
-    } else {
-        task.attempts + task.rejections + 1
-    };
+    // Audit sequence numbers are independent of resettable task/agent budgets.
+    let attempt: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM jobs WHERE task_id = ? AND role = ?",
+    )
+    .bind(&task.id)
+    .bind(role)
+    .fetch_one(&state.db)
+    .await?;
     let forced = task.forced_agent_id.as_deref() == Some(agent.id.as_str())
         && task.forced_agent_role.as_deref() == Some(role);
     let timestamp = now();
@@ -1496,7 +1499,7 @@ async fn spawn_task_job(
         };
         sqlx::query(
             "INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, \
-         replan_generation, created_at, execution_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)",
+         replan_generation, created_at, execution_job_id, error) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
         )
         .bind(&job_id)
         .bind(&project.id)
@@ -1512,6 +1515,7 @@ async fn spawn_task_job(
         })
         .bind(&timestamp)
         .bind(execution_job_id)
+        .bind(&task.last_error)
         .execute(&state.db)
         .await?;
     }

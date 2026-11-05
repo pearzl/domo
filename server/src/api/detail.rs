@@ -75,7 +75,10 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
                 .and_then(|agent_id| agent_names.get(agent_id).cloned()),
             status: job.status,
             attempt: job.attempt,
-            failure_summary: crate::failure::summarize(job.error.as_deref()),
+            failure_summary: crate::failure::summarize_classified(
+                job.error.as_deref(),
+                job.failure_kind.as_deref(),
+            ),
             error: job.error,
             exit_code: job.exit_code,
             failure_kind: job.failure_kind,

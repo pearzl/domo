@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use tokio::fs;
 
 use crate::agents::{self, AgentSpec};
-use crate::domain::{now, parse_result, short_id, ParsedResult};
+use crate::domain::{self, now, parse_result, short_id, ParsedResult};
 use crate::events::emit_job;
 use crate::git;
 use crate::models::*;
@@ -230,7 +230,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
     let resume = job.resume == 1;
     let prompt = if resume {
-        format!("{}\n上一轮已中断。先检查文件、已有结果和可能的残留操作，避免重复副作用，再继续原工作。以下是当前上下文，若与会话历史不一致以当前有效要求为准：\n{}", prompts::continuation(&prompt_data), full_prompt)
+        format!("继续。\n上一轮已中断。先检查文件、已有结果和可能的残留操作，避免重复副作用，再继续原工作。以下是当前有效的任务与输出契约，若与会话历史不一致以当前有效要求为准：\n{}", full_prompt)
     } else {
         full_prompt.clone()
     };
@@ -260,12 +260,14 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     )
     .await?;
 
-    sqlx::query("UPDATE jobs SET prompt = ?, started_at = ?, resume = 0 WHERE id = ?")
-        .bind(&full_prompt)
-        .bind(now())
-        .bind(&job.id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE jobs SET prompt = ?, started_at = ?, error = NULL, resume = 0 WHERE id = ?",
+    )
+    .bind(&full_prompt)
+    .bind(now())
+    .bind(&job.id)
+    .execute(&state.db)
+    .await?;
     emit_job(
         &state.db,
         &state.bus,
@@ -465,6 +467,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(raw) if result_is_failure(&job.role, raw) => None,
             Some(raw) => match parse_result(&job.role, raw) {
                 Err(error) => Some(error),
+                Ok(ParsedResult::ExecutorDerive { tasks, .. }) => {
+                    validate_derive_request(state, &project, task.as_ref(), &tasks).await?
+                }
                 Ok(_) if review => crate::replan_review::validate_result(&state.db, &job, raw)
                     .await
                     .err(),
@@ -551,11 +556,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         if remaining.is_zero() {
             break;
         }
-        let follow_up = format!(
-            "{}\n请修正结果协议错误：{}\n请覆盖结果文件并提交完整有效结果。\n",
-            prompts::continuation(&prompt_data),
-            protocol_error.unwrap_or_default()
-        );
+        let protocol_error = protocol_error.unwrap_or_default();
+        let follow_up = if current_result.is_none() {
+            prompts::missing_result_continuation(&prompt_data)
+        } else {
+            prompts::invalid_result_continuation(&prompt_data, &protocol_error)
+        };
         fs::write(
             job_dir.join(format!("continuation-{}.md", continuations + 1)),
             &follow_up,
@@ -575,8 +581,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(&job.id),
             "job_continued",
             format!(
-                "{}作业结果协议不完整，已追加第 {} 轮继续提示",
+                "{}作业结果协议校验失败（{}），已追加第 {} 轮继续提示",
                 role_label(&job.role),
+                protocol_error,
                 continuations + 1
             ),
         )
@@ -937,12 +944,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         )
         .await?
         {
-            if job.role == ROLE_EXECUTOR {
-                sqlx::query("UPDATE tasks SET attempts = attempts + 1 WHERE id = ?")
-                    .bind(&job.task_id)
-                    .execute(&state.db)
-                    .await?;
-            }
             crate::continuation::block_interrupted(state, &job, reason).await?;
         }
         return Ok(());
@@ -1129,9 +1130,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 };
                 if let Err(commit_error) = commit {
                     let error_text = format!("提交执行结果失败: {commit_error:#}");
-                    let transition =
-                        handle_executor_failure(state, &project, task, &error_text, &agent, false)
-                            .await;
+                    let transition = handle_executor_failure(
+                        state,
+                        &project,
+                        task,
+                        &error_text,
+                        &agent,
+                        domain::FailureKind::Task,
+                    )
+                    .await;
                     let finished = finish_job(
                         state,
                         &job,
@@ -1214,9 +1221,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 };
                 if let Err(commit_error) = commit {
                     let error_text = format!("提交执行结果失败: {commit_error:#}");
-                    let transition =
-                        handle_executor_failure(state, &project, task, &error_text, &agent, false)
-                            .await;
+                    let transition = handle_executor_failure(
+                        state,
+                        &project,
+                        task,
+                        &error_text,
+                        &agent,
+                        domain::FailureKind::Task,
+                    )
+                    .await;
                     let finished = finish_job(
                         state,
                         &job,
@@ -1368,9 +1381,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                         _ => None,
                     })
                     .unwrap_or("执行失败");
-                let process_failure = run.process_failure();
-                handle_executor_failure(state, &project, task, reason, &agent, process_failure)
-                    .await
+                let kind = domain::classify_job_failure(
+                    &job.role,
+                    result_text.as_deref(),
+                    reason,
+                    run.process_failure(),
+                );
+                handle_executor_failure(state, &project, task, reason, &agent, kind).await
             } else {
                 Ok(())
             }

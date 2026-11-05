@@ -6,7 +6,7 @@
      `codex exec resume <thread_id>`，而不是重新开一个会话。
   2. WorkBuddy 首次运行没有写 result.json 时，继续轮次使用
      `--resume <session_id>`，而不是重新开一个会话。
-  3. 继续提示词只包含“继续”和执行者的派生子任务提示。
+  3. 继续提示词携带当前任务与输出契约、结果文件缺失原因和绝对路径。
 
 使用脚本化 CLI 与内置 mock Agent，不访问外网；临时数据全部放在系统临时
 目录。退出码 0 表示全部通过。
@@ -223,6 +223,8 @@ def main():
         assert "thread-1" in entries[1]["args"], entries[1]
         assert "继续" in entries[1]["prompt"], entries[1]
         assert "派生子任务" in entries[1]["prompt"], entries[1]
+        assert "未能读取结果文件" in entries[1]["prompt"], entries[1]
+        assert "当前有效的任务与输出契约" in entries[1]["prompt"], entries[1]
 
         workbuddy_log = temp / "workbuddy.jsonl"
         detail, entries = run_case(
@@ -245,6 +247,8 @@ def main():
         assert entries[1]["session"] == "session-1", entries[1]
         assert "继续" in entries[1]["prompt"], entries[1]
         assert "派生子任务" in entries[1]["prompt"], entries[1]
+        assert "未能读取结果文件" in entries[1]["prompt"], entries[1]
+        assert "当前有效的任务与输出契约" in entries[1]["prompt"], entries[1]
 
         print("Codex 与 WorkBuddy 会话复用测试通过")
 

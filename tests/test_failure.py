@@ -147,7 +147,7 @@ out.parent.mkdir(exist_ok=True); out.write_text(key)
             )
 
             task = detail["tasks"][0]
-            assert task["attempts"] == 3, task
+            assert task["attempts"] == 0, task
             assert "尝试" in (task["last_error"] or ""), task
             assert any(event["kind"] == "task_state_changed" for event in detail["events"])
             failed_jobs = [job for job in detail["jobs"] if job["status"] == "failed"]

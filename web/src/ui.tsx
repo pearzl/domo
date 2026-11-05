@@ -153,6 +153,7 @@ export const FAILURE_SUMMARY_LABELS: Record<string, string> = {
   stalled: "卡死",
   process_exit: "进程退出",
   protocol: "结果异常",
+  task: "任务失败",
   permanent: "配置错误",
   provider_error: "供应商错误",
   unknown: "失败",

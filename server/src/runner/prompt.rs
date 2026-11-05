@@ -193,6 +193,10 @@ pub(super) async fn build_prompt_data(
         derived_tasks,
         messages,
         verifier_issues,
+        execution_error: job
+            .error
+            .clone()
+            .or_else(|| task.and_then(|task| task.last_error.clone())),
         summary_tasks,
         completed_tasks,
         canceled_tasks,
@@ -273,6 +277,7 @@ pub(super) fn build_context(
             "role": message.role, "content": message.content,
         })).collect::<Vec<_>>(),
         "verifier_issues": data.verifier_issues,
+        "execution_error": data.execution_error,
         "summary_tasks": data.summary_tasks.iter().map(|task| json!({
             "key": task.key, "title": task.title, "summary": task.summary,
         })).collect::<Vec<_>>(),

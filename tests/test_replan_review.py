@@ -5,7 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from harness import Server, init_repo, temp_root, wait_for
+from harness import Server, git, init_repo, temp_root, wait_for
 
 
 def configure(server):
@@ -105,6 +105,7 @@ def test_parent_plan(root, repo):
         "DOMO_MOCK_DERIVE_ONCE": "1", "DOMO_MOCK_DERIVE_KEY": "T1",
         "DOMO_MOCK_REPLAN_ONCE": "1", "DOMO_MOCK_REPLAN_KEY": "T1.1",
         "DOMO_MOCK_REPLAN_REVIEW_DELAY_MS": "1500",
+        "DOMO_MOCK_PARENT_REPLAN_DEPENDENCIES": "1",
     }) as server:
         _, executor = configure(server)
         project_id = create(server, repo, "[parallel] parent replaces children")
@@ -126,6 +127,12 @@ def test_parent_plan(root, repo):
         assert old["status"] == "canceled"
         assert sibling["stage"] == "completed" and sibling["status"] is None
         assert replacement["parent_id"] == parent["id"]
+        successor = next(t for t in current["tasks"] if t["key"] == "T1.4")
+        assert successor["parent_id"] == parent["id"]
+        assert successor["deps"] == ["T1.3"]
+        assert "dep T1.3 was merged" in git(["show", f"{current['project']['branch']}:domo_mock/T1.4.txt"], repo)
+        for task in (replacement, successor):
+            assert any(j["task_id"] == task["id"] and j["role"] == "verifier" and j["status"] == "succeeded" for j in current["jobs"])
         assert "T1.1" not in parent["deps"] and "T1.3" in parent["deps"]
         assert len([j for j in current["jobs"] if j["role"] == "replan_review"]) == 1
         assert len([j for j in current["jobs"] if j["role"] == "analysis"]) == 1

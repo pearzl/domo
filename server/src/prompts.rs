@@ -57,6 +57,7 @@ pub struct PromptData {
     pub derived_tasks: Vec<DerivedTaskInfo>,
     pub messages: Vec<MessageRow>,
     pub verifier_issues: Vec<String>,
+    pub execution_error: Option<String>,
     pub summary_tasks: Vec<SummaryTaskInfo>,
     pub completed_tasks: Vec<SummaryTaskInfo>,
     pub canceled_tasks: Vec<SummaryTaskInfo>,
@@ -105,7 +106,7 @@ fn replan_review_prompt(data: &PromptData) -> String {
         审批固定上下文 reviewer=parent 时，你代表父任务执行者，只能重新安排该父任务的未完成子任务；reviewer=planner 时，你代表项目规划者，可以替换项目的未完成任务计划。\n\
         - 只能写作业目录中的结果文件，所有项目/父任务/子任务工作区只读；不运行会修改产物的命令，不修改代码、输入、权限或 Git 状态。\n\
         - 同意重规划时必须直接返回完整 kind=plan 方案：包含 summary、当前项目 goal、tasks（key/title/description/acceptance/deps）和 skip_confirmation；不能只返回 approve。\n\
-        - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，子任务之间不建立依赖；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
+        - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，deps 只能引用本批次子任务且必须无环；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
         - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径；自动确认模式下明确方案可设 skip_confirmation=true，否则等待人工确认。\n\
         - reject：不需要重规划，必须提供可执行 guidance，任务将带着该指导继续；不能仅要求重复尝试。\n\
         - wait：缺输入、SDK、授权或环境等资源，必须写清缺项和解除条件 guidance；任务等待人工补齐，不自动重试。\n\
@@ -114,24 +115,34 @@ fn replan_review_prompt(data: &PromptData) -> String {
         common_header(data), result_rules(data, "{\"kind\":\"plan\",\"summary\":\"取舍与替代方案\",\"goal\":\"当前项目目标\",\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":true} 或 {\"kind\":\"replan_review\",\"decision\":\"reject|wait\",\"reason\":\"判断依据\",\"guidance\":\"执行指导或解除条件\"}"))
 }
 
-/// Follow-up message for a run that exited cleanly without a result file. A
-/// resumable session keeps the original prompt; other agents receive the
-/// original prompt followed by this message.
+/// Resumed sessions receive the current contract, not just their historical
+/// context. Feedback, guidance and result paths remain authoritative even if
+/// the agent believes an earlier attempt was complete.
 pub fn continuation(data: &PromptData) -> String {
     let mut text = if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
         "继续。\n如果任务仍然过于复杂，可以派生子任务。\n".to_string()
     } else {
         "继续。\n".to_string()
     };
-    let guidance = data
-        .task
-        .as_ref()
-        .map(|task| task.guidance.trim())
-        .unwrap_or_default();
-    if !guidance.is_empty() {
-        text.push_str(&format!("\n人工指导：{guidance}\n"));
-    }
+    text.push_str("\n以下是当前有效的任务与输出契约，优先于会话中的历史完成声明。请检查当前工作区、验收反馈及结果文件，不要仅回复已完成或等待验收。\n\n");
+    text.push_str(&render(data));
     text
+}
+
+pub fn missing_result_continuation(data: &PromptData) -> String {
+    format!(
+        "DOMO 检查到本轮进程正常退出，但未能读取结果文件 {}。口头声明已写入不代表交付完成。请检查该绝对路径，完成当前任务后使用文件工具实际写入符合下方协议的 JSON，并确认文件可读取。\n\n{}",
+        data.result_path,
+        continuation(data)
+    )
+}
+
+pub fn invalid_result_continuation(data: &PromptData, reason: &str) -> String {
+    format!(
+        "DOMO 无法接受本轮结果，具体校验错误：{reason}\n请修正 {} 中的结果，保留真实任务依赖和验收要求，不要伪造完成。派生子任务的 deps 只能引用同一批次子任务，且不能形成环；需要改变任务范围时应请求 replan。\n\n{}",
+        data.result_path,
+        continuation(data)
+    )
 }
 
 fn common_header(data: &PromptData) -> String {
@@ -171,6 +182,9 @@ fn common_header(data: &PromptData) -> String {
     };
     let mut header = format!("你是 DOMO 本地多 Agent 协作平台中的团队成员。\n\n{workspace}");
     header.push_str(long_command_rules());
+    if let Some(error) = &data.execution_error {
+        header.push_str(&format!("\n## 上次作业失败（DOMO 诊断）\n{error}\n"));
+    }
     header
 }
 
@@ -468,7 +482,7 @@ fn executor_prompt(data: &PromptData) -> String {
         "禁止派生子任务；派生任务只能完成自身工作或请求重新规划。".to_string()
     } else {
         format!(
-            "任务仍复杂时可派生子任务：单次 1 到 {MAX_DERIVED_TASKS} 个、deps 为空、key 在活动任务中唯一，每个子任务写清描述与验收标准。"
+            "任务仍复杂时可派生子任务：单次 1 到 {MAX_DERIVED_TASKS} 个，key 在活动任务中唯一，每个子任务写清描述与验收标准；deps 只能引用本批次内子任务，允许兄弟子任务之间存在依赖，但禁止自依赖、缺失依赖和依赖环。前置子任务经独立验收并交付到父任务工作区后再启动后继；全部子任务完成后父任务继续整合并接受验收。"
         )
     };
     let git_rules = if plain_workspace(data) {
@@ -877,6 +891,7 @@ mod tests {
                 created_at: "2026-01-01T00:00:00Z".into(),
             }],
             verifier_issues: Vec::new(),
+            execution_error: None,
             summary_tasks: vec![SummaryTaskInfo {
                 key: "T1".into(),
                 title: "整理结果".into(),
@@ -926,16 +941,56 @@ mod tests {
     }
 
     #[test]
-    fn continuation_only_asks_to_continue_and_offers_derivation() {
-        let prompt = continuation(&sample_data(JOB_ROLE_EXECUTOR));
+    fn continuation_refreshes_current_contract_and_offers_derivation() {
+        let mut data = sample_data(JOB_ROLE_EXECUTOR);
+        data.verifier_issues = vec!["当前验收发现的缺陷".into()];
+        let prompt = continuation(&data);
         assert!(prompt.contains("继续"));
         assert!(prompt.contains("派生子任务"));
         assert!(prompt.contains(GUIDANCE));
-        assert!(!prompt.contains(RESULT_PATH));
+        assert!(prompt.contains("当前验收发现的缺陷"));
+        assert!(prompt.contains(RESULT_PATH));
+        assert!(prompt.contains(result_schema_text(JOB_ROLE_EXECUTOR)));
 
         let verifier = continuation(&sample_data(JOB_ROLE_VERIFIER));
         assert!(verifier.contains("继续"));
         assert!(!verifier.contains("派生子任务"));
+    }
+
+    #[test]
+    fn missing_result_follow_up_identifies_failure_and_required_file() {
+        for role in [
+            JOB_ROLE_ANALYSIS,
+            JOB_ROLE_DIRECT,
+            JOB_ROLE_EXECUTOR,
+            JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
+            JOB_ROLE_SUMMARY,
+        ] {
+            let prompt = missing_result_continuation(&sample_data(role));
+            assert!(prompt.contains("未能读取结果文件"));
+            assert!(prompt.contains(RESULT_PATH));
+            assert!(prompt.contains(result_schema_text(role)));
+        }
+    }
+
+    #[test]
+    fn protocol_correction_and_manual_resume_keep_precise_diagnostics() {
+        let mut data = sample_data(JOB_ROLE_EXECUTOR);
+        let reason = "派生任务 T1.5 的 deps 引用了本批次以外的任务 missing";
+        data.execution_error = Some(reason.into());
+        data.verifier_issues = vec!["仍需处理的验收反馈".into()];
+        for prompt in [
+            continuation(&data),
+            invalid_result_continuation(&data, reason),
+        ] {
+            assert!(prompt.contains(reason));
+            assert!(prompt.contains(RESULT_PATH));
+            assert!(prompt.contains(GUIDANCE));
+            assert!(prompt.contains("仍需处理的验收反馈"));
+            assert!(prompt.contains("允许兄弟子任务之间存在依赖"));
+            assert!(!prompt.contains("deps 为空"));
+        }
     }
 
     #[test]

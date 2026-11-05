@@ -5,7 +5,7 @@
   1. kind=cli 的命令模板占位符：{prompt} 存在时提示词走位置参数且 stdin 为空；
      模板缺少 {prompt} 时提示词走 stdin；{session_id}、{job_dir}、{cwd}、
      {model}、{model_args} 按适配器规则展开，模型参数在模板未引用时追加。
-  2. 续跑轮次沿用首次运行派生的 session，继续提示词只包含继续指令。
+  2. 续跑轮次沿用首次运行派生的 session，并接收当前任务与输出契约。
   3. kind=opencode 通过 stdin 接收提示词，参数固定为 run --standalone --auto
      --thinking --format json --session <session> --title "DOMO <role> <job_id>"，
      配置模型时附带 --model；续跑使用同一 session，用量以该 session 的 SQLite 账本为准。
@@ -435,7 +435,9 @@ def run_cli_positional(temp, script):
             assert "结果文件" in prompt, prompt
         else:
             assert "继续" in prompt and "派生子任务" in prompt, prompt
-            assert "INVOKE-CLI-POSITIONAL" not in prompt, prompt
+            assert "INVOKE-CLI-POSITIONAL" in prompt, prompt
+            assert "未能读取结果文件" in prompt, prompt
+            assert str(Path(entry["job_dir"]) / "result.json") in prompt, prompt
     return job
 
 
@@ -511,7 +513,8 @@ def run_cli_stdin(temp, script):
         else:
             assert "继续" in entry["prompt"], entry["prompt"]
             assert "派生子任务" in entry["prompt"], entry["prompt"]
-            assert "INVOKE-CLI-STDIN" not in entry["prompt"], entry["prompt"]
+            assert "INVOKE-CLI-STDIN" in entry["prompt"], entry["prompt"]
+            assert "未能读取结果文件" in entry["prompt"], entry["prompt"]
     return job
 
 
@@ -582,7 +585,8 @@ def run_opencode(temp, script):
             assert "结果文件" in entry["prompt"], entry["prompt"]
         else:
             assert "继续" in entry["prompt"], entry["prompt"]
-            assert "INVOKE-OPENCODE" not in entry["prompt"], entry["prompt"]
+            assert "INVOKE-OPENCODE" in entry["prompt"], entry["prompt"]
+            assert "当前有效的任务与输出契约" in entry["prompt"], entry["prompt"]
     assert len(usage_calls) == 1, f"{key} 用量查询次数异常: {entries}"
     assert Path(usage_calls[0]["path"]).is_file(), usage_calls
     return job

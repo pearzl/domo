@@ -39,6 +39,21 @@ pub fn summarize(raw: Option<&str>) -> Option<FailureSummary> {
     Some(summarize_text(text))
 }
 
+/// Task and protocol provenance is authoritative; user text that mentions HTTP
+/// or providers must not be rendered as an infrastructure failure.
+pub fn summarize_classified(raw: Option<&str>, kind: Option<&str>) -> Option<FailureSummary> {
+    if let Some(kind @ (crate::models::FAILURE_TASK | crate::models::FAILURE_PROTOCOL)) = kind {
+        let text = raw?.trim();
+        return (!text.is_empty()).then(|| FailureSummary {
+            kind: kind.to_string(),
+            message: truncate_message(text),
+            status: None,
+            retry_after_ms: None,
+        });
+    }
+    summarize(raw)
+}
+
 /// Builds the stored failure detail for an agent run. The opening lines keep
 /// local context, and the last structured error event is appended because it
 /// may fall outside the excerpt and carries the provider status that drives
@@ -539,6 +554,19 @@ mod tests {
         assert_eq!(summary.message, "Agent 作业超时");
         assert_eq!(summary.status, None);
         assert_eq!(summary.retry_after_ms, None);
+    }
+
+    #[test]
+    fn classified_task_content_is_not_displayed_as_a_provider_error() {
+        let raw = "SDK credentials provider 含 token；HTTP 429 quota network timeout";
+        for kind in [crate::models::FAILURE_TASK, crate::models::FAILURE_PROTOCOL] {
+            let summary = summarize_classified(Some(raw), Some(kind)).unwrap();
+            assert_eq!(summary.kind, kind);
+            assert_eq!(summary.message, raw);
+            assert_eq!(summary.status, None);
+            assert_eq!(summary.retry_after_ms, None);
+        }
+        assert!(summarize_classified(Some(" "), Some(crate::models::FAILURE_TASK)).is_none());
     }
 
     #[test]

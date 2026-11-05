@@ -80,13 +80,8 @@ marker = os.path.join(root, "flaky-failed-once")
 if key == "T1" and not os.path.exists(marker):
     with open(marker, "w", encoding="utf-8") as handle:
         handle.write("1")
-    with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as handle:
-        json.dump(
-            {"kind": "failed", "reason": "永久错误：Agent 配置无效"},
-            handle,
-            ensure_ascii=False,
-        )
-    sys.exit(0)
+    sys.stderr.write("永久错误：Agent 配置无效\\n")
+    sys.exit(1)
 time.sleep(0.2)
 os.makedirs(os.path.join(cwd, "domo_mock"), exist_ok=True)
 with open(os.path.join(cwd, "domo_mock", f"{key}.txt"), "w", encoding="utf-8") as handle:

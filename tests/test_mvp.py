@@ -170,7 +170,7 @@ def main():
             assert any(
                 job["role"] == "verifier" and job["attempt"] > 1 for job in jobs
             ), "未覆盖验收拒绝后的再次验收"
-            assert tasks["T1"]["attempts"] >= 1, tasks["T1"]
+            assert tasks["T1"]["attempts"] == 0, tasks["T1"]
 
             completed_job = next((job for job in jobs if job["status"] == "succeeded"), None)
             assert completed_job is not None, jobs

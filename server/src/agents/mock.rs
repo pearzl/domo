@@ -36,6 +36,18 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
 
     let context = read_context(&spec.job_dir)?;
     let streamed = write_mock_stream(spec, &context).await?;
+    if let Some(reason) = mock_transport_failure(&spec.role, &context) {
+        tokio::fs::write(spec.job_dir.join("stderr.log"), &reason).await?;
+        return Ok(AgentRun {
+            stdout: String::new(),
+            stderr: reason,
+            exit_code: Some(1),
+            timed_out: false,
+            stalled: false,
+            session_id: None,
+            usage: None,
+        });
+    }
     let result = match mock_role_failure(&spec.role, &context) {
         Some(result) => result,
         None => match spec.role.as_str() {
@@ -57,8 +69,16 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
                 .unwrap_or_else(|_| "plan".into());
                 if decision == "plan" {
                     if reviewer == "parent" {
+                        let mut tasks = vec![
+                            serde_json::json!({"key": "T1.3", "title": "替代子任务", "description": "完成父任务范围内的剩余交付", "acceptance": ["产物存在"], "deps": []}),
+                        ];
+                        if std::env::var("DOMO_MOCK_PARENT_REPLAN_DEPENDENCIES").as_deref()
+                            == Ok("1")
+                        {
+                            tasks.push(serde_json::json!({"key": "T1.4", "title": "后继子任务", "description": "读取前置子任务成果并完成交付", "acceptance": ["产物存在"], "deps": ["T1.3"]}));
+                        }
                         serde_json::json!({"kind": "plan", "goal": context["project"]["goal"], "summary": "mock 父任务局部替代方案", "skip_confirmation": true,
-                            "tasks": [{"key": "T1.3", "title": "替代子任务", "description": "完成父任务范围内的剩余交付", "acceptance": ["产物存在"], "deps": []}]})
+                            "tasks": tasks})
                     } else {
                         mock_replan_plan(
                             &context,
@@ -538,11 +558,7 @@ fn mock_switch_matches(context: &serde_json::Value, switch_env: &str, key: &str)
     matches_goal && matches_key && matches_agent
 }
 
-/// Planned failures for the project roles (analysis, direct completion,
-/// project acceptance and summary). The mock writes a failed result before
-/// running the role logic, so project jobs can exercise the same failure policy
-/// as task jobs. The switches are separate from the task-level ones so goals and
-/// pools stay orthogonal.
+/// Invalid project results exercise the bounded protocol-correction path.
 fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_json::Value> {
     if !matches!(
         role,
@@ -550,7 +566,6 @@ fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_js
     ) {
         return None;
     }
-    let failed = |reason: String| Some(serde_json::json!({ "kind": "failed", "reason": reason }));
     if role == JOB_ROLE_DIRECT
         && std::env::var("DOMO_MOCK_DIRECT_FAIL_GOAL").is_ok_and(|marker| {
             context
@@ -562,20 +577,33 @@ fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_js
     {
         return Some(serde_json::json!({"kind": "invalid_direct_result"}));
     }
-    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_RATE_LIMIT", "") {
-        let secs = std::env::var("DOMO_MOCK_PLANNER_RATE_LIMIT_RETRY")
+    None
+}
+
+/// Infrastructure fixtures fail the process; valid business failure results
+/// do not supply evidence about provider health.
+fn mock_transport_failure(role: &str, context: &serde_json::Value) -> Option<String> {
+    let (prefix, key) = match role {
+        JOB_ROLE_EXECUTOR => ("DOMO_MOCK", context["task"]["key"].as_str().unwrap_or("T1")),
+        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
+            ("DOMO_MOCK_PLANNER", "")
+        }
+        _ => return None,
+    };
+    if mock_flag_matches(context, &format!("{prefix}_RATE_LIMIT"), key) {
+        let secs = std::env::var(format!("{prefix}_RATE_LIMIT_RETRY"))
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(900);
-        return failed(format!(
+        return Some(format!(
             "HTTP 429 too many requests; retry after {secs} seconds"
         ));
     }
-    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_TRANSIENT", "") {
-        return failed("provider temporarily unavailable (503)".into());
+    if mock_flag_matches(context, &format!("{prefix}_TRANSIENT"), key) {
+        return Some("provider temporarily unavailable (503)".into());
     }
-    if mock_flag_matches(context, "DOMO_MOCK_PLANNER_PERMANENT", "") {
-        return failed("永久错误：Agent 配置无效".into());
+    if mock_flag_matches(context, &format!("{prefix}_PERMANENT"), key) {
+        return Some("永久错误：Agent 配置无效".into());
     }
     None
 }
@@ -659,28 +687,6 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
             "reason": "mock 执行者持续失败"
         }));
     }
-    if mock_flag_matches(context, "DOMO_MOCK_RATE_LIMIT", key) {
-        let secs = std::env::var("DOMO_MOCK_RATE_LIMIT_RETRY")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(900);
-        return Ok(serde_json::json!({
-            "kind": "failed",
-            "reason": format!("HTTP 429 too many requests; retry after {secs} seconds")
-        }));
-    }
-    if mock_flag_matches(context, "DOMO_MOCK_TRANSIENT", key) {
-        return Ok(serde_json::json!({
-            "kind": "failed",
-            "reason": "provider temporarily unavailable (503)"
-        }));
-    }
-    if mock_flag_matches(context, "DOMO_MOCK_PERMANENT", key) {
-        return Ok(serde_json::json!({
-            "kind": "failed",
-            "reason": "永久错误：Agent 配置无效"
-        }));
-    }
     let replan_once = std::env::var("DOMO_MOCK_REPLAN_ONCE")
         .map(|value| value == "1")
         .unwrap_or(false);
@@ -722,7 +728,7 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
     {
         return Ok(serde_json::json!({
             "kind": "derive",
-            "summary": "mock 执行者把当前任务拆成两个可并行子任务",
+            "summary": "mock 执行者拆分任务，依赖关系由测试场景指定",
             "tasks": [
                 {
                     "key": "T1.1",
@@ -736,7 +742,7 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
                     "title": "并行子任务二",
                     "description": "在 domo_mock/T1.2.txt 写入派生任务二的内容。",
                     "acceptance": ["domo_mock/T1.2.txt 存在且包含 T1.2"],
-                    "deps": []
+                    "deps": if std::env::var("DOMO_MOCK_DERIVE_DEPENDENCIES").as_deref() == Ok("1") { vec!["T1.1"] } else { vec![] }
                 }
             ]
         }));
@@ -751,7 +757,7 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
                 {
                     "key": "T1.9",
                     "title": "非法子任务",
-                    "description": "派生任务不允许带依赖。",
+                    "description": "派生任务不允许依赖父任务。",
                     "acceptance": ["非法请求应被拒绝"],
                     "deps": ["T1"]
                 }

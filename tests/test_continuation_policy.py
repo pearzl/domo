@@ -169,7 +169,7 @@ def main():
                 else:
                     assert calls[0]["job"] == calls[1]["job"] and calls[0]["session"] == calls[1]["session"], calls
                     if task and case not in ("force", "restart", "stall"):
-                        assert detail["tasks"][0]["attempts"] == 1, detail["tasks"]
+                        assert detail["tasks"][0]["attempts"] == 0, detail["tasks"]
                     assert len(call("GET", endpoint + "/history")["runs"]) == 1
                 if case in ("auth", "quota", "config"):
                     assert view["diagnostic"]["evidence"] == "structured", view
