@@ -164,6 +164,8 @@ export interface TaskAgentPool {
 
 /** 单条验收作业摘要：验收记录接口按所属执行轮返回验收者的解析结论。 */
 export interface VerificationRecord {
+  next_action?: "execute" | "wait" | "review" | null;
+  guidance?: string | null;
   execution_job_id: string | null;
   evidence?: {
     contract_id: number;
@@ -248,6 +250,8 @@ export interface ProjectSummary {
 }
 
 export interface Project {
+  acceptance?: string | null;
+  acceptance_passed?: number;
   id: string;
   name: string;
   goal: string;

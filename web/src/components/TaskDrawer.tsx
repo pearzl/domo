@@ -233,7 +233,7 @@ export function TaskDrawer({
         <p>产物版本：{record.evidence!.artifact_version ?? "普通工作区当前产物，不提供历史内容恢复"}</p>
         <p>检查时间：{record.finished_at ?? "—"}</p>
         {record.evidence!.criteria.map((criterion, index) => <div key={index}>
-          <strong>{criterion.passed ? "通过" : "拒绝"} · {criterion.criterion}</strong>
+          <strong>{criterion.passed ? "通过" : "尚未满足或验证"} · {criterion.criterion}</strong>
           <ul>{criterion.checks.map((check, i) => <li key={i}>{check.method} → {check.result}</li>)}</ul>
         </div>)}
         <p>已检查产物：{record.evidence!.artifacts.join("、") || "无文件产物"}</p>
@@ -273,7 +273,7 @@ export function TaskDrawer({
         {!resultFirst && verificationRecapValue.conclusion === "rejected" ? <div className="latest-feedback"><strong>最近一次验收未通过，修复后需重新核验</strong>{verificationRecapValue.reason ? <RichContent content={verificationRecapValue.reason} format="markdown" /> : null}</div> : null}
         <details className="reference-fold current-feedback">
           <summary>当前待处理反馈（{verifierFeedback(task.verifier_issues).length} 条）</summary>
-          <p className="muted">以下为最近一次验收或合入返回的待处理问题，修复后需重新核验。历轮反馈与证据保留在作业历史中。</p>
+          <p className="muted">以下为最近一次验收或合入返回的待处理问题，修复或补齐条件后需重新核验。历轮反馈与证据保留在作业历史中。</p>
         <ul>
           {verifierFeedback(task.verifier_issues).map((issue, index) => (
             <li key={`${index}-${issue}`}>

@@ -97,14 +97,14 @@ def test_project_plan(root, repo):
         old = min(current["tasks"], key=lambda t: t["seq"])
         assert old["status"] == "canceled"
         assert not Path(old["worktree"]).exists()
-        summary_job = next(j for j in current["jobs"] if j["role"] == "summary")
+        summary_job = next(j for j in current["jobs"] if j["role"] == "project_acceptance")
         workspace = project_id.split("_")[0] + "_" + project_id.split("_")[1][:16]
         summary_dir = root / "ws" / workspace / "jobs" / summary_job["id"]
         context = json.loads((summary_dir / "context.json").read_text(encoding="utf-8"))
         completed = [t for t in current["tasks"] if t["stage"] == "completed" and t["status"] != "canceled"]
         assert len(context["summary_tasks"]) == len(completed), context["summary_tasks"]
         assert len(context["canceled_tasks"]) == 1, context["canceled_tasks"]
-        assert "未保留或已取消任务（不计为完成交付）" in (summary_dir / "prompt.md").read_text(encoding="utf-8")
+        assert "已取消任务" in (summary_dir / "prompt.md").read_text(encoding="utf-8")
         assert request_rows(root)[0]["state"] == "applied"
 
 

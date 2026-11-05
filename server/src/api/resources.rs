@@ -365,7 +365,7 @@ pub(super) async fn recommendations(
             FROM tasks t JOIN jobs j ON j.task_id = t.id AND j.role = 'executor' WHERE j.agent_id = ?")
             .bind(&agent.id).fetch_one(&state.db).await?;
         let rejections: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs v WHERE v.role = 'verifier' AND json_valid(v.result) \
-            AND json_extract(v.result, '$.pass') = 0 AND EXISTS(SELECT 1 FROM jobs e WHERE e.task_id = v.task_id AND e.role = 'executor' AND e.agent_id = ?)")
+            AND json_extract(v.result, '$.pass') = 0 AND json_extract(v.result, '$.next_action') = 'execute' AND EXISTS(SELECT 1 FROM jobs e WHERE e.task_id = v.task_id AND e.role = 'executor' AND e.agent_id = ?)")
             .bind(&agent.id).fetch_one(&state.db).await?;
         let failed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM jobs WHERE agent_id = ? AND status = 'failed'",

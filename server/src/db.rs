@@ -277,7 +277,7 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     )
     .fetch_one(&pool)
     .await?;
-    if tables > 0 && version != 2 {
+    if tables > 0 && version != 3 {
         return Err(DbError::UnsupportedSchema);
     }
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
@@ -286,7 +286,7 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     crate::queue::initialize(&pool).await?;
     crate::replan_review::initialize(&pool).await?;
     seed_defaults(&pool).await?;
-    sqlx::raw_sql("PRAGMA user_version = 2")
+    sqlx::raw_sql("PRAGMA user_version = 3")
         .execute(&pool)
         .await?;
     Ok(pool)

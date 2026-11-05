@@ -372,7 +372,7 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
         JOB_ROLE_VERIFIER,
         JOB_STATUS_SUCCEEDED,
         2,
-        Some(r#"{"pass":false,"reason":"测试失败","issues":["a","b"]}"#),
+        Some(r#"{"pass":false,"reason":"测试失败","issues":["a","b"],"next_action":"execute","guidance":"修复测试"}"#),
         true,
         "2026-01-01T00:00:05Z",
         None,

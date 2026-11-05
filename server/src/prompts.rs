@@ -70,6 +70,7 @@ pub struct PromptData {
     pub replan_source: Option<String>,
     pub acceptance_criteria: Vec<String>,
     pub acceptance_result: Option<String>,
+    pub direct_result: Option<String>,
     pub project_summary: Option<String>,
     pub project_assumptions: Vec<String>,
     pub confirm_mode: String,
@@ -142,7 +143,7 @@ fn replan_review_prompt(data: &PromptData) -> String {
         - 同意重规划时必须直接返回完整 kind=plan 方案：包含 summary、当前项目 goal、tasks（key/title/description/acceptance/deps）和 skip_confirmation；不能只返回 approve。\n\
         - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，deps 只能引用本批次子任务且必须无环；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
          - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径，确认方式见项目方案确认。\n\
-        - reject：不需要重规划，必须提供可执行 guidance，任务将带着该指导继续；不能仅要求重复尝试。\n\
+        - reject：不需要重规划，必须提供可执行 guidance；resume_stage 可选 executing（修复实现）或 verifying（补充核验），省略时沿用请求的 resume_stage；不能仅要求重复尝试。\n\
         - wait：缺输入、SDK、授权或环境等资源，必须写清缺项和解除条件 guidance；任务等待人工补齐，不自动重试。\n\
         - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
         - 规划者方案保留项目 assumptions 和 acceptance，子任务验收标准分别写入 tasks[].acceptance。\n\
@@ -217,7 +218,7 @@ fn common_header(data: &PromptData) -> String {
             "任务验收者：独立检查当前任务产物，给出逐项证据与通过或拒绝结论，不修复产物。"
         }
         JOB_ROLE_ACCEPTANCE => {
-            "项目验收者：核验完整交付是否满足项目验收条目，不实施修改，不写项目报告。"
+            "项目验收与报告撰写者：核验完整交付，给出证据与处置，满足条件时同时撰写项目报告；不修改交付文件。"
         }
         JOB_ROLE_SUMMARY => {
             "报告撰写者：依据项目验收结论和实际产物，向用户说明交付、使用方式、验证结果与待办。"
@@ -343,7 +344,7 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
             "{\"kind\":\"replan\",\"reason\":\"需上级决策的事实、影响与建议\"}"
         ),
         JOB_ROLE_VERIFIER => "{\"pass\":true,\"reason\":\"结论与依据\",\"issues\":[],\"evidence\":{\"contract_id\":0,\"artifact_version\":null,\"artifacts\":[\"已检查路径\"],\"risks\":[],\"human_checks\":[],\"criteria\":[{\"criterion\":\"验收标准原文\",\"passed\":true,\"checks\":[{\"method\":\"实际检查方法或命令\",\"result\":\"实际结果及退出码\"}]}]}}",
-        JOB_ROLE_ACCEPTANCE => "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"contract_id\":0,\"artifact_version\":null,\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met\",\"evidence\":[\"实际方法与结果\"],\"gap\":\"\"}],\"replan_reason\":\"\"}",
+        JOB_ROLE_ACCEPTANCE => "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"contract_id\":0,\"artifact_version\":null,\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met\",\"evidence\":[\"实际方法与结果\"],\"gap\":\"\"}],\"next_action\":\"report\",\"report\":\"Markdown 项目报告\",\"guidance\":\"\",\"replan_reason\":\"\"}",
         JOB_ROLE_SUMMARY => "{\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"}",
         JOB_ROLE_REPLAN_REVIEW => concat!(
             "{\"kind\":\"plan\",\"summary\":\"替代方案与影响\",\"goal\":\"当前项目目标\",\"assumptions\":[],\"acceptance\":[\"项目验收口径\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":false}\n",
@@ -353,6 +354,12 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         _ => "",
     };
     let mut text = schema.to_string();
+    if data.role == JOB_ROLE_VERIFIER {
+        text.push_str("\n未通过时 pass=false，必须同时填写 next_action（execute：退回执行修复；wait：等待条件，补齐后重新验收；review：请求上级判断）和非空 guidance（后续工作，或缺项、责任方与解除条件）。通过时不填写 next_action。等待和决策请求本身不计入验收拒绝次数。");
+    }
+    if data.role == JOB_ROLE_ACCEPTANCE {
+        text.push_str("\nnext_action 必填：report（满足报告条件并同时提交非空 report）、wait（条件补齐后重新验收）、replan（确需安排修复工作或调整计划）、arbitrate（需用户决定）。非 report 时必须提供非空 guidance，说明具体工作或缺项、责任方与解除条件；不提交完成报告。不因 unmet 或 unverifiable 自动选择重规划。");
+    }
     if matches!(data.role.as_str(), JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE) {
         if let Some(inputs) = inputs {
             let mut example: serde_json::Value =
@@ -364,7 +371,11 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
             };
             target["contract_id"] = inputs.contract["id"].clone();
             target["artifact_version"] = inputs.artifact_version.clone();
-            text = example.to_string();
+            text = format!(
+                "{}\n{}",
+                example,
+                text.strip_prefix(schema).unwrap_or_default()
+            );
         }
     }
     if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
@@ -448,7 +459,7 @@ fn analysis_prompt(data: &PromptData) -> String {
          - 每个任务写清目标、边界和验收方式；单个方案最多包含 {MAX_PLAN_TASKS} 个任务；大型项目分阶段，后续通过重规划派发下一批；\n\
          - 每个任务在依赖满足后可执行并可单独验收；deps 表示实际工程前置关系，须为无环 DAG，不因平台串行派发人为串联任务；key 使用 T1、T2 等短标识；\n\
          - 项目 acceptance 描述最终集成交付的可观察结果，任务 acceptance 描述该任务的验证方法与判据；已知缺少的必需环境应明确责任方与解除条件，不能把资源申请当成成果已验证；\n\
-         - questions：存在影响方案的关键信息缺口，最多 3 个问题；plan：需要拆分任务；direct：无需拆分，提供执行步骤和自检方法，本作业仍不实施。\n\
+         - questions：只询问无法通过调查获得、且影响目标理解、方案可行性或验收方式的必要信息；合并相关问题，不设置固定数量上限；plan：需要拆分任务；direct：无需拆分，提供执行步骤和自检方法，本作业仍不实施。\n\
          {}\
          {}\
          \n## 项目分析对话\n{}\n",
@@ -740,7 +751,7 @@ fn verifier_prompt(data: &PromptData) -> String {
          - 以任务描述和验收标准为唯一判据，由你决定核验方式，不扩大范围；\n\
          - 按当前产物完整核验全部验收标准，并复核上一轮问题。检查实际交付路径及行为；测试替身只能证明隔离部分的行为，不能代替标准要求的生产集成或实机证据；\n\
          - 每条标准在 evidence.criteria 写 passed 和非空 checks，method/result 记录实际方法与结果。未执行时写明已检查到的阻塞及缺失证据，不能将静态检查描述为运行通过；\n\
-         - 全部标准有充分证据时 pass=true、issues=[]；否则 pass=false，issues 列出本轮确认仍未解决的完整缺口，包括具体位置、实际行为或环境缺项、违反的标准与所需修复或补齐条件。已解决项仅在证据中记录，不继续列入 issues；\n\
+         - 全部标准有充分证据时 pass=true、issues=[]；否则 pass=false，issues 列出本轮确认仍未解决的完整缺口，包括具体位置、实际行为或环境缺项、违反的标准与所需修复或补齐条件。已解决项仅在证据中记录，不继续列入 issues；由你结合当前上下文选择 execute、wait 或 review，不按关键词分类；同时存在可修复缺陷和环境缺项时可先退回执行处理缺陷；\n\
          - 对合并冲突反馈核对文件与标记是否已处理，再验证任务行为；冲突处理本身不增加项目验收标准。\n\
          - {workspace_note}\n\
          {}",
@@ -838,13 +849,13 @@ fn acceptance_prompt(data: &PromptData) -> String {
         .unwrap_or_default();
     let (completion_note, workspace_label, evidence_rule) = if plain_workspace(data) {
         (
-            "当前计划的活动任务已经完成；你只做验收，不写项目报告。",
+            "当前计划的活动任务已经完成；核验集成成果，满足报告条件时在同一结果中撰写项目报告。",
             "工作区改动规模",
             "逐条对照项目验收条目，以工作区的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；",
         )
     } else {
         (
-            "当前计划的活动任务已经完成并合入项目交付分支；你只做验收，不写项目报告。",
+            "当前计划的活动任务已经完成并合入项目交付分支；核验集成成果，满足报告条件时在同一结果中撰写项目报告。",
             "交付分支改动规模",
             "逐条对照项目验收条目，以交付分支的实际状态、可执行命令和可核查文件为准；任务结果摘要只作线索；",
         )
@@ -864,9 +875,10 @@ fn acceptance_prompt(data: &PromptData) -> String {
          {}\
          - 每条验收条目给出 verdict：met（证据充分）、unmet（实现或交付不满足标准）、unverifiable（缺少验证条件或证据）、human_required（标准本身要求人的判断、签字等）；设备或 SDK 暂不可用属于 unverifiable，不据此豁免硬性验收；\n\
          - 方案明确允许以 UNKNOWN 收口的条目，判为 met，并在 evidence 中引用允许该口径的方案条文；不为通过验收而放宽标准；\n\
-         - human_required 不是重规划理由，会作为人工待办写入项目报告；只有 unmet 和 unverifiable 需要重新规划；\n\
+         - human_required 作为人工待办写入项目报告；unmet 和 unverifiable 不自动要求重规划，由你选择等待条件、安排重规划或请求人工裁决；未验证不能视为通过；\n\
          - evidence 写实际方法、命令与退出码、文件路径或版本；执行集成标准要求的检查，任务验收通过不能代替集成验证；\n\
-         - gap 说明未满足或未验证部分；存在 unmet 或 unverifiable 时，replan_reason 汇总待修复工作、资源缺项和责任方，否则为空。\n",
+         - gap 说明未满足或未验证部分；选择 replan 时，replan_reason 汇总待修复工作。\n\
+         - 无 unmet 或 unverifiable 时可选择 report，并同时用 Markdown 说明交付物及位置、使用或复现方法、关键方案、验证结果、已知风险和人工待办；报告与本轮验收证据一致，不另起报告作业。\n",
         summary,
         acceptance_criteria(data),
         assumptions,
@@ -948,8 +960,14 @@ fn summary_prompt(data: &PromptData) -> String {
             "交付分支改动规模",
         )
     };
+    let direct = data
+        .direct_result
+        .as_deref()
+        .map(|result| format!("\n## 直接完成实现与自检记录（不是独立验收）\n{result}\n"))
+        .unwrap_or_default();
     format!(
         "{completion_note}\n\
+         {direct}\n\
          \n## 已完成任务结果\n{}\n\
          {canceled}\
          \n## {workspace_label}\n{}\n\
@@ -1041,6 +1059,7 @@ mod tests {
             replan_source: None,
             acceptance_criteria: vec!["项目验收条目".into()],
             acceptance_result: None,
+            direct_result: None,
             project_summary: Some("项目方案摘要".into()),
             project_assumptions: vec!["关键假设".into()],
             confirm_mode: CONFIRM_MANUAL.into(),
@@ -1471,7 +1490,8 @@ mod tests {
             "缺少 questions schema"
         );
         assert!(prompt.contains("无环 DAG"), "缺少无环依赖约束");
-        assert!(prompt.contains("最多 3 个"), "缺少提问数量约束");
+        assert!(!prompt.contains("最多 3 个"));
+        assert!(prompt.contains("无法通过调查获得"));
         assert!(
             prompt.contains("交付文件只读；仅可写指定结果文件"),
             "缺少只读约束"
@@ -1698,7 +1718,9 @@ mod tests {
             "缺少验证命令权限"
         );
         assert!(prompt.contains("human_required"), "缺少人工待办口径");
-        assert!(prompt.contains("不写项目报告"), "缺少不写报告约束");
+        assert!(!prompt.contains("不写项目报告"));
+        assert!(prompt.contains("同时撰写项目报告"));
+        assert!(prompt.contains("不因 unmet 或 unverifiable 自动选择重规划"));
     }
 
     #[test]

@@ -599,6 +599,7 @@ export function ProjectPage({
             busy={busy}
             archived={archived}
             onSubmitReport={(action) => void submitReport(action)}
+            onRetryAcceptance={() => void run(() => api.retryProjectAcceptance(project.id))}
             onRequestReplan={requestReportReplan}
             onAddTask={openAddTaskForm}
             onOpenTasks={() => selectTab("tasks")}

@@ -35,9 +35,26 @@ async function renderDecision(state: string, actions: string[]) {
 }
 
 describe("重规划决策呈现", () => {
+  it("验收等待提供重新验收入口，不把阻塞统一描述为执行失败", async () => {
+    vi.mocked(api.getTaskArbitration).mockResolvedValue({
+      project: { id: "project", name: "项目", stage: "executing", status: "blocked", blocked_reason: null },
+      role: "verifier", task: { id: "task", key: "T1", title: "报告", stage: "verifying", status: "blocked",
+        attempts: 0, rejections: 0, last_error: "用户补齐设备后重新验收", failure_summary: null, milestone: false,
+        human_gate: null, forced_agent_id: null, forced_agent_role: null },
+      agents: [], jobs: [], actions: ["retry", "guide"], replan_request: null,
+    });
+    await act(async () => {
+      rendered = create(<ArbitrationPanel projectId="project"
+        task={{ id: "task", stage: "verifying", status: "blocked" } as Task}
+        onRefresh={async () => {}} disabled={false} onLegacyRetry={() => {}} />);
+    });
+    expect(rendered!.root.findByType("h3").children).toEqual(["验收条件与处置"]);
+    const retry = rendered!.root.findAllByType("button").find(button => button.children.includes("条件已补齐，重新验收"));
+    expect(retry?.props.disabled).toBe(false);
+  });
   it("决策进行中不允许重试或人工换人绕过上级决策", async () => {
     const view = await renderDecision("running", []);
-    expect(view.root.findByType("h3").children).toEqual(["重规划决策"]);
+    expect(view.root.findByType("h3").children).toEqual(["上级决策"]);
     const buttons = view.root.findAllByType("button");
     for (const label of ["重新决策", "记录指导并重新排队"]) {
       expect(buttons.find((button) => button.children.includes(label))?.props.disabled).toBe(true);

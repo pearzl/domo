@@ -238,6 +238,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
+  retryProjectAcceptance: (id: string) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/acceptance/retry`, { method: "POST" }),
   abandonReplan: (id: string) =>
     request<ProjectDetail>(`/api/projects/${id}/replan/abandon`, {
       method: "POST",

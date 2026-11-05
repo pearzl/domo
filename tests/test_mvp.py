@@ -164,7 +164,6 @@ def main():
                 "executor",
                 "verifier",
                 "project_acceptance",
-                "summary",
             } <= roles, roles
             assert any(job["status"] == "failed" for job in jobs), "未覆盖失败作业审计"
             assert any(

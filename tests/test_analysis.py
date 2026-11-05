@@ -179,19 +179,20 @@ def main():
             content = git(["show", f"{branch}:domo_mock/direct.txt"], repo)
             assert "mock direct completion" in content, content
 
-            # 4.1 报告被拒绝后重新直接完成。
+            # 4.1 只重写报告，不重新执行直接完成。
             call(
                 "POST",
                 f"/api/projects/{direct['id']}/report",
-                {"action": "reject", "feedback": "请重新执行直接完成。"},
+                {"action": "reject", "feedback": "请补充报告使用说明。"},
             )
             redone = wait_project(
                 direct["id"],
                 lambda detail: detail["project"]["report"]
-                and sum(1 for job in detail["jobs"] if job["role"] == "direct") >= 2,
-                "直接完成重做",
+                and sum(1 for job in detail["jobs"] if job["role"] == "summary") == 1,
+                "直接完成报告重写",
             )
             assert redone["project"]["completion_mode"] == "direct", redone["project"]
+            assert sum(job["role"] == "direct" for job in redone["jobs"]) == 1
             call("POST", f"/api/projects/{direct['id']}/report", {"action": "accept"})
             assert [item["kind"] for item in project_summary(direct["id"])["attention_items"]] == ["merge"]
 

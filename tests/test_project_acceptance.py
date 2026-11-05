@@ -2,10 +2,10 @@
 """项目整体验收冒烟测试。
 
 覆盖范围：
-  1. 全部任务完成后先派发项目验收作业，验收通过后才生成项目报告；
+  1. 全部任务完成后由一次项目验收作业核验并生成项目报告；
   2. 项目验收不通过时按验收条目生成重规划草稿，确认后执行并再次验收；
   3. 项目验收连续未通过达到上限后阻塞，等待人工裁决；
-  4. 项目验收与总结作业在作业记录和事件流中分别可查。
+  4. 项目验收和报告事件分别可查，首次收尾不派发总结作业。
 
 使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
 退出码 0 表示全部通过。
@@ -88,7 +88,7 @@ def test_acceptance_failure_replans_and_then_reports(temp, repo):
 
         roles = [job["role"] for job in detail["jobs"]]
         assert roles.count("project_acceptance") >= 2, roles
-        assert roles.count("summary") >= 1, roles
+        assert roles.count("summary") == 0, roles
 
         events = detail["events"]
         kinds = [event["kind"] for event in events]

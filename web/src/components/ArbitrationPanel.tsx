@@ -81,7 +81,7 @@ export function ArbitrationPanel({
 
   return (
     <section className="arbitration-panel">
-      <h3>{context?.replan_request ? "重规划决策" : "人工裁决"}</h3>
+      <h3>{context?.replan_request ? "上级决策" : context?.role === "verifier" ? "验收条件与处置" : "人工裁决"}</h3>
       {context?.replan_request ? <p className="muted">
         {context.replan_request.state === "waiting"
           ? "等待输入或处理条件：补齐后可重新决策，或记录指导让原任务继续。"
@@ -91,7 +91,7 @@ export function ArbitrationPanel({
         <>
           <div className="error-box">{contextError}</div>
           <button className="primary" disabled={disabled || busy} onClick={onLegacyRetry}>
-            新会话执行此任务
+            {task.stage === "verifying" ? "重新验收此任务" : "新会话执行此任务"}
           </button>
         </>
       ) : null}
@@ -104,7 +104,7 @@ export function ArbitrationPanel({
             </span>
           </div>
           <div className="kv">
-            <span>失败原因</span>
+            <span>阻塞原因与解除条件</span>
             <div>
               {context.task.failure_summary ? (
                 <div className="failure-summary">
@@ -172,7 +172,7 @@ export function ArbitrationPanel({
               disabled={disabled || busy || !context.actions.includes("retry")}
               onClick={() => void submit({ action: "retry" })}
             >
-              {context.replan_request ? "重新决策" : "新会话执行"}
+              {context.replan_request ? "重新决策" : context.role === "verifier" ? "条件已补齐，重新验收" : "新会话执行"}
             </button>
           </div>
           {context.actions.includes("switch_agent") ? <div className="arbitration-switch">

@@ -30,9 +30,8 @@ export interface HistoryJob {
   finishedAt: string | null;
 }
 
-/// 验收结论：通过、拒绝、验收异常（全部尝试失败且无结论）、待验收（尚未结束或结论待定）、
-/// 未验收（没有验收作业）。
-export type HistoryVerdict = "passed" | "rejected" | "error" | "pending" | "none";
+/// 验收结论及等待、决策处置；等待条件和请求决策不属于失败尝试。
+export type HistoryVerdict = "passed" | "rejected" | "waiting" | "review" | "error" | "pending" | "none";
 
 /// 同一执行轮内多次验收尝试的汇总；明细仍保留在 verifiers。
 export interface VerifierAttempts {
@@ -112,6 +111,8 @@ export function unlinkedVerifiersLabel(count: number): string {
 export const HISTORY_VERDICT_LABELS: Record<HistoryVerdict, string> = {
   passed: "通过",
   rejected: "拒绝",
+  waiting: "等待验证条件",
+  review: "请求上级决策",
   error: "验收异常",
   pending: "待验收",
   none: "未验收",
@@ -123,6 +124,8 @@ export const HISTORY_VERDICT_TONES: Record<
 > = {
   passed: "success",
   rejected: "danger",
+  waiting: "info",
+  review: "info",
   error: "danger",
   pending: "info",
   none: "muted",
@@ -174,17 +177,19 @@ function toHistoryJob(
 /// 单个验收尝试的结论；只有验收结束且解析出通过或拒绝时才有结论。
 function conclusiveVerdict(
   record: VerificationRecord | undefined,
-): "passed" | "rejected" | null {
+): HistoryVerdict | null {
   if (!record) return null;
   if (RUNNING_STATUSES.has(record.status)) return null;
   if (record.passed === true) return "passed";
+  if (record.next_action === "wait") return "waiting";
+  if (record.next_action === "review") return "review";
   if (record.passed === false) return "rejected";
   return null;
 }
 
 interface VerifierAttempt {
   job: JobSummary;
-  verdict: "passed" | "rejected" | null;
+  verdict: HistoryVerdict | null;
   failed: boolean;
 }
 

@@ -111,6 +111,7 @@ elif role == "project_acceptance":
     result = {
         "kind": "project_acceptance",
         "summary": "项目验收通过",
+        "next_action": "report", "report": "# 报告：完成",
         "criteria": [{
             "id": "A1",
             "source": "proposal_acceptance",

@@ -385,11 +385,8 @@ pub struct ProjectRow {
     #[serde(skip_serializing)]
     #[allow(dead_code)]
     pub replan_cleanup_needed: i64,
-    /// Latest project-level acceptance verdict. The job result keeps the full
-    /// audit trail; this copy is the current gate for report dispatch.
-    #[serde(skip_serializing)]
+    /// Current acceptance disposition; immutable job results retain its history.
     pub acceptance: Option<String>,
-    #[serde(skip_serializing)]
     pub acceptance_passed: i64,
     #[serde(skip_serializing)]
     pub acceptance_round: i64,

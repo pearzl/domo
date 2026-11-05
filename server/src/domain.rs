@@ -112,6 +112,7 @@ pub enum ParsedResult {
         decision: String,
         reason: String,
         guidance: String,
+        resume_stage: Option<String>,
     },
     ExecutorDerive {
         summary: String,
@@ -121,6 +122,7 @@ pub enum ParsedResult {
         pass: bool,
         reason: String,
         issues: Vec<String>,
+        action: AcceptanceAction,
     },
     Report {
         summary: String,
@@ -129,7 +131,39 @@ pub enum ParsedResult {
         summary: String,
         criteria: Vec<AcceptanceCriterion>,
         replan_reason: String,
+        action: AcceptanceAction,
     },
+}
+
+/// A business disposition, separate from whether the evidence meets the criteria.
+#[derive(Debug, Clone, Default)]
+pub struct AcceptanceAction {
+    pub next_action: String,
+    pub guidance: String,
+    pub report: String,
+}
+
+fn acceptance_action(value: &Value, allowed: &[&str]) -> Result<AcceptanceAction, String> {
+    let next_action = string_field(value, "next_action").unwrap_or_default();
+    if !allowed.contains(&next_action.as_str()) {
+        return Err(format!("next_action 必须是 {}", allowed.join("、")));
+    }
+    let guidance = string_field(value, "guidance").unwrap_or_default();
+    let report = string_field(value, "report").unwrap_or_default();
+    if next_action == "report" && report.is_empty() {
+        return Err("生成报告时必须提供非空 report".into());
+    }
+    if next_action != "report" && !report.is_empty() {
+        return Err("未完成验收时不能同时提交完成报告".into());
+    }
+    if next_action != "report" && guidance.is_empty() {
+        return Err("未完成验收时必须提供非空 guidance，说明后续工作或责任方与解除条件".into());
+    }
+    Ok(AcceptanceAction {
+        next_action,
+        guidance,
+        report,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +283,12 @@ fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
         decision,
         reason,
         guidance,
+        resume_stage: match string_field(value, "resume_stage") {
+            Some(stage) if !matches!(stage.as_str(), "executing" | "verifying") => {
+                return Err("resume_stage 必须是 executing 或 verifying".into());
+            }
+            stage => stage,
+        },
     })
 }
 
@@ -417,6 +457,14 @@ fn parse_verifier_result(value: &Value) -> Result<ParsedResult, String> {
     Ok(ParsedResult::Verdict {
         pass,
         reason,
+        action: if pass {
+            if !issues.is_empty() {
+                return Err("验收通过时 issues 必须为空".into());
+            }
+            AcceptanceAction::default()
+        } else {
+            acceptance_action(value, &["execute", "wait", "review"])?
+        },
         issues,
     })
 }
@@ -477,10 +525,15 @@ fn parse_acceptance_result(value: &Value) -> Result<ParsedResult, String> {
             gap: string_field(item, "gap").unwrap_or_default(),
         });
     }
+    let action = acceptance_action(value, &["report", "wait", "replan", "arbitrate"])?;
+    if action.next_action == "report" && criteria.iter().any(AcceptanceCriterion::blocks_report) {
+        return Err("存在未满足或无法验证条目，不能生成完成报告".into());
+    }
     Ok(ParsedResult::ProjectAcceptance {
         summary: string_field(value, "summary").unwrap_or_default(),
         criteria,
         replan_reason: string_field(value, "replan_reason").unwrap_or_default(),
+        action,
     })
 }
 
@@ -1294,7 +1347,7 @@ mod tests {
             {"id":"A1","criterion":"产物可运行","verdict":"met","evidence":["command: check -> exit 0"]},
             {"id":"A2","criterion":"人工签字","verdict":"human_required","evidence":[]},
             {"id":"A3","criterion":"缺失的能力","verdict":"unmet","gap":"尚未实现"}
-        ]}"#;
+        ],"next_action":"replan","guidance":"修复缺失能力"}"#;
         match parse_result(JOB_ROLE_ACCEPTANCE, raw).unwrap() {
             ParsedResult::ProjectAcceptance {
                 summary, criteria, ..
@@ -1333,7 +1386,7 @@ mod tests {
 
     #[test]
     fn parses_verdict() {
-        let raw = r#"{"pass":false,"reason":"tests fail","issues":["a"]}"#;
+        let raw = r#"{"pass":false,"reason":"tests fail","issues":["a"],"next_action":"execute","guidance":"修复测试"}"#;
         match parse_result(ROLE_VERIFIER, raw).unwrap() {
             ParsedResult::Verdict { pass, issues, .. } => {
                 assert!(!pass);
@@ -1341,6 +1394,39 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn acceptance_dispositions_require_explicit_actions_and_truthful_reports() {
+        for action in ["execute", "wait", "review"] {
+            let raw = format!(
+                r#"{{"pass":false,"reason":"设备缺项","next_action":"{action}","guidance":"用户补齐后重新核验"}}"#
+            );
+            assert!(parse_result(ROLE_VERIFIER, &raw).is_ok());
+        }
+        for raw in [
+            r#"{"pass":false}"#,
+            r#"{"pass":false,"next_action":"wait"}"#,
+            r#"{"pass":false,"next_action":"approve","guidance":"x"}"#,
+            r#"{"pass":true,"issues":["缺少证据"]}"#,
+        ] {
+            assert!(parse_result(ROLE_VERIFIER, raw).is_err());
+        }
+        for verdict in ["met", "unmet", "unverifiable", "human_required"] {
+            for action in ["report", "wait", "replan", "arbitrate"] {
+                let report = if action == "report" { "报告" } else { "" };
+                let raw = format!(
+                    r#"{{"kind":"project_acceptance","criteria":[{{"criterion":"核验报告","verdict":"{verdict}"}}],"next_action":"{action}","guidance":"补齐条件","report":"{report}"}}"#
+                );
+                let expected = action != "report" || matches!(verdict, "met" | "human_required");
+                assert_eq!(
+                    parse_result(JOB_ROLE_ACCEPTANCE, &raw).is_ok(),
+                    expected,
+                    "{raw}"
+                );
+            }
+        }
+        assert!(parse_result(JOB_ROLE_ACCEPTANCE, r#"{"kind":"project_acceptance","criteria":[{"criterion":"x","verdict":"met"}],"next_action":"report","report":" "}"#).is_err());
     }
 
     #[test]

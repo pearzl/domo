@@ -1402,16 +1402,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(())
             }
         }
-        (
-            JOB_ROLE_VERIFIER,
-            Some(ParsedResult::Verdict {
-                pass,
-                reason,
-                issues,
-            }),
-        ) => {
+        (JOB_ROLE_VERIFIER, Some(verdict @ ParsedResult::Verdict { .. })) => {
             if let Some(task) = task.as_ref() {
-                handle_verdict(state, &project, task, *pass, reason, issues, &agent).await
+                handle_verdict(state, &project, task, &job, verdict, &agent).await
             } else {
                 Ok(())
             }
@@ -1432,8 +1425,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 summary,
                 criteria,
                 replan_reason,
+                action,
             }),
-        ) => handle_project_acceptance(state, &project, summary, criteria, replan_reason).await,
+        ) => {
+            handle_project_acceptance(state, &project, summary, criteria, replan_reason, action)
+                .await
+        }
         (JOB_ROLE_ACCEPTANCE, _) => {
             let process_failure = run.process_failure();
             handle_acceptance_failure(

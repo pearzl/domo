@@ -134,7 +134,8 @@ elif role == "analysis":
         "acceptance":["domo_mock/T1.txt exists"], "deps":[]}]}
 elif role == "project_acceptance":
     r = {"kind":"project_acceptance", "contract_id":c["contract"]["id"], "artifact_version":c["artifact_version"],
-        "criteria":[{"criterion":"报告存在", "verdict":"met", "evidence":["检查 domo_mock/T1.txt 文件存在"]}]}
+        "criteria":[{"criterion":"报告存在", "verdict":"met", "evidence":["检查 domo_mock/T1.txt 文件存在"]}],
+        "next_action":"report", "report":"报告就绪"}
 else:
     r = {"kind":"report", "summary":"报告就绪"}
 (jd / "result.json").write_text(json.dumps(r), encoding="utf-8")
@@ -160,6 +161,9 @@ def test_project_switch(root):
                 "goal": f"[single] fail-{role}", "confirm_mode": "auto"})["project"]
             base = f"/api/projects/{p['id']}"
             d = wait_detail(call, base, lambda d: bool(d["project"]["report"]), "永久错误自动换人")
+            if role == "summary":
+                call("POST", base + "/report", {"action": "reject", "feedback": "核对报告"})
+                d = wait_detail(call, base, lambda d: bool(d["project"]["report"]) and len([j for j in d["jobs"] if j["role"] == role]) == 2, "报告重写永久错误自动换人")
             jobs = [j for j in d["jobs"] if j["role"] == role]
             assert [(j["agent_id"], j["status"]) for j in jobs] == [(primary, "failed"), (backup, "succeeded")], jobs
             with sqlite3.connect(root / "data" / "domo.db") as db:

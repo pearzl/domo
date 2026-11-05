@@ -14,7 +14,7 @@ def main():
             server.restart()
             assert server.call("GET", "/api/agents") == before
         with sqlite3.connect(root / "data" / "domo.db") as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 3
             columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
             assert not {"executor_agent_id", "verifier_agent_id"} & columns
             assert not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'task_agent_roles'").fetchall()

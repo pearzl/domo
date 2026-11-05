@@ -17,12 +17,20 @@ pub(super) async fn handle_verdict(
     state: &AppState,
     project: &ProjectRow,
     task: &TaskRow,
-    pass: bool,
-    reason: &str,
-    issues: &[String],
+    job: &JobRow,
+    verdict: &domain::ParsedResult,
     agent: &AgentRow,
 ) -> Result<()> {
-    if pass {
+    let domain::ParsedResult::Verdict {
+        pass,
+        reason,
+        issues,
+        action,
+    } = verdict
+    else {
+        anyhow::bail!("缺少验收结论")
+    };
+    if *pass {
         let current = load_task(&state.db, &task.id)
             .await?
             .unwrap_or_else(|| task.clone());
@@ -101,8 +109,17 @@ pub(super) async fn handle_verdict(
         }
     } else {
         let _guard = state.schedule_lock.lock().await;
-        let rejections = task.rejections + 1;
-        let blocked = rejections >= 3;
+        let execute = action.next_action == "execute";
+        let rejections = task.rejections + i64::from(execute);
+        let threshold = execute && rejections >= 3;
+        let reviewed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM replan_requests WHERE task_id = ? AND origin = 'rejections'",
+        )
+        .bind(&task.id)
+        .fetch_one(&state.db)
+        .await?;
+        let review = action.next_action == "review" || (threshold && reviewed == 0);
+        let blocked = action.next_action != "execute" || threshold;
         let pause = task_pause_intent(state, &task.id).await?;
         let status = match pause {
             Some(paused) => paused,
@@ -111,20 +128,22 @@ pub(super) async fn handle_verdict(
         };
         // Each verdict is a complete current list; old verdicts remain on jobs.
         let current_issues = if issues.is_empty() {
-            models_list_json(&[reason.to_string()])
+            vec![reason.to_string()]
         } else {
-            models_list_json(issues)
+            issues.clone()
         };
+        let current_issues = models_list_json(&current_issues);
         sqlx::query(
             "UPDATE tasks SET stage = ?, status = ?, attempts = 0, rejections = ?, verifier_issues = ?, \
-             last_error = ?, agent_id = ?, waiting_reason = NULL, updated_at = ? WHERE id = ?",
+              last_error = ?, last_failure_kind = NULL, agent_id = ?, waiting_reason = ?, updated_at = ? WHERE id = ?",
         )
-        .bind(TASK_STAGE_EXECUTING)
+        .bind(if execute { TASK_STAGE_EXECUTING } else { TASK_STAGE_VERIFYING })
         .bind(status)
         .bind(rejections)
         .bind(&current_issues)
-        .bind(reason)
+        .bind(format!("{reason}\n处理指导：{}", action.guidance))
         .bind(&agent.id)
+        .bind((!execute).then_some(action.guidance.as_str()))
         .bind(now())
         .bind(&task.id)
         .execute(&state.db)
@@ -134,18 +153,53 @@ pub(super) async fn handle_verdict(
             &state.bus,
             Some(&project.id),
             Some(&task.id),
-            if status == STATUS_BLOCKED {
+            if !execute {
+                if review {
+                    "task_decision_requested"
+                } else {
+                    "task_verification_waiting"
+                }
+            } else if threshold {
                 "task_blocked"
             } else {
                 "task_rejected"
             },
-            if status == STATUS_BLOCKED {
-                format!("任务 {} 连续 3 次验收未通过，已阻塞：{reason}", task.key)
+            if !execute || threshold {
+                format!(
+                    "任务 {} 验收未闭合（{}）：{reason}；{}",
+                    task.key,
+                    if review {
+                        "等待上级决策"
+                    } else if execute {
+                        "等待人工裁决"
+                    } else {
+                        "等待验证条件"
+                    },
+                    action.guidance
+                )
             } else {
                 format!("任务 {} 验收未通过，退回执行：{reason}", task.key)
             },
         )
         .await;
+        if review {
+            crate::replan_review::submit_locked(
+                state,
+                job,
+                &format!(
+                    "{reason}\n{}\n当前问题：{}",
+                    action.guidance,
+                    issues.join("；")
+                ),
+                if threshold { "rejections" } else { "verifier" },
+                if execute {
+                    TASK_STAGE_EXECUTING
+                } else {
+                    TASK_STAGE_VERIFYING
+                },
+            )
+            .await?;
+        }
     }
     Ok(())
 }

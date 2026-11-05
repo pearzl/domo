@@ -2,7 +2,7 @@
 """人工返工和指导创建新作业与会话，历史失败不能替代后续执行。
 
 覆盖 Git/普通工作区、暂停/未暂停项目、任务重试/指导裁决入口。执行先失败、
-后续执行成功但连续三次验收拒绝时，人工返工创建新执行作业，保留历史失败，
+后续执行成功但上级指导后仍被拒绝时，人工返工创建新执行作业，保留历史失败，
 新验收关联实际执行作业。使用 mock 与标准库 CLI，不访问模型或外网。
 """
 import sys
@@ -22,6 +22,8 @@ result = {"pass": passed, "reason": "报告核验完成", "issues": [] if passed
         "criteria": [{"criterion": item, "passed": passed,
             "checks": [{"method": "检查报告结论", "result": "满足要求" if passed else "结论不完整"}]}
             for item in context["task"]["acceptance"]]}}
+if not passed:
+    result.update(next_action="execute", guidance="补充报告结论")
 (job_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
 '''
 
@@ -38,13 +40,14 @@ def run_case(server, root, workspace, paused, action):
         "goal": "[single] 生成研究报告", "confirm_mode": "auto"})["project"]
     base = f"/api/projects/{project['id']}"
     before = wait_detail(call, base, lambda d: bool(d["tasks"])
-        and d["tasks"][0]["status"] == "blocked" and d["tasks"][0]["rejections"] == 3
+        and d["tasks"][0]["status"] == "blocked" and d["tasks"][0]["rejections"] == 4
         and all(j["status"] != "running" for j in d["jobs"]), "连续验收拒绝后阻塞")
     task_id = before["tasks"][0]["id"]
     executions = [j for j in before["jobs"] if j["role"] == "executor"]
-    assert len(executions) == 4, executions
+    assert len(executions) == 5, executions
+    assert len([j for j in before["jobs"] if j["role"] == "replan_review"]) == 1
     assert executions[0]["status"] == "failed", executions
-    assert all(j["status"] == "succeeded" for j in executions[-3:]), executions
+    assert all(j["status"] == "succeeded" for j in executions[-4:]), executions
     old_failed = executions[0]["id"]
     if paused:
         call("POST", base + "/pause", {})
@@ -83,7 +86,7 @@ def main():
         init_repo(root / "repo")
         verifier = root / "verifier.py"
         verifier.write_text(f"PASS_ROOT = {str(root)!r}\n" + VERIFIER, encoding="utf-8")
-        with Server(root, env={"DOMO_MOCK_DELAY_MS": "20", "DOMO_MOCK_FAIL_ONCE": "1"}) as server:
+        with Server(root, env={"DOMO_MOCK_DELAY_MS": "20", "DOMO_MOCK_FAIL_ONCE": "1", "DOMO_MOCK_PLANNER_REPLAN_DECISION": "reject"}) as server:
             call = server.call
             for agent in call("GET", "/api/agents"):
                 call("PATCH", f"/api/agents/{agent['id']}", {"enabled": False})

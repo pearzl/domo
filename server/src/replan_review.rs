@@ -25,6 +25,8 @@ pub struct ReviewRequest {
     pub review_job_id: Option<String>,
     pub attempts: i64,
     pub guidance: String,
+    pub origin: String,
+    pub resume_stage: String,
 }
 
 pub async fn initialize(pool: &SqlitePool) -> crate::db::DbResult<()> {
@@ -35,7 +37,8 @@ pub async fn initialize(pool: &SqlitePool) -> crate::db::DbResult<()> {
           source_job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
           reviewer_task_id TEXT REFERENCES tasks(id), generation INTEGER NOT NULL,
           reason TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', review_job_id TEXT REFERENCES jobs(id),
-          attempts INTEGER NOT NULL DEFAULT 0, guidance TEXT NOT NULL DEFAULT '',
+           attempts INTEGER NOT NULL DEFAULT 0, guidance TEXT NOT NULL DEFAULT '',
+           origin TEXT NOT NULL DEFAULT 'executor', resume_stage TEXT NOT NULL DEFAULT 'executing',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_replan_request_active ON replan_requests(task_id)
@@ -53,6 +56,17 @@ pub async fn active(pool: &SqlitePool, task_id: &str) -> Result<Option<ReviewReq
 
 pub async fn submit(state: &AppState, job: &JobRow, reason: &str) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    submit_locked(state, job, reason, "executor", TASK_STAGE_EXECUTING).await
+}
+
+/// The verdict and its decision request share the scheduling lock.
+pub async fn submit_locked(
+    state: &AppState,
+    job: &JobRow,
+    reason: &str,
+    origin: &str,
+    resume_stage: &str,
+) -> Result<()> {
     let Some(task_id) = job.task_id.as_deref() else {
         anyhow::bail!("重规划请求缺少任务")
     };
@@ -89,9 +103,9 @@ pub async fn submit(state: &AppState, job: &JobRow, reason: &str) -> Result<()> 
         "重规划审批：等待项目规划者决策"
     };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("INSERT INTO replan_requests (id, project_id, task_id, source_job_id, reviewer_task_id, generation, reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO replan_requests (id, project_id, task_id, source_job_id, reviewer_task_id, generation, reason, created_at, updated_at, origin, resume_stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(new_id("rpr")).bind(&job.project_id).bind(task_id).bind(&job.id).bind(&task.parent_id)
-        .bind(project.replan_generation).bind(reason).bind(&timestamp).bind(&timestamp).execute(&mut *tx).await?;
+        .bind(project.replan_generation).bind(reason).bind(&timestamp).bind(&timestamp).bind(origin).bind(resume_stage).execute(&mut *tx).await?;
     sqlx::query("UPDATE tasks SET status = CASE WHEN status IN ('paused', 'pausing') THEN status ELSE 'blocked' END, waiting_reason = ?, last_error = ?, updated_at = ? WHERE id = ?")
         .bind(waiting).bind(reason).bind(&timestamp).bind(task_id).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -563,11 +577,16 @@ pub async fn context(state: &AppState, job: &JobRow) -> Result<Value> {
         "title": task.title, "description": task.description, "acceptance": parse_string_list(&task.acceptance),
         "deps": parse_string_list(&task.deps), "parent_id": task.parent_id,
         "stage": task.stage, "status": task.status, "worktree": task.worktree, "branch": task.branch,
+        "rejections": task.rejections, "issues": parse_string_list(&task.verifier_issues),
         "summary": task.result_summary.as_deref().unwrap_or_default().chars().take(2000).collect::<String>(),
     })).collect::<Vec<_>>();
+    let history: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, role, result, error FROM jobs WHERE task_id = ? AND status != 'running' ORDER BY rowid DESC LIMIT 6")
+        .bind(&request.task_id).fetch_all(&state.db).await?;
     Ok(
         json!({"request": request, "reviewer": if request.reviewer_task_id.is_some() { "parent" } else { "planner" },
-        "tasks": tasks, "source_job": {"id": source.id, "result": source.result, "error": source.error}}),
+        "tasks": tasks, "source_job": {"id": source.id, "result": source.result, "error": source.error},
+        "recent_jobs": history.into_iter().map(|(id, role, result, error)| json!({"id": id, "role": role, "result": result, "error": error})).collect::<Vec<_>>()}),
     )
 }
 
@@ -662,6 +681,7 @@ pub async fn settle_locked(
         decision,
         reason,
         guidance,
+        resume_stage,
     }) = parsed
     else {
         let retry = interrupted || request.attempts < 3;
@@ -704,10 +724,16 @@ pub async fn settle_locked(
     };
     sqlx::query("UPDATE replan_requests SET state = ?, guidance = ?, updated_at = ? WHERE id = ? AND state = 'running'")
         .bind(next).bind(&note).bind(now()).bind(&request.id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE tasks SET guidance = CASE WHEN guidance = '' THEN ? ELSE guidance || char(10) || ? END, status = CASE WHEN status IN ('paused', 'pausing') THEN status WHEN ? THEN 'queued' ELSE 'blocked' END, last_error = CASE WHEN ? THEN NULL ELSE ? END, waiting_reason = ?, updated_at = ? WHERE id = ?")
+    let stage = resume_stage.as_deref().unwrap_or(&request.resume_stage);
+    sqlx::query("UPDATE tasks SET guidance = CASE WHEN guidance = '' THEN ? ELSE guidance || char(10) || ? END, status = CASE WHEN status IN ('paused', 'pausing') THEN status WHEN ? THEN 'queued' ELSE 'blocked' END, last_error = CASE WHEN ? THEN NULL ELSE ? END, waiting_reason = ?, stage = ?, updated_at = ? WHERE id = ?")
         .bind(&note).bind(&note).bind(decision == "reject").bind(decision == "reject").bind(&note)
         .bind(if next == "rejected" { None } else { Some(note.as_str()) })
-        .bind(now()).bind(&request.task_id).execute(&mut *tx).await?;
+        .bind(stage).bind(now()).bind(&request.task_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE replan_requests SET resume_stage = ? WHERE id = ?")
+        .bind(stage)
+        .bind(&request.id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     emit(
         &state.db,
@@ -747,8 +773,8 @@ pub async fn retry_locked(
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE replan_requests SET state = ?, attempts = 0, review_job_id = NULL, updated_at = ? WHERE id = ?")
         .bind(if guidance.is_some() { "resolved" } else { "pending" }).bind(now()).bind(&request.id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE tasks SET status = ?, guidance = CASE WHEN ? IS NULL THEN guidance ELSE guidance || char(10) || ? END, waiting_reason = ?, last_error = NULL, updated_at = ? WHERE id = ?")
-        .bind(if guidance.is_some() { STATUS_QUEUED } else { STATUS_BLOCKED }).bind(guidance).bind(guidance)
+    sqlx::query("UPDATE tasks SET status = CASE WHEN status IN ('paused', 'pausing') THEN status ELSE ? END, stage = ?, guidance = CASE WHEN ? IS NULL THEN guidance ELSE guidance || char(10) || ? END, waiting_reason = ?, last_error = NULL, updated_at = ? WHERE id = ?")
+        .bind(if guidance.is_some() { STATUS_QUEUED } else { STATUS_BLOCKED }).bind(&request.resume_stage).bind(guidance).bind(guidance)
         .bind(if guidance.is_some() { None } else { Some("重规划审批：等待重新审批") }).bind(now()).bind(&task.id).execute(&mut *tx).await?;
     sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing', 'archived') THEN status ELSE 'running' END, blocked_reason = NULL WHERE id = ?")
         .bind(&task.project_id).execute(&mut *tx).await?;

@@ -78,6 +78,7 @@ pub(super) async fn handle_project_acceptance(
     summary: &str,
     criteria: &[AcceptanceCriterion],
     replan_reason: &str,
+    action: &domain::AcceptanceAction,
 ) -> Result<()> {
     let snapshot = serde_json::to_string(&json!({
         "kind": "project_acceptance",
@@ -91,13 +92,15 @@ pub(super) async fn handle_project_acceptance(
             "gap": &item.gap,
         })).collect::<Vec<_>>(),
         "replan_reason": replan_reason,
+        "next_action": action.next_action,
+        "guidance": action.guidance,
     }))
     .unwrap_or_default();
     let gaps: Vec<&AcceptanceCriterion> = criteria
         .iter()
         .filter(|item| item.blocks_report())
         .collect();
-    let passed = gaps.is_empty();
+    let passed = gaps.is_empty() && action.next_action == "report";
     let timestamp = now();
     let replanning;
     {
@@ -120,13 +123,14 @@ pub(super) async fn handle_project_acceptance(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
                  ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
                  acceptance = ?, acceptance_passed = 1, acceptance_round = 0, \
-                 acceptance_at = ?, blocked_reason = NULL, report = NULL, \
+                  acceptance_at = ?, blocked_reason = NULL, report = ?, \
                  report_feedback = NULL, updated_at = ? WHERE id = ?",
             )
             .bind(STAGE_SUMMARIZING)
-            .bind(STATUS_RUNNING)
+            .bind(STATUS_BLOCKED)
             .bind(&snapshot)
             .bind(&timestamp)
+            .bind(&action.report)
             .bind(&timestamp)
             .bind(&project.id)
             .execute(&state.db)
@@ -178,6 +182,17 @@ pub(super) async fn handle_project_acceptance(
             format!("项目验收通过{suffix}"),
         )
         .await;
+        if !replanning {
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&project.id),
+                None,
+                "report_ready",
+                "项目验收与报告已生成，等待人工验收",
+            )
+            .await;
+        }
         return Ok(());
     }
 
@@ -198,6 +213,30 @@ pub(super) async fn handle_project_acceptance(
     .await;
 
     if replanning {
+        return Ok(());
+    }
+    if action.next_action != "replan" {
+        let _guard = state.schedule_lock.lock().await;
+        let reason = format!(
+            "{}：{}\n{gap_text}",
+            if action.next_action == "wait" {
+                "项目验收等待条件"
+            } else {
+                "项目验收等待人工裁决"
+            },
+            action.guidance
+        );
+        sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing', 'archived') THEN status ELSE 'blocked' END, blocked_reason = ?, updated_at = ? WHERE id = ?")
+            .bind(&reason).bind(now()).bind(&project.id).execute(&state.db).await?;
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            None,
+            "project_acceptance_blocked",
+            reason,
+        )
+        .await;
         return Ok(());
     }
     if project.acceptance_round >= domain::MAX_AUTO_ACCEPTANCE_REPLANS {
@@ -229,6 +268,7 @@ pub(super) async fn handle_project_acceptance(
         return Ok(());
     }
 
+    let reason = format!("{reason}\n{}", action.guidance);
     let outcome = replan::request(state, &project.id, &reason, REPLAN_SOURCE_ACCEPTANCE).await?;
     if outcome.is_some() {
         sqlx::query("UPDATE projects SET acceptance_round = ?, updated_at = ? WHERE id = ?")

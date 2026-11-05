@@ -46,6 +46,7 @@ elif role == "project_acceptance":
     result = {
         "kind": "project_acceptance",
         "summary": "脚本化项目验收通过",
+        "next_action": "report", "report": "# 脚本化报告：全部任务已完成。",
         "criteria": [
             {
                 "id": "A1",

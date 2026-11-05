@@ -69,12 +69,24 @@ pub(super) async fn build_prompt_data(
                 summary: row.result_summary.unwrap_or_default(),
             });
         }
+        let verification_result: Option<String> = sqlx::query_scalar(
+            "SELECT result FROM jobs WHERE task_id = ? AND role = 'verifier' AND status = 'succeeded' ORDER BY rowid DESC LIMIT 1")
+            .bind(&task.id).fetch_optional(&state.db).await?.flatten();
+        let verification_guidance = verification_result
+            .as_deref()
+            .and_then(crate::domain::extract_json)
+            .filter(|result| result["pass"] == false)
+            .and_then(|result| result["guidance"].as_str().map(str::to_string));
+        let guidance = match verification_guidance {
+            Some(guidance) => format!("{}\n验收处置指导：{guidance}", task.guidance),
+            None => task.guidance.clone(),
+        };
         task_info = Some(TaskInfo {
             key: task.key.clone(),
             title: task.title.clone(),
             description: task.description.clone(),
             acceptance: parse_json_list(&task.acceptance),
-            guidance: task.guidance.clone(),
+            guidance,
         });
     }
     let messages = sqlx::query_as::<_, MessageRow>(
@@ -85,7 +97,7 @@ pub(super) async fn build_prompt_data(
     .await?;
     let mut messages = messages;
     if matches!(job.role.as_str(), JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT) {
-        // 报告评议记录只属于总结作业和直接重做反馈。
+        // 报告评议由只读报告重写作业处理，不改变分析与实施输入。
         messages.retain(|message| message.role != REPORT_MESSAGE_ROLE);
     }
     let mut summary_tasks = Vec::new();
@@ -145,7 +157,7 @@ pub(super) async fn build_prompt_data(
                     String::new()
                 }
             }
-            JOB_ROLE_SUMMARY => git::diff_between(
+            JOB_ROLE_SUMMARY | JOB_ROLE_ACCEPTANCE => git::diff_between(
                 &paths::project_repo(&workspace),
                 &project.base_branch,
                 &project.branch,
@@ -209,6 +221,14 @@ pub(super) async fn build_prompt_data(
         replan_source: project.replan_source.clone(),
         acceptance_criteria,
         acceptance_result: project.acceptance.clone(),
+        direct_result: if project.completion_mode == COMPLETION_DIRECT
+            && job.role == JOB_ROLE_SUMMARY
+        {
+            sqlx::query_scalar::<_, Option<String>>("SELECT result FROM jobs WHERE project_id = ? AND role = 'direct' AND status = 'succeeded' AND replan_generation = ? ORDER BY rowid DESC LIMIT 1")
+                .bind(&project.id).bind(project.replan_generation).fetch_optional(&state.db).await?.flatten()
+        } else {
+            None
+        },
         project_summary,
         project_assumptions,
         confirm_mode: project.confirm_mode.clone(),
@@ -261,7 +281,7 @@ pub(super) fn build_context(
             "stage": task.stage,
             "attempts": task.attempts,
             "rejections": task.rejections,
-            "guidance": task.guidance,
+            "guidance": data.task.as_ref().map(|info| info.guidance.as_str()).unwrap_or(&task.guidance),
         })),
         "parent_task": data.derived_from.as_ref().map(|parent| json!({
             "key": parent.key, "title": parent.title, "summary": parent.summary,
@@ -290,6 +310,7 @@ pub(super) fn build_context(
         "diff_stat": data.diff_stat,
         "acceptance_criteria": data.acceptance_criteria,
         "acceptance_result": data.acceptance_result,
+        "direct_result": data.direct_result,
         "report_feedback": data.report_feedback,
         "project_summary": data.project_summary,
         "project_assumptions": data.project_assumptions,

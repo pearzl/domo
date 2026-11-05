@@ -16,6 +16,7 @@ export function ProjectReportPanel({
   onRequestReplan,
   onAddTask,
   onOpenTasks,
+  onRetryAcceptance,
 }: {
   project: Project;
   reviewMessages: Message[];
@@ -28,6 +29,7 @@ export function ProjectReportPanel({
   onRequestReplan: () => void;
   onAddTask: () => void;
   onOpenTasks?: () => void;
+  onRetryAcceptance?: () => void;
 }) {
   if (project.stage !== "summarizing" && !project.report) return (
     <section className="panel" aria-label="项目报告">
@@ -55,7 +57,9 @@ export function ProjectReportPanel({
         <RichContent content={project.report} className="report" />
       ) : project.stage === "summarizing" ? (
         project.blocked_reason ? (
-          <p className="muted">报告生成失败，可在上方作业记录中选择适用的执行操作。</p>
+          <div><p className="muted">{project.blocked_reason}</p>
+            {project.acceptance && !project.acceptance_passed && project.status === "blocked" && onRetryAcceptance ? <button className="primary" disabled={busy} onClick={onRetryAcceptance}>条件已补齐，重新验收</button> : <p className="muted">可在作业记录中查看原因及适用操作。</p>}
+          </div>
         ) : (
           <p className="muted">规划者正在依据评议意见重写报告…</p>
         )
@@ -89,13 +93,9 @@ export function ProjectReportPanel({
                   className="secondary"
                   disabled={busy || !project.report || !feedback.trim()}
                   onClick={() => onSubmitReport("reject")}
-                  title={
-                    project.completion_mode === "direct"
-                      ? "记录意见并重新执行直接完成"
-                      : "记录意见并要求规划者重新撰写报告"
-                  }
+                   title="记录意见并要求规划者只读重写报告，不重新实施"
                 >
-                  {project.completion_mode === "direct" ? "重做并重新总结" : "重新撰写"}
+                   重新撰写
                 </button>
                 <button
                   className="secondary"
@@ -124,7 +124,7 @@ export function ProjectReportPanel({
             </p>
           ) : (
             <p className="muted">
-              直接完成模式下，“重做并重新总结”会重新执行并生成新报告。
+               重新撰写只修改报告；交付内容需要修复时，请要求重新规划。
             </p>
           )}
         </div>

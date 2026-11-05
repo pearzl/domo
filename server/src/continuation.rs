@@ -284,7 +284,9 @@ pub async fn validate(state: &AppState, job: &JobRow) -> Result<Checkpoint> {
             || project.report.is_some()
             || (job.role == JOB_ROLE_DIRECT && project.completion_mode != COMPLETION_DIRECT)
             || (job.role == JOB_ROLE_ACCEPTANCE && project.acceptance_passed != 0)
-            || (job.role == JOB_ROLE_SUMMARY && project.acceptance_passed == 0)
+            || (job.role == JOB_ROLE_SUMMARY
+                && project.acceptance_passed == 0
+                && project.completion_mode != COMPLETION_DIRECT)
         {
             bail!("项目阶段不允许继续");
         }

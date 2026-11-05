@@ -54,7 +54,7 @@ use self::projects::{
     abandon_replan, create_project, get_project, get_project_agents, get_task_agent_pool,
     list_projects, replan_project, update_project_agent, update_project_goal, update_task_agent,
 };
-use self::reports::submit_report;
+use self::reports::{retry_acceptance, submit_report};
 use self::tasks::{
     confirm_analysis, create_task, pause_project, pause_task, post_analysis_message,
     reorder_task_queue, resume_project, resume_task, update_analysis_policy,
@@ -228,6 +228,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/replan", post(replan_project))
         .route("/api/projects/{id}/replan/abandon", post(abandon_replan))
         .route("/api/projects/{id}/report", post(submit_report))
+        .route(
+            "/api/projects/{id}/acceptance/retry",
+            post(retry_acceptance),
+        )
         .route("/api/projects/{id}/merge", post(merge_project))
         .route(
             "/api/projects/{id}/merge/assist",

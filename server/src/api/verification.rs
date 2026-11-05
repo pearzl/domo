@@ -30,6 +30,8 @@ pub(super) struct VerificationSummary {
     pub(super) attempt: i64,
     pub(super) status: String,
     pub(super) passed: Option<bool>,
+    pub(super) next_action: Option<String>,
+    pub(super) guidance: Option<String>,
     pub(super) reason: Option<String>,
     pub(super) issues: Vec<String>,
     pub(super) parsed: bool,
@@ -56,6 +58,8 @@ pub(super) struct TaskVerificationsResponse {
 
 pub(super) struct VerificationVerdict {
     passed: Option<bool>,
+    next_action: Option<String>,
+    guidance: Option<String>,
     reason: Option<String>,
     issues: Vec<String>,
     parsed: bool,
@@ -118,6 +122,8 @@ pub(super) async fn task_verifications(
                 attempt: job.attempt,
                 status: job.status,
                 passed: verdict.passed,
+                next_action: verdict.next_action,
+                guidance: verdict.guidance,
                 reason: verdict.reason,
                 issues: verdict.issues,
                 parsed: verdict.parsed,
@@ -153,8 +159,11 @@ pub(super) fn verification_verdict(result: Option<&str>) -> VerificationVerdict 
             pass,
             reason,
             issues,
+            action,
         }) => VerificationVerdict {
             passed: Some(pass),
+            next_action: (!pass).then_some(action.next_action),
+            guidance: (!pass).then_some(action.guidance),
             reason: Some(reason),
             issues,
             parsed: true,
@@ -169,6 +178,8 @@ pub(super) fn verification_verdict(result: Option<&str>) -> VerificationVerdict 
 pub(super) fn unparsed_verdict(raw: Option<&str>, error: &str) -> VerificationVerdict {
     VerificationVerdict {
         passed: None,
+        next_action: None,
+        guidance: None,
         reason: None,
         issues: Vec::new(),
         parsed: false,
@@ -306,6 +317,9 @@ pub(super) async fn submit_arbitration(
     if project.stage == STAGE_COMPLETED {
         return Err(ApiError::bad("项目已完成"));
     }
+    if project.replan_active != 0 {
+        return Err(ApiError::conflict("项目正在重规划，不能恢复旧任务"));
+    }
     let task = load_project_task(&state, &project_id, &task_id).await?;
     if task.stage == TASK_STAGE_COMPLETED {
         return Err(ApiError::bad("任务已完成"));
@@ -315,6 +329,14 @@ pub(super) async fn submit_arbitration(
     }
     if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
         return Err(ApiError::bad("任务正在等待人工验收，请使用人工验收操作"));
+    }
+    let active: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE task_id = ? AND status = 'running'")
+            .bind(&task.id)
+            .fetch_one(&state.db)
+            .await?;
+    if active > 0 {
+        return Err(ApiError::conflict("上一轮作业尚未结算"));
     }
     if crate::replan_review::active(&state.db, &task.id)
         .await?
@@ -367,7 +389,8 @@ pub(super) async fn submit_arbitration(
         }
         _ => {}
     }
-    let reset_counts = matches!(action.as_str(), ARBITRATION_RETRY | ARBITRATION_GUIDE);
+    let reset_counts = task.stage != TASK_STAGE_VERIFYING
+        && matches!(action.as_str(), ARBITRATION_RETRY | ARBITRATION_GUIDE);
     let latest_job = if reset_counts {
         latest_failed_job(&state, &project_id, Some(&task.id), role).await?
     } else {

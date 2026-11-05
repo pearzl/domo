@@ -52,6 +52,8 @@ if feedback:
         passed = n >= (1 if empty else 2)
         issues = [] if passed or empty else (["OLD", "KEEP"] if n == 0 else ["KEEP", "NEW"])
         result = {"pass": passed, "reason": "EMPTY_REASON" if empty and not passed else "current check", "issues": issues}
+        if not passed:
+            result.update(next_action="execute", guidance="EMPTY_REASON" if empty else "KEEP")
         result["evidence"] = {
             "contract_id": context["contract"]["id"],
             "artifact_version": context["artifact_version"],

@@ -89,6 +89,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
                     }
                 } else {
                     serde_json::json!({"kind": "replan_review", "decision": decision,
+                        "resume_stage": std::env::var("DOMO_MOCK_REVIEW_RESUME_STAGE").ok(),
                         "reason": format!("mock {reviewer} 审批决策"), "guidance": "核对固定输入与权限；缺少资源时等待补齐，不降低验收标准"})
                 }
             }
@@ -121,6 +122,10 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
     }
     if spec.role == JOB_ROLE_VERIFIER && result.get("pass").is_some() {
         let pass = result["pass"].as_bool().unwrap_or(false);
+        if !pass && result.get("next_action").is_none() {
+            result["next_action"] = serde_json::json!("execute");
+            result["guidance"] = result["reason"].clone();
+        }
         let criteria = context["task"]["acceptance"]
             .as_array()
             .cloned()
@@ -802,6 +807,19 @@ fn mock_execute(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::V
 fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
     let task = context.get("task").cloned().unwrap_or_default();
     let key = task.get("key").and_then(|v| v.as_str()).unwrap_or("T1");
+    if let Ok(action) = std::env::var("DOMO_MOCK_VERIFIER_ACTION_ONCE") {
+        if take_once_marker(context, cwd, ".mock-verifier-action")? {
+            return Ok(
+                serde_json::json!({"pass": false, "reason": "mock 验证条件未齐", "issues": ["需补充验证"],
+                "next_action": action, "guidance": "用户补齐设备后重新验收"}),
+            );
+        }
+    }
+    if std::env::var("DOMO_MOCK_REJECT_ALWAYS").as_deref() == Ok("1") {
+        return Ok(
+            serde_json::json!({"pass": false, "reason": "mock 持续拒绝", "issues": ["交付仍有缺陷"]}),
+        );
+    }
     let reject_once = std::env::var("DOMO_MOCK_REJECT_ONCE")
         .map(|value| value == "1")
         .unwrap_or(false);
@@ -848,6 +866,10 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
 }
 
 fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
+    let disposition = match std::env::var("DOMO_MOCK_ACCEPT_ACTION_ONCE") {
+        Ok(action) if take_once_marker(context, cwd, ".mock-accept-action")? => Some(action),
+        _ => None,
+    };
     let criteria: Vec<String> = context
         .get("acceptance_criteria")
         .and_then(|value| value.as_array())
@@ -873,13 +895,15 @@ fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<se
         .map(|value| value == "1")
         .unwrap_or(false)
         && take_once_marker(context, cwd, ".mock-accept-fail-once")?;
-    let fail = !human_only && (always_fail || fail_once);
+    let fail = disposition.is_some() || (!human_only && (always_fail || fail_once));
     let items = criteria
         .iter()
         .enumerate()
         .map(|(index, criterion)| {
             let failed = fail && index == 0;
-            let verdict = if failed {
+            let verdict = if failed && disposition.is_some() {
+                "unverifiable"
+            } else if failed {
                 "unmet"
             } else if human_only {
                 "human_required"
@@ -913,6 +937,13 @@ fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<se
         "summary": if fail { "mock 项目验收未通过" } else { "mock 项目验收通过" },
         "criteria": items,
         "replan_reason": if fail { "mock 项目验收发现未满足条目" } else { "" },
+        "next_action": disposition.unwrap_or_else(|| if fail { "replan".into() } else { "report".into() }),
+        "guidance": if fail { "用户补齐设备或按缺口安排修复后重新验收" } else { "" },
+        "report": if fail { serde_json::Value::Null } else {
+            let mut report = mock_summary(context)["report"].as_str().unwrap_or_default().to_string();
+            if human_only { report.push_str("\n## 人工待办\n需要人工确认或签字。\n"); }
+            serde_json::json!(report)
+        },
     }))
 }
 

@@ -83,25 +83,7 @@ pub(super) async fn submit_report(
                 }
                 require_opinion(&feedback)?;
                 let round = record_report_opinion(&state, &id, &feedback).await?;
-                if project.completion_mode == COMPLETION_DIRECT {
-                    sqlx::query(
-                        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused') \
-                         THEN status ELSE ? END, report = NULL, \
-                         report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-                    )
-                    .bind(STAGE_EXECUTING)
-                    .bind(STATUS_RUNNING)
-                    .bind(&feedback)
-                    .bind(now())
-                    .bind(&id)
-                    .execute(&state.db)
-                    .await?;
-                    event_kind = Some("report_rejected");
-                    event_message = format!(
-                        "项目报告被要求重做（第 {round} 条意见），重新直接完成：{feedback}"
-                    );
-                } else {
-                    sqlx::query(
+                sqlx::query(
                         "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused') \
                          THEN status ELSE ? END, report = NULL, \
                          report_feedback = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
@@ -113,9 +95,8 @@ pub(super) async fn submit_report(
                     .bind(&id)
                     .execute(&state.db)
                     .await?;
-                    event_kind = Some("report_rejected");
-                    event_message = format!("项目报告被要求重写（第 {round} 条意见）：{feedback}");
-                }
+                event_kind = Some("report_rejected");
+                event_message = format!("项目报告被要求重写（第 {round} 条意见）：{feedback}");
             }
             // 处置二：要求重新规划，项目回到项目分析阶段（复用重规划路径）。
             "replan" => {
@@ -162,6 +143,47 @@ pub(super) async fn submit_report(
     }
     state.notify_scheduler();
     Ok(Json(json!({"ok": true, "action": request.action})))
+}
+
+/// Retry verification without recreating implementation work or resetting costs.
+pub(super) async fn retry_acceptance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
+    let project = require_project(&state, &id).await?;
+    if project.stage != STAGE_SUMMARIZING
+        || project.status.as_deref() != Some(STATUS_BLOCKED)
+        || project.report.is_some()
+        || project.replan_active != 0
+        || project.acceptance.is_none()
+    {
+        return Err(ApiError::conflict("当前项目没有等待重新验收的结论"));
+    }
+    let active: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND status = 'running'")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await?;
+    if active > 0 {
+        return Err(ApiError::conflict("上一轮作业尚未结算"));
+    }
+    if let Some(reason) = crate::delivery::gate(&state.db, &id, None).await? {
+        return Err(ApiError::conflict(reason));
+    }
+    sqlx::query("UPDATE projects SET acceptance = NULL, acceptance_passed = 0, acceptance_at = NULL, blocked_reason = NULL, status = 'running', updated_at = ? WHERE id = ?")
+        .bind(now()).bind(&id).execute(&state.db).await?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        None,
+        "project_acceptance_retried",
+        "用户补齐条件或完成裁决，重新进行项目验收",
+    )
+    .await;
+    state.notify_scheduler();
+    Ok(Json(json!({"ok": true})))
 }
 
 /// 意见不能为空：评议记录必须可回溯，空意见不会产生任何处置。

@@ -417,6 +417,38 @@ pub(super) async fn reject_milestone(
         ),
     )
     .await;
+    if task.rejections + 1 >= 3 {
+        let reviewed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM replan_requests WHERE task_id = ? AND origin = 'rejections'",
+        )
+        .bind(&task.id)
+        .fetch_one(&state.db)
+        .await?;
+        if reviewed == 0 {
+            let source = sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE task_id = ? AND role = 'verifier' AND status = 'succeeded' ORDER BY rowid DESC LIMIT 1")
+                .bind(&task.id).fetch_optional(&state.db).await?;
+            if let Some(source) = source {
+                crate::replan_review::submit_locked(
+                    &state,
+                    &source,
+                    &format!("连续验收拒绝，最近人工意见：{reason}\n{guidance}"),
+                    "rejections",
+                    TASK_STAGE_EXECUTING,
+                )
+                .await
+                .map_err(ApiError::internal)?;
+            }
+        } else {
+            sqlx::query(
+                "UPDATE tasks SET status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(format!("上级指导后仍多次验收拒绝，等待人工裁决：{reason}"))
+            .bind(now())
+            .bind(&task.id)
+            .execute(&state.db)
+            .await?;
+        }
+    }
     state.notify_scheduler();
     load_detail(&state, &project_id).await.map(Json)
 }

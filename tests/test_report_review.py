@@ -187,7 +187,7 @@ def main():
             assert detail["project"]["status"] == "blocked", detail["project"]
 
             summary_jobs = [j for j in detail["jobs"] if j["role"] == "summary"]
-            assert len(summary_jobs) >= 2, summary_jobs
+            assert len(summary_jobs) == 1, summary_jobs
             rewrite_jobs = sorted(summary_jobs, key=lambda j: j["created_at"])
             rewrite = call("GET", f"/api/jobs/{rewrite_jobs[-1]['id']}")
             assert "评议记录" in rewrite["prompt"], rewrite["prompt"]
@@ -207,7 +207,7 @@ def main():
             reviews = [m for m in detail["messages"] if m["role"] == "review"]
             assert len(reviews) == 3, detail["messages"]
             summary_jobs = [j for j in detail["jobs"] if j["role"] == "summary"]
-            assert len(summary_jobs) >= 3, summary_jobs
+            assert len(summary_jobs) == 2, summary_jobs
 
             events = all_events(pid_a)
             kinds = [e["kind"] for e in events]

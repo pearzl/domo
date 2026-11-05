@@ -85,6 +85,15 @@ const taskBase = {
 };
 
 describe("verificationRecap 结论", () => {
+  it("等待条件与上级决策不计为拒绝，并保留解除指导", () => {
+    for (const action of ["wait", "review"] as const) {
+      const recap = verificationRecap(taskBase, history([record({ passed: false, next_action: action,
+        guidance: "用户连接设备", issues: ["缺少运行证据"] })]), "ready");
+      expect(recap.conclusion).toBe(action === "wait" ? "waiting" : "review");
+      expect(recap.rejected).toBe(0);
+      expect(recap.issues).toContain("用户连接设备");
+    }
+  });
   it("最近一条验收作业通过时结论为通过", () => {
     const recap = verificationRecap(
       { ...taskBase, stage: "completed", attempts: 1 },
@@ -167,6 +176,12 @@ describe("verificationRecap 结论", () => {
 });
 
 describe("verificationRecap 回退来源", () => {
+  it("验证记录不可用时不把条件缺项推测为验收拒绝", () => {
+    const recap = verificationRecap({ ...taskBase, stage: "verifying", status: "blocked",
+      verifier_issues: ["缺少设备"], last_error: "用户连接设备后重新验收" }, null, "error");
+    expect(recap.conclusion).toBe("pending");
+    expect(recap.rejected).toBe(0);
+  });
   it("接口不可用时回退到 verifier_issues 与 last_error，并标注来源", () => {
     const recap = verificationRecap(
       {

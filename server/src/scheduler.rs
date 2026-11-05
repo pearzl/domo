@@ -735,7 +735,9 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 recompute_blocked(state, &project.id).await?;
             }
             STAGE_SUMMARIZING => {
-                let (role, waiting) = if project.acceptance_passed == 0 {
+                let (role, waiting) = if project.acceptance_passed == 0
+                    && project.completion_mode != COMPLETION_DIRECT
+                {
                     if project.acceptance.is_some() {
                         let reason = "项目验收未通过，等待重规划或人工裁决";
                         sqlx::query(

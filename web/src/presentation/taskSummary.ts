@@ -11,7 +11,7 @@ import type {
 
 export type { VerificationHistory, VerificationRecord } from "../types";
 
-export type VerificationConclusion = "passed" | "rejected" | "pending" | "none";
+export type VerificationConclusion = "passed" | "rejected" | "waiting" | "review" | "pending" | "none";
 
 export const VERIFICATION_CONCLUSIONS: Record<
   VerificationConclusion,
@@ -19,6 +19,8 @@ export const VERIFICATION_CONCLUSIONS: Record<
 > = {
   passed: { label: "通过", tone: "success" },
   rejected: { label: "拒绝", tone: "danger" },
+  waiting: { label: "等待验证条件", tone: "info" },
+  review: { label: "请求上级决策", tone: "info" },
   pending: { label: "待验收", tone: "info" },
   none: { label: "未验收", tone: "muted" },
 };
@@ -110,6 +112,8 @@ function recordConclusion(record: VerificationRecord): VerificationConclusion {
   // 验收作业已完成且给出结论时，以解析出的 pass 为准；作业未结束或结果无法解析时结论待定。
   if (!RUNNING_STATUSES.has(record.status)) {
     if (record.passed === true) return "passed";
+    if (record.next_action === "wait") return "waiting";
+    if (record.next_action === "review") return "review";
     if (record.passed === false) return "rejected";
   }
   return "pending";
@@ -121,7 +125,7 @@ function recordIssues(record: VerificationRecord): string[] {
 
 function fromHistory(history: VerificationHistory): VerificationRecap {
   const rejected = history.verifications.filter(
-    (record) => record.passed === false,
+    (record) => record.passed === false && record.next_action !== "wait" && record.next_action !== "review",
   ).length;
   const latest = latestRecord(history);
   const base: VerificationRecap = {
@@ -144,7 +148,8 @@ function fromHistory(history: VerificationHistory): VerificationRecap {
     ...base,
     conclusion: recordConclusion(latest),
     reason: latest.reason && latest.reason.trim() !== "" ? latest.reason : null,
-    issues: recordIssues(latest),
+    issues: latest.guidance && !latest.issues.includes(latest.guidance)
+      ? [...recordIssues(latest), latest.guidance] : recordIssues(latest),
     unparsedExcerpt: latest.parse_error
       ? latest.parse_error
       : latest.parsed
@@ -171,12 +176,12 @@ function fromTask(task: TaskVerificationInput): VerificationRecap {
   const issues = (task.verifier_issues ?? [])
     .map((issue) => issue.trim())
     .filter((issue) => issue !== "");
-  const rejected = rejections > 0 || issues.length > 0;
+  const rejected = rejections > 0;
   let conclusion: VerificationConclusion;
-  if (rejected) {
-    conclusion = "rejected";
-  } else if (task.human_gate === "milestone" || task.stage === "verifying") {
+  if (task.human_gate === "milestone" || task.stage === "verifying") {
     conclusion = "pending";
+  } else if (rejected) {
+    conclusion = "rejected";
   } else if (task.stage === "completed" && attempts > 0) {
     conclusion = "passed";
   } else if (task.stage === "completed") {
@@ -196,8 +201,8 @@ function fromTask(task: TaskVerificationInput): VerificationRecap {
     issues,
     unparsedExcerpt: null,
     total: attempts,
-    // 拒绝次数以任务字段为准，至少包含仍留在任务上的这轮反馈。
-    rejected: rejected ? Math.max(rejections, 1) : 0,
+    // 反馈可能是验证缺项，不据此推测拒绝次数。
+    rejected: rejections,
     truncated: false,
     round: null,
     detailNote:

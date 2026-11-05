@@ -104,6 +104,15 @@ const verifier2 = job({
 });
 
 describe("按执行轮聚合验收尝试", () => {
+  it("等待验证与上级决策保留原执行轮，不增加失败次数", () => {
+    for (const action of ["wait", "review"] as const) {
+      const result = alignHistory([executor1, verifier1], history([
+        record({ id: "v1", round: 1, passed: false, next_action: action }),
+      ]));
+      expect(result[0].verdict).toBe(action === "wait" ? "waiting" : "review");
+      expect(result[0].verifierAttempts.failed).toBe(0);
+    }
+  });
   it("显式关联优先于时间，缺失执行作业时不猜测归属", () => {
     const verifier = job({ id: "linked", role: "verifier", execution_job_id: "e2", created_at: beforeFirst(0) });
     const result = groupExecutionRounds([executor1, executor2], [verifier]);
