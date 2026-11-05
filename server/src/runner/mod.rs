@@ -176,19 +176,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         PathBuf::from(&project.repo_path)
     };
     ensure_worktree_root(&cwd, project.is_git() && !review).await?;
-    if let Err(error) = if review {
-        Ok(())
-    } else if resumed.is_none() && !collect {
-        crate::resources::workspace_preflight(state, &project, &job).await
-    } else {
-        // The original writer may resume its unfinished files. Keep the pending
-        // write marker; settlement still enforces ownership and write rights.
-        Ok(())
-    } {
-        let reason = format!("工作区检查未通过：{error:#}");
-        crate::resources::block_workspace(state, &project, &job, &reason).await?;
-        return Ok(());
-    }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
     let artifact_version = if collect {
@@ -510,6 +497,16 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                         }
                         Ok(_) => None,
                     };
+                    if protocol_error.is_none() {
+                        protocol_error = crate::resources::validate_delivery_artifacts(
+                            raw,
+                            &cwd,
+                            project.is_git(),
+                        )
+                        .await
+                        .err()
+                        .map(|error| format!("artifacts 声明不合法：{error:#}"));
+                    }
                 }
             }
         }
@@ -788,7 +785,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 | ParsedResult::DirectDone { .. }
         )
     ) {
-        let validation =
+        let mut validation =
             match crate::domain::commit_files(result_text.as_deref().unwrap_or_default()) {
                 Ok(files) if project.is_git() => git::validate_commit_files(&cwd, &files)
                     .await
@@ -796,6 +793,15 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(_) => Ok(()),
                 Err(error) => Err(error),
             };
+        if validation.is_ok() {
+            validation = crate::resources::validate_delivery_artifacts(
+                result_text.as_deref().unwrap_or_default(),
+                &cwd,
+                project.is_git(),
+            )
+            .await
+            .map_err(|error| format!("artifacts 声明不合法：{error:#}"));
+        }
         if let Err(reason) = validation {
             status = JOB_STATUS_FAILED;
             error = Some(format!(
@@ -1048,9 +1054,14 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 }
                 return Ok(());
             }
-            if let Err(error) =
-                crate::resources::workspace_settle(state, &project, &job, &cwd, &artifact_version)
-                    .await
+            if let Err(error) = crate::resources::settle_artifacts(
+                state,
+                &project,
+                &job,
+                &cwd,
+                result_text.as_deref().unwrap_or_default(),
+            )
+            .await
             {
                 finish_job(
                     state,
@@ -1153,12 +1164,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     }
                     return Ok(());
                 }
-                if let Err(error) = crate::resources::workspace_settle(
+                if let Err(error) = crate::resources::settle_artifacts(
                     state,
                     &project,
                     &job,
                     &cwd,
-                    &artifact_version,
+                    result_text.as_deref().unwrap_or_default(),
                 )
                 .await
                 {
@@ -1244,12 +1255,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     }
                     return Ok(());
                 }
-                if let Err(error) = crate::resources::workspace_settle(
+                if let Err(error) = crate::resources::settle_artifacts(
                     state,
                     &project,
                     &job,
                     &cwd,
-                    &artifact_version,
+                    result_text.as_deref().unwrap_or_default(),
                 )
                 .await
                 {

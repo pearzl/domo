@@ -1,4 +1,4 @@
-//! Read-only versioned resources and explicit workspace inspection/permissions.
+//! Versioned project knowledge and explicitly registered delivery resources.
 use super::{
     helpers::{load_project_task, require_project},
     ApiError,
@@ -120,57 +120,6 @@ pub(super) async fn put_artifact(
     .await
     .map_err(|e| ApiError::bad(format!("{e:#}")))?;
     list_artifacts(State(state), Path(id)).await
-}
-
-#[derive(Deserialize)]
-pub(super) struct InspectRequest {
-    reason: String,
-}
-pub(super) async fn inspect(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<InspectRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("归档项目只读"));
-    }
-    resources::acknowledge(&state, &project, &request.reason)
-        .await
-        .map_err(|e| ApiError::bad(format!("{e:#}")))?;
-    Ok(Json(json!({"ok": true})))
-}
-
-#[derive(Deserialize)]
-pub(super) struct PermissionRequest {
-    path: String,
-    task_id: Option<String>,
-    reason: String,
-}
-pub(super) async fn permit(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<PermissionRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) || request.reason.trim().is_empty() {
-        return Err(ApiError::bad("项目只读或缺少原地修改的理由"));
-    }
-    resources::contained(&resources::delivery_root(&project), &request.path)
-        .await
-        .map_err(|e| ApiError::bad(e.to_string()))?;
-    if let Some(task) = &request.task_id {
-        load_project_task(&state, &id, task).await?;
-    }
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("INSERT INTO file_permissions(project_id, task_id, path, reason) VALUES(?, ?, ?, ?) ON CONFLICT(project_id, task_id, path) DO UPDATE SET reason = excluded.reason")
-        .bind(&id).bind(request.task_id.as_deref().unwrap_or("")).bind(&request.path).bind(&request.reason).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO events(project_id, task_id, kind, message, payload, created_at) VALUES(?, ?, 'file_write_authorized', ?, ?, ?)")
-        .bind(&id).bind(&request.task_id).bind(&request.reason).bind(json!({"version": 1, "path": request.path, "task_id": request.task_id}).to_string()).bind(now()).execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(Json(json!({"ok": true})))
 }
 
 #[derive(Default, Deserialize)]

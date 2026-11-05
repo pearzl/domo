@@ -37,21 +37,13 @@ def run_case(server, root, workspace, paused, action):
         "repo_path": str(root / ("repo" if workspace == "git" else f"report-{paused}-{action}")),
         "goal": "[single] 生成研究报告", "confirm_mode": "auto"})["project"]
     base = f"/api/projects/{project['id']}"
-    if workspace == "plain":
-        # A failed writer leaves the plain workspace pending inspection.
-        interrupted = wait_detail(call, base, lambda d: d["project"]["status"] == "blocked"
-            and any(t["last_failure_kind"] == "workspace" for t in d["tasks"]), "失败写入后的现场检查")
-        call("POST", base + "/workspace/inspect", {"reason": "已检查首次失败未写入产物，允许继续生成报告"})
-        call("POST", base + f"/tasks/{interrupted['tasks'][0]['id']}/retry", {})
     before = wait_detail(call, base, lambda d: bool(d["tasks"])
         and d["tasks"][0]["status"] == "blocked" and d["tasks"][0]["rejections"] == 3
         and all(j["status"] != "running" for j in d["jobs"]), "连续验收拒绝后阻塞")
     task_id = before["tasks"][0]["id"]
     executions = [j for j in before["jobs"] if j["role"] == "executor"]
-    assert len(executions) == (5 if workspace == "plain" else 4), executions
+    assert len(executions) == 4, executions
     assert executions[0]["status"] == "failed", executions
-    if workspace == "plain":
-        assert executions[1]["status"] == "failed" and "工作区检查" in executions[1]["error"], executions
     assert all(j["status"] == "succeeded" for j in executions[-3:]), executions
     old_failed = executions[0]["id"]
     if paused:

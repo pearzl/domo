@@ -197,14 +197,6 @@ pub fn router(state: AppState) -> Router {
             post(resources::reveal),
         )
         .route(
-            "/api/projects/{id}/workspace/inspect",
-            post(resources::inspect),
-        )
-        .route(
-            "/api/projects/{id}/workspace/permissions",
-            post(resources::permit),
-        )
-        .route(
             "/api/projects/{id}/limits",
             axum::routing::put(delivery::set_limits),
         )

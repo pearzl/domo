@@ -234,7 +234,6 @@ pub(super) async fn create_project(
     }
     crate::db::ensure_project_agents(&state.db, &project_id).await?;
     let created = require_project(&state, &project_id).await?;
-    crate::resources::initialize_inputs(&state, &created).await?;
     crate::resources::shared_snapshot(&state, &created, None, None).await?;
     emit(
         &state.db,

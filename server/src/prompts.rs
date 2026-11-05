@@ -114,13 +114,13 @@ pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> 
     prompt
 }
 
-/// Artifact ownership does not limit writes in an isolated Git worktree. Plain
-/// workspaces need explicit permission to overwrite another task's files.
+/// Resource indexes locate important results; role, task scope and explicit user
+/// constraints determine write access, never the provenance of a listed file.
 pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> String {
     let rules = if !matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
-        "登记的输入与产物只读参考；permissions 不授予本角色修改交付文件的权限，写入位置以本次运行权限为准。"
+        "登记的成果与参考输入只读参考；登记不授予本角色修改交付文件的权限，写入位置以本次运行权限为准。"
     } else if plain_workspace(data) {
-        "普通工作区：可创建新产物和修改自己任务的产物；已有输入或其他任务产物仅可修改 permissions 中授权给当前任务的精确路径。task_id 对照 context.json 的 task.id，直接执行作业使用空 task_id；任务 key 不等于 task_id。未经授权的原始输入必须保留，新交付物使用独立位置。缺少覆盖授权时停止对应修改，在失败原因中列出路径、理由和所需用户操作。"
+        "普通工作区：所选目录及其内容就是项目输入，任务串行接力。先按需检查当前文件、已有结果与未完成操作，再按已确认目标、任务范围及明确的用户约束修改已有文件和前序任务产物，不因文件来源任务不同要求逐路径授权。用户明确要求只读或保留的资料必须保护；能够安全接续时继续，无法判断或涉及不可逆风险时说明具体问题并请求处理。"
     } else {
         "Git 工作区：可在当前目录内按已确认目标、任务范围及明确的用户约束修改源码、配置、测试、文档和前序任务产物，无需额外逐路径覆盖授权。DOMO 负责暂存、提交和合并；主工作树和其他工作区保持只读。"
     };
@@ -130,12 +130,10 @@ pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> Str
         serde_json::json!({
             "root": artifacts["root"],
             "item_count": artifacts["items"].as_array().map_or(0, Vec::len),
-            "permission_count": artifacts["permissions"].as_array().map_or(0, Vec::len),
-            "check": artifacts["check"],
             "snapshot_file": std::path::Path::new(&data.job_dir).join("artifacts.json"),
         })
     };
-    format!("\n## 输入与产物边界\n{inventory}\n{rules}\n完整固定索引见作业目录 artifacts.json，按相关路径检索，无需逐条审计。省略记录不代表不存在或已授权；普通工作区覆盖前核对归属与 permissions。该索引只读，文件是否存在、包含哪些内容仍需在当前目录核实。中断后先检查现场，停止进程不代表文件回滚。\n")
+    format!("\n## 输入与产物边界\n{inventory}\n{rules}\n完整固定索引见作业目录 artifacts.json，按相关路径检索，无需逐条审计。索引仅列显式登记的重要成果与参考输入，不是工作区文件清单；未登记不代表文件不存在，登记类型不自动授予或限制修改权限。文件是否存在、包含哪些内容仍需在当前目录核实。中断后先检查现场，停止进程不代表文件回滚。\n")
 }
 
 fn replan_review_prompt(data: &PromptData) -> String {
@@ -230,8 +228,12 @@ fn common_header(data: &PromptData) -> String {
         _ => "未知角色。",
     };
     let writes = match data.role.as_str() {
-        JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT => "交付文件可在当前目录内按任务范围修改，具体覆盖权限见输入与产物边界；作业目录用于结果、报告及临时数据。",
-        JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE => "交付文件只读；可以在指定验收产物目录或作业目录生成构建、测试及检查产物。",
+        JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT => {
+            "交付文件可在当前目录内按任务范围及用户明确约束修改；作业目录用于结果、报告及临时数据。"
+        }
+        JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE => {
+            "交付文件只读；可以在指定验收产物目录或作业目录生成构建、测试及检查产物。"
+        }
         _ => "交付文件只读；仅可写指定结果文件，不运行会改写项目或生成构建产物的命令。",
     };
     let isolation = if plain_workspace(data) {
@@ -369,7 +371,7 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         text.push_str("\n{\"kind\":\"derive\",\"summary\":\"分工依据及父任务已完成的工作\",\"commit_files\":[],\"tasks\":[{\"key\":\"T1.1\",\"title\":\"标题\",\"description\":\"目标和边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}");
     }
     if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
-        text.push_str("\ncommit_files 使用相对当前目录的逐文件路径，重命名列新旧路径；不得填写目录、通配符、越界或符号链接路径。仅列交付所需文件，日志、缓存、构建产物与下载包不列入源码交付清单。");
+        text.push_str("\ncommit_files 使用相对当前目录的逐文件路径，重命名列新旧路径；不得填写目录、通配符、越界或符号链接路径。仅列交付所需文件，日志、缓存、构建产物与下载包不列入源码交付清单。\n需要在成果区域展示或供后续任务引用的重要成果，可在结果中添加 artifacts 数组，例如 [{\"path\":\"outputs/report.md\",\"kind\":\"delivery\",\"format\":\"text/markdown\",\"verification\":\"核对报告结论与证据\"}]。path 为当前目录内已存在的文件或目录；kind 为 input（特殊参考输入）、intermediate（重要中间成果）或 delivery（最终交付），format 与 verification 可省略。Git 成果必须已跟踪或包含在本轮 commit_files 中。仅登记重要成果，不枚举全部源码或临时文件；无需登记时省略或填写 []。artifacts 与逐文件变更清单用途不同，登记不表示验收通过。");
     }
     if matches!(
         data.role.as_str(),
@@ -1148,7 +1150,7 @@ mod tests {
         let contract = serde_json::json!({"id": 37, "goal": "当前目标", "proposal": {"acceptance": [ACCEPTANCE]}});
         let version = serde_json::json!("checked-commit");
         let shared = serde_json::json!({"version": "knowledge-commit", "records": [], "read_endpoint": "/api/projects/proj-1/shared"});
-        let artifacts = serde_json::json!({"root": "/workspace", "items": [], "permissions": []});
+        let artifacts = serde_json::json!({"root": "/workspace", "items": []});
         let review = serde_json::json!({"reviewer": "planner"});
         for role in [
             JOB_ROLE_ANALYSIS,
@@ -1370,23 +1372,21 @@ mod tests {
             .map(|index| {
                 serde_json::json!({
                     "path": format!("repo-{}/src/file-{index}.cpp", index % 8),
-                    "kind": "input", "verification": "保留原始输入"
+                    "kind": "intermediate", "verification": "核对阶段成果"
                 })
             })
             .collect::<Vec<_>>();
         let mut data = sample_data(JOB_ROLE_EXECUTOR);
         data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
         let artifacts = serde_json::json!({
-            "root": "/multi-repo", "items": items,
-            "check": {"interrupted": false},
-            "permissions": [{"path": "repo-0/src/file-0.cpp", "task_id": "T1"}]
+            "root": "/multi-repo", "items": items
         });
         let prompt = artifact_context(&data, &artifacts);
         assert!(prompt.len() < 4_000);
         assert!(prompt.contains("\"item_count\":15000"));
-        assert!(prompt.contains("\"permission_count\":1"));
         assert!(prompt.contains("/workspace/jobs/job-1/artifacts.json"));
-        assert!(prompt.contains("覆盖前核对归属与 permissions"));
+        assert!(prompt.contains("不是工作区文件清单"));
+        assert!(!prompt.contains("permissions"));
         assert!(prompt.contains("无需逐条审计"));
         assert!(!prompt.contains("file-14999.cpp"));
         assert_eq!(artifacts["items"].as_array().unwrap().len(), 15_000);
@@ -1571,8 +1571,7 @@ mod tests {
     #[test]
     fn artifact_write_boundaries_follow_workspace_type() {
         let artifacts = serde_json::json!({
-            "items": [{"path": "shared.cpp", "task_id": "previous-task"}],
-            "permissions": []
+            "items": [{"path": "shared.cpp", "task_id": "previous-task"}]
         });
         for role in [JOB_ROLE_EXECUTOR, JOB_ROLE_DIRECT] {
             let mut data = sample_data(role);
@@ -1587,11 +1586,11 @@ mod tests {
 
             data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
             let plain = artifact_context(&data, &artifacts);
-            assert!(plain.contains("未经授权的原始输入必须保留"));
-            assert!(plain.contains("修改自己任务的产物"));
-            assert!(plain.contains("permissions 中授权给当前任务的精确路径"));
-            assert!(plain.contains("列出路径、理由和所需用户操作"));
-            assert!(!plain.contains("不因产物归属其他任务"));
+            assert!(plain.contains("所选目录及其内容就是项目输入"));
+            assert!(plain.contains("前序任务产物"));
+            assert!(plain.contains("不因文件来源任务不同要求逐路径授权"));
+            assert!(plain.contains("用户明确要求只读或保留的资料必须保护"));
+            assert!(!plain.contains("permissions"));
             for prompt in [git, plain] {
                 assert!(prompt.contains("shared.cpp"));
                 assert!(prompt.contains("previous-task"));
@@ -1612,7 +1611,7 @@ mod tests {
             for workspace_type in [crate::models::WORKSPACE_GIT, crate::models::WORKSPACE_PLAIN] {
                 let mut data = sample_data(role);
                 data.workspace_type = workspace_type.into();
-                let prompt = artifact_context(&data, &serde_json::json!({"permissions": []}));
+                let prompt = artifact_context(&data, &serde_json::json!({"items": []}));
                 assert!(prompt.contains("只读参考"), "{role}/{workspace_type}");
                 assert!(prompt.contains("不授予本角色修改交付文件的权限"));
                 assert!(!prompt.contains("只能修改自己任务的产物"));

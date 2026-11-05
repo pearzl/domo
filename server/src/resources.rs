@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -16,7 +15,8 @@ use crate::{
 };
 
 pub async fn initialize(pool: &SqlitePool) -> crate::db::DbResult<()> {
-    sqlx::raw_sql(r#"
+    sqlx::raw_sql(
+        r#"
 CREATE TABLE IF NOT EXISTS shared_records (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT, job_id TEXT,
  topic TEXT NOT NULL, body TEXT NOT NULL, scope TEXT NOT NULL, evidence TEXT NOT NULL,
@@ -31,28 +31,23 @@ CREATE TABLE IF NOT EXISTS job_shared_versions (
 CREATE TABLE IF NOT EXISTS artifacts (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT, job_id TEXT,
  path TEXT NOT NULL, kind TEXT NOT NULL, format TEXT NOT NULL, verification TEXT NOT NULL,
- fingerprint TEXT, commit_id TEXT, contract_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ commit_id TEXT, contract_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  UNIQUE(project_id, path)
-);
-CREATE TABLE IF NOT EXISTS workspace_checks (
- project_id TEXT PRIMARY KEY REFERENCES projects(id), interrupted INTEGER NOT NULL DEFAULT 0,
- reason TEXT, acknowledged_at TEXT, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS artifact_versions (
  id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id TEXT NOT NULL REFERENCES artifacts(id),
- commit_id TEXT NOT NULL, fingerprint TEXT, job_id TEXT, recorded_at TEXT NOT NULL,
+ commit_id TEXT NOT NULL, job_id TEXT, recorded_at TEXT NOT NULL,
  UNIQUE(artifact_id, commit_id)
-);
-CREATE TABLE IF NOT EXISTS file_permissions (
- project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
- reason TEXT NOT NULL, PRIMARY KEY(project_id, task_id, path)
 );
 CREATE TABLE IF NOT EXISTS merge_requests (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), agent_id TEXT NOT NULL,
  state TEXT NOT NULL, job_id TEXT, error TEXT, base_commit TEXT NOT NULL,
  project_commit TEXT NOT NULL, requested_at TEXT NOT NULL
 );
-"#).execute(pool).await?;
+"#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -329,81 +324,7 @@ pub fn delivery_root(project: &ProjectRow) -> PathBuf {
     }
 }
 
-fn fingerprint_sync(path: &Path) -> Result<String> {
-    use std::io::Read;
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        bail!("登记路径不能是符号链接：{}", path.display());
-    }
-    let mut hash = Sha256::new();
-    if meta.is_dir() {
-        let mut children = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            if child.file_name() == ".git" {
-                continue;
-            }
-            hash.update(child.file_name().to_string_lossy().as_bytes());
-            hash.update(fingerprint_sync(&child.path())?.as_bytes());
-        }
-    } else {
-        let mut file = std::fs::File::open(path)?;
-        let mut buffer = [0_u8; 65536];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
-        }
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-async fn fingerprint(path: &Path) -> Result<Option<String>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let path = path.to_path_buf();
-    Ok(Some(
-        tokio::task::spawn_blocking(move || fingerprint_sync(&path)).await??,
-    ))
-}
-
-fn files_sync(root: &Path) -> Result<Vec<String>> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut result = Vec::new();
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.file_name() == ".git" {
-                continue;
-            }
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                pending.push(entry.path());
-            } else if kind.is_file() {
-                result.push(
-                    entry
-                        .path()
-                        .strip_prefix(root)?
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
-                if result.len() > 100_000 {
-                    bail!("工作区超过 100000 个文件，请选择更具体的交付目录");
-                }
-            }
-        }
-    }
-    result.sort();
-    Ok(result)
-}
-
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArtifactInput {
     pub path: String,
     pub kind: String,
@@ -420,62 +341,136 @@ pub async fn register_artifact(
     job_id: Option<&str>,
     input: &ArtifactInput,
 ) -> Result<()> {
-    if !matches!(input.kind.as_str(), "input" | "intermediate" | "delivery") {
-        bail!("产物 kind 必须为 input、intermediate 或 delivery");
-    }
-    let path = contained(&delivery_root(project), &input.path).await?;
-    let checksum = fingerprint(&path).await?;
+    let root = delivery_root(project);
+    validate_artifact(&root, input).await?;
     let commit = if project.is_git() {
-        let root = delivery_root(project);
-        let commit = git::commit_of(&root, &project.branch).await?;
-        let kind = git::run_git(
-            &root,
-            &["cat-file", "-t", &format!("{commit}:{}", input.path)],
-        )
-        .await?;
-        if !matches!(kind.trim(), "blob" | "tree") {
-            bail!("产物不是提交中的文件或目录");
-        }
-        Some(commit)
+        Some(git::commit_of(&root, &project.branch).await?)
     } else {
         None
     };
-    let timestamp = now();
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let artifact_id: String = sqlx::query_scalar("INSERT INTO artifacts(id, project_id, task_id, job_id, path, kind, format, verification, fingerprint, commit_id, contract_id, created_at, updated_at) \
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, path) DO UPDATE SET \
-        kind = excluded.kind, format = excluded.format, verification = excluded.verification, updated_at = excluded.updated_at RETURNING id")
-        .bind(new_id("art")).bind(&project.id).bind(task_id).bind(job_id).bind(&input.path).bind(&input.kind).bind(&input.format).bind(&input.verification)
-        .bind(&checksum).bind(&commit).bind(project.contract_id).bind(&timestamp).bind(&timestamp).fetch_one(&mut *tx).await?;
-    if let Some(commit) = commit {
-        sqlx::query("INSERT OR IGNORE INTO artifact_versions(artifact_id, commit_id, fingerprint, job_id, recorded_at) VALUES(?, ?, ?, ?, ?)")
-            .bind(&artifact_id).bind(commit).bind(checksum).bind(job_id).bind(&timestamp).execute(&mut *tx).await?;
+    save_artifact_batch(
+        state,
+        project,
+        &ArtifactSource {
+            task_id,
+            job_id,
+            contract_id: project.contract_id,
+            root: &root,
+            commit: commit.as_deref(),
+        },
+        std::slice::from_ref(input),
+    )
+    .await
+}
+
+async fn validate_artifact(root: &Path, input: &ArtifactInput) -> Result<()> {
+    if !matches!(input.kind.as_str(), "input" | "intermediate" | "delivery") {
+        bail!("产物 kind 必须为 input、intermediate 或 delivery");
     }
-    tx.commit().await?;
+    let path = contained(root, &input.path).await?;
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .with_context(|| format!("登记的成果或参考输入不存在：{}", input.path))?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        bail!("登记对象必须是普通文件或目录：{}", input.path);
+    }
     Ok(())
 }
 
-pub async fn initialize_inputs(state: &AppState, project: &ProjectRow) -> Result<()> {
-    if project.is_git() {
+/// Validate declarations before committing delivery files so the same job can
+/// correct invalid metadata. An absent list never means "index all files".
+async fn declared_artifacts(raw: &str, cwd: &Path) -> Result<Vec<ArtifactInput>> {
+    let result = crate::domain::extract_json(raw).ok_or_else(|| anyhow!("结果不是 JSON 对象"))?;
+    let records: Vec<ArtifactInput> = match result.get("artifacts") {
+        Some(value) => {
+            serde_json::from_value(value.clone()).context("artifacts 必须是产物声明数组")?
+        }
+        None => Vec::new(),
+    };
+    let mut paths = std::collections::HashSet::new();
+    for record in &records {
+        if !paths.insert(&record.path) {
+            bail!("artifacts 中的路径重复：{}", record.path);
+        }
+        validate_artifact(cwd, record).await?;
+    }
+    Ok(records)
+}
+
+pub async fn validate_delivery_artifacts(raw: &str, cwd: &Path, is_git: bool) -> Result<()> {
+    let records = declared_artifacts(raw, cwd).await?;
+    if is_git {
+        let files = crate::domain::commit_files(raw).map_err(anyhow::Error::msg)?;
+        for record in records {
+            let declared = files.iter().any(|file| {
+                (file == &record.path || file.starts_with(&format!("{}/", record.path)))
+                    && cwd.join(file).is_file()
+            });
+            if !declared
+                && !git::run_git(
+                    cwd,
+                    &["--literal-pathspecs", "ls-files", "-z", "--", &record.path],
+                )
+                .await?
+                .split('\0')
+                .any(|file| {
+                    !file.is_empty()
+                        && (!files.iter().any(|deleted| deleted == file)
+                            || cwd.join(file).is_file())
+                })
+            {
+                bail!("产物未被 Git 跟踪，也不在 commit_files 中：{}", record.path);
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ArtifactSource<'a> {
+    task_id: Option<&'a str>,
+    job_id: Option<&'a str>,
+    contract_id: Option<i64>,
+    root: &'a Path,
+    commit: Option<&'a str>,
+}
+
+async fn save_artifact_batch(
+    state: &AppState,
+    project: &ProjectRow,
+    source: &ArtifactSource<'_>,
+    inputs: &[ArtifactInput],
+) -> Result<()> {
+    if inputs.is_empty() {
         return Ok(());
     }
-    let root = delivery_root(project);
-    let files = tokio::task::spawn_blocking(move || files_sync(&root)).await??;
-    for path in files {
-        register_artifact(
-            state,
-            project,
-            None,
-            None,
-            &ArtifactInput {
-                path,
-                kind: "input".into(),
-                format: String::new(),
-                verification: "保留原始输入".into(),
-            },
-        )
-        .await?;
+    // Check the complete batch before publishing any metadata or version index.
+    for input in inputs {
+        if let Some(commit) = source.commit {
+            let kind = git::run_git(
+                source.root,
+                &["cat-file", "-t", &format!("{commit}:{}", input.path)],
+            )
+            .await?;
+            if !matches!(kind.trim(), "blob" | "tree") {
+                bail!("产物不是提交中的文件或目录：{}", input.path);
+            }
+        }
     }
+    let timestamp = now();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    for input in inputs {
+        let artifact_id: String = sqlx::query_scalar("INSERT INTO artifacts(id, project_id, task_id, job_id, path, kind, format, verification, commit_id, contract_id, created_at, updated_at) \
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, path) DO UPDATE SET \
+            kind = excluded.kind, format = excluded.format, verification = excluded.verification, task_id = excluded.task_id, job_id = excluded.job_id, \
+            commit_id = excluded.commit_id, contract_id = excluded.contract_id, updated_at = excluded.updated_at RETURNING id")
+            .bind(new_id("art")).bind(&project.id).bind(source.task_id).bind(source.job_id).bind(&input.path).bind(&input.kind).bind(&input.format).bind(&input.verification)
+            .bind(source.commit).bind(source.contract_id).bind(&timestamp).bind(&timestamp).fetch_one(&mut *tx).await?;
+        if let Some(commit) = source.commit {
+            sqlx::query("INSERT OR IGNORE INTO artifact_versions(artifact_id, commit_id, job_id, recorded_at) VALUES(?, ?, ?, ?)")
+                .bind(&artifact_id).bind(commit).bind(source.job_id).bind(&timestamp).execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -498,220 +493,67 @@ pub async fn artifact_snapshot(state: &AppState, project: &ProjectRow) -> Result
         "id": id, "path": path, "kind": kind, "format": format, "verification": verification,
         "task_id": task_id, "job_id": job_id, "commit": commit, "contract_id": contract, "updated_at": at
     })).collect::<Vec<_>>();
-    let check: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT interrupted, reason, acknowledged_at FROM workspace_checks WHERE project_id = ?",
-    )
-    .bind(&project.id)
-    .fetch_optional(&state.db)
-    .await?;
-    let permissions: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT task_id, path, reason FROM file_permissions WHERE project_id = ?")
-            .bind(&project.id)
-            .fetch_all(&state.db)
-            .await?;
-    Ok(
-        json!({"root": delivery_root(project), "items": items, "check": check.map(|(interrupted, reason, at)| json!({"interrupted": interrupted != 0, "reason": reason, "acknowledged_at": at})),
-        "permissions": permissions.into_iter().map(|(task, path, reason)| json!({"task_id": task, "path": path, "reason": reason})).collect::<Vec<_>>()}),
-    )
+    Ok(json!({"root": delivery_root(project), "items": items}))
 }
 
-/// Detect registered external changes and incomplete attempts before any new
-/// process. Detection is not a sandbox and never rolls back the user's files.
-pub async fn workspace_preflight(
-    state: &AppState,
-    project: &ProjectRow,
-    job: &JobRow,
-) -> Result<()> {
-    if project.is_git() {
-        return Ok(());
-    }
-    let interrupted: Option<(i64, Option<String>)> =
-        sqlx::query_as("SELECT interrupted, reason FROM workspace_checks WHERE project_id = ?")
-            .bind(&project.id)
-            .fetch_optional(&state.db)
-            .await?;
-    if interrupted.is_some_and(|(flag, _)| flag != 0) {
-        bail!("普通工作区可能有未完成修改，请先检查现场并通过工作区检查入口确认，不会自动回滚");
-    }
-    let records: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT path, fingerprint FROM artifacts WHERE project_id = ?")
-            .bind(&project.id)
-            .fetch_all(&state.db)
-            .await?;
-    let mut changes = Vec::new();
-    for (path, expected) in records {
-        let full = contained(&delivery_root(project), &path).await?;
-        if fingerprint(&full).await? != expected {
-            changes.push(path);
-        }
-    }
-    if !changes.is_empty() {
-        interrupt(
-            state,
-            project,
-            &format!("已登记输入或产物发生外部变化：{}", changes.join("、")),
-        )
-        .await?;
-        bail!("普通工作区外部变化需要检查：{}", changes.join("、"));
-    }
-    if matches!(job.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
-        sqlx::query("INSERT INTO workspace_checks(project_id, interrupted, reason, updated_at) VALUES(?, 1, ?, ?) \
-            ON CONFLICT(project_id) DO UPDATE SET interrupted = 1, reason = excluded.reason, updated_at = excluded.updated_at")
-            .bind(&project.id).bind(format!("作业 {} 写入中，若中断请检查文件现场", job.id)).bind(now()).execute(&state.db).await?;
-    }
-    Ok(())
-}
-
-pub async fn interrupt(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
-    if project.is_git() {
-        return Ok(());
-    }
-    sqlx::query("INSERT INTO workspace_checks(project_id, interrupted, reason, updated_at) VALUES(?, 1, ?, ?) \
-        ON CONFLICT(project_id) DO UPDATE SET interrupted = 1, reason = excluded.reason, updated_at = excluded.updated_at")
-        .bind(&project.id).bind(reason).bind(now()).execute(&state.db).await?;
-    crate::events::emit(
-        &state.db,
-        &state.bus,
-        Some(&project.id),
-        None,
-        "workspace_inspection_required",
-        reason,
-    )
-    .await;
-    Ok(())
-}
-
-pub async fn workspace_settle(
+pub async fn settle_artifacts(
     state: &AppState,
     project: &ProjectRow,
     job: &JobRow,
     cwd: &Path,
-    baseline: &Value,
+    raw: &str,
 ) -> Result<()> {
     if !matches!(job.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
         return Ok(());
     }
-    let rows: Vec<(String, Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT path, fingerprint, task_id FROM artifacts WHERE project_id = ?")
-            .bind(&project.id)
-            .fetch_all(&state.db)
-            .await?;
-    if !project.is_git() {
-        for (path, expected, owner) in &rows {
-            let actual = fingerprint(&contained(cwd, path).await?).await?;
-            if actual != *expected
-                && (owner.is_none() || owner.as_deref() != job.task_id.as_deref())
-            {
-                let allowed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_permissions WHERE project_id = ? AND task_id = ? AND path = ?")
-                    .bind(&project.id).bind(job.task_id.as_deref().unwrap_or("")).bind(path).fetch_one(&state.db).await?;
-                if allowed == 0 {
-                    interrupt(
-                        state,
-                        project,
-                        &format!("作业未经声明覆盖历史输入或产物：{path}；已保留现场"),
-                    )
-                    .await?;
-                    bail!("普通工作区未授权覆盖：{path}，请人工检查现场");
+    let mut inputs = declared_artifacts(raw, cwd).await?;
+    let files = crate::domain::commit_files(raw).map_err(anyhow::Error::msg)?;
+    let commit = if project.is_git() {
+        Some(git::commit_of(cwd, "HEAD").await?)
+    } else {
+        None
+    };
+    let snapshot = artifact_snapshot(state, project).await?;
+    for item in snapshot["items"].as_array().into_iter().flatten() {
+        let path = item["path"].as_str().unwrap_or_default();
+        let changed = files
+            .iter()
+            .any(|file| file == path || file.starts_with(&format!("{path}/")));
+        if changed && !inputs.iter().any(|input| input.path == path) {
+            let input = ArtifactInput {
+                path: path.into(),
+                kind: item["kind"].as_str().unwrap_or("intermediate").into(),
+                format: item["format"].as_str().unwrap_or_default().into(),
+                verification: item["verification"].as_str().unwrap_or_default().into(),
+            };
+            // An old navigation entry is not a write gate. Deleted or no longer
+            // accessible results retain their last registered Git version.
+            if validate_artifact(cwd, &input).await.is_ok() {
+                if let Some(commit) = &commit {
+                    if git::run_git(cwd, &["cat-file", "-e", &format!("{commit}:{path}")])
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
                 }
+                inputs.push(input);
             }
         }
     }
-    let files = if project.is_git() {
-        git::run_git(
-            cwd,
-            &[
-                "diff",
-                "--name-only",
-                "--diff-filter=ACMRT",
-                baseline
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Git 作业缺少初始提交版本"))?,
-                "HEAD",
-            ],
-        )
-        .await?
-        .lines()
-        .map(str::to_string)
-        .collect()
-    } else {
-        let root = cwd.to_path_buf();
-        tokio::task::spawn_blocking(move || files_sync(&root)).await??
-    };
-    for path in files {
-        if project.is_git() && !cwd.join(&path).is_file() {
-            continue;
-        }
-        let exists = rows.iter().any(|(registered, _, _)| registered == &path);
-        if !exists {
-            // New files are indexed automatically; explicit declarations can
-            // refine their class, format and verification in the artifact API.
-            let checksum = fingerprint(&contained(cwd, &path).await?).await?;
-            let commit = if project.is_git() {
-                Some(git::commit_of(cwd, "HEAD").await?)
-            } else {
-                None
-            };
-            sqlx::query("INSERT OR IGNORE INTO artifacts(id, project_id, task_id, job_id, path, kind, format, verification, fingerprint, commit_id, contract_id, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 'intermediate', '', '', ?, ?, ?, ?, ?)")
-                .bind(new_id("art")).bind(&project.id).bind(&job.task_id).bind(&job.id).bind(&path).bind(checksum).bind(commit).bind(job.contract_id).bind(now()).bind(now()).execute(&state.db).await?;
-        }
-        if project.is_git() {
-            let commit = git::commit_of(cwd, "HEAD").await?;
-            sqlx::query("INSERT OR IGNORE INTO artifact_versions(artifact_id, commit_id, job_id, recorded_at) SELECT id, ?, ?, ? FROM artifacts WHERE project_id = ? AND path = ?")
-                .bind(&commit).bind(&job.id).bind(now()).bind(&project.id).bind(&path).execute(&state.db).await?;
-            sqlx::query("UPDATE artifacts SET commit_id = ?, job_id = ?, contract_id = ?, updated_at = ? WHERE project_id = ? AND path = ?")
-                .bind(&commit).bind(&job.id).bind(job.contract_id).bind(now()).bind(&project.id).bind(&path).execute(&state.db).await?;
-        }
-    }
-    if !project.is_git() {
-        for (path, _, _) in &rows {
-            let checksum = fingerprint(&contained(cwd, path).await?).await?;
-            sqlx::query("UPDATE artifacts SET fingerprint = ?, updated_at = ? WHERE project_id = ? AND path = ?")
-                .bind(checksum).bind(now()).bind(&project.id).bind(path).execute(&state.db).await?;
-        }
-        sqlx::query("UPDATE workspace_checks SET interrupted = 0, reason = NULL, updated_at = ? WHERE project_id = ?")
-            .bind(now()).bind(&project.id).execute(&state.db).await?;
-    }
-    Ok(())
-}
-
-pub async fn acknowledge(state: &AppState, project: &ProjectRow, reason: &str) -> Result<()> {
-    if reason.trim().is_empty() {
-        bail!("必须记录文件现场检查结论及后续处理方式");
-    }
-    if project.status.as_deref() != Some(STATUS_PAUSED)
-        && project.status.as_deref() != Some(STATUS_BLOCKED)
-    {
-        bail!("请先暂停项目或等待阻塞后检查文件现场");
-    }
-    let running: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND status = 'running'")
-            .bind(&project.id)
-            .fetch_one(&state.db)
-            .await?;
-    if running > 0 {
-        bail!("仍有作业在途，请等待其结算后检查");
-    }
-    let rows: Vec<String> = sqlx::query_scalar("SELECT path FROM artifacts WHERE project_id = ?")
-        .bind(&project.id)
-        .fetch_all(&state.db)
-        .await?;
-    for path in rows {
-        let checksum = fingerprint(&contained(&delivery_root(project), &path).await?).await?;
-        sqlx::query("UPDATE artifacts SET fingerprint = ?, updated_at = ? WHERE project_id = ? AND path = ?")
-            .bind(checksum).bind(now()).bind(&project.id).bind(path).execute(&state.db).await?;
-    }
-    sqlx::query("UPDATE workspace_checks SET interrupted = 0, reason = ?, acknowledged_at = ?, updated_at = ? WHERE project_id = ?")
-        .bind(reason).bind(now()).bind(now()).bind(&project.id).execute(&state.db).await?;
-    crate::events::emit(
-        &state.db,
-        &state.bus,
-        Some(&project.id),
-        None,
-        "workspace_inspected",
-        reason,
+    save_artifact_batch(
+        state,
+        project,
+        &ArtifactSource {
+            task_id: job.task_id.as_deref(),
+            job_id: Some(&job.id),
+            contract_id: job.contract_id,
+            root: cwd,
+            commit: commit.as_deref(),
+        },
+        &inputs,
     )
-    .await;
-    Ok(())
+    .await
 }
 
 pub async fn block_workspace(
@@ -732,4 +574,90 @@ pub async fn block_workspace(
         .bind(reason).bind(now()).bind(&project.id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn artifact_declarations_are_explicit_and_validate_the_complete_list() {
+        let root = std::env::temp_dir().join(format!("domo-resources-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(root.join("outputs"))
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("outputs/report.md"), "report")
+            .await
+            .unwrap();
+        for raw in [r#"{"commit_files":[]}"#, r#"{"artifacts":[]}"#] {
+            assert!(declared_artifacts(raw, &root).await.unwrap().is_empty());
+        }
+        let valid = r#"{"artifacts":[{"path":"outputs/report.md","kind":"delivery"},{"path":"outputs","kind":"intermediate"}]}"#;
+        assert_eq!(declared_artifacts(valid, &root).await.unwrap().len(), 2);
+        for value in [
+            json!(null),
+            json!({"path":"outputs/report.md", "kind":"delivery"}),
+            json!([{"path":"missing.md", "kind":"delivery"}]),
+            json!([{"path":"../outside.md", "kind":"input"}]),
+            json!([{"path":".git/config", "kind":"input"}]),
+            json!([{"path":"outputs/report.md", "kind":"unknown"}]),
+            json!([{"path":"outputs/report.md", "kind":"delivery"}, {"path":"outputs/report.md", "kind":"input"}]),
+        ] {
+            let raw = json!({"artifacts":value}).to_string();
+            assert!(declared_artifacts(&raw, &root).await.is_err(), "{raw}");
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn git_artifact_declarations_require_files_in_the_delivery_snapshot() {
+        let root = std::env::temp_dir().join(format!("domo-resources-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(root.join("outputs"))
+            .await
+            .unwrap();
+        git::run_git(&root, &["init", "-q", "-b", "main"])
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("outputs/seed.md"), "seed")
+            .await
+            .unwrap();
+        git::commit_all(&root, "fixture").await.unwrap();
+        tokio::fs::write(root.join("outputs/report.md"), "report")
+            .await
+            .unwrap();
+        let raw = json!({"commit_files":[], "artifacts":[{"path":"outputs/report.md", "kind":"delivery"}]}).to_string();
+        assert!(validate_delivery_artifacts(&raw, &root, true)
+            .await
+            .is_err());
+        let raw = json!({"commit_files":["outputs/report.md"], "artifacts":[{"path":"outputs/report.md", "kind":"delivery"}]}).to_string();
+        validate_delivery_artifacts(&raw, &root, true)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(root.join("outputs/seed.md"))
+            .await
+            .unwrap();
+        let raw = json!({"commit_files":["outputs/seed.md"], "artifacts":[{"path":"outputs", "kind":"delivery"}]}).to_string();
+        assert!(validate_delivery_artifacts(&raw, &root, true)
+            .await
+            .is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artifact_declarations_reject_symlink_escape() {
+        let root = std::env::temp_dir().join(format!("domo-resources-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(root.join("workspace"))
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("outside.md"), "outside")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&root, root.join("workspace/escape")).unwrap();
+        let raw = r#"{"artifacts":[{"path":"escape/outside.md","kind":"input"}]}"#;
+        assert!(declared_artifacts(raw, &root.join("workspace"))
+            .await
+            .is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }

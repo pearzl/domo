@@ -7,18 +7,22 @@ import { vi } from "vitest";
 
 describe("项目资源与团队操作", () => {
   const detail = { project: { id: "p", stage: "completed", status: null, workspace_type: "plain" }, tasks: [], agents: [] } as unknown as ProjectDetail;
-  it("普通目录展示保护边界但没有项目合入操作", () => {
+  it("普通目录展示当前现场与显式成果，不提供文件授权门禁或合入操作", () => {
     const html = renderToStaticMarkup(<ResourcePanel detail={detail} onSaved={() => {}} />);
     expect(html).toContain("项目共享信息");
-    expect(html).toContain("不承诺恢复历史内容");
-    expect(html).toContain("授权该任务修改指定路径");
+    expect(html).toContain("无需逐文件登记");
+    expect(html).toContain("普通工作区不保留文件历史");
+    expect(html).toContain("登记重要成果或参考输入");
+    expect(html).not.toContain("授权该任务修改指定路径");
+    expect(html).not.toContain("记录检查结果并允许后续重试");
     expect(html).not.toContain("确认风险并处理冲突");
   });
-  it("归档项目不提供写入授权或检查确认", () => {
+  it("归档项目只读展示成果与参考输入", () => {
     const archived = { ...detail, project: { ...detail.project, status: "archived" } };
     const html = renderToStaticMarkup(<ResourcePanel detail={archived} onSaved={() => {}} />);
     expect(html).not.toContain("授权该任务修改指定路径");
-    expect(html).toContain("输入与产物");
+    expect(html).not.toContain("登记重要成果或参考输入");
+    expect(html).toContain("成果与参考输入");
   });
   it("Git 完成项目明确说明人工风险和独立项目作业", () => {
     const git = { ...detail, project: { ...detail.project, workspace_type: "git" as const } };

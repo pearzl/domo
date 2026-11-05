@@ -110,6 +110,9 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
                 context["task"]["key"].as_str().unwrap_or("T1")
             )]
         };
+        result["artifacts"] = serde_json::json!(files.iter().map(|path| serde_json::json!({
+            "path": path, "kind": "delivery", "format": "text/plain", "verification": "检查 mock 任务交付文件"
+        })).collect::<Vec<_>>());
         result["commit_files"] = serde_json::json!(files);
     }
     if spec.role == JOB_ROLE_ACCEPTANCE && result.get("criteria").is_some() {

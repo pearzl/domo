@@ -13,7 +13,7 @@ export async function resourceRequest<T>(url: string, method = "GET", body?: unk
 interface SharedRecord { id: string; topic: string; body: string; scope: string[]; evidence: string[]; supersedes: string[]; conflicts: string[]; reason: string; task_id: string | null; job_id: string | null; created_at: string }
 interface Shared { version: string; repository: string; records: SharedRecord[]; superseded_ids: string[] }
 interface Artifact { id: string; path: string; kind: string; format: string; verification: string; task_id: string | null; commit: string | null }
-interface Artifacts { root: string; items: Artifact[]; check: { interrupted: boolean; reason: string | null } | null; permissions: { task_id: string; path: string; reason: string }[] }
+interface Artifacts { root: string; items: Artifact[] }
 interface Preview { path: string; text: string; commit: string | null; versions: string[] }
 interface MergeStatus { request: { agent_id: string; state: string; job_id: string | null; error: string | null } | null }
 
@@ -37,10 +37,9 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   const [format, setFormat] = useState("");
   const [verification, setVerification] = useState("");
   const [task, setTask] = useState("");
-  const [reason, setReason] = useState("");
   const [agent, setAgent] = useState("");
   const readonly = detail.project.status === "archived";
-  const kindLabels: Record<string, string> = { input: "原始输入", intermediate: "中间产物", delivery: "最终交付" };
+  const kindLabels: Record<string, string> = { input: "参考输入", intermediate: "中间成果", delivery: "最终交付" };
   const filteredArtifacts = (artifacts?.items ?? []).filter(item => (!taskFilter || item.task_id === taskFilter) && (!kindFilter || item.kind === kindFilter));
   async function refresh() {
     const [s, a, m] = await Promise.all([resourceRequest<Shared>(`${base}/shared${selectedVersion ? `?version=${encodeURIComponent(selectedVersion)}` : ""}`), resourceRequest<Artifacts>(`${base}/artifacts`), resourceRequest<MergeStatus>(`${base}/merge/assist`)]);
@@ -73,13 +72,13 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
       {shared?.records.length === 0 ? <p>暂无共享记录。Agent 可在作业结果的 shared_updates 中提交事实、接口与结论。</p> : null}
       </div>
     </details>
-    <details className="panel resource-panel"><summary>输入与产物 <span className="section-count">{artifacts ? `${artifacts.items.filter(item => item.kind === "delivery").length} 项最终交付 · ${artifacts.items.length} 项登记` : "加载中…"}</span></summary><div className="resource-body"><p className="mono">{artifacts?.root}</p>
-      <p className="muted">原始输入、任务中间产物与最终交付物分别登记。普通工作区只管理当前文件，不承诺恢复历史内容；请暂停后再手工编辑。</p>
-      {artifacts?.check?.interrupted ? <div className="error-box">需要检查现场：{artifacts.check.reason}。停止进程不代表撤销文件修改。</div> : null}
+    <details className="panel resource-panel"><summary>成果与参考输入 <span className="section-count">{artifacts ? `${artifacts.items.filter(item => item.kind === "delivery").length} 项最终交付 · ${artifacts.items.length} 项登记` : "加载中…"}</span></summary><div className="resource-body"><p>工作区 / 项目输入目录：<span className="mono">{artifacts?.root}</span></p>
+      <p className="muted">目录及其内容就是项目输入，无需逐文件登记。这里仅展示显式登记的重要成果与参考资料，登记不表示验收通过，也不决定文件修改权限。</p>
+      <p className="muted">{detail.project.workspace_type === "plain" ? "任务串行使用当前目录；普通工作区不保留文件历史，初始内容请自行备份。" : "任务在隔离 worktree 中执行；已登记成果可查看对应的 Git 提交版本。"}建议暂停后再手工编辑；中断保留文件现场，后续执行先检查再接续。</p>
       <div className="form-grid"><label>按任务过滤<select value={taskFilter} onChange={e => setTaskFilter(e.target.value)}><option value="">全部任务</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
-      <label>按类型过滤<select value={kindFilter} onChange={e => setKindFilter(e.target.value)}><option value="">全部类型</option><option value="input">原始输入</option><option value="intermediate">中间产物</option><option value="delivery">最终交付</option></select></label>
+      <label>按类型过滤<select value={kindFilter} onChange={e => setKindFilter(e.target.value)}><option value="">全部类型</option><option value="input">参考输入</option><option value="intermediate">中间成果</option><option value="delivery">最终交付</option></select></label>
       </div>
-      {artifacts && filteredArtifacts.length === 0 ? <p className="muted">当前筛选下没有登记的产物。</p> : null}
+      {artifacts && filteredArtifacts.length === 0 ? <p className="muted">当前筛选下没有登记的重要成果或参考输入；工作区文件仍可按任务需要直接使用。</p> : null}
       {["delivery", "input", "intermediate", ...new Set(filteredArtifacts.map(item => item.kind).filter(value => !kindLabels[value]))].map(group => {
         const items = filteredArtifacts.filter(item => item.kind === group);
         if (!items.length) return null;
@@ -96,16 +95,12 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
         {preview.versions.length ? <select aria-label="产物版本" value={preview.commit ?? ""} onChange={e => void viewArtifact(selectedArtifact, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
         <pre>{preview.text}</pre>
       </details> : null}
-      {!readonly ? <details><summary>登记产物、声明原地修改或确认现场检查</summary>
+      {!readonly ? <details><summary>登记重要成果或参考输入</summary>
         <label>相对路径<input value={path} onChange={e => setPath(e.target.value)} placeholder="outputs/report.md" /></label>
-        <label>类型<select value={kind} onChange={e => setKind(e.target.value)}><option value="input">原始输入</option><option value="intermediate">中间产物</option><option value="delivery">最终交付</option></select></label>
+        <label>类型<select value={kind} onChange={e => setKind(e.target.value)}><option value="input">参考输入</option><option value="intermediate">中间成果</option><option value="delivery">最终交付</option></select></label>
         <label>格式<input value={format} onChange={e => setFormat(e.target.value)} /></label><label>验收方式<input value={verification} onChange={e => setVerification(e.target.value)} /></label>
-        <label>来源 / 授权任务<select value={task} onChange={e => setTask(e.target.value)}><option value="">项目直接完成</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
+        <label>来源任务<select value={task} onChange={e => setTask(e.target.value)}><option value="">项目</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
         <button className="secondary" disabled={busy || !path} onClick={() => void action(() => resourceRequest(`${base}/artifacts`, "POST", { path, kind, format, verification, task_id: task || null }))}>登记产物</button>
-        <label>修改理由 / 文件现场检查结论<textarea value={reason} onChange={e => setReason(e.target.value)} /></label>
-        <button className="secondary" disabled={busy || !path || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/permissions`, "POST", { path, task_id: task || null, reason }))}>授权该任务修改指定路径</button>{" "}
-        <button className="secondary" disabled={busy || !reason.trim()} onClick={() => void action(() => resourceRequest(`${base}/workspace/inspect`, "POST", { reason }))}>记录检查结果并允许后续重试</button>
-        <ul>{artifacts?.permissions.map((p, index) => <li key={index}>{p.path} · {p.task_id || "项目直接完成"} · {p.reason}</li>)}</ul>
       </details> : null}
     </div></details>
     {detail.project.workspace_type === "git" && detail.project.stage === "completed" && !readonly && !detail.merged_into_base ? <section className="panel"><h2>合入冲突处理</h2>
@@ -117,7 +112,6 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
       }}>确认风险并处理冲突</button>
       {merge?.request ? <p>状态：{merge.request.state} · {merge.request.error ?? ""} · 作业 {merge.request.job_id ?? "等待派发"}</p> : null}
     </section> : null}
-    {artifacts?.check?.interrupted ? <ErrorBox message={`工作区需要检查现场：${artifacts.check.reason ?? "作业中断"}。请展开输入与产物处理，停止进程不代表撤销文件修改。`} /> : null}
     {error ? <ErrorBox message={error} onRetry={() => void refresh().then(() => setError("")).catch(err => setError(errorMessage(err)))} /> : null}
   </>;
 }

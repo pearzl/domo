@@ -45,8 +45,6 @@ def main():
             task = active["tasks"][-1]
             call("POST", base + f"/tasks/{task['id']}/pause", {"force": True})
             call("POST", base + "/pause", {"force": True})
-            if call("GET", base + "/artifacts")["check"]:
-                call("POST", base + "/workspace/inspect", {"reason": "已检查强制暂停后的普通文件现场，保留当前内容"})
             call("POST", base + "/resume", {})
             paused = next(t for t in get()["tasks"] if t["id"] == task["id"])
             assert paused["status"] == "paused", paused
