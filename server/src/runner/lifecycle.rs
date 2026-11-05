@@ -35,7 +35,7 @@ pub(super) async fn finish_job(
                     &job.role,
                     result.as_deref(),
                     reason,
-                    run.process_failure(),
+                    run.process_failure() || run.reported_error.is_some(),
                 )
             })
             .as_str()

@@ -626,6 +626,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         spec.session_id = run.session_id.clone();
     }
     let interruption_run = run.clone();
+    let agent_failure = run.process_failure() || run.reported_error.is_some();
     run.stdout = combined_stdout;
     run.stderr = combined_stderr;
     if !state.is_shutting_down() {
@@ -979,14 +980,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         // scheduler would dispatch a parallel analysis for the same project.
         if status != JOB_STATUS_SUCCEEDED {
             let reason = error.as_deref().unwrap_or("项目分析失败");
-            let transition = handle_analysis_failure(
-                state,
-                &project,
-                reason,
-                Some(&agent),
-                run.process_failure(),
-            )
-            .await;
+            let transition =
+                handle_analysis_failure(state, &project, reason, Some(&agent), agent_failure).await;
             let finished = finish_job(
                 state,
                 &job,
@@ -1004,14 +999,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
         if parsed.is_none() {
             let reason = error.as_deref().unwrap_or("项目分析失败");
-            let transition = handle_analysis_failure(
-                state,
-                &project,
-                reason,
-                Some(&agent),
-                run.process_failure(),
-            )
-            .await;
+            let transition =
+                handle_analysis_failure(state, &project, reason, Some(&agent), agent_failure).await;
             let finished = finish_job(
                 state,
                 &job,
@@ -1373,7 +1362,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             .await
         }
         (JOB_ROLE_ANALYSIS, _) => {
-            let process_failure = run.process_failure();
+            let process_failure = agent_failure;
             handle_analysis_failure(
                 state,
                 &project,
@@ -1384,7 +1373,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             .await
         }
         (JOB_ROLE_DIRECT, _) => {
-            let process_failure = run.process_failure();
+            let process_failure = agent_failure;
             handle_direct_failure(
                 state,
                 &project,
@@ -1415,7 +1404,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     &job.role,
                     result_text.as_deref(),
                     reason,
-                    run.process_failure(),
+                    agent_failure,
                 );
                 handle_executor_failure(state, &project, task, reason, &agent, kind).await
             } else {
@@ -1432,7 +1421,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         (JOB_ROLE_VERIFIER, _) => {
             if let Some(task) = task.as_ref() {
                 let reason = error.as_deref().unwrap_or("验收作业失败");
-                let process_failure = run.process_failure();
+                let process_failure = agent_failure;
                 handle_verifier_failure(state, &project, task, reason, &agent, process_failure)
                     .await
             } else {
@@ -1452,7 +1441,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 .await
         }
         (JOB_ROLE_ACCEPTANCE, _) => {
-            let process_failure = run.process_failure();
+            let process_failure = agent_failure;
             handle_acceptance_failure(
                 state,
                 &project,
@@ -1466,7 +1455,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             handle_report(state, &project, summary).await
         }
         (JOB_ROLE_SUMMARY, _) => {
-            let process_failure = run.process_failure();
+            let process_failure = agent_failure;
             handle_summary_failure(
                 state,
                 &project,

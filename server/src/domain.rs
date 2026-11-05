@@ -1712,8 +1712,12 @@ mod tests {
             FailureKind::Transient
         );
         assert_eq!(
-            classify_failure("Request timed out after 30s", false),
+            classify_failure("Request timed out after 30s", true),
             FailureKind::Transient
+        );
+        assert_eq!(
+            classify_failure("Request timed out after 30s", false),
+            FailureKind::Task
         );
         assert_eq!(
             classify_failure("Agent 作业卡死：连续 60 秒无输出或进度", true),
