@@ -92,6 +92,9 @@ pub struct AgentRun {
     pub stalled: bool,
     pub session_id: Option<String>,
     pub usage: Option<UsageRecord>,
+    /// Execution failure reported inside the agent's output stream. A CLI can
+    /// exit 0 and still fail, so this reason outranks the exit code.
+    pub reported_error: Option<String>,
 }
 
 impl AgentRun {

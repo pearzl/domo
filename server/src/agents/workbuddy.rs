@@ -73,7 +73,75 @@ async fn workbuddy_turn(
     run.session_id = parse_workbuddy_session_id(&run.stdout)
         .or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
     run.usage = parse_workbuddy_usage(&run.stdout);
+    run.reported_error = parse_workbuddy_error(&run.stdout);
     Ok(run)
+}
+
+/// WorkBuddy reports execution failures inside the final `result` event while
+/// the process still exits 0. The reason is the first line of the first
+/// structured error so a provider payload never becomes the job error.
+pub(crate) fn parse_workbuddy_error(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("result"))
+        .filter_map(|value| workbuddy_result_error(&value))
+        .last()
+}
+
+pub(crate) fn workbuddy_result_error(value: &serde_json::Value) -> Option<String> {
+    let subtype = value
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .filter(|subtype| !subtype.is_empty());
+    let is_error = value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
+    if !is_error && !subtype.is_some_and(|subtype| subtype != "success") {
+        return None;
+    }
+    value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.as_str().and_then(first_line))
+        })
+        .or_else(|| {
+            value
+                .get("errors_info")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.iter().find_map(info_error))
+        })
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .and_then(first_line)
+        })
+        .or_else(|| {
+            Some(match subtype {
+                Some(subtype) => format!("WorkBuddy 执行失败：{subtype}"),
+                None => "WorkBuddy 报告执行错误".to_string(),
+            })
+        })
+}
+
+fn info_error(info: &serde_json::Value) -> Option<String> {
+    info.get("details")
+        .and_then(serde_json::Value::as_str)
+        .and_then(first_line)
+        .or_else(|| {
+            info.get("message")
+                .and_then(serde_json::Value::as_str)
+                .and_then(first_line)
+        })
+}
+
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 pub(super) fn workbuddy_bin() -> String {
@@ -292,6 +360,55 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.cache_read_tokens, Some(12));
         assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn parses_quota_failure_from_the_result_event() {
+        let stdout = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["429 您的使用量已超出频率限制…\n更多说明"],"errors_info":[{"status":429,"category":"quota","details":"429 您的使用量已超出频率限制…"}]}"#,
+            "\n"
+        );
+        assert_eq!(
+            parse_workbuddy_error(stdout).as_deref(),
+            Some("429 您的使用量已超出频率限制…")
+        );
+    }
+
+    #[test]
+    fn parses_request_timeout_from_the_result_event() {
+        let stdout = concat!(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Request timed out\nupstream did not respond"]}"#,
+            "\n"
+        );
+        assert_eq!(
+            parse_workbuddy_error(stdout).as_deref(),
+            Some("Request timed out")
+        );
+    }
+
+    #[test]
+    fn result_error_falls_back_to_structured_details() {
+        let stdout = concat!(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors_info":[{"status":400,"details":"400 model service info not found\n可用模型列表"}]}"#,
+            "\n"
+        );
+        assert_eq!(
+            parse_workbuddy_error(stdout).as_deref(),
+            Some("400 model service info not found")
+        );
+    }
+
+    #[test]
+    fn successful_result_reports_no_error() {
+        let stdout = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            "\n"
+        );
+        assert_eq!(parse_workbuddy_error(stdout), None);
     }
 
     #[test]

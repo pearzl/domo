@@ -79,6 +79,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         stalled: false,
         session_id: None,
         usage: None,
+        reported_error: None,
     })
 }
 

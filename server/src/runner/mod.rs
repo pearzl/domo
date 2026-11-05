@@ -308,6 +308,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             }
             break;
         }
+        if run.reported_error.is_some() {
+            // An execution failure reported in the result event is not an
+            // incomplete result protocol, so it goes through failure policy
+            // instead of consuming the continuation budget.
+            break;
+        }
         let current_result = fs::read_to_string(&result_path).await.ok();
         let mut protocol_error = match current_result.as_deref() {
             None => Some("Agent 没有写 result.json".to_string()),
@@ -499,6 +505,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             )
         };
         (JOB_STATUS_FAILED, raw_result.clone(), Some(reason))
+    } else if let Some(reported) = run.reported_error.clone() {
+        (JOB_STATUS_FAILED, raw_result.clone(), Some(reported))
     } else if let Some(raw) = &raw_result {
         match parse_result(&job.role, raw) {
             Ok(parsed) => {

@@ -63,8 +63,9 @@
 | `timed_out`、`stalled` | 超时与卡死标记。 |
 | `session_id` | 本类型报告或派生的会话标识。 |
 | `usage` | 该轮可解析到的用量；没有时为 `None`。 |
+| `reported_error` | 适配器从输出协议中读到的执行失败原因；进程退出码为 0 时也按失败处理，并跳过结果协议继续。 |
 
-`AgentRun::process_failure()` 在 `timed_out`、`stalled` 或 `exit_code != Some(0)` 时返回真，供结算和失败分类使用。
+`AgentRun::process_failure()` 在 `timed_out`、`stalled` 或 `exit_code != Some(0)` 时返回真，供结算和失败分类使用。`reported_error` 描述的是进程成功退出但 Agent 明确报告失败的情况，因此不计入 `process_failure()`。
 
 ### 2.4 作业用量结算
 

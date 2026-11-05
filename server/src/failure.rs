@@ -69,10 +69,25 @@ pub fn last_error_line(text: &str) -> Option<&str> {
     text.lines().rev().find_map(|line| {
         let fragment = json_fragment(line)?;
         let value = serde_json::from_str::<Value>(fragment).ok()?;
-        let is_error = value.get("type").and_then(Value::as_str) == Some("error")
-            || value.get("error").is_some_and(|error| !error.is_null());
-        is_error.then_some(fragment)
+        is_error_event(&value).then_some(fragment)
     })
+}
+
+/// Error events come from OpenCode as `type=error` and from WorkBuddy as a
+/// `result` event whose `is_error` or `subtype` marks the failure.
+fn is_error_event(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) == Some("error") {
+        return true;
+    }
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return true;
+    }
+    value.get("type").and_then(Value::as_str) == Some("result")
+        && (value.get("is_error").and_then(Value::as_bool) == Some(true)
+            || value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|subtype| subtype != "success"))
 }
 
 fn summarize_json_lines(text: &str) -> Option<FailureSummary> {
@@ -243,7 +258,22 @@ fn collect_candidates(
             }
         }
         Value::Array(items) => {
+            let error_list = path == "errors" || path.ends_with(".errors");
             for (index, child) in items.iter().enumerate() {
+                if error_list {
+                    if let Some(message) = child
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                    {
+                        out.push(Candidate {
+                            message: message.to_string(),
+                            context: inherited.clone(),
+                            depth: depth + 1,
+                        });
+                        continue;
+                    }
+                }
                 collect_candidates(
                     child,
                     &format!("{path}[{index}]"),
@@ -384,7 +414,28 @@ fn classify_provider(context: &Context, message: &str) -> &'static str {
 
 fn summarize_text(text: &str) -> FailureSummary {
     let lowered = text.to_lowercase();
-    let kind = if lowered.contains("作业超时") || lowered.contains("timed out") {
+    let kind = if contains_status_code(&lowered, "429")
+        || [
+            "rate limit",
+            "rate-limit",
+            "ratelimit",
+            "rate_limit",
+            "too many requests",
+            "quota",
+            "限流",
+            "请求过多",
+            "频率限制",
+            "使用量已超出",
+            "额度",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle))
+    {
+        KIND_RATE_LIMIT
+    } else if lowered.contains("超时")
+        || lowered.contains("timeout")
+        || lowered.contains("timed out")
+    {
         KIND_TIMEOUT
     } else if lowered.contains("卡死") || lowered.contains("stalled") {
         KIND_STALLED
@@ -435,6 +486,17 @@ fn process_exit_message(text: &str) -> String {
 
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Matches an HTTP status code as a standalone token so other numbers in an
+/// error message do not become rate-limit signals.
+fn contains_status_code(text: &str, code: &str) -> bool {
+    text.match_indices(code).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + code.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric())
+    })
 }
 
 fn truncate_message(text: &str) -> String {
@@ -529,6 +591,46 @@ mod tests {
     fn does_not_duplicate_an_error_event_inside_the_excerpt() {
         let raw = "{\"type\":\"error\",\"error\":{\"message\":\"boom\",\"status\":401}}";
         assert_eq!(error_detail(raw, 30), raw);
+    }
+
+    #[test]
+    fn summarizes_workbuddy_error_result() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["429 您的使用量已超出频率限制…\n更多说明"],"errors_info":[{"status":429,"code":6004,"category":"quota","details":"429 您的使用量已超出频率限制…"}]}"#
+        );
+        let summary = summarize(Some(raw)).expect("workbuddy error is summarized");
+        assert_eq!(summary.kind, KIND_RATE_LIMIT);
+        assert_eq!(summary.message, "429 您的使用量已超出频率限制…");
+        assert_eq!(summary.status, Some(429));
+    }
+
+    #[test]
+    fn classifies_request_timeout_text() {
+        let summary = summarize(Some("请求超时，模型服务未在时限内响应"))
+            .expect("timeout text is summarized");
+        assert_eq!(summary.kind, KIND_TIMEOUT);
+        assert!(summary.message.contains("请求超时"));
+    }
+
+    #[test]
+    fn classifies_plain_text_rate_limit() {
+        let summary = summarize(Some("429 您的使用量已超出频率限制，请稍后重试"))
+            .expect("text is summarized");
+        assert_eq!(summary.kind, KIND_RATE_LIMIT);
+        assert!(summary.message.contains("429"));
+    }
+
+    #[test]
+    fn selects_workbuddy_error_result_line() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["429 您的使用量已超出频率限制…"]}"#
+        );
+        let line = last_error_line(raw).expect("error result is selected");
+        assert!(line.contains("error_during_execution"));
     }
 
     #[test]

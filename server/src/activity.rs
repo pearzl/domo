@@ -565,7 +565,14 @@ fn parse_workbuddy(raw: &str, state: &mut ParseState) {
             .unwrap_or_default();
         match event {
             "assistant" | "user" => {}
-            // `result` carries session totals only; usage is read by the runner.
+            // A successful `result` only carries session totals. An error
+            // result becomes a line so the reason is visible in the activity.
+            "result" => {
+                if let Some(error) = crate::agents::workbuddy_result_error(&value) {
+                    state.line(&error);
+                }
+                continue;
+            }
             _ => continue,
         }
         for block in message_blocks(&value) {
@@ -1193,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_result_event_adds_no_activity() {
+    fn workbuddy_error_result_becomes_a_line() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s"}"#,
             "\n",
@@ -1205,9 +1212,14 @@ mod tests {
         let activity = report(raw);
         assert_eq!(activity.format, FORMAT_WORKBUDDY);
         assert_eq!(activity.summary.messages, 1);
-        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items.len(), 2);
         assert_eq!(
             activity.items[0].text.as_deref(),
+            Some("400 model service info not found")
+        );
+        assert_eq!(activity.items[1].kind, KIND_LINE);
+        assert_eq!(
+            activity.items[1].text.as_deref(),
             Some("400 model service info not found")
         );
     }

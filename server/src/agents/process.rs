@@ -92,6 +92,7 @@ pub(super) async fn run_process(
         stalled: false,
         session_id: None,
         usage: None,
+        reported_error: None,
     })
 }
 

@@ -48,6 +48,7 @@ pub use codex::CodexAdapter;
 pub use mock::MockAdapter;
 pub use opencode::OpencodeAdapter;
 pub use process::{job_process_alive, kill_job_dir};
+pub(crate) use workbuddy::workbuddy_result_error;
 pub use workbuddy::WorkbuddyAdapter;
 
 /// Declares the registered adapter types once. `KINDS` and every dispatch hook
@@ -252,6 +253,7 @@ mod tests {
             stalled: true,
             session_id: None,
             usage: None,
+            reported_error: None,
         };
         assert!(run.process_failure());
         let clean = AgentRun {
@@ -262,6 +264,7 @@ mod tests {
             stalled: false,
             session_id: None,
             usage: None,
+            reported_error: None,
         };
         assert!(!clean.process_failure());
     }
