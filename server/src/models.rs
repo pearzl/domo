@@ -907,6 +907,9 @@ pub struct CreateAgentRequest {
     pub model_args: Option<Vec<String>>,
     pub availability: Option<AvailabilityConfig>,
     pub usage_limit: Option<UsageLimitConfig>,
+    /// 创建时把该 Agent 追加到所有未归档项目及未结束任务的 Agent 池末尾。
+    #[serde(default)]
+    pub add_to_existing_pools: bool,
 }
 
 #[derive(Debug, Deserialize)]

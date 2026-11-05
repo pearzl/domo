@@ -107,6 +107,16 @@ pub(super) async fn create_agent(
     .execute(&state.db)
     .await?;
     crate::db::ensure_default_team(&state.db).await?;
+    if request.add_to_existing_pools {
+        let summary = crate::db::add_agent_to_existing_pools(&state.db, &id).await?;
+        tracing::info!(
+            agent_id = %id,
+            project_entries = summary.project_entries,
+            task_entries = summary.task_entries,
+            "新建 Agent 已同步到现有项目和任务 Agent 池"
+        );
+        state.notify_scheduler();
+    }
     let row = crate::db::load_agent(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("Agent 不存在"))?;

@@ -82,10 +82,15 @@ pub(super) fn codex_bin() -> String {
 
 pub(super) fn codex_args(model: &str, job_dir: &Path) -> Vec<String> {
     let mut args = vec![
+        // Without this the CLI may attach to the shared background server, so a
+        // killed job would leave its turn running outside the job process tree.
+        "--no-daemon".to_string(),
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
         "workspace-write".to_string(),
+        // Plain workspaces are not Git repositories.
+        "--skip-git-repo-check".to_string(),
         "--add-dir".to_string(),
         job_dir.to_string_lossy().to_string(),
     ];
@@ -100,9 +105,12 @@ pub(super) fn codex_args(model: &str, job_dir: &Path) -> Vec<String> {
 
 pub(super) fn codex_resume_args(model: &str, session_id: &str) -> Vec<String> {
     let mut args = vec![
+        // Keep resumed turns in this process tree as well.
+        "--no-daemon".to_string(),
         "exec".to_string(),
         "resume".to_string(),
         "--json".to_string(),
+        "--skip-git-repo-check".to_string(),
     ];
     let model = model.trim();
     if !model.is_empty() {
@@ -220,8 +228,10 @@ mod tests {
     #[test]
     fn codex_args_omit_model_flag_when_model_is_empty() {
         let args = codex_args("", Path::new("/tmp/job"));
-        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert_eq!(args.first().map(String::as_str), Some("--no-daemon"));
+        assert_eq!(args.get(1).map(String::as_str), Some("exec"));
         assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args_contain_pair(&args, "--sandbox", "workspace-write"));
         assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
         assert!(!args.contains(&"--model".to_string()));
@@ -231,7 +241,10 @@ mod tests {
     #[test]
     fn codex_args_include_model_when_present() {
         let args = codex_args(" gpt-5-codex ", Path::new("/tmp/job"));
+        assert_eq!(args.first().map(String::as_str), Some("--no-daemon"));
+        assert_eq!(args.get(1).map(String::as_str), Some("exec"));
         assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args_contain_pair(&args, "--sandbox", "workspace-write"));
         assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
         assert!(args_contain_pair(&args, "--model", "gpt-5-codex"));
@@ -241,9 +254,11 @@ mod tests {
     #[test]
     fn resume_args_keep_the_agent_session_id() {
         let codex = codex_resume_args("gpt-test", "thread-1");
-        assert_eq!(codex[0], "exec");
-        assert_eq!(codex[1], "resume");
+        assert_eq!(codex[0], "--no-daemon");
+        assert_eq!(codex[1], "exec");
+        assert_eq!(codex[2], "resume");
         assert!(codex.contains(&"--json".to_string()));
+        assert!(codex.contains(&"--skip-git-repo-check".to_string()));
         assert!(codex.contains(&"thread-1".to_string()));
         assert_eq!(codex.last().map(String::as_str), Some("-"));
     }

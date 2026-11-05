@@ -420,7 +420,8 @@ def main():
                 args = invocations[0]["args"]
                 assert invocations[0]["prompt_chars"] > 0, f"{key} 未从 stdin 读取提示词"
                 if key == "codex":
-                    assert args[:2] == ["exec", "--json"], args
+                    assert args[:3] == ["--no-daemon", "exec", "--json"], args
+                    assert "--skip-git-repo-check" in args, args
                     assert args[-1] == "-", args
                 else:
                     assert "-p" in args and "stream-json" in args, args

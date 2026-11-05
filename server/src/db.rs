@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::models::{
     default_team_row_to_pool, parse_string_list, string_list_json, AgentRow, DefaultTeamRow,
     ProjectAgentEntry, ProjectAgentPool, ProjectAgentRow, ProjectRolePool, TaskAgentPool,
-    TaskAgentRow, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER,
+    TaskAgentRow, AGENT_OPENCODE, ROLE_EXECUTOR, ROLE_PLANNER, ROLE_VERIFIER, STATUS_ARCHIVED,
+    STATUS_CANCELED, TASK_STAGE_COMPLETED,
 };
 use crate::usage::UsageError;
 
@@ -684,6 +685,102 @@ pub async fn initialize_task_agents_tx(
     .execute(executor)
     .await?;
     Ok(())
+}
+
+/// 新建 Agent 时同步到存量 Agent 池的写入统计。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AgentPoolSyncSummary {
+    pub project_entries: i64,
+    pub task_entries: i64,
+}
+
+/// 把已注册的 Agent 追加到全部未归档项目和未结束任务的 Agent 池末尾。
+///
+/// 项目池按 Agent 的规划/执行/验收角色追加，任务池只追加执行者与验收者。
+/// 写入使用单个 `BEGIN IMMEDIATE` 事务，优先级取角色内 `MAX(priority)+1`，
+/// 并通过 `INSERT OR IGNORE` 保持幂等；已归档项目、已完成或已取消任务不参与。
+pub async fn add_agent_to_existing_pools(
+    pool: &SqlitePool,
+    agent_id: &str,
+) -> DbResult<AgentPoolSyncSummary> {
+    let Some(agent) = load_agent(pool, agent_id).await? else {
+        return Ok(AgentPoolSyncSummary::default());
+    };
+    let roles = parse_string_list(&agent.roles);
+    let project_roles: Vec<&str> = PROJECT_POOL_ROLES
+        .iter()
+        .copied()
+        .filter(|role| roles.iter().any(|item| item.as_str() == *role))
+        .collect();
+    let task_roles: Vec<&str> = TASK_POOL_ROLES
+        .iter()
+        .copied()
+        .filter(|role| roles.iter().any(|item| item.as_str() == *role))
+        .collect();
+    if project_roles.is_empty() && task_roles.is_empty() {
+        return Ok(AgentPoolSyncSummary::default());
+    }
+
+    let timestamp = crate::domain::now();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut summary = AgentPoolSyncSummary::default();
+
+    for role in &project_roles {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO project_agents \
+             (project_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+             SELECT p.id, ?, ?, ?, \
+                COALESCE((SELECT MAX(pa.priority) + 1 FROM project_agents pa \
+                          WHERE pa.project_id = p.id AND pa.role = ?), 0), \
+                ?, ?, ? \
+             FROM projects p \
+             WHERE COALESCE(p.status, '') != ?",
+        )
+        .bind(role)
+        .bind(&agent.id)
+        .bind(&agent.name)
+        .bind(role)
+        .bind(agent.enabled)
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .bind(STATUS_ARCHIVED)
+        .execute(&mut *tx)
+        .await?;
+        summary.project_entries += result.rows_affected() as i64;
+    }
+
+    if !task_roles.is_empty() {
+        for role in &task_roles {
+            let result = sqlx::query(
+                "INSERT OR IGNORE INTO task_agents \
+                 (task_id, role, agent_id, agent_name, priority, enabled, created_at, updated_at) \
+                 SELECT t.id, ?, ?, ?, \
+                    COALESCE((SELECT MAX(ta.priority) + 1 FROM task_agents ta \
+                              WHERE ta.task_id = t.id AND ta.role = ?), 0), \
+                    ?, ?, ? \
+                 FROM tasks t JOIN projects p ON p.id = t.project_id \
+                 WHERE COALESCE(p.status, '') != ? \
+                   AND t.stage != ? \
+                   AND COALESCE(t.status, '') != ?",
+            )
+            .bind(role)
+            .bind(&agent.id)
+            .bind(&agent.name)
+            .bind(role)
+            .bind(agent.enabled)
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(STATUS_ARCHIVED)
+            .bind(TASK_STAGE_COMPLETED)
+            .bind(STATUS_CANCELED)
+            .execute(&mut *tx)
+            .await?;
+            summary.task_entries += result.rows_affected() as i64;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(summary)
 }
 
 pub async fn load_task_agent_pool(

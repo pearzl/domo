@@ -27,6 +27,8 @@ export interface AgentFormState {
   maxConcurrency: string;
   allowPriorityFallback: boolean;
   enabled: boolean;
+  /** 创建时同步追加到现有项目和任务 Agent 池；编辑时固定为 false。 */
+  addToExistingPools: boolean;
   command: string;
   modelArgs: string;
   availabilityEnabled: boolean;
@@ -54,6 +56,7 @@ export function emptyForm(): AgentFormState {
     maxConcurrency: "2",
     allowPriorityFallback: false,
     enabled: true,
+    addToExistingPools: false,
     command: "",
     modelArgs: "",
     availabilityEnabled: false,
@@ -78,6 +81,7 @@ export function isAgentFormDraft(value: unknown): value is AgentFormState {
     typeof record.maxConcurrency === "string" &&
     typeof record.allowPriorityFallback === "boolean" &&
     typeof record.enabled === "boolean" &&
+    typeof record.addToExistingPools === "boolean" &&
     typeof record.command === "string" &&
     typeof record.modelArgs === "string" &&
     typeof record.availabilityEnabled === "boolean" &&
@@ -120,6 +124,7 @@ export function formForAgent(agent: Agent): AgentFormState {
     maxConcurrency: String(agent.max_concurrency),
     allowPriorityFallback: Boolean(agent.allow_priority_fallback),
     enabled: agent.enabled,
+    addToExistingPools: false,
     command: agent.command.length ? JSON.stringify(agent.command) : "",
     modelArgs: agent.model_args.length ? JSON.stringify(agent.model_args) : "",
     availabilityEnabled: Boolean(agent.availability?.enabled),
@@ -324,6 +329,23 @@ export function AgentFormPanel({
             ))}
           </div>
         </div>
+        {agent === null ? (
+          <div className="field">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.addToExistingPools}
+                onChange={(event) =>
+                  update({ addToExistingPools: event.target.checked })
+                }
+              />
+              <span>同时加入所有现有项目和任务的 Agent 池</span>
+            </label>
+            <small className="muted">
+              仅创建时可选：按角色追加到未归档项目的项目池，以及这些项目下未完成、未取消任务的执行者与验收者池末尾。默认关闭。
+            </small>
+          </div>
+        ) : null}
       </>
     ),
     schedule: (

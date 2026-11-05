@@ -490,6 +490,18 @@ mod tests {
             .unwrap()
             .contains("尝试"));
         pool.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        for attempt in 0..20 {
+            match tokio::fs::remove_dir_all(&root).await {
+                Ok(()) => break,
+                Err(error)
+                    if cfg!(windows)
+                        && matches!(error.raw_os_error(), Some(32 | 33))
+                        && attempt < 19 =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("temporary database cleanup failed: {error}"),
+            }
+        }
     }
 }

@@ -561,6 +561,8 @@ export interface AgentInput {
   max_concurrency?: number;
   allow_priority_fallback?: boolean;
   enabled?: boolean;
+  /// 创建时同步追加到现有项目和任务 Agent 池；仅创建请求使用。
+  add_to_existing_pools?: boolean;
   command?: string[];
   model_args?: string[];
   availability?: AgentAvailability | null;

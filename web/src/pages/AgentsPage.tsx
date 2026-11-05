@@ -142,6 +142,9 @@ export function AgentsPage() {
         availability,
         usage_limit: usageLimit,
       };
+      if (!editing) {
+        input.add_to_existing_pools = form.addToExistingPools;
+      }
       if (editing) {
         await api.updateAgent(editing.id, input);
       } else {

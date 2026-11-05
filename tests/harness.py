@@ -17,6 +17,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -78,7 +79,14 @@ def free_port():
 
 @contextmanager
 def temp_root(prefix):
-    path = Path(tempfile.mkdtemp(prefix=prefix))
+    if IS_WINDOWS:
+        # Python turns tempfile.mkdtemp's 0o700 into an owner-only Windows ACL;
+        # a sandboxed real CLI (Codex) runs under another account and could not
+        # traverse the tree, so create the root with the default ACL instead.
+        path = Path(tempfile.gettempdir()) / f"{prefix}{uuid.uuid4().hex}"
+        path.mkdir(mode=0o777)
+    else:
+        path = Path(tempfile.mkdtemp(prefix=prefix))
     try:
         yield path
     finally:

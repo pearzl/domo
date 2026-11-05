@@ -129,6 +129,24 @@ describe("Agent 表单字段与校验保持不变", () => {
     });
   });
 
+  it("新建 Agent 默认不同步现有池，面板提供同步选项", () => {
+    expect(emptyForm().addToExistingPools).toBe(false);
+    const markup = renderPanel(emptyForm());
+    expect(markup).toContain("同时加入所有现有项目和任务的 Agent 池");
+  });
+
+  it("编辑 Agent 时不显示同步现有池选项", () => {
+    const value = agent();
+    const markup = renderPanel(formForAgent(value), value);
+    expect(markup).not.toContain("同时加入所有现有项目和任务的 Agent 池");
+  });
+
+  it("草稿校验拒绝缺失或非布尔的同步选项", () => {
+    expect(
+      isAgentFormDraft({ ...emptyForm(), addToExistingPools: "yes" }),
+    ).toBe(false);
+  });
+
   it("用量限额必须大于 0，命令模板必须是字符串数组", () => {
     expect(() =>
       buildUsageLimit({ ...emptyForm(), usageLimitEnabled: true, usageLimit: "0" }),

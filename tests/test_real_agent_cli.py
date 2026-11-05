@@ -8,7 +8,7 @@ CLI，例如：
     python tests/test_real_agent_cli.py
 
 场景：对每个已配置的 CLI，用真实 Agent 完成一个最小的、可客观验收的任务
-（在仓库根目录创建 hello.txt，内容为一行 hello domo），断言执行作业成功、
+（在仓库根目录创建 domo_mock/T1.txt，内容包含 T1），断言执行作业成功、
 产物随交付分支保留、作业记录了活动与用量读取结果。规划与验收由内置 mock
 负责，避免把真实调用扩展到整条链路。
 
@@ -117,11 +117,7 @@ def main():
                 )["project"]
                 project_id = project["id"]
                 # 项目池在创建时从默认团队快照，把真实 CLI 设为唯一可用的执行者。
-                pool = call(
-                    "POST",
-                    f"/api/projects/{project_id}/agents",
-                    {"role": "executor", "agent_id": agent["id"]},
-                )
+                pool = call("GET", f"/api/projects/{project_id}/agents")
                 for entry in next(
                     group for group in pool["roles"] if group["role"] == "executor"
                 )["entries"]:
@@ -136,9 +132,10 @@ def main():
                     f"/api/projects/{project_id}/agents/executor/{agent['id']}",
                     {"position": 0},
                 )
+                # 与内置 mock 规划者的固定单任务保持一致，真实执行者只负责产物。
                 goal = (
-                    "[single] 在仓库根目录创建 hello.txt，内容为一行 hello domo。"
-                    "不要修改其他文件。验收标准：hello.txt 存在。"
+                    "[single] 在仓库根目录创建 domo_mock/T1.txt，内容为一行 T1。"
+                    "不要修改其他文件。验收标准：domo_mock/T1.txt 存在且包含 T1。"
                 )
                 call(
                     "POST",
@@ -204,19 +201,26 @@ def main():
                 stderr = (job_dir / "stderr.log").read_text(
                     encoding="utf-8", errors="replace"
                 )
-                artifact_path = Path(worktree) / "hello.txt" if worktree else None
+                artifact_path = (
+                    Path(worktree) / "domo_mock" / "T1.txt" if worktree else None
+                )
                 if artifact_path is not None and artifact_path.is_file():
-                    content = artifact_path.read_text(encoding="utf-8").strip()
-                    assert content == "hello domo", repr(content)
+                    content = artifact_path.read_text(
+                        encoding="utf-8-sig", errors="replace"
+                    ).strip()
+                    assert "T1" in content, repr(content)
                     artifact = "worktree"
                 else:
                     # 执行者不提交；产物出现在交付分支是在后续环节，这里以日志中的写入动作为准。
-                    assert "hello.txt" in stdout, (
-                        f"{key} 执行日志中找不到 hello.txt 痕迹：\n{stdout[-4000:]}"
+                    assert "domo_mock/T1.txt" in stdout, (
+                        f"{key} 执行日志中找不到 domo_mock/T1.txt 痕迹：\n{stdout[-4000:]}"
                     )
                     artifact = "log"
 
-                with open(job_dir / "result.json", encoding="utf-8") as handle:
+                # Windows 上 Codex 写文件可能带 UTF-8 BOM。
+                with open(
+                    job_dir / "result.json", encoding="utf-8-sig"
+                ) as handle:
                     json.load(handle)
 
                 activity = call("GET", f"/api/jobs/{job['id']}/activity")

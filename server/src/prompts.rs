@@ -156,6 +156,13 @@ fn long_command_rules() -> &'static str {
      - 最少每隔5分钟要有一次内容输出，否则会被判定为卡死而被关闭。\n"
 }
 
+fn verification_rules() -> &'static str {
+    "- 可以运行测试、探针、构建和检查器，核对实际退出码与报告；这些命令可以创建缓存、日志、临时数据和报告。\n\
+     - 验证产物只能写入工作区内的验收产物目录或作业目录；Git 工作区使用已忽略目录，普通工作区使用独立验收产物目录；通过命令参数或环境变量指定输出位置。\n\
+     - 不要修改交付源码、配置、文档、输入资源或现有交付物，也不要修改忽略规则；不得执行 git add、git commit、git merge、git rebase、git reset、git clean、git push 等改变暂存区、历史或分支或清理工作区的命令。\n\
+     - 不要在工作区和作业目录以外读写文件；结果 JSON 写入指定结果文件。\n"
+}
+
 fn result_rules(data: &PromptData, schema: &str) -> String {
     format!(
         "\n## 结果文件（必须执行）\n\
@@ -527,12 +534,12 @@ fn verifier_prompt(data: &PromptData) -> String {
     let (opening, workspace_note) = if plain_workspace(data) {
         (
             "你当前扮演**验收者**，在同一普通工作区核验执行结果；产物直接留在此目录，不存在分支或合入步骤。",
-            "不要在工作区以外读写文件，也不要修改任何文件；",
+            "验收产物与交付物使用不同目录；",
         )
     } else {
         (
-            "你当前扮演**验收者**，在任务分支的独立只读工作区核验执行结果。项目交付分支会在验收通过后由 DOMO 自动合并；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在项目交付分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。",
-            "不要在工作区以外读写文件，也不要修改任何文件；验收工作区在结束后会被删除；",
+            "你当前扮演**验收者**，在任务分支的独立验收工作区核验执行结果。项目交付分支会在验收通过后由 DOMO 自动合并；合并冲突时任务会退回执行者解决并再次验收。不要因为任务改动尚未出现在项目交付分支而判定失败，也不要把“已提交到项目交付分支”当作验收前置条件。",
+            "验收工作区在结束后会被删除；需要保留的验证报告写入作业目录；",
         )
     };
     format!(
@@ -548,6 +555,7 @@ fn verifier_prompt(data: &PromptData) -> String {
          - 如果历史问题包含合并冲突，先确认执行者已解决冲突并消除冲突标记，再按任务验收标准复核；冲突处理本身不作为验收标准；\n\
          - 发现真实缺陷、验证失败、遗漏或伪造，判定不通过；\n\
          - {workspace_note}\n\
+         {}\
          - 即使无法验收，也要写结果文件。\n\
          {}",
         common_header(data),
@@ -563,6 +571,7 @@ fn verifier_prompt(data: &PromptData) -> String {
         } else {
             &data.diff_stat
         },
+        verification_rules(),
         result_rules(
             data,
             "{\"pass\":true,\"reason\":\"通过原因\",\"issues\":[]} 或 {\"pass\":false,\"reason\":\"拒绝原因\",\"issues\":[\"具体问题\"]}"
@@ -674,14 +683,14 @@ fn acceptance_prompt(data: &PromptData) -> String {
          {}\
          \n## 验收要求\n\
          - {evidence_rule}\n\
-         - 可以运行只读验证命令（测试、探针、构建检查等）获取证据；构建与测试产物应落在已忽略的目录；\n\
+         {}\
          - {git_rule}\n\
          - 每条验收条目给出 verdict：met（有可核查证据）、unmet（代理本应完成但未完成）、unverifiable（代理应能验证但当前无法验证）、human_required（只能由人完成的签字、试听、实机对照等）；\n\
          - 方案明确允许以 UNKNOWN 收口的条目，判为 met，并在 evidence 中引用允许该口径的方案条文；不为通过验收而放宽标准；\n\
          - human_required 不是重规划理由，会作为人工待办写入项目报告；只有 unmet 和 unverifiable 需要重新规划；\n\
          - 证据必须具体，写清命令与退出码、文件路径、提交号或作业 id，不要只复述任务摘要；\n\
          - 存在 unmet 或 unverifiable 时，在 replan_reason 中列出需要规划者补齐的工作；否则留空；\n\
-         - 不要写项目报告，也不要修改结果文件以外的任何文件。\n\
+         - 不要写项目报告。\n\
          {}",
         common_header(data),
         summary,
@@ -696,6 +705,7 @@ fn acceptance_prompt(data: &PromptData) -> String {
         },
         dialogue_history(data),
         replan,
+        verification_rules(),
         result_rules(
             data,
             "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met|unmet|unverifiable|human_required\",\"evidence\":[\"command: 命令 -> 退出码\",\"file: 路径 -> 结论\"],\"gap\":\"未满足或无法验证的原因\"}],\"replan_reason\":\"存在 unmet 或 unverifiable 时的重规划原因，否则为空\"}"
@@ -1040,6 +1050,41 @@ mod tests {
     }
 
     #[test]
+    fn verification_permissions_allow_reports_and_protect_deliverables() {
+        for role in [JOB_ROLE_VERIFIER, JOB_ROLE_ACCEPTANCE] {
+            for workspace_type in ["git", crate::models::WORKSPACE_PLAIN] {
+                let mut data = sample_data(role);
+                data.workspace_type = workspace_type.into();
+                let criterion = "运行表格核对工具 --out var/acceptance，核对退出码与报告";
+                data.task.as_mut().unwrap().acceptance = vec![criterion.into()];
+                data.acceptance_criteria = vec![criterion.into()];
+                let prompt = render(&data);
+                assert!(prompt.contains(criterion));
+                assert!(prompt.contains("可以创建缓存、日志、临时数据和报告"));
+                assert!(prompt.contains("Git 工作区使用已忽略目录"));
+                assert!(prompt.contains("普通工作区使用独立验收产物目录"));
+                assert!(prompt.contains("或作业目录"));
+                assert!(prompt.contains("不要修改交付源码、配置、文档、输入资源或现有交付物"));
+                assert!(prompt.contains("也不要修改忽略规则"));
+                assert!(prompt.contains("不得执行 git add、git commit"));
+                assert!(prompt.contains("不要在工作区和作业目录以外读写文件"));
+                assert!(prompt.contains(&data.result_path));
+                for conflict in [
+                    "不要修改任何文件",
+                    "不要修改结果文件以外的任何文件",
+                    "独立只读工作区",
+                    "运行只读验证命令",
+                ] {
+                    assert!(
+                        !prompt.contains(conflict),
+                        "{role}/{workspace_type}: {conflict}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn each_role_states_readonly_and_commit_boundaries() {
         for role in [
             JOB_ROLE_ANALYSIS,
@@ -1077,7 +1122,10 @@ mod tests {
         assert!(prompt.contains("关键假设"), "缺少关键假设");
         assert!(prompt.contains("实现产物"), "缺少已完成任务");
         assert!(prompt.contains("1 file changed"), "缺少改动规模");
-        assert!(prompt.contains("运行只读验证命令"), "缺少验证命令权限");
+        assert!(
+            prompt.contains("可以运行测试、探针、构建和检查器"),
+            "缺少验证命令权限"
+        );
         assert!(prompt.contains("human_required"), "缺少人工待办口径");
         assert!(prompt.contains("不要写项目报告"), "缺少不写报告约束");
     }

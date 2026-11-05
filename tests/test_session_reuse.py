@@ -27,7 +27,7 @@ import sys
 
 args = sys.argv[1:]
 kind = "opencode" if args and args[0] == "run" else (
-    "codex" if args and args[0] == "exec" else "workbuddy"
+    "codex" if "exec" in args else "workbuddy"
 )
 
 def option(name):
@@ -41,7 +41,8 @@ if kind == "opencode":
     resume = False
     prompt = args[-1]
 elif kind == "codex":
-    resume = len(args) > 1 and args[1] == "resume"
+    exec_at = args.index("exec")
+    resume = len(args) > exec_at + 1 and args[exec_at + 1] == "resume"
     session = "thread-1"
     model = option("--model") or ""
     prompt = sys.stdin.read()
