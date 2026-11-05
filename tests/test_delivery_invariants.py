@@ -94,7 +94,9 @@ def main():
             def gates_done():
                 detail = call("GET", mpath)
                 tasks = detail["tasks"]
-                return detail if sum(task["human_gate"] == "milestone" for task in tasks) == 2 and tasks[2]["stage"] == "completed" else None
+                return detail if (sum(task["human_gate"] == "milestone" for task in tasks) == 2
+                    and tasks[2]["stage"] == "completed" and detail["project"]["status"] == "blocked"
+                    and not any(job["status"] == "running" for job in detail["jobs"])) else None
             settled = wait_for(gates_done, "独立里程碑不阻挡其他任务", 20)
             jobs = {job["id"]: job for job in settled["jobs"]}
             verifiers = [job for job in jobs.values() if job["role"] == "verifier"]

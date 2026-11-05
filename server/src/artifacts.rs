@@ -32,9 +32,9 @@ pub type ArtifactsResult<T> = std::result::Result<T, ArtifactsError>;
 
 pub const ARTIFACTS_RELEASING: &str = "releasing";
 
-/// Releases the worktree and branch of one task after its changes have been
-/// merged. A task with unfinished derived tasks keeps its integration checkout.
-/// Dirty worktrees are left untouched.
+/// Releases the worktree and branch of a merged or canceled task. A task with
+/// unfinished derived tasks keeps its integration checkout unless forced.
+/// Canceled tasks discard uncommitted work. Other dirty worktrees stay intact.
 pub async fn cleanup_task(
     state: &AppState,
     project: &ProjectRow,
@@ -62,6 +62,27 @@ pub async fn cleanup_task(
 
     let guard = state.git_lock.lock().await;
 
+    let canceled =
+        sqlx::query_scalar::<_, String>("SELECT COALESCE(status, '') FROM tasks WHERE id = ?")
+            .bind(&task.id)
+            .fetch_optional(&state.db)
+            .await?
+            .as_deref()
+            == Some(STATUS_CANCELED);
+    if canceled {
+        let jobs =
+            sqlx::query_as::<_, (String, String)>("SELECT id, status FROM jobs WHERE task_id = ?")
+                .bind(&task.id)
+                .fetch_all(&state.db)
+                .await?;
+        for (id, status) in jobs {
+            let dir = paths::job_dir(&workspace, &id);
+            if status == JOB_STATUS_RUNNING || crate::agents::job_process_alive(&dir) {
+                return Ok(false);
+            }
+        }
+    }
+
     let mut remove_worktree = false;
     if let Some(path) = worktree.as_deref() {
         if path.exists() {
@@ -74,7 +95,7 @@ pub async fn cleanup_task(
                     "任务工作区不是 Git 工作树，按残留目录清理"
                 );
                 remove_worktree = true;
-            } else if !git::status_porcelain(path).await?.trim().is_empty() {
+            } else if !canceled && !git::status_porcelain(path).await?.trim().is_empty() {
                 tracing::warn!(path = %path.display(), "任务工作区有未提交改动，跳过清理");
                 clean = false;
             } else {
@@ -276,7 +297,7 @@ pub async fn cleanup_completed_tasks(
 /// filesystem cleanup.
 pub async fn recover(state: &AppState) {
     let tasks = sqlx::query_as::<_, TaskRow>(
-        "SELECT * FROM tasks WHERE stage = ? \
+        "SELECT * FROM tasks WHERE (stage = ? OR status = 'canceled') \
          AND (artifacts_released_at IS NULL OR artifacts_released_at = ?) \
          AND (worktree IS NOT NULL OR branch IS NOT NULL)",
     )
@@ -544,7 +565,28 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(cleanup_task(&state, &project, &task, false).await.unwrap());
+        std::fs::write(
+            task_worktree.join("uncommitted.txt"),
+            "keep unless canceled",
+        )
+        .unwrap();
+        assert!(!cleanup_task(&state, &project, &task, true).await.unwrap());
+        assert!(task_worktree.join("uncommitted.txt").exists());
+        sqlx::query("UPDATE tasks SET status = 'canceled' WHERE id = ?")
+            .bind(&task.id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO jobs (id, project_id, task_id, role, status, prompt, created_at) VALUES ('job_busy', 'prj_test', 'tsk_test', 'executor', 'running', '', ?)")
+            .bind(&now).execute(&state.db).await.unwrap();
+        assert!(!cleanup_task(&state, &project, &task, true).await.unwrap());
+        assert!(task_worktree.exists(), "运行作业存在时不能丢弃现场");
+        sqlx::query("UPDATE jobs SET status = 'failed' WHERE id = 'job_busy'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Read the persisted cancellation instead of trusting a stale task row.
+        assert!(cleanup_task(&state, &project, &task, true).await.unwrap());
         assert!(!task_worktree.exists());
         let (worktree, released_at, branch_ref): (Option<String>, Option<String>, Option<String>) =
             sqlx::query_as("SELECT worktree, artifacts_released_at, branch FROM tasks WHERE id = ?")

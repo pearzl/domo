@@ -56,6 +56,7 @@ pub(super) fn role_label(role: &str) -> &'static str {
         ROLE_VERIFIER => "验收",
         JOB_ROLE_ACCEPTANCE => "项目验收",
         JOB_ROLE_SUMMARY => "总结",
+        JOB_ROLE_REPLAN_REVIEW => "重规划决策",
         ROLE_PLANNER => "规划",
         _ => "未知",
     }

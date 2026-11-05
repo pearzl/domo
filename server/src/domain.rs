@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::{
-    parse_string_list, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_SUMMARY,
-    ROLE_EXECUTOR, ROLE_VERIFIER,
+    parse_string_list, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT,
+    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, ROLE_EXECUTOR, ROLE_VERIFIER,
 };
 
 pub fn now() -> String {
@@ -108,6 +108,11 @@ pub enum ParsedResult {
     ExecutorReplan {
         reason: String,
     },
+    ReplanReview {
+        decision: String,
+        reason: String,
+        guidance: String,
+    },
     ExecutorDerive {
         summary: String,
         tasks: Vec<NormalizedTask>,
@@ -180,8 +185,38 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
         ROLE_VERIFIER => parse_verifier_result(&value),
         JOB_ROLE_SUMMARY => parse_report_result(&value),
         JOB_ROLE_ACCEPTANCE => parse_acceptance_result(&value),
+        JOB_ROLE_REPLAN_REVIEW => parse_replan_review(&value),
         other => Err(format!("未知作业角色: {other}")),
     }
+}
+
+fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
+    if value.get("kind").and_then(Value::as_str) == Some("plan") {
+        let parsed = parse_analysis_result(value)?;
+        return if matches!(parsed, ParsedResult::AnalysisPlan { .. }) {
+            Ok(parsed)
+        } else {
+            Err("重规划同意结果必须包含完整 tasks 方案，不能只提问".into())
+        };
+    }
+    if value.get("kind").and_then(Value::as_str) != Some("replan_review") {
+        return Err("重规划审批结果 kind 必须为 replan_review".into());
+    }
+    let decision = string_field(value, "decision").unwrap_or_default();
+    if !matches!(decision.as_str(), "reject" | "wait") {
+        return Err("拒绝重规划时 decision 必须为 reject 或 wait；同意时必须在本作业返回完整 kind=plan 方案".into());
+    }
+    let reason =
+        string_field(value, "reason").ok_or_else(|| "重规划审批缺少非空 reason".to_string())?;
+    let guidance = string_field(value, "guidance").unwrap_or_default();
+    if guidance.is_empty() {
+        return Err("拒绝或等待重规划时必须提供可执行指导或明确的解除条件 guidance".into());
+    }
+    Ok(ParsedResult::ReplanReview {
+        decision,
+        reason,
+        guidance,
+    })
 }
 
 fn parse_analysis_result(value: &Value) -> Result<ParsedResult, String> {
@@ -1216,6 +1251,25 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn replan_decision_requires_guidance_or_a_complete_plan() {
+        for decision in ["reject", "wait"] {
+            assert!(parse_result(
+                JOB_ROLE_REPLAN_REVIEW,
+                &format!(r#"{{"kind":"replan_review","decision":"{decision}","reason":"依据"}}"#)
+            )
+            .is_err());
+            assert!(matches!(parse_result(JOB_ROLE_REPLAN_REVIEW, &format!(r#"{{"kind":"replan_review","decision":"{decision}","reason":"依据","guidance":"可执行指导"}}"#)).unwrap(), ParsedResult::ReplanReview { .. }));
+        }
+        assert!(parse_result(
+            JOB_ROLE_REPLAN_REVIEW,
+            r#"{"kind":"replan_review","decision":"approve","reason":"需要重规划"}"#
+        )
+        .is_err());
+        assert!(parse_result(JOB_ROLE_REPLAN_REVIEW, r#"{"kind":"plan","tasks":[]}"#).is_err());
+        assert!(matches!(parse_result(JOB_ROLE_REPLAN_REVIEW, r#"{"kind":"plan","tasks":[{"key":"T1","title":"替代任务","description":"明确范围"}]}"#).unwrap(), ParsedResult::AnalysisPlan { .. }));
     }
 
     fn derive_task(key: &str, deps: &[&str]) -> PlanTask {

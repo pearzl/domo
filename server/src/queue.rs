@@ -66,7 +66,7 @@ pub async fn candidate(
          LEFT JOIN tasks t ON t.id = q.task_id WHERE q.agent_id = ? AND q.state = 'waiting' \
          AND q.position < (SELECT position FROM dispatch_queue WHERE scope_key = ? AND state = 'waiting') \
          AND (p.status = 'running' OR (q.role = 'merge_conflict' AND p.stage = 'completed' AND p.status IS NULL)) \
-         AND (q.task_id IS NULL OR t.status = 'queued')",
+          AND (q.task_id IS NULL OR t.status = 'queued' OR (q.role = 'replan_review' AND t.status = 'blocked' AND EXISTS (SELECT 1 FROM replan_requests r WHERE r.task_id = t.id AND r.state = 'pending')))",
     ).bind(&agent.id).bind(&scope).fetch_one(pool).await?;
     Ok(earlier == 0)
 }
@@ -107,7 +107,8 @@ pub async fn reconcile(pool: &SqlitePool) -> Result<()> {
             OR dispatch_queue.scope_key NOT LIKE 'project:' || p.id || ':' || p.stage || ':%')) \
          OR (dispatch_queue.task_id IS NOT NULL AND (t.stage = 'completed' OR t.status = 'canceled' \
             OR (t.stage = 'verifying' AND dispatch_queue.role = 'executor') \
-            OR (t.stage = 'executing' AND dispatch_queue.role = 'verifier')))))")
+             OR (t.stage = 'executing' AND dispatch_queue.role = 'verifier')
+             OR (dispatch_queue.role = 'replan_review' AND NOT EXISTS (SELECT 1 FROM replan_requests r WHERE r.task_id = t.id AND r.state = 'pending'))))))")
         .execute(pool).await?;
     Ok(())
 }

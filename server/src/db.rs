@@ -284,6 +284,7 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     crate::delivery::initialize(&pool).await?;
     crate::resources::initialize(&pool).await?;
     crate::queue::initialize(&pool).await?;
+    crate::replan_review::initialize(&pool).await?;
     seed_defaults(&pool).await?;
     sqlx::raw_sql("PRAGMA user_version = 2")
         .execute(&pool)

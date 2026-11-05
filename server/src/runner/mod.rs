@@ -14,7 +14,6 @@ use crate::git;
 use crate::models::*;
 use crate::paths;
 use crate::prompts;
-use crate::replan;
 use crate::state::AppState;
 
 mod agent;
@@ -32,6 +31,7 @@ mod worktree;
 
 use self::agent::{append_log_separator, continuation_allowed, merge_usage, run_agent_job};
 pub(crate) use self::analysis::apply_analysis_plan;
+pub(crate) use self::analysis::apply_analysis_plan_locked;
 use self::analysis::{
     handle_analysis_direct, handle_analysis_failure, handle_analysis_plan,
     handle_analysis_questions,
@@ -117,7 +117,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     let _ = fs::write(job_dir.join("stderr.log"), b"").await;
 
     let workspace = PathBuf::from(&project.workspace);
-    let cwd = if project.is_git() {
+    let review = job.role == JOB_ROLE_REPLAN_REVIEW;
+    let cwd = if review {
+        job_dir.clone()
+    } else if project.is_git() {
         match job.role.as_str() {
             JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
                 paths::project_repo(&workspace)
@@ -132,8 +135,12 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         // 普通工作区的全部角色共用所选本地目录，不创建 worktree。
         PathBuf::from(&project.repo_path)
     };
-    ensure_worktree_root(&cwd, project.is_git()).await?;
-    if let Err(error) = crate::resources::workspace_preflight(state, &project, &job).await {
+    ensure_worktree_root(&cwd, project.is_git() && !review).await?;
+    if let Err(error) = if review {
+        Ok(())
+    } else {
+        crate::resources::workspace_preflight(state, &project, &job).await
+    } {
         let reason = format!("工作区检查未通过：{error:#}");
         crate::resources::block_workspace(state, &project, &job, &reason).await?;
         return Ok(());
@@ -144,7 +151,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
-    let artifact_version = if project.is_git() {
+    let artifact_version = if project.is_git() && !review {
         serde_json::json!(git::commit_of(&cwd, "HEAD").await?)
     } else {
         serde_json::Value::Null
@@ -156,9 +163,21 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     );
     let shared =
         crate::resources::shared_snapshot(state, &project, Some(&job), task.as_ref()).await?;
-    full_prompt.push_str(&format!("\n## 项目共享信息（固定输入版本）\n{}\n只加载相关有效记录；运行中可通过给出的只读 API 按需读取其他主题或版本，不因新记录自动改变本轮输入。结果 JSON 可提交 shared_updates 数组，每项包含 topic、body、scope（任务 key 数组，空数组为全项目）、evidence（非空证据引用数组）、supersedes（被替代记录 ID）、conflicts（存在结论分歧的记录 ID）和 reason（替代/分歧原因及影响）。记录按主题追加到独立仓库，不能修改交付契约。不得静默覆盖结论；分歧保留双方依据，优先由相关任务核验，影响方案或契约时才请求规划者。记录提交无需规划者逐条审批。\n", shared));
+    if review {
+        full_prompt.push_str(&format!("\n## 项目共享信息（只读固定输入）\n{shared}\n审批只返回决策，不提交 shared_updates 或修改共享信息。\n"));
+    } else {
+        full_prompt.push_str(&format!("\n## 项目共享信息（固定输入版本）\n{}\n只加载相关有效记录；运行中可通过给出的只读 API 按需读取其他主题或版本，不因新记录自动改变本轮输入。结果 JSON 可提交 shared_updates 数组，每项包含 topic、body、scope（任务 key 数组，空数组为全项目）、evidence（非空证据引用数组）、supersedes（被替代记录 ID）、conflicts（存在结论分歧的记录 ID）和 reason（替代/分歧原因及影响）。记录按主题追加到独立仓库，不能修改交付契约。不得静默覆盖结论；分歧保留双方依据，优先由相关任务核验，影响方案或契约时才请求规划者。记录提交无需规划者逐条审批。\n", shared));
+    }
     let artifacts = crate::resources::artifact_snapshot(state, &project).await?;
-    full_prompt.push_str(&format!("\n## 输入与产物边界\n{}\n普通工作区必须保留原始输入，默认把新交付物写到 outputs/ 等独立位置。只能修改自己任务的产物以及 permissions 中明确授权给当前任务的路径，不能覆盖其他历史产物。需要未授权原地修改时报告失败并请求用户在产物区域登记修改对象及理由。若输入或产物外部变化或前次中断，必须先检查现场，不得把停止进程当作文件回滚。\n", artifacts));
+    if review {
+        full_prompt.push_str(&format!(
+            "\n## 审批固定上下文\n{}\n## 输入与产物（全部只读）\n{}\n",
+            crate::replan_review::context(state, &job).await?,
+            artifacts
+        ));
+    } else {
+        full_prompt.push_str(&format!("\n## 输入与产物边界\n{}\n普通工作区必须保留原始输入，默认把新交付物写到 outputs/ 等独立位置。只能修改自己任务的产物以及 permissions 中明确授权给当前任务的路径，不能覆盖其他历史产物。需要未授权原地修改时报告失败并请求用户在产物区域登记修改对象及理由。若输入或产物外部变化或前次中断，必须先检查现场，不得把停止进程当作文件回滚。\n", artifacts));
+    }
     if job.role == JOB_ROLE_VERIFIER {
         full_prompt.push_str(&format!("\n## 必填验收证据\n结果必须含 evidence 对象：contract_id={}，artifact_version={}，artifacts 为已检查的产物路径数组，risks 和 human_checks 为未覆盖风险及人工检查项数组。criteria 按任务验收标准的原文与顺序逐项填写，每项包含 criterion、passed 布尔值和非空 checks 数组；每个检查包含 method（实际运行命令或检查方法）和 result（实际结果，不得编造）。无产物或风险时数组可为空。普通工作区不提供历史内容回溯，检查时间由服务端记录。\n", contract["id"], artifact_version));
     }
@@ -188,6 +207,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     context["artifact_version"] = artifact_version.clone();
     context["shared"] = shared;
     context["artifacts"] = artifacts;
+    if review {
+        context["replan_review"] = crate::replan_review::context(state, &job).await?;
+    }
     fs::write(
         job_dir.join("context.json"),
         serde_json::to_vec_pretty(&context)?,
@@ -320,6 +342,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(raw) if result_is_failure(&job.role, raw) => None,
             Some(raw) => match parse_result(&job.role, raw) {
                 Err(error) => Some(error),
+                Ok(_) if review => crate::replan_review::validate_result(&state.db, &job, raw)
+                    .await
+                    .err(),
                 Ok(_) if job.role == JOB_ROLE_VERIFIER => crate::delivery::validate_evidence(
                     raw,
                     &contract,
@@ -343,7 +368,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(_) => None,
             },
         };
-        if protocol_error.is_none() {
+        if protocol_error.is_none() && !review {
             if let Some(raw) = current_result.as_deref() {
                 if let Some(value) =
                     crate::domain::extract_json(raw).and_then(|v| v.get("shared_updates").cloned())
@@ -548,7 +573,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     } else {
         None
     };
-    if status == JOB_STATUS_SUCCEEDED {
+    if status == JOB_STATUS_SUCCEEDED && !review {
         if let Some(value) = result_text
             .as_deref()
             .and_then(crate::domain::extract_json)
@@ -608,6 +633,43 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 error = Some(format!("结果协议不合法，协议继续次数用尽：{reason}"));
             }
         }
+    }
+    if review {
+        if status == JOB_STATUS_SUCCEEDED {
+            if let Err(reason) = crate::replan_review::validate_result(
+                &state.db,
+                &job,
+                result_text.as_deref().unwrap_or_default(),
+            )
+            .await
+            {
+                status = JOB_STATUS_FAILED;
+                parsed = None;
+                error = Some(format!("重规划决策结果不合法：{reason}"));
+            }
+        }
+        let _guard = state.schedule_lock.lock().await;
+        if finish_job(
+            state,
+            &job,
+            status,
+            result_text,
+            &run,
+            error.as_deref(),
+            parsed.clone(),
+        )
+        .await?
+        {
+            crate::replan_review::settle_locked(
+                state,
+                &job,
+                parsed.as_ref(),
+                error.as_deref(),
+                false,
+            )
+            .await?;
+        }
+        return Ok(());
     }
     if job.role == JOB_ROLE_ANALYSIS {
         // A failed analysis is settled only after the failure handling decides
@@ -748,7 +810,10 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     if job.role == JOB_ROLE_EXECUTOR && status == JOB_STATUS_SUCCEEDED {
         match parsed.clone() {
             Some(ParsedResult::ExecutorReplan { reason }) => {
-                let finished = finish_job(
+                // Persist the request before settling its source job so crash
+                // recovery cannot lose an accepted request between callbacks.
+                crate::replan_review::submit(state, &job, &reason).await?;
+                finish_job(
                     state,
                     &job,
                     JOB_STATUS_SUCCEEDED,
@@ -758,9 +823,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     None,
                 )
                 .await?;
-                if finished {
-                    replan::request(state, &project.id, &reason, REPLAN_SOURCE_EXECUTOR).await?;
-                }
                 return Ok(());
             }
             Some(ParsedResult::ExecutorDerive { summary, tasks }) => {

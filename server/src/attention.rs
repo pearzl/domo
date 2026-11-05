@@ -118,6 +118,11 @@ pub(crate) async fn items(
     for task in tasks.iter().filter(|task| {
         task.status.as_deref() == Some(STATUS_BLOCKED) && task.stage != TASK_STAGE_COMPLETED
     }) {
+        let deciding: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM replan_requests WHERE task_id = ? AND state IN ('pending', 'running', 'planned', 'ready')")
+            .bind(&task.id).fetch_one(pool).await?;
+        if deciding > 0 {
+            continue;
+        }
         let mut affected = std::collections::HashSet::from([task.key.clone()]);
         loop {
             let before = affected.len();

@@ -115,6 +115,19 @@ pub(crate) async fn apply_analysis_plan(
     proposal_json: &str,
 ) -> Result<()> {
     let _guard = state.schedule_lock.lock().await;
+    apply_analysis_plan_locked(state, project, goal, tasks, summary, proposal_json).await
+}
+
+/// Applies an already generated plan without another planner invocation.
+/// The scheduler owns the lock while completing a task replan handoff.
+pub(crate) async fn apply_analysis_plan_locked(
+    state: &AppState,
+    project: &ProjectRow,
+    goal: &str,
+    tasks: &[domain::NormalizedTask],
+    summary: &str,
+    proposal_json: &str,
+) -> Result<()> {
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let current = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
         .bind(&project.id)

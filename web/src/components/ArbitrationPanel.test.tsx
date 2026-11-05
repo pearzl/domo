@@ -1,0 +1,54 @@
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "../api";
+import type { ArbitrationContext, Task } from "../types";
+import { ArbitrationPanel } from "./ArbitrationPanel";
+
+vi.mock("../api", async (original) => {
+  const actual = await original<typeof import("../api")>();
+  return { ...actual, api: { ...actual.api, getTaskArbitration: vi.fn() } };
+});
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+let rendered: ReactTestRenderer | null = null;
+afterEach(async () => {
+  await act(async () => rendered?.unmount());
+  rendered = null;
+  vi.restoreAllMocks();
+});
+
+async function renderDecision(state: string, actions: string[]) {
+  vi.mocked(api.getTaskArbitration).mockResolvedValue({
+    project: { id: "project", name: "项目", stage: "executing", status: "running", blocked_reason: null },
+    role: "executor", task: { id: "child", key: "T1.1", title: "子任务", stage: "executing", status: "blocked",
+      attempts: 0, rejections: 0, last_error: null, failure_summary: null, milestone: false,
+      human_gate: null, forced_agent_id: null, forced_agent_role: null },
+    agents: [], jobs: [], actions,
+    replan_request: { state, reviewer_task_id: "parent", reason: "输入不一致" },
+  } satisfies ArbitrationContext);
+  await act(async () => {
+    rendered = create(<ArbitrationPanel projectId="project"
+      task={{ id: "child", stage: "executing", status: "blocked" } as Task}
+      onRefresh={async () => {}} disabled={false} onLegacyRetry={() => {}} />);
+  });
+  return rendered!;
+}
+
+describe("重规划决策呈现", () => {
+  it("决策进行中不允许重试或人工换人绕过上级决策", async () => {
+    const view = await renderDecision("running", []);
+    expect(view.root.findByType("h3").children).toEqual(["重规划决策"]);
+    const buttons = view.root.findAllByType("button");
+    for (const label of ["重新决策", "记录指导并重新排队"]) {
+      expect(buttons.find((button) => button.children.includes(label))?.props.disabled).toBe(true);
+    }
+    expect(view.root.findAllByType("select")).toHaveLength(0);
+  });
+
+  it("等待条件时允许重新决策和指导，不提供换 Agent 执行入口", async () => {
+    const view = await renderDecision("waiting", ["retry", "guide"]);
+    const retry = view.root.findAllByType("button").find((button) => button.children.includes("重新决策"));
+    expect(retry?.props.disabled).toBe(false);
+    expect(view.root.findAllByType("select")).toHaveLength(0);
+  });
+});

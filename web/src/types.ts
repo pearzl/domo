@@ -521,6 +521,7 @@ export interface ArbitrationTask {
 }
 
 export interface ArbitrationContext {
+  replan_request?: { state: string; reviewer_task_id: string | null; reason: string } | null;
   project: {
     id: string;
     name: string;

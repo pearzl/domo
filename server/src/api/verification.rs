@@ -200,6 +200,7 @@ pub(super) async fn task_arbitration(
     }
     let task = load_project_task(&state, &project_id, &task_id).await?;
     let role = arbitration_role(&task);
+    let replan_request = crate::replan_review::active(&state.db, &task.id).await?;
     let agents = role_agents(&state, role).await?;
     let jobs =
         sqlx::query_as::<_, JobRow>("SELECT * FROM jobs WHERE task_id = ? ORDER BY created_at ASC")
@@ -270,7 +271,10 @@ pub(super) async fn task_arbitration(
             "finished_at": job.finished_at,
             "created_at": job.created_at,
         })).collect::<Vec<_>>(),
-        "actions": [ARBITRATION_RETRY, ARBITRATION_SWITCH_AGENT, ARBITRATION_GUIDE],
+        "replan_request": replan_request,
+        "actions": if let Some(request) = &replan_request {
+            if request.state == "waiting" { vec![ARBITRATION_RETRY, ARBITRATION_GUIDE] } else { vec![] }
+        } else { vec![ARBITRATION_RETRY, ARBITRATION_SWITCH_AGENT, ARBITRATION_GUIDE] },
     })))
 }
 
@@ -312,6 +316,21 @@ pub(super) async fn submit_arbitration(
     }
     if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
         return Err(ApiError::bad("任务正在等待人工验收，请使用人工验收操作"));
+    }
+    if crate::replan_review::active(&state.db, &task.id)
+        .await?
+        .is_some()
+    {
+        if action == ARBITRATION_SWITCH_AGENT {
+            return Err(ApiError::bad(
+                "重规划审批使用父任务执行者池或项目规划者池，请调整对应角色池后重试审批",
+            ));
+        }
+        crate::replan_review::retry_locked(&state, &task, guidance.as_deref())
+            .await
+            .map_err(|error| ApiError::bad(error.to_string()))?;
+        state.notify_scheduler();
+        return load_detail(&state, &project_id).await.map(Json);
     }
     let role = arbitration_role(&task);
     let mut forced_agent_id: Option<String> = None;

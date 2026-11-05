@@ -3,7 +3,7 @@
 
 覆盖范围：
   1. 人工指导保存后可查询审计事件，并出现在任务下一次执行作业的 prompt 中；
-  2. 执行者返回 replan 后产生重规划事件，高影响草稿确认后才作废旧计划；
+  2. 执行者返回 replan 后由规划者在同一决策作业生成方案，应用后才作废旧计划；
   3. 已完成任务保留，未完成任务退出活动 DAG，新规划可复用旧 key 并最终产出报告；
   4. 暂停中的项目可提交重规划，暂停期间不产生新的规划作业，恢复后按新计划推进；
   5. 归档中的项目拒绝重规划，状态和规划作业数量不变；
@@ -341,20 +341,16 @@ def main():
             assert detail["project"]["replan_requested_at"], detail["project"]
 
             planner_jobs = goal_jobs(detail)
-            assert len(planner_jobs) >= 2, planner_jobs
+            assert len(planner_jobs) == 1, planner_jobs
+            decision_jobs = [job for job in detail["jobs"] if job["role"] == "replan_review"]
+            assert len(decision_jobs) == 1, decision_jobs
             planner_prompt = call(
-                "GET", f"/api/jobs/{planner_jobs[-1]['id']}"
+                "GET", f"/api/jobs/{decision_jobs[-1]['id']}"
             )["prompt"]
-            assert "重规划上下文" in planner_prompt
+            assert "审批固定上下文" in planner_prompt
             assert "原计划与仓库现状冲突" in planner_prompt
-            assert (
-                old_t1["key"] in planner_prompt
-                and "已完成任务" in planner_prompt
-            )
-            assert (
-                old_t2["key"] in planner_prompt
-                and "不保留任务" in planner_prompt
-            )
+            assert old_t1["key"] in planner_prompt and "completed" in planner_prompt
+            assert old_t2["key"] in planner_prompt and "决策与方案生成" in planner_prompt
             replan_reason = detail["project"]["replan_reason"]
             code, _ = call_error(
                 "POST",

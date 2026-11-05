@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""逐代际重规划清理队列在多轮 apply 与失败后保持完整。"""
+"""逐代际重规划清理在提交后崩溃时恢复，取消任务的脏工作区直接丢弃。"""
 
 import sqlite3
 import time
 from pathlib import Path
 
-from harness import Server, ensure_server_built, git, init_repo, temp_root, wait_for
+from harness import Server, ensure_server_built, init_repo, temp_root, wait_for
 
 
 def wait_crash(server):
@@ -74,11 +74,12 @@ def main():
             server.restart()
             wait_project(lambda item: item["project"]["stage"] == "executing", "第一轮恢复")
             db = sqlite3.connect(temp / "data" / "domo.db")
-            pending = db.execute(
-                "SELECT COUNT(*) FROM replan_cleanup WHERE project_id = ? AND status = 'pending'",
+            done = db.execute(
+                "SELECT COUNT(*) FROM replan_cleanup WHERE project_id = ? AND status = 'done'",
                 (pid,),
             ).fetchone()[0]
-            assert pending == 1, pending
+            assert done == 1, done
+            assert not Path(old_task["worktree"]).exists()
             db.close()
 
             server.env["DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY"] = "1"
@@ -91,7 +92,7 @@ def main():
                 "SELECT generation, status FROM replan_cleanup WHERE project_id = ? ORDER BY generation",
                 (pid,),
             ).fetchall()
-            assert len(rows) == 2 and all(status == "pending" for _, status in rows), rows
+            assert len(rows) == 2 and rows[0][1] == "done" and rows[1][1] == "pending", rows
             worktrees = [
                 row[0]
                 for row in db.execute(
@@ -101,11 +102,6 @@ def main():
                 )
             ]
             db.close()
-            for worktree in worktrees:
-                if Path(worktree).exists():
-                    git(["reset", "--hard"], worktree)
-                    git(["clean", "-fd"], worktree)
-
             server.env.pop("DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY")
             server.restart()
             wait_project(lambda item: item["project"]["stage"] == "executing", "第二轮恢复")
@@ -123,8 +119,9 @@ def main():
             ).fetchone()[0]
             db.close()
             assert unreleased == 0, unreleased
+            assert all(not Path(worktree).exists() for worktree in worktrees)
 
-            print("两轮自动应用与清理失败后的逐代际恢复测试通过")
+            print("两轮应用崩溃后的逐代际恢复与取消工作区丢弃测试通过")
 
 
 if __name__ == "__main__":

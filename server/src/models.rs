@@ -69,6 +69,7 @@ pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
 pub const JOB_ROLE_VERIFIER: &str = ROLE_VERIFIER;
 pub const JOB_ROLE_SUMMARY: &str = "summary";
 pub const JOB_ROLE_ACCEPTANCE: &str = "project_acceptance";
+pub const JOB_ROLE_REPLAN_REVIEW: &str = "replan_review";
 
 pub const CONFIRM_MANUAL: &str = "manual";
 pub const CONFIRM_AUTO: &str = "auto";

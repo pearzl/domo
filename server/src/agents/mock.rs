@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::models::{
     CONFIRM_AUTO, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR,
-    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
 
 use super::adapter::{AgentAdapter, AgentConfig, AgentRun, AgentSpec, TurnContext};
@@ -19,7 +19,12 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120);
-    let delay_ms = if spec.role == JOB_ROLE_EXECUTOR {
+    let delay_ms = if spec.role == JOB_ROLE_REPLAN_REVIEW {
+        std::env::var("DOMO_MOCK_REPLAN_REVIEW_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(delay_ms)
+    } else if spec.role == JOB_ROLE_EXECUTOR {
         std::env::var("DOMO_MOCK_EXECUTOR_DELAY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -40,6 +45,33 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
             JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
             JOB_ROLE_ACCEPTANCE => mock_project_acceptance(&context, &spec.cwd)?,
             JOB_ROLE_SUMMARY => mock_summary(&context),
+            JOB_ROLE_REPLAN_REVIEW => {
+                let reviewer = context["replan_review"]["reviewer"]
+                    .as_str()
+                    .unwrap_or("planner");
+                let decision = std::env::var(if reviewer == "parent" {
+                    "DOMO_MOCK_PARENT_REPLAN_DECISION"
+                } else {
+                    "DOMO_MOCK_PLANNER_REPLAN_DECISION"
+                })
+                .unwrap_or_else(|_| "plan".into());
+                if decision == "plan" {
+                    if reviewer == "parent" {
+                        serde_json::json!({"kind": "plan", "goal": context["project"]["goal"], "summary": "mock 父任务局部替代方案", "skip_confirmation": true,
+                            "tasks": [{"key": "T1.3", "title": "替代子任务", "description": "完成父任务范围内的剩余交付", "acceptance": ["产物存在"], "deps": []}]})
+                    } else {
+                        mock_replan_plan(
+                            &context,
+                            context["replan_review"]["request"]["reason"]
+                                .as_str()
+                                .unwrap_or("任务申请"),
+                        )
+                    }
+                } else {
+                    serde_json::json!({"kind": "replan_review", "decision": decision,
+                        "reason": format!("mock {reviewer} 审批决策"), "guidance": "核对固定输入与权限；缺少资源时等待补齐，不降低验收标准"})
+                }
+            }
             other => return Err(anyhow!("mock 不支持角色 {other}")),
         },
     };

@@ -126,7 +126,7 @@ def main():
         with Server(
             crash_root,
             env={
-                "DOMO_MOCK_DELAY_MS": "80",
+                "DOMO_MOCK_DELAY_MS": "350",
                 "DOMO_MOCK_REJECT_ONCE": "1",
                 "DOMO_MOCK_REPLAN_CRASH_AFTER_APPLY": "1",
             },

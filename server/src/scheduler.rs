@@ -320,6 +320,7 @@ async fn cleanup_orphans(state: &AppState) {
 }
 
 async fn reconcile(state: &AppState) -> Result<Vec<String>> {
+    crate::replan_review::reconcile_locked(state).await?;
     crate::queue::reconcile(&state.db).await?;
     let mut merge_spawns = Vec::new();
     let requests: Vec<(String, String)> = sqlx::query_as("SELECT project_id, agent_id FROM merge_requests WHERE state = 'waiting' ORDER BY requested_at")
@@ -401,6 +402,9 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
             note_waiting(state, &project, &reason, false).await?;
             continue;
         }
+        if crate::replan_review::advance_plans_locked(state, &project).await? {
+            continue;
+        }
         match project.stage.as_str() {
             STAGE_ANALYSIS => {
                 if project.replan_active != 0
@@ -449,6 +453,11 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 }
             }
             STAGE_EXECUTING => {
+                for request in crate::replan_review::pending(&state.db, &project.id).await? {
+                    if let Some(job_id) = spawn_replan_review(state, &project, &request).await? {
+                        spawns.push(job_id);
+                    }
+                }
                 if project.completion_mode == COMPLETION_DIRECT {
                     if has_project_job(&state.db, &project.id, JOB_ROLE_DIRECT).await? {
                         continue;
@@ -553,6 +562,13 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     continue;
                 }
                 for task in &tasks {
+                    if crate::replan_review::active(&state.db, &task.id)
+                        .await?
+                        .is_some()
+                        || crate::replan_review::holds_task(&state.db, task).await?
+                    {
+                        continue;
+                    }
                     if task.status.as_deref() == Some(STATUS_BLOCKED)
                         || task.stage == TASK_STAGE_COMPLETED
                     {
@@ -720,6 +736,11 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
 }
 
 async fn recompute_blocked(state: &AppState, project_id: &str) -> Result<()> {
+    let reviews: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM replan_requests WHERE project_id = ? AND state IN ('pending', 'running', 'planned')")
+        .bind(project_id).fetch_one(&state.db).await?;
+    if reviews > 0 {
+        return Ok(());
+    }
     let active: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND status = 'running'")
             .bind(project_id)
@@ -835,7 +856,20 @@ async fn choose_agent(
     role: &str,
     task: Option<&TaskRow>,
 ) -> Result<AgentChoice> {
-    crate::queue::enter(&state.db, project, task, role).await?;
+    choose_agent_for(state, project, role, task, role, task).await
+}
+
+/// Pool ownership and queue ownership differ for control jobs: a child owns
+/// the request, but its parent owns the executor pool used for the decision.
+async fn choose_agent_for(
+    state: &AppState,
+    project: &ProjectRow,
+    role: &str,
+    task: Option<&TaskRow>,
+    queue_role: &str,
+    queue_task: Option<&TaskRow>,
+) -> Result<AgentChoice> {
+    crate::queue::enter(&state.db, project, queue_task, queue_role).await?;
     if let Some(task) = task {
         let target: Option<String> = sqlx::query_scalar(
             "SELECT agent_id FROM retry_requests WHERE task_id = ? AND role = ?",
@@ -867,9 +901,10 @@ async fn choose_agent(
                     });
                 }
                 let gate = agent_gate(state, &agent).await?;
-                let ordered =
-                    crate::queue::candidate(&state.db, project, Some(task), role, &agent, false)
-                        .await?;
+                let ordered = crate::queue::candidate(
+                    &state.db, project, queue_task, queue_role, &agent, false,
+                )
+                .await?;
                 if gate.is_some()
                     || !ordered
                     || running_jobs(state, &id).await? >= agent.max_concurrency.max(1)
@@ -916,8 +951,10 @@ async fn choose_agent(
                     });
                 };
                 // 人工指定的 Agent 只等待自身释放，不读取让位配置。
-                if !crate::queue::candidate(&state.db, project, Some(task), role, &agent, true)
-                    .await?
+                if !crate::queue::candidate(
+                    &state.db, project, queue_task, queue_role, &agent, true,
+                )
+                .await?
                 {
                     return Ok(AgentChoice {
                         agent: None,
@@ -952,7 +989,7 @@ async fn choose_agent(
 
     // 执行者与验收者从任务专用 Agent 池按严格优先级选人：池为空或全不可用
     // 时只等待，不回退到项目池；调度只读取任务池。规划者使用项目池。
-    let (rows, scope) = if role == ROLE_EXECUTOR || role == ROLE_VERIFIER {
+    let (mut rows, scope) = if role == ROLE_EXECUTOR || role == ROLE_VERIFIER {
         let Some(task) = task else {
             return Ok(AgentChoice {
                 agent: None,
@@ -990,6 +1027,13 @@ async fn choose_agent(
             "项目 Agent 池",
         )
     };
+    if queue_role == JOB_ROLE_REPLAN_REVIEW {
+        if let Some(preferred) =
+            task.and_then(|task| task.agent_id.as_ref().or(task.last_agent_id.as_ref()))
+        {
+            rows.sort_by_key(|row| row.agent_id != *preferred);
+        }
+    }
     if rows.is_empty() {
         let hint = if scope == "任务 Agent 池" {
             "任务池在创建时从项目池快照，请检查项目池该角色配置；调整项目池后需新建任务"
@@ -1123,7 +1167,9 @@ async fn choose_agent(
         // Strict priority: the first usable agent owns this dispatch. When it
         // is at capacity the task waits instead of falling through to a lower
         // priority agent, unless that agent lets lower priorities take over.
-        if !crate::queue::candidate(&state.db, project, task, role, agent, false).await? {
+        if !crate::queue::candidate(&state.db, project, queue_task, queue_role, agent, false)
+            .await?
+        {
             return Ok(AgentChoice {
                 agent: None,
                 recoverable: true,
@@ -1182,6 +1228,128 @@ async fn choose_agent(
         )),
         yielded: Vec::new(),
     })
+}
+
+async fn spawn_replan_review(
+    state: &AppState,
+    project: &ProjectRow,
+    request: &crate::replan_review::ReviewRequest,
+) -> Result<Option<String>> {
+    let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+        .bind(&request.task_id)
+        .fetch_one(&state.db)
+        .await?;
+    if matches!(
+        task.status.as_deref(),
+        Some(STATUS_PAUSED | STATUS_PAUSING | STATUS_CANCELED)
+    ) || task_has_running_job(&state.db, &task.id).await?
+    {
+        return Ok(None);
+    }
+    let parent = if let Some(parent_id) = &request.reviewer_task_id {
+        let parent = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+            .bind(parent_id)
+            .fetch_one(&state.db)
+            .await?;
+        if matches!(
+            parent.status.as_deref(),
+            Some(STATUS_PAUSED | STATUS_PAUSING | STATUS_CANCELED)
+        ) || task_has_running_job(&state.db, parent_id).await?
+        {
+            return Ok(None);
+        }
+        Some(parent)
+    } else {
+        None
+    };
+    // Serialize decisions by the same parent/planner, but do not wait for child
+    // dependencies to complete: that would deadlock the request being reviewed.
+    let busy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM replan_requests WHERE project_id = ? AND reviewer_task_id IS ? AND state = 'running'")
+        .bind(&project.id).bind(&request.reviewer_task_id).fetch_one(&state.db).await?;
+    if busy > 0 {
+        return Ok(None);
+    }
+    let pool_role = if parent.is_some() {
+        ROLE_EXECUTOR
+    } else {
+        ROLE_PLANNER
+    };
+    let choice = choose_agent_for(
+        state,
+        project,
+        pool_role,
+        parent.as_ref(),
+        JOB_ROLE_REPLAN_REVIEW,
+        Some(&task),
+    )
+    .await?;
+    let Some(agent) = choice.agent else {
+        let reason = format!(
+            "重规划审批：{}",
+            choice.reason.as_deref().unwrap_or("等待审批 Agent")
+        );
+        crate::replan_review::set_waiting(state, request, &reason).await?;
+        crate::queue::waiting(
+            &state.db,
+            project,
+            Some(&task),
+            JOB_ROLE_REPLAN_REVIEW,
+            &reason,
+        )
+        .await?;
+        if !choice.recoverable {
+            sqlx::query("UPDATE replan_requests SET state = 'waiting', guidance = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
+                .bind(&reason).bind(now()).bind(&request.id).execute(&state.db).await?;
+            emit(
+                &state.db,
+                &state.bus,
+                Some(&project.id),
+                Some(&task.id),
+                "replan_review_waiting",
+                &reason,
+            )
+            .await;
+        }
+        return Ok(None);
+    };
+    let job_id = domain::new_id("job");
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("INSERT INTO jobs (id, project_id, task_id, role, agent_id, status, attempt, prompt, replan_generation, created_at) VALUES (?, ?, ?, ?, ?, 'running', ?, '', ?, ?)")
+        .bind(&job_id).bind(&project.id).bind(&task.id).bind(JOB_ROLE_REPLAN_REVIEW).bind(&agent.id)
+        .bind(request.attempts + 1).bind(project.replan_generation).bind(now()).execute(&mut *tx).await?;
+    sqlx::query("UPDATE replan_requests SET state = 'running', review_job_id = ?, attempts = attempts + 1, updated_at = ? WHERE id = ? AND state = 'pending'")
+        .bind(&job_id).bind(now()).bind(&request.id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    clear_waiting(&state.db, &project.id).await?;
+    crate::queue::dispatched(
+        &state.db,
+        project,
+        Some(&task),
+        JOB_ROLE_REPLAN_REVIEW,
+        &job_id,
+    )
+    .await?;
+    emit_job(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        Some(&task.id),
+        Some(&job_id),
+        "job_queued",
+        format!(
+            "任务 {} 的重规划审批已派发给{} {}{}",
+            task.key,
+            if parent.is_some() {
+                "父任务执行者"
+            } else {
+                "项目规划者"
+            },
+            agent.name,
+            yield_note(&choice.yielded)
+        ),
+    )
+    .await;
+    Ok(Some(job_id))
 }
 
 struct AgentChoice {
@@ -1569,6 +1737,7 @@ fn role_label(role: &str) -> &'static str {
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",
         JOB_ROLE_ACCEPTANCE => "项目验收",
+        JOB_ROLE_REPLAN_REVIEW => "重规划审批",
         JOB_ROLE_SUMMARY => "总结",
         _ => "未知",
     }

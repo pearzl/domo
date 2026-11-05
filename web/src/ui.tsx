@@ -93,6 +93,7 @@ export const ROLE_LABELS: Record<string, string> = {
   verifier: "验收",
   project_acceptance: "项目验收",
   summary: "总结",
+  replan_review: "重规划审批",
 };
 
 export const JOB_STATUS_LABELS: Record<string, string> = {

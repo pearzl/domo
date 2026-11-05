@@ -4,8 +4,8 @@
 use crate::domain::{MAX_DERIVED_TASKS, MAX_PLAN_TASKS};
 use crate::models::{
     MessageRow, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR,
-    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE, REPLAN_SOURCE_EXECUTOR,
-    REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
+    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE,
+    REPLAN_SOURCE_EXECUTOR, REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -82,8 +82,23 @@ pub fn render(data: &PromptData) -> String {
         JOB_ROLE_VERIFIER => verifier_prompt(data),
         JOB_ROLE_ACCEPTANCE => acceptance_prompt(data),
         JOB_ROLE_SUMMARY => summary_prompt(data),
+        JOB_ROLE_REPLAN_REVIEW => replan_review_prompt(data),
         _ => format!("未知作业角色: {}", data.role),
     }
+}
+
+fn replan_review_prompt(data: &PromptData) -> String {
+    format!("{}你负责重规划决策与方案生成，必须在本作业中完成判断和必要的新方案，不另行请求一次规划作业。\n\
+        审批固定上下文 reviewer=parent 时，你代表父任务执行者，只能重新安排该父任务的未完成子任务；reviewer=planner 时，你代表项目规划者，可以替换项目的未完成任务计划。\n\
+        - 只能写作业目录中的结果文件，所有项目/父任务/子任务工作区只读；不运行会修改产物的命令，不修改代码、输入、权限或 Git 状态。\n\
+        - 同意重规划时必须直接返回完整 kind=plan 方案：包含 summary、当前项目 goal、tasks（key/title/description/acceptance/deps）和 skip_confirmation；不能只返回 approve。\n\
+        - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，子任务之间不建立依赖；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
+        - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径；自动确认模式下明确方案可设 skip_confirmation=true，否则等待人工确认。\n\
+        - reject：不需要重规划，必须提供可执行 guidance，任务将带着该指导继续；不能仅要求重复尝试。\n\
+        - wait：缺输入、SDK、授权或环境等资源，必须写清缺项和解除条件 guidance；任务等待人工补齐，不自动重试。\n\
+        - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
+        - 决策期间当前计划保持有效，其他任务继续；只有完整方案生成后才暂停受影响范围的后续派发，等待在途作业结算后替换，未完成旧任务届时才取消。\n{}",
+        common_header(data), result_rules(data, "{\"kind\":\"plan\",\"summary\":\"取舍与替代方案\",\"goal\":\"当前项目目标\",\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":true} 或 {\"kind\":\"replan_review\",\"decision\":\"reject|wait\",\"reason\":\"判断依据\",\"guidance\":\"执行指导或解除条件\"}"))
 }
 
 /// Follow-up message for a run that exited cleanly without a result file. A
@@ -469,7 +484,7 @@ fn executor_prompt(data: &PromptData) -> String {
          - 如实核验并说明结果，不伪造；\n\
          - 不要在工作区以外读写文件；\n\
          {git_rules}\
-         - 仅当事实前提错误、无法按描述完成或约束冲突需规划者裁决时输出 replan；\n\
+         - 仅当事实前提错误、无法按描述完成或约束冲突需上级决策时输出 replan；子任务交由父任务执行者，普通任务交由项目规划者，在同一决策作业中生成替代方案或拒绝并指导继续；请求本身不停止其他任务；\n\
          - 不要判断其他任务或整个项目计划的进度；\n\
          - {}。\n\
          {}",

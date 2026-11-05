@@ -54,7 +54,7 @@ export function ArbitrationPanel({
     return () => {
       active = false;
     };
-  }, [projectId, task.id, task.status, task.stage, task.human_gate]);
+  }, [projectId, task.id, task.status, task.stage, task.human_gate, task.waiting_reason]);
 
   async function submit(input: {
     action: "retry" | "switch_agent" | "guide";
@@ -81,7 +81,12 @@ export function ArbitrationPanel({
 
   return (
     <section className="arbitration-panel">
-      <h3>人工裁决</h3>
+      <h3>{context?.replan_request ? "重规划决策" : "人工裁决"}</h3>
+      {context?.replan_request ? <p className="muted">
+        {context.replan_request.state === "waiting"
+          ? "等待输入或处理条件：补齐后可重新决策，或记录指导让原任务继续。"
+          : "上级正在处理请求或等待替代方案应用，无需人工逐项审批；其他独立任务继续。"}
+      </p> : null}
       {contextError ? (
         <>
           <div className="error-box">{contextError}</div>
@@ -164,13 +169,13 @@ export function ArbitrationPanel({
           <div className="button-row">
             <button
               className="primary"
-              disabled={disabled || busy}
+              disabled={disabled || busy || !context.actions.includes("retry")}
               onClick={() => void submit({ action: "retry" })}
             >
-              重试
+              {context.replan_request ? "重新决策" : "重试"}
             </button>
           </div>
-          <div className="arbitration-switch">
+          {context.actions.includes("switch_agent") ? <div className="arbitration-switch">
             <p className="muted">人工指定会绕过角色能力、启停、冷却、可用时段和用量限额，可能产生额外费用；并发满额时仍等待该 Agent。</p>
             <select
               value={agentId}
@@ -196,18 +201,18 @@ export function ArbitrationPanel({
             >
               换 Agent 执行
             </button>
-          </div>
+          </div> : null}
           <InputBox
             value={guidance}
             onChange={guidanceDraft.setValue}
             draftKey={guidanceDraft.key}
             rows={3}
-            disabled={disabled || busy}
+            disabled={disabled || busy || !context.actions.includes("guide")}
             placeholder="补充指导：说明下一步应如何处理；提交后任务重新排队，等待派发新作业。"
             actions={
               <button
                 className="secondary"
-                disabled={disabled || busy || !guidance.trim()}
+                disabled={disabled || busy || !guidance.trim() || !context.actions.includes("guide")}
                 onClick={() =>
                   void submit({ action: "guide", guidance: guidance.trim() })
                 }

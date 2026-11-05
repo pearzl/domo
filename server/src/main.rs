@@ -19,6 +19,7 @@ mod platform;
 mod prompts;
 mod queue;
 mod replan;
+mod replan_review;
 mod resources;
 mod runner;
 mod scheduler;

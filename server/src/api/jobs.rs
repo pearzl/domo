@@ -161,6 +161,25 @@ pub(super) async fn retry_job(
     if project.stage == STAGE_COMPLETED {
         return Err(ApiError::bad("项目已完成"));
     }
+    if let Some(task_id) = job.task_id.as_deref() {
+        if crate::replan_review::active(&state.db, task_id)
+            .await?
+            .is_some()
+        {
+            if job.role != JOB_ROLE_REPLAN_REVIEW {
+                return Err(ApiError::bad("任务等待重规划决策，不能绕过决策重试执行"));
+            }
+            let task = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(&state.db)
+                .await?;
+            crate::replan_review::retry_locked(&state, &task, None)
+                .await
+                .map_err(|error| ApiError::bad(error.to_string()))?;
+            state.notify_scheduler();
+            return load_detail(&state, &project.id).await.map(Json);
+        }
+    }
     let latest: Option<String> = match job.task_id.as_deref() {
         Some(task_id) => {
             sqlx::query_scalar(

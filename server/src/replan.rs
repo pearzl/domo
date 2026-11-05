@@ -92,6 +92,19 @@ async fn request_inner(
     expected: Option<&ProjectRow>,
 ) -> Result<Option<ReplanSummary>> {
     let _guard = state.schedule_lock.lock().await;
+    request_locked(state, project_id, reason, source, goal, expected).await
+}
+
+/// Caller holds the scheduling lock; approvals use the same guarded transition
+/// as human and acceptance requests.
+pub(crate) async fn request_locked(
+    state: &AppState,
+    project_id: &str,
+    reason: &str,
+    source: &str,
+    goal: Option<&str>,
+    expected: Option<&ProjectRow>,
+) -> Result<Option<ReplanSummary>> {
     let Some(project) = load_project(&state.db, project_id).await? else {
         return Ok(None);
     };
@@ -629,6 +642,7 @@ pub async fn cancel(state: &AppState, project_id: &str) -> Result<Option<Project
             .unwrap_or(STAGE_EXECUTING)
     };
     let waiting_report = stage == STAGE_SUMMARIZING && project.report.is_some();
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "UPDATE projects SET goal = COALESCE(replan_previous_goal, goal), stage = ?, \
          status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
@@ -644,8 +658,15 @@ pub async fn cancel(state: &AppState, project_id: &str) -> Result<Option<Project
     })
     .bind(now())
     .bind(project_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    let guidance =
+        "用户已放弃替代方案，请沿用原任务，核对请求中提出的问题；不得把未应用的方案当作有效输入。";
+    sqlx::query("UPDATE tasks SET status = CASE WHEN status IN ('paused', 'pausing') THEN status ELSE 'queued' END, guidance = guidance || char(10) || ?, waiting_reason = NULL, last_error = NULL, updated_at = ? WHERE id IN (SELECT task_id FROM replan_requests WHERE project_id = ? AND reviewer_task_id IS NULL AND state IN ('planned', 'ready') AND ? LIKE '任务请求 ' || id || '：%')")
+        .bind(guidance).bind(now()).bind(project_id).bind(&project.replan_reason).execute(&mut *tx).await?;
+    sqlx::query("UPDATE replan_requests SET state = 'resolved', guidance = ?, updated_at = ? WHERE project_id = ? AND reviewer_task_id IS NULL AND state IN ('planned', 'ready') AND ? LIKE '任务请求 ' || id || '：%'")
+        .bind(guidance).bind(now()).bind(project_id).bind(&project.replan_reason).execute(&mut *tx).await?;
+    tx.commit().await?;
     emit(
         &state.db,
         &state.bus,
