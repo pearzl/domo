@@ -138,6 +138,72 @@ async fn verification_test_state() -> (AppState, PathBuf) {
 }
 
 #[tokio::test]
+async fn user_actions_belong_to_the_current_blockage_not_historical_jobs() {
+    let (state, root) = verification_test_state().await;
+    let notice = serde_json::json!({
+        "summary": "请提供原始销售数据", "why": "缺少原始记录，无法核对报表。",
+        "owner": "数据提供方", "steps": ["上传 CSV，并告知文件路径。"],
+        "after": "记录路径并继续，AI 将核验数据并完成报表。"
+    });
+    let result = serde_json::json!({"pass": false, "reason": "原始记录缺项", "issues": [],
+        "next_action": "wait", "guidance": "核对 CSV 字段并重新计算", "user_action": notice});
+    sqlx::query("INSERT INTO jobs(id, project_id, task_id, role, status, prompt, result, created_at) VALUES('notice_job', 'prj_test', 'tsk_a', 'verifier', 'succeeded', '', ?, 't')")
+        .bind(result.to_string()).execute(&state.db).await.unwrap();
+    let cause = "原始记录缺项\n处理指导：核对 CSV 字段并重新计算";
+    sqlx::query("UPDATE tasks SET status = 'blocked', last_error = ? WHERE id = 'tsk_a'")
+        .bind(cause)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    async fn action(state: &AppState) -> Option<crate::user_action::UserAction> {
+        let task: TaskRow = sqlx::query_as("SELECT * FROM tasks WHERE id = 'tsk_a'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        crate::user_action::for_task(&state.db, &task)
+            .await
+            .unwrap()
+    }
+    assert_eq!(action(&state).await.unwrap().summary, "请提供原始销售数据");
+    for (status, error) in [
+        ("queued", cause),
+        ("paused", cause),
+        ("blocked", "另一个错误"),
+    ] {
+        sqlx::query("UPDATE tasks SET status = ?, last_error = ? WHERE id = 'tsk_a'")
+            .bind(status)
+            .bind(error)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(action(&state).await.is_none());
+    }
+    sqlx::query("UPDATE tasks SET status = 'blocked', last_error = ? WHERE id = 'tsk_a'")
+        .bind(cause)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO jobs(id, project_id, task_id, role, status, prompt, created_at) VALUES('new_job', 'prj_test', 'tsk_a', 'verifier', 'running', '', 't')")
+        .execute(&state.db).await.unwrap();
+    assert!(
+        action(&state).await.is_none(),
+        "a newer attempt invalidates the old notice"
+    );
+    let snapshot = serde_json::json!({"next_action": "wait", "user_action": notice});
+    sqlx::query("UPDATE projects SET stage = 'summarizing', status = 'blocked', acceptance = ?, blocked_reason = ? WHERE id = 'prj_test'")
+        .bind(snapshot.to_string()).bind("请提供原始销售数据").execute(&state.db).await.unwrap();
+    let mut project: ProjectRow = sqlx::query_as("SELECT * FROM projects WHERE id = 'prj_test'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(crate::user_action::for_project(&project).is_some());
+    project.blocked_reason = Some("新的阻塞".into());
+    assert!(crate::user_action::for_project(&project).is_none());
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn default_team_reorders_wait_for_membership_lock() {
     let (state, root) = verification_test_state().await;
     for id in ["executor_a", "executor_b", "executor_c"] {

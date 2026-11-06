@@ -3,7 +3,8 @@
 
 覆盖设备缺项等待不返工、不重规划、不增加拒绝计数；重启保留等待；
 重复恢复请求不重复派发；验收决策可恢复到执行或验收；重复拒绝只自动决策一次；
-首次收尾只有一次调用，非软件交付及直接完成报告重写不重新实施。
+首次收尾只有一次调用，非软件交付及直接完成报告重写不重新实施；
+用户处理说明与技术指导分别返回，列表/详情/处置一致，重启保留、恢复后失效。
 """
 import json
 import sqlite3
@@ -70,11 +71,21 @@ def task_wait(root, mode):
         current = detail(server, pid, lambda d: any(t["stage"] == "verifying" and t["status"] == "blocked" for t in d["tasks"]) and settled(d))
         task = current["tasks"][0]
         assert task["rejections"] == 0, task
+        notice = task["user_action"]
+        assert notice["summary"] == "请连接验收所需的设备"
+        assert task["waiting_reason"] == notice["summary"]
+        assert all(notice[key] for key in ["why", "owner", "steps", "after"])
+        context = server.call("GET", f"/api/projects/{pid}/tasks/{task['id']}/arbitration")
+        assert context["task"]["user_action"] == notice
+        assert context["agent_guidance"] == "用户补齐设备后重新验收"
+        assert context["decision_reason"] == "mock 验证条件未齐"
+        assert current["attention_items"][0]["reason"] == notice["summary"]
         assert len(jobs(current, "executor")) == 1
         server.call("PUT", f"/api/projects/{pid}/limits", {"task_attempt_limit": 1})
         server.restart()
         current = server.call("GET", f"/api/projects/{pid}")
         assert current["tasks"][0]["stage"] == "verifying"
+        assert current["tasks"][0]["user_action"] == notice
         path = f"/api/projects/{pid}/tasks/{task['id']}/arbitration"
         server.call("POST", f"/api/projects/{pid}/pause", {})
         detail(server, pid, lambda d: d["project"]["status"] == "paused")
@@ -92,6 +103,7 @@ def task_wait(root, mode):
         assert len(jobs(current, "project_acceptance")) == 1
         assert not jobs(current, "summary")
         assert current["tasks"][0]["rejections"] == 0
+        assert current["tasks"][0]["user_action"] is None
         if mode == "plain":
             assert not (root / "deliverables" / ".git").exists()
 
@@ -104,8 +116,12 @@ def project_wait(root, action):
         current = detail(server, pid, lambda d: d["project"]["stage"] == "summarizing" and d["project"]["status"] == "blocked" and settled(d))
         assert not current["project"]["report"]
         assert json.loads(current["project"]["acceptance"])["next_action"] == action
+        notice = current["project"]["user_action"]
+        assert notice["steps"] and notice["after"]
+        assert current["project"]["blocked_reason"] == notice["summary"]
         assert not any(e["kind"] == "replan_requested" for e in current["events"])
         server.restart()
+        assert server.call("GET", f"/api/projects/{pid}")["project"]["user_action"] == notice
         path = f"/api/projects/{pid}/acceptance/retry"
         server.call("PUT", f"/api/projects/{pid}/limits", {"cost_budget": 0})
         rejects(server, "POST", path)
@@ -116,6 +132,7 @@ def project_wait(root, action):
         assert len(jobs(current, "executor")) == 1
         assert len(jobs(current, "project_acceptance")) == 2
         assert not jobs(current, "summary")
+        assert current["project"]["user_action"] is None
 
 
 def verifier_review(root, stage):
@@ -156,6 +173,10 @@ def decision_wait(root):
         current = detail(server, pid, lambda d: bool(jobs(d, "replan_review")) and settled(d))
         task = current["tasks"][0]
         assert task["stage"] == "verifying" and task["rejections"] == 0
+        assert task["user_action"]["summary"] == "请连接验收所需的设备"
+        assert "重规划审批" not in task["waiting_reason"]
+        context = server.call("GET", f"/api/projects/{pid}/tasks/{task['id']}/arbitration")
+        assert context["task"]["user_action"] == task["user_action"]
         server.restart()
         server.call("POST", f"/api/projects/{pid}/tasks/{task['id']}/arbitration", {
             "action": "guide", "guidance": "设备已连接，检查当前现场并补齐验证",
@@ -164,6 +185,7 @@ def decision_wait(root):
         assert len(jobs(current, "executor")) == 1
         assert len(jobs(current, "verifier")) == 2
         assert len(jobs(current, "replan_review")) == 1
+        assert current["tasks"][0]["user_action"] is None
 
 
 def direct_report_rewrite(root):

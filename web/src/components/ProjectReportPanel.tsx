@@ -2,6 +2,20 @@ import type { Message, Project } from "../types";
 import { InputBox } from "./InputBox";
 import { RichContent } from "./RichContent";
 import { Empty } from "../ui";
+import { UserActionNotice } from "./UserActionNotice";
+
+function acceptanceContext(project: Project) {
+  try {
+    const snapshot: Record<string, unknown> = JSON.parse(project.acceptance ?? "null");
+    if (!snapshot || typeof snapshot !== "object") return { details: project.blocked_reason };
+    const guidance = typeof snapshot.guidance === "string" ? snapshot.guidance : null;
+    delete snapshot.guidance;
+    delete snapshot.user_action;
+    return { guidance, details: [project.blocked_reason, JSON.stringify(snapshot, null, 2)].filter(Boolean).join("\n\n") };
+  } catch {
+    return { details: [project.blocked_reason, project.acceptance].filter(Boolean).join("\n\n") };
+  }
+}
 
 /// 项目报告与评议：报告内容、意见记录与四类提交动作。
 export function ProjectReportPanel({
@@ -57,7 +71,7 @@ export function ProjectReportPanel({
         <RichContent content={project.report} className="report" />
       ) : project.stage === "summarizing" ? (
         project.blocked_reason ? (
-          <div><p className="muted">{project.blocked_reason}</p>
+          <div><UserActionNotice action={project.user_action} {...acceptanceContext(project)} />
             {project.acceptance && !project.acceptance_passed && project.status === "blocked" && onRetryAcceptance ? <button className="primary" disabled={busy} onClick={onRetryAcceptance}>条件已补齐，重新验收</button> : <p className="muted">可在作业记录中查看原因及适用操作。</p>}
           </div>
         ) : (

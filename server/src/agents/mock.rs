@@ -98,6 +98,15 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         },
     };
     let mut result = attach_mock_usage(result, &context);
+    if result["decision"] == "wait"
+        || matches!(result["next_action"].as_str(), Some("wait" | "arbitrate"))
+    {
+        result["user_action"] = serde_json::json!({
+            "summary": "请连接验收所需的设备", "why": "设备尚未连接，AI 无法完成实际验证。",
+            "owner": "设备提供方", "steps": ["连接测试设备，并确认当前作业能够访问。"],
+            "after": if spec.role == JOB_ROLE_REPLAN_REVIEW { "在任务中记录设备已连接并继续，AI 将核实环境并接续原任务。" } else { "点击“条件已补齐，重新验收”，AI 将完成检查与证据整理。" }
+        });
+    }
     if matches!(
         result["kind"].as_str(),
         Some("done" | "derive" | "direct_done")

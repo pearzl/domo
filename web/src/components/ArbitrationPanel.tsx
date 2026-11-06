@@ -4,8 +4,8 @@ import { api, errorMessage } from "../api";
 import { InputBox } from "./InputBox";
 import { useDraftValue } from "./useDraft";
 import { RichContent } from "./RichContent";
+import { UserActionNotice } from "./UserActionNotice";
 import {
-  Badge,
   ROLE_LABELS,
   failureSummaryLabel,
   jobStatusLabel,
@@ -40,6 +40,7 @@ export function ArbitrationPanel({
 
   useEffect(() => {
     let active = true;
+    setContext(null);
     setContextError("");
     api
       .getTaskArbitration(projectId, task.id)
@@ -54,7 +55,7 @@ export function ArbitrationPanel({
     return () => {
       active = false;
     };
-  }, [projectId, task.id, task.status, task.stage, task.human_gate, task.waiting_reason]);
+  }, [projectId, task.id, task.status, task.stage, task.human_gate, task.waiting_reason, task.updated_at]);
 
   async function submit(input: {
     action: "retry" | "switch_agent" | "guide";
@@ -81,7 +82,7 @@ export function ArbitrationPanel({
 
   return (
     <section className="arbitration-panel">
-      <h3>{context?.replan_request ? "上级决策" : context?.role === "verifier" ? "验收条件与处置" : "人工裁决"}</h3>
+      <h3>{context?.replan_request?.state === "waiting" ? "需要补充条件" : context?.replan_request ? "上级决策" : context?.role === "verifier" ? "验收条件与处置" : "人工裁决"}</h3>
       {context?.replan_request ? <p className="muted">
         {context.replan_request.state === "waiting"
           ? "等待输入或处理条件：补齐后可重新决策，或记录指导让原任务继续。"
@@ -97,36 +98,19 @@ export function ArbitrationPanel({
       ) : null}
       {context ? (
         <>
+          <UserActionNotice
+            action={context.task.user_action}
+            details={context.decision_reason ?? context.task.last_error}
+            guidance={context.agent_guidance}
+            fallback={context.replan_request && context.replan_request.state !== "waiting"
+              ? "AI 正在处理请求，无需你操作。" : undefined}
+          />
+          <details className="reference-fold"><summary>运行状态与作业记录</summary>
           <div className="kv">
             <span>阶段</span>
             <span>
               {taskStateLabel(context.task.stage, context.task.status)}
             </span>
-          </div>
-          <div className="kv">
-            <span>阻塞原因与解除条件</span>
-            <div>
-              {context.task.failure_summary ? (
-                <div className="failure-summary">
-                  <div className="failure-summary-head">
-                    <Badge tone="danger">
-                      {failureSummaryLabel(context.task.failure_summary.kind)}
-                    </Badge>
-                    <span>{shortText(context.task.failure_summary.message, 160)}</span>
-                  </div>
-                </div>
-              ) : null}
-              {context.task.last_error ? (
-                <details className="raw-error">
-                  <summary>查看原始错误</summary>
-                  <div className="error-box">
-                    <RichContent content={context.task.last_error} />
-                  </div>
-                </details>
-              ) : (
-                <span className="muted">—</span>
-              )}
-            </div>
           </div>
           <div className="kv">
             <span>失败统计</span>
@@ -166,6 +150,7 @@ export function ArbitrationPanel({
               ))}
             </div>
           ) : null}
+          </details>
           <div className="button-row">
             <button
               className="primary"
@@ -208,7 +193,7 @@ export function ArbitrationPanel({
             draftKey={guidanceDraft.key}
             rows={3}
             disabled={disabled || busy || !context.actions.includes("guide")}
-            placeholder="补充指导：说明下一步应如何处理；提交后任务重新排队，等待派发新作业。"
+            placeholder="说明你已补齐什么，或希望 AI 如何处理；提交后 AI 将按指导继续。"
             actions={
               <button
                 className="secondary"
@@ -217,7 +202,7 @@ export function ArbitrationPanel({
                   void submit({ action: "guide", guidance: guidance.trim() })
                 }
               >
-                记录指导并重新排队
+                记录指导并继续
               </button>
             }
           />

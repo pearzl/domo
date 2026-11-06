@@ -113,6 +113,7 @@ pub enum ParsedResult {
         reason: String,
         guidance: String,
         resume_stage: Option<String>,
+        user_action: Option<crate::user_action::UserAction>,
     },
     ExecutorDerive {
         summary: String,
@@ -141,6 +142,7 @@ pub struct AcceptanceAction {
     pub next_action: String,
     pub guidance: String,
     pub report: String,
+    pub user_action: Option<crate::user_action::UserAction>,
 }
 
 fn acceptance_action(value: &Value, allowed: &[&str]) -> Result<AcceptanceAction, String> {
@@ -163,6 +165,7 @@ fn acceptance_action(value: &Value, allowed: &[&str]) -> Result<AcceptanceAction
         next_action,
         guidance,
         report,
+        user_action: crate::user_action::parse(value)?,
     })
 }
 
@@ -283,6 +286,7 @@ fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
         decision,
         reason,
         guidance,
+        user_action: crate::user_action::parse(value)?,
         resume_stage: match string_field(value, "resume_stage") {
             Some(stage) if !matches!(stage.as_str(), "executing" | "verifying") => {
                 return Err("resume_stage 必须是 executing 或 verifying".into());

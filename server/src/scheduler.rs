@@ -857,9 +857,19 @@ async fn recompute_blocked(state: &AppState, project_id: &str) -> Result<()> {
     if runnable {
         return Ok(());
     }
-    let reason = pending_tasks
-        .iter()
-        .find_map(|task| task.last_error.clone())
+    let mut reason = None;
+    for task in &pending_tasks {
+        if let Some(action) = crate::user_action::for_task(&state.db, task).await? {
+            reason = Some(format!("{}：{}", task.key, action.summary));
+            break;
+        }
+    }
+    let reason = reason
+        .or_else(|| {
+            pending_tasks
+                .iter()
+                .find_map(|task| task.last_error.clone())
+        })
         .unwrap_or_else(|| "没有可自动推进的任务".into());
     sqlx::query("UPDATE projects SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?")
         .bind(STATUS_BLOCKED)

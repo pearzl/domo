@@ -152,7 +152,7 @@ pub(super) async fn handle_verdict(
         .bind(&current_issues)
         .bind(format!("{reason}\n处理指导：{}", action.guidance))
         .bind(&agent.id)
-        .bind((!execute).then_some(action.guidance.as_str()))
+        .bind((!execute).then_some(action.user_action.as_ref().map(|action| action.summary.as_str()).unwrap_or("等待验证条件，请查看处理说明")))
         .bind(now())
         .bind(&task.id)
         .execute(&state.db)

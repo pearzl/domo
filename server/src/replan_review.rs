@@ -682,6 +682,7 @@ pub async fn settle_locked(
         reason,
         guidance,
         resume_stage,
+        user_action,
     }) = parsed
     else {
         let retry = interrupted || request.attempts < 3;
@@ -703,19 +704,12 @@ pub async fn settle_locked(
         .await?;
         return Ok(());
     };
-    let note = format!(
-        "{}重规划审批：{reason}{}",
-        if request.reviewer_task_id.is_some() {
-            "父任务"
-        } else {
-            "规划者"
-        },
-        if guidance.is_empty() {
-            String::new()
-        } else {
-            format!("\n处理指导：{guidance}")
-        }
-    );
+    let note =
+        crate::user_action::review_note(request.reviewer_task_id.is_some(), reason, guidance);
+    let waiting = user_action
+        .as_ref()
+        .map(|action| action.summary.as_str())
+        .unwrap_or("等待外部条件，请查看处理说明");
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let next = if decision == "reject" {
         "rejected"
@@ -727,7 +721,7 @@ pub async fn settle_locked(
     let stage = resume_stage.as_deref().unwrap_or(&request.resume_stage);
     sqlx::query("UPDATE tasks SET guidance = CASE WHEN guidance = '' THEN ? ELSE guidance || char(10) || ? END, status = CASE WHEN status IN ('paused', 'pausing') THEN status WHEN ? THEN 'queued' ELSE 'blocked' END, last_error = CASE WHEN ? THEN NULL ELSE ? END, waiting_reason = ?, stage = ?, updated_at = ? WHERE id = ?")
         .bind(&note).bind(&note).bind(decision == "reject").bind(decision == "reject").bind(&note)
-        .bind(if next == "rejected" { None } else { Some(note.as_str()) })
+        .bind(if next == "rejected" { None } else { Some(waiting) })
         .bind(stage).bind(now()).bind(&request.task_id).execute(&mut *tx).await?;
     sqlx::query("UPDATE replan_requests SET resume_stage = ? WHERE id = ?")
         .bind(stage)

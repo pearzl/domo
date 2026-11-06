@@ -181,7 +181,7 @@ fn replan_review_prompt(data: &PromptData) -> String {
         - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，deps 只能引用本批次子任务且必须无环；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
          - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径，确认方式见项目方案确认。\n\
         - reject：不需要重规划，必须提供可执行 guidance；resume_stage 可选 executing（修复实现）或 verifying（补充核验），省略时沿用请求的 resume_stage；不能仅要求重复尝试。\n\
-         - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，guidance 写清缺项、责任方和解除条件；等待期间不自动重试。\n\
+          - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，另用 user_action 告诉用户具体怎么处理；guidance 保留给后续 Agent 的执行要求，reason 保留判断依据；等待期间不自动重试。\n\
         - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
         - 规划者方案保留项目 assumptions 和 acceptance，子任务验收标准分别写入 tasks[].acceptance。\n\
         - 以审批固定上下文中的请求、当前任务状态和保留成果为决策输入，不修改或执行现有计划。\n{}", confirmation_rules(data))
@@ -439,16 +439,16 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         JOB_ROLE_REPLAN_REVIEW => concat!(
             "{\"kind\":\"plan\",\"summary\":\"替代方案与影响\",\"goal\":\"当前项目目标\",\"assumptions\":[],\"acceptance\":[\"项目验收口径\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":false}\n",
             "{\"kind\":\"replan_review\",\"decision\":\"reject\",\"reason\":\"判断依据\",\"guidance\":\"继续执行的具体指导\"}\n",
-            "{\"kind\":\"replan_review\",\"decision\":\"wait\",\"reason\":\"资源缺项\",\"guidance\":\"责任方与解除条件\"}"
+            "{\"kind\":\"replan_review\",\"decision\":\"wait\",\"reason\":\"判断依据\",\"guidance\":\"给后续 Agent 的执行要求\",\"user_action\":{\"summary\":\"缺什么或需要决定什么\",\"why\":\"对交付的影响\",\"owner\":\"谁来处理\",\"steps\":[\"具体操作\"],\"after\":\"做完如何在 DOMO 继续，以及 AI 接下来做什么\"}}"
         ),
         _ => "",
     };
     let mut text = schema.to_string();
     if data.role == JOB_ROLE_VERIFIER {
-        text.push_str("\n未通过时 pass=false，必须同时填写 next_action（execute：退回执行修复；wait：等待条件，补齐后重新验收；review：请求上级判断）和非空 guidance（后续工作，或缺项、责任方与解除条件）。通过时不填写 next_action。等待和决策请求本身不计入验收拒绝次数。");
+        text.push_str("\n未通过时 pass=false，必须同时填写 next_action（execute：退回执行修复；wait：等待条件，补齐后重新验收；review：请求上级判断）和非空 guidance（给后续 Agent 的工作要求）。wait 另填 user_action。通过时不填写 next_action。等待和决策请求本身不计入验收拒绝次数。");
     }
     if data.role == JOB_ROLE_ACCEPTANCE {
-        text.push_str("\nnext_action 必填：report（满足报告条件并同时提交非空 report）、wait（条件补齐后重新验收）、replan（确需安排修复工作或调整计划）、arbitrate（需用户决定）。非 report 时必须提供非空 guidance，说明具体工作或缺项、责任方与解除条件；不提交完成报告。不因 unmet 或 unverifiable 自动选择重规划。");
+        text.push_str("\nnext_action 必填：report（满足报告条件并同时提交非空 report）、wait（条件补齐后重新验收）、replan（确需安排修复工作或调整计划）、arbitrate（需用户决定）。非 report 时必须提供非空 guidance，说明后续 Agent 的工作要求；wait/arbitrate 另填 user_action。不提交完成报告。不因 unmet 或 unverifiable 自动选择重规划。");
     }
     if matches!(data.role.as_str(), JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE) {
         if let Some(inputs) = inputs {
@@ -505,6 +505,12 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         text.push_str(
             "criteria 按本轮验收标准原文与顺序逐项填写；无产物、风险或人工检查时相应数组填 []。",
         );
+    }
+    if matches!(
+        data.role.as_str(),
+        JOB_ROLE_REPLAN_REVIEW | JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE
+    ) {
+        text.push_str("\n## 用户处理说明\n等待用户或外部条件（decision=wait 或 next_action=wait/arbitrate）时必须填写独立的 user_action 对象：summary（一行、不超过120字，直接说缺什么或需要决定什么）、why（为什么影响交付）、owner（实际处理方）、steps（1–8项具体操作，可用 Markdown 命令或明确的选项）、after（处理后使用 DOMO 的哪个入口继续，以及 AI 将完成什么）。用用户能理解的语言，不要求用户阅读日志才能知道下一步；只让用户处理确实需要其输入、授权或外部资源的部分，测试、修复和证据整理仍由 Agent 完成。操作必须有已核实的依据，不编造命令或把申请当成已有授权；存在选择时说明选项及影响。已解决的缺项不再要求用户处理。源码位置、摘要、测试矩阵和历史记录放 reason/验收证据；后续 Agent 的工作细节放 guidance，不复制进用户说明。after 必须符合当前角色的实际恢复入口：任务决策等待可用“记录指导并继续”接续原任务，或“重新决策”；任务验收等待用“条件已补齐，重新验收”；项目验收等待用项目重新验收入口。不要宣称用户补齐后会自动检测或已经验收通过。\n");
     }
     text
 }
@@ -1612,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn user_reports_and_task_handoffs_have_distinct_consumers_without_new_fields() {
+    fn user_reports_and_task_handoffs_have_distinct_consumers() {
         for role in [JOB_ROLE_DIRECT, JOB_ROLE_ACCEPTANCE, JOB_ROLE_SUMMARY] {
             let prompt = render_role(role);
             assert_eq!(prompt.matches("## 面向用户的报告").count(), 1);
@@ -1630,6 +1636,24 @@ mod tests {
         let prompt = shared_context(&data, &serde_json::json!({"records": []}));
         assert!(prompt.contains("不逐轮复制完成总结"));
         assert!(prompt.contains("不强制空小节"));
+    }
+
+    #[test]
+    fn waiting_roles_separate_user_actions_from_agent_guidance() {
+        for role in [
+            JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
+            JOB_ROLE_REPLAN_REVIEW,
+        ] {
+            let prompt = render_role(role);
+            assert_eq!(prompt.matches("## 用户处理说明").count(), 1);
+            for field in ["summary", "why", "owner", "steps", "after"] {
+                assert!(prompt.contains(field));
+            }
+            assert!(prompt.contains("测试、修复和证据整理仍由 Agent 完成"));
+            assert!(prompt.contains("已解决的缺项不再要求用户处理"));
+            assert!(prompt.contains("不编造命令"));
+        }
     }
 
     #[test]

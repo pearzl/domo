@@ -493,6 +493,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 Ok(_) => None,
             },
         };
+        if protocol_error.is_none() {
+            if let Some(raw) = current_result.as_deref() {
+                protocol_error = crate::user_action::validate_live(&job.role, raw).err();
+            }
+        }
         if protocol_error.is_none() && !review {
             if let Some(raw) = current_result.as_deref() {
                 if matches!(

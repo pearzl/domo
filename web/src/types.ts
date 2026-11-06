@@ -250,6 +250,7 @@ export interface ProjectSummary {
 }
 
 export interface Project {
+  user_action?: UserAction | null;
   acceptance?: string | null;
   acceptance_passed?: number;
   id: string;
@@ -279,7 +280,16 @@ export interface Project {
   updated_at: string;
 }
 
+export interface UserAction {
+  summary: string;
+  why: string;
+  owner: string;
+  steps: string[];
+  after: string;
+}
+
 export interface Task {
+  user_action?: UserAction | null;
   id: string;
   project_id: string;
   seq: number;
@@ -520,6 +530,7 @@ export interface ArbitrationJob {
 }
 
 export interface ArbitrationTask {
+  user_action?: UserAction | null;
   id: string;
   key: string;
   title: string;
@@ -536,13 +547,15 @@ export interface ArbitrationTask {
 }
 
 export interface ArbitrationContext {
+  decision_reason?: string | null;
+  agent_guidance?: string | null;
   replan_request?: { state: string; reviewer_task_id: string | null; reason: string } | null;
   project: {
     id: string;
     name: string;
     stage: string;
     status: string | null;
-    blocked_reason: string | null;
+  blocked_reason: string | null;
   };
   task: ArbitrationTask;
   role: Role;

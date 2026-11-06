@@ -34,4 +34,18 @@ describe("报告未生成", () => {
     expect(markup).toContain("重新撰写只修改报告");
     expect(markup).not.toContain("重做并重新总结");
   });
+
+  it("项目验收用用户说明展示操作，执行指导与验收快照分别折叠", () => {
+    const user_action = { summary: "请确认采用哪个统计口径", why: "两种口径会得到不同的结果。", owner: "报表负责人",
+      steps: ["选择含税或不含税口径，并记录决定。"], after: "记录意见后重新验收，AI 将核对最终报表。" };
+    const markup = renderToStaticMarkup(<ProjectReportPanel {...props} onRetryAcceptance={() => {}}
+      project={{ stage: "summarizing", status: "blocked", report: null, acceptance_passed: 0,
+        user_action, blocked_reason: user_action.summary,
+        acceptance: JSON.stringify({ next_action: "arbitrate", user_action, guidance: "核对所选口径与报表公式", criteria: [] }) } as Project} />);
+    expect(markup).toContain("选择含税或不含税口径");
+    expect(markup).toContain("Agent 执行指导");
+    expect(markup.indexOf("选择含税或不含税口径")).toBeLessThan(markup.indexOf("核对所选口径与报表公式"));
+    expect(markup).not.toMatch(/<details[^>]*\bopen/);
+    expect(markup).toContain("条件已补齐，重新验收");
+  });
 });

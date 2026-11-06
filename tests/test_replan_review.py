@@ -79,7 +79,7 @@ def test_planner_reject(root, repo):
                "other tasks finish during review")
         current = detail(server, project_id, lambda d: d["project"]["report"] is not None, "rejected request resumes")
         task = next(t for t in current["tasks"] if t["key"] == "T1")
-        assert "处理指导" in task["guidance"]
+        assert "执行指导" in task["guidance"]
         assert task["attempts"] == 0 and task["rejections"] == 0
         assert generation(root, project_id) == 0
         assert len([j for j in current["jobs"] if j["role"] == "analysis"]) == 1
@@ -226,7 +226,7 @@ def test_parent_reject(root, repo):
         assert generation(root, project_id) == 0
         assert not any(t["status"] == "canceled" for t in current["tasks"])
         child = next(t for t in current["tasks"] if t["key"] == "T1.1")
-        assert "父任务重规划审批" in child["guidance"]
+        assert "父任务决策" in child["guidance"]
         assert next(j for j in current["jobs"] if j["role"] == "replan_review")["agent_id"] == executor["id"]
 
 

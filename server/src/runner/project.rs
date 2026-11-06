@@ -100,6 +100,7 @@ pub(super) async fn handle_project_acceptance(
         "replan_reason": replan_reason,
         "next_action": action.next_action,
         "guidance": action.guidance,
+        "user_action": action.user_action,
     }))
     .unwrap_or_default();
     let gaps: Vec<&AcceptanceCriterion> = criteria
@@ -228,7 +229,7 @@ pub(super) async fn handle_project_acceptance(
             action.guidance
         );
         sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing', 'archived') THEN status ELSE 'blocked' END, blocked_reason = ?, updated_at = ? WHERE id = ?")
-            .bind(&reason).bind(now()).bind(&project.id).execute(&state.db).await?;
+            .bind(action.user_action.as_ref().map(|action| action.summary.as_str()).unwrap_or(&reason)).bind(now()).bind(&project.id).execute(&state.db).await?;
         emit(
             &state.db,
             &state.bus,

@@ -356,6 +356,8 @@ pub struct AnalysisProposal {
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct ProjectRow {
+    #[sqlx(skip)]
+    pub user_action: Option<crate::user_action::UserAction>,
     pub contract_id: Option<i64>,
     pub id: String,
     pub name: String,
@@ -633,6 +635,7 @@ pub struct ProjectSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
+    pub user_action: Option<crate::user_action::UserAction>,
     pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
@@ -671,6 +674,7 @@ pub struct TaskView {
 impl TaskView {
     pub fn from_row(row: TaskRow) -> Self {
         Self {
+            user_action: None,
             contract_id: row.contract_id,
             id: row.id,
             project_id: row.project_id,
