@@ -9,7 +9,9 @@
   5. 自动确认的直接完成不等待人工确认；
   6. 人工确认模式忽略规划者的跳过请求；
   7. 开启 mock 分段输出后，运行中的作业输出持续增长，结束后停止；
-  8. 作业运行输出可通过接口读取。
+   8. 作业运行输出可通过接口读取。
+   9. Git/普通工作区的单任务方案保持独立执行、任务验收和项目验收，
+      不转为直接完成；实际投递的粒度规则不因工作区改变，且不进入验收职责。
 
 约定：使用内置 mock Agent，不访问外网；临时数据全部放在系统临时目录。
 退出码 0 表示全部通过。
@@ -252,6 +254,52 @@ def main():
             output = call("GET", f"/api/jobs/{forced_ready['jobs'][0]['id']}/output")
             assert "mock job" in output["stdout"], output
             assert output["running"] is False, output
+
+            # 9. mock 只验证单工作单元的真实流程，不评价模型是否选对粒度。
+            policies = {}
+            for workspace_type in ("git", "plain"):
+                directory = repo if workspace_type == "git" else temp / "research"
+                directory.mkdir(exist_ok=True)
+                single = call(
+                    "POST",
+                    "/api/projects",
+                    {
+                        "name": f"Single research unit {workspace_type}",
+                        "workspace_type": workspace_type,
+                        "repo_path": str(directory),
+                        "base_branch": "main",
+                    },
+                )["project"]
+                project_id = single["id"]
+                submit(project_id, "[single] 整理资料、交叉核对并撰写调研报告")
+                proposed = wait_proposal(project_id, "plan")
+                assert len(proposed["proposal"]["tasks"]) == 1, proposed["proposal"]
+                assert proposed["tasks"] == [], proposed["tasks"]
+                call("POST", f"/api/projects/{project_id}/analysis/confirm", {})
+                completed = wait_report(project_id)
+                assert completed["project"]["completion_mode"] == "tasks"
+                assert len(completed["tasks"]) == 1, completed["tasks"]
+                assert completed["tasks"][0]["stage"] == "completed"
+                succeeded = [
+                    job for job in completed["jobs"] if job["status"] == "succeeded"
+                ]
+                roles = [job["role"] for job in succeeded]
+                for role in ("analysis", "executor", "verifier", "project_acceptance"):
+                    assert roles.count(role) == 1, roles
+                assert "direct" not in roles, roles
+                for job in succeeded:
+                    prompt = call("GET", f"/api/jobs/{job['id']}")["prompt"]
+                    expects_policy = job["role"] in ("analysis", "executor")
+                    assert prompt.count("## 任务粒度与分工") == int(expects_policy)
+                    if expects_policy:
+                        policy = prompt.split("## 任务粒度与分工\n", 1)[1].split(
+                            "\n## ", 1
+                        )[0].strip()
+                        assert "不以工作区类型决定粒度" in policy
+                        assert "不自动提高质量或节省 Token" in policy
+                        policies[(workspace_type, job["role"])] = policy
+                call("POST", f"/api/projects/{project_id}/archive", {})
+            assert len(set(policies.values())) == 1, policies
 
             print("项目分析阶段测试通过")
 

@@ -184,7 +184,7 @@ fn replan_review_prompt(data: &PromptData) -> String {
           - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，另用 user_action 告诉用户具体怎么处理；guidance 保留给后续 Agent 的执行要求，reason 保留判断依据；等待期间不自动重试。\n\
         - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
         - 规划者方案保留项目 assumptions 和 acceptance，子任务验收标准分别写入 tasks[].acceptance。\n\
-        - 以审批固定上下文中的请求、当前任务状态和保留成果为决策输入，不修改或执行现有计划。\n{}", confirmation_rules(data))
+        - 以审批固定上下文中的请求、当前任务状态和保留成果为决策输入，不修改或执行现有计划。\n{}{}", task_decomposition_rules(), confirmation_rules(data))
 }
 
 /// Resumed sessions receive the current contract, not just their historical
@@ -425,7 +425,7 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         JOB_ROLE_ANALYSIS => concat!(
             "{\"kind\":\"questions\",\"summary\":\"必须澄清的原因\",\"questions\":[\"问题\"]}\n",
             "{\"kind\":\"plan\",\"summary\":\"现状、方案取舍和风险\",\"goal\":\"项目目标\",\"assumptions\":[\"待核实的项目事实或决策\"],\"acceptance\":[\"项目级验收标准\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标、范围与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":false}\n",
-            "{\"kind\":\"direct\",\"summary\":\"无需拆分的原因\",\"goal\":\"项目目标\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方法\"],\"skip_confirmation\":false}"
+            "{\"kind\":\"direct\",\"summary\":\"适合直接实现、自检与报告的原因\",\"goal\":\"项目目标\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方法\"],\"skip_confirmation\":false}"
         ),
         JOB_ROLE_DIRECT => "{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告\",\"commit_files\":[\"path/to/file\"]}",
         JOB_ROLE_EXECUTOR => concat!(
@@ -546,6 +546,19 @@ fn conversation_history(data: &PromptData) -> String {
     history
 }
 
+/// One policy for initial plans, replacement plans and executor-owned delegation.
+/// These are planning criteria, not extra protocol fields or acceptance gates.
+fn task_decomposition_rules() -> &'static str {
+    "\n## 任务粒度与分工\n\
+         生成任务方案或派生分工时采用以下判据，不据此自行改写已确认任务。\n\
+         - 任务是独立执行并提交验收的工作单元，不是实现步骤。默认由一个执行者连续完成共享大量上下文、需要共同调整的工作，内部步骤写入 description；不只按文件、技术层或实现/测试/文档工序切分。\n\
+         - 独立拆分应有具体收益：可实际并行、能隔离大块上下文、需要专门能力或权限边界，或能先形成有用的独立交付与风险判断。复杂、工作量大或涉及多个模块本身不足以分工；也不为减少任务数把不相关工作塞进一个巨型任务。\n\
+         - 每项交接明确输入、输出、消费方与验证边界。优先形成可验证的完整能力；稳定接口、独立资料成果或技术验证结论也可独立交付，不要求所有任务端到端；局部替身通过不能代替完整集成。\n\
+         - 任务边界主要按上下文耦合、交接、验证与整合判断，不以工作区类型决定粒度。并行主要缩短实际经过时间，不自动提高质量或节省 Token；每个独立任务都有执行和独立验收成本，派生分工还需父任务整合并接受验收。\n\
+         - 提交前检查能否合并：若相邻任务反复理解相同上下文，或结果要等后续接线才可验证，且无上述独立收益，合为同一任务的内部步骤；保留必要的授权边界、技术验证和全部验收要求，不自行扩大范围。\n\
+         - 方案或派生分工的 summary 简述主要分工收益与关键交接，不编造节省时长；description 写清各任务目标、内部步骤和交接边界，acceptance 检验交付结果，不仅确认步骤做过。\n"
+}
+
 fn analysis_prompt(data: &PromptData) -> String {
     let replan = replan_section(data);
     format!(
@@ -555,11 +568,13 @@ fn analysis_prompt(data: &PromptData) -> String {
          - 每个任务写清目标、边界和验收方式；单个方案最多包含 {MAX_PLAN_TASKS} 个任务；大型项目分阶段，后续通过重规划派发下一批；\n\
          - 每个任务在依赖满足后可执行并可单独验收；deps 表示实际工程前置关系，须为无环 DAG，不因平台串行派发人为串联任务；key 使用 T1、T2 等短标识；\n\
          - 项目 acceptance 描述最终集成交付的可观察结果，任务 acceptance 描述该任务的验证方法与判据；已知缺少的必需环境应明确责任方与解除条件，不能把资源申请当成成果已验证；\n\
-         - questions：只询问无法通过调查获得、且影响目标理解、方案可行性或验收方式的必要信息；合并相关问题，不设置固定数量上限；plan：需要拆分任务；direct：无需拆分，提供执行步骤和自检方法，本作业仍不实施。\n\
+         - questions：只询问无法通过调查获得、且影响目标理解、方案可行性或验收方式的必要信息；合并相关问题，不设置固定数量上限；plan：按任务执行并独立验收，可以只有一个任务；direct：仅在工作量、验证难度、影响可逆性与外部风险适合实现、自检和报告直接完成时选择，提供执行步骤和自检方法，不为减少任务数绕过必要的独立验收。本作业仍不实施。\n\
+         {}\
          {}\
          {}\
          \n## 项目分析对话\n{}\n",
         replan,
+        task_decomposition_rules(),
         confirmation_rules(data),
         conversation_history(data),
     )
@@ -744,7 +759,8 @@ fn executor_prompt(data: &PromptData) -> String {
         "禁止派生子任务；派生任务只能完成自身工作或请求重新规划。".to_string()
     } else {
         format!(
-            "任务仍复杂时可派生子任务：单次 1 到 {MAX_DERIVED_TASKS} 个，key 在活动任务中唯一，每个子任务写清描述与验收标准；deps 只能引用本批次内子任务，允许兄弟子任务之间存在依赖，但禁止自依赖、缺失依赖和依赖环。不在 description 或 acceptance 中暗藏未声明的先后依赖。前置子任务经独立验收并交付到父任务工作区后再启动后继；跨子任务整合与最终核验由父任务在全部子任务完成后负责，父任务仍需接受验收。"
+            "先在当前任务内组织实现步骤；调查确认有独立边界且分工收益足以抵消交接、验收与整合成本时，可派生子任务。单次 1 到 {MAX_DERIVED_TASKS} 个，key 在活动任务中唯一，每个子任务写清描述与验收标准；summary 说明为何不由当前执行者直接继续、交接成果及父任务剩余整合责任，并保留已完成工作的说明。deps 只能引用本批次内子任务，允许兄弟子任务之间存在依赖，但禁止自依赖、缺失依赖和依赖环。不在 description 或 acceptance 中暗藏未声明的先后依赖。前置子任务经独立验收并交付到父任务工作区后再启动后继；跨子任务整合与最终核验由父任务在全部子任务完成后负责，父任务仍需接受验收。{}",
+            task_decomposition_rules()
         )
     };
     let merge_rules = if plain_workspace(data) {
@@ -1798,6 +1814,147 @@ mod tests {
             prompt.contains("交付文件只读；仅可写指定结果文件"),
             "缺少只读约束"
         );
+    }
+
+    #[test]
+    fn decomposition_policy_covers_initial_replacement_and_parent_plans_once() {
+        for workspace in [crate::models::WORKSPACE_GIT, crate::models::WORKSPACE_PLAIN] {
+            for mode in [CONFIRM_MANUAL, CONFIRM_AUTO] {
+                let mut data = sample_data(JOB_ROLE_ANALYSIS);
+                data.workspace_type = workspace.into();
+                data.confirm_mode = mode.into();
+                let mut variants = vec![data.clone()];
+                data.replan_reason = Some("保留成果，调整剩余工作的边界".into());
+                data.replan_source = Some(REPLAN_SOURCE_HUMAN.into());
+                variants.push(data.clone());
+                data.role = JOB_ROLE_REPLAN_REVIEW.into();
+                variants.push(data.clone());
+                data.role = JOB_ROLE_EXECUTOR.into();
+                data.derived_tasks.push(DerivedTaskInfo {
+                    key: "T1.1".into(),
+                    title: "可复用的前置成果".into(),
+                    stage: TASK_STAGE_COMPLETED.into(),
+                    status: None,
+                    summary: "保留现有成果".into(),
+                });
+                variants.push(data);
+                for data in variants {
+                    let prompt = render(&data);
+                    assert_eq!(prompt.matches("## 任务粒度与分工").count(), 1);
+                    for criterion in [
+                        "不是实现步骤",
+                        "内部步骤写入 description",
+                        "具体收益",
+                        "专门能力或权限边界",
+                        "风险判断",
+                        "巨型任务",
+                        "输入、输出、消费方与验证边界",
+                        "不要求所有任务端到端",
+                        "独立验收成本",
+                        "提交前检查能否合并",
+                        "全部验收要求",
+                        "不编造节省时长",
+                    ] {
+                        assert!(prompt.contains(criterion), "{}: {criterion}", data.role);
+                    }
+                    for resumed in [
+                        continuation_with_prompt(&prompt),
+                        missing_result_continuation(&data, &prompt),
+                        invalid_result_continuation(&data, "保留真实任务范围", &prompt),
+                    ] {
+                        assert_eq!(resumed.matches("## 任务粒度与分工").count(), 1);
+                        assert!(resumed.ends_with(&prompt));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decomposition_policy_is_workspace_independent_and_separates_time_from_quality_and_tokens() {
+        for role in [JOB_ROLE_ANALYSIS, JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_EXECUTOR] {
+            let mut data = sample_data(role);
+            let git = render(&data);
+            data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
+            let plain = render(&data);
+            let policy = task_decomposition_rules();
+            assert_eq!(git.matches(policy).count(), 1);
+            assert_eq!(plain.matches(policy).count(), 1);
+            assert!(policy.contains("不以工作区类型决定粒度"));
+            assert!(policy.contains("并行主要缩短实际经过时间"));
+            assert!(policy.contains("不自动提高质量或节省 Token"));
+            assert!(!policy.contains("普通工作区"));
+            assert!(!policy.contains("Git 工作区"));
+            assert!(git.contains("主工作树（只读参考）"));
+            assert!(plain.contains("普通目录，任务串行运行"));
+            for prompt in [git, plain] {
+                if role == JOB_ROLE_ANALYSIS {
+                    assert!(prompt.contains("不因平台串行派发人为串联任务"));
+                } else if role == JOB_ROLE_EXECUTOR {
+                    assert!(prompt.contains("不在 description 或 acceptance 中暗藏"));
+                } else {
+                    assert!(prompt.contains("deps 只能引用本批次子任务且必须无环"));
+                    assert!(prompt.contains("不修改父任务目标或影响其他任务"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delegation_requires_a_boundary_and_keeps_parent_integration_responsibility() {
+        let prompt = render_role(JOB_ROLE_EXECUTOR);
+        assert!(prompt.contains("先在当前任务内组织实现步骤"));
+        assert!(prompt.contains("分工收益足以抵消交接、验收与整合成本"));
+        assert!(prompt.contains("为何不由当前执行者直接继续"));
+        assert!(prompt.contains("父任务剩余整合责任"));
+        assert!(prompt.contains("父任务仍需接受验收"));
+        assert!(!prompt.contains("任务仍复杂时可派生子任务"));
+
+        let mut child = sample_data(JOB_ROLE_EXECUTOR);
+        child.derived_from = Some(DependencyInfo {
+            key: "P".into(),
+            title: "父任务".into(),
+            summary: String::new(),
+        });
+        let child_prompt = render(&child);
+        assert!(!child_prompt.contains("## 任务粒度与分工"));
+        assert!(!child_prompt.contains("\"kind\":\"derive\""));
+        assert!(child_prompt.contains("禁止再次派生新的子任务"));
+        assert!(child_prompt.contains("接受独立验收"));
+        for role in [
+            JOB_ROLE_DIRECT,
+            JOB_ROLE_VERIFIER,
+            JOB_ROLE_ACCEPTANCE,
+            JOB_ROLE_SUMMARY,
+        ] {
+            assert!(!render_role(role).contains("## 任务粒度与分工"), "{role}");
+        }
+    }
+
+    #[test]
+    fn one_task_plan_preserves_independent_verification_without_using_direct_mode() {
+        let data = sample_data(JOB_ROLE_ANALYSIS);
+        let prompt = render(&data);
+        assert!(prompt.contains("按任务执行并独立验收，可以只有一个任务"));
+        assert!(prompt.contains("不为减少任务数绕过必要的独立验收"));
+        let example = result_schema(&data, None)
+            .lines()
+            .find(|line| line.starts_with("{\"kind\":\"plan\""))
+            .unwrap()
+            .to_string();
+        let mut plan: serde_json::Value = serde_json::from_str(&example).unwrap();
+        plan["tasks"][0]["description"] = serde_json::json!(
+            "整理调研资料并形成决策报告；内部步骤包括来源核对、交叉验证和报告撰写"
+        );
+        plan["tasks"][0]["acceptance"] = serde_json::json!(["关键结论可追溯且明确未验证项"]);
+        let crate::domain::ParsedResult::AnalysisPlan { tasks, .. } =
+            crate::domain::parse_result(JOB_ROLE_ANALYSIS, &plan.to_string()).unwrap()
+        else {
+            panic!("single work unit must remain a task plan");
+        };
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].description.contains("内部步骤"));
+        assert_eq!(tasks[0].acceptance, ["关键结论可追溯且明确未验证项"]);
     }
 
     #[test]
