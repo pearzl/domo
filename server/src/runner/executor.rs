@@ -5,6 +5,7 @@ use crate::domain::{self, now, FailureKind};
 use crate::events::emit;
 use crate::models::*;
 use crate::state::AppState;
+use crate::transitions::Transitions;
 
 use super::common::{load_task, models_list_json, parse_json_list};
 use super::failure::{
@@ -18,7 +19,11 @@ pub(super) async fn handle_executor_success(
     summary: &str,
     agent: &AgentRow,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.task_result(project, task).await? else {
+        return Ok(());
+    };
+    let task = &current;
     let pause = task_pause_intent(state, &task.id).await?;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = ?, agent_id = ?, last_agent_id = NULL, \
@@ -84,13 +89,10 @@ pub(super) async fn handle_executor_derive(
     tasks: &[domain::NormalizedTask],
     agent: &AgentRow,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
-    let Some(parent) = load_task(&state.db, &task.id).await? else {
+    let transition = Transitions::lock(state).await;
+    let Some(parent) = transition.task_result(project, task).await? else {
         return Ok(());
     };
-    if parent.stage == TASK_STAGE_COMPLETED || parent.status.as_deref() == Some(STATUS_CANCELED) {
-        return Ok(());
-    }
     if parent.parent_id.is_some() {
         return Err(anyhow!("派生任务不能再次派生"));
     }
@@ -225,7 +227,11 @@ pub(super) async fn handle_executor_failure(
     kind: FailureKind,
 ) -> Result<()> {
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
-    let _guard = state.schedule_lock.lock().await;
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.task_result(project, task).await? else {
+        return Ok(());
+    };
+    let task = &current;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = domain::task_failure_attempts(task.attempts, kind);
     // Protocol errors have consumed the job's separate correction budget.

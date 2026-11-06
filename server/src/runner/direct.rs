@@ -4,6 +4,7 @@ use crate::domain::now;
 use crate::events::emit;
 use crate::models::*;
 use crate::state::AppState;
+use crate::transitions::Transitions;
 
 use super::failure::plan_project_failure;
 
@@ -13,11 +14,14 @@ pub(super) async fn handle_direct_success(
     summary: &str,
     report: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
+    let transition = Transitions::lock(state).await;
     let timestamp = now();
-    let current = crate::replan::load_project(&state.db, &project.id)
-        .await?
-        .unwrap_or_else(|| project.clone());
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
+    if current.replan_active == 0 && current.completion_mode != COMPLETION_DIRECT {
+        return Ok(());
+    }
     if current.replan_active != 0 {
         sqlx::query(
             "UPDATE projects SET report = ?, report_feedback = NULL, updated_at = ? WHERE id = ?",
@@ -84,10 +88,13 @@ pub(super) async fn handle_direct_failure(
         agent.map(|agent| (agent, process_failure)),
     )
     .await?;
-    let _guard = state.schedule_lock.lock().await;
-    let current = crate::replan::load_project(&state.db, &project.id)
-        .await?
-        .unwrap_or_else(|| project.clone());
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
+    if current.replan_active == 0 && current.completion_mode != COMPLETION_DIRECT {
+        return Ok(());
+    }
     if current.replan_active != 0 {
         sqlx::query(
             "UPDATE projects SET avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \

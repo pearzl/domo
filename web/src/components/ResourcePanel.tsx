@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProjectDetail } from "../types";
 import { errorMessage } from "../api";
 import { Badge, ErrorBox } from "../ui";
@@ -30,8 +30,8 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   const [selectedVersion, setSelectedVersion] = useState("");
   const [taskFilter, setTaskFilter] = useState("");
   const [kindFilter, setKindFilter] = useState("");
-  const [preview, setPreview] = useState<Preview | null>(null);
-  const [selectedArtifact, setSelectedArtifact] = useState("");
+  const [preview, setPreview] = useState<(Preview & { artifactId: string }) | null>(null);
+  const previewRequestRef = useRef(0);
   const [path, setPath] = useState("");
   const [kind, setKind] = useState("delivery");
   const [format, setFormat] = useState("");
@@ -41,6 +41,10 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   const readonly = detail.project.status === "archived";
   const kindLabels: Record<string, string> = { input: "参考输入", intermediate: "中间成果", delivery: "最终交付" };
   const filteredArtifacts = (artifacts?.items ?? []).filter(item => (!taskFilter || item.task_id === taskFilter) && (!kindFilter || item.kind === kindFilter));
+  useEffect(() => {
+    setPreview(null);
+    return () => { previewRequestRef.current += 1; };
+  }, [base]);
   async function refresh() {
     const [s, a, m] = await Promise.all([resourceRequest<Shared>(`${base}/shared${selectedVersion ? `?version=${encodeURIComponent(selectedVersion)}` : ""}`), resourceRequest<Artifacts>(`${base}/artifacts`), resourceRequest<MergeStatus>(`${base}/merge/assist`)]);
     setShared(s); setArtifacts(a); setMerge(m);
@@ -51,9 +55,16 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
     try { await operation(); await refresh(); onSaved(); } catch (err) { setError(errorMessage(err)); } finally { setBusy(false); }
   }
   async function viewArtifact(id: string, commit?: string) {
-    setSelectedArtifact(id);
-    try { setPreview(await resourceRequest<Preview>(`${base}/artifacts/${id}${commit ? `?commit=${encodeURIComponent(commit)}` : ""}`)); setError(""); }
-    catch (err) { setError(errorMessage(err)); }
+    const request = ++previewRequestRef.current;
+    setPreview(null);
+    try {
+      const next = await resourceRequest<Preview>(`${base}/artifacts/${id}${commit ? `?commit=${encodeURIComponent(commit)}` : ""}`);
+      if (request !== previewRequestRef.current) return;
+      setPreview({ ...next, artifactId: id });
+      setError("");
+    } catch (err) {
+      if (request === previewRequestRef.current) setError(errorMessage(err));
+    }
   }
   return <>
     <details className="panel resource-panel"><summary>项目共享信息 <span className="section-count">{shared ? `${shared.records.length} 条记录` : "加载中…"}</span></summary>
@@ -92,7 +103,7 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
         </details>;
       })}
       {preview ? <details open><summary>{preview.path} · {preview.commit?.slice(0, 12) ?? "当前文件"}</summary>
-        {preview.versions.length ? <select aria-label="产物版本" value={preview.commit ?? ""} onChange={e => void viewArtifact(selectedArtifact, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
+        {preview.versions.length ? <select aria-label="产物版本" value={preview.commit ?? ""} onChange={e => void viewArtifact(preview.artifactId, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
         <pre>{preview.text}</pre>
       </details> : null}
       {!readonly ? <details><summary>登记重要成果或参考输入</summary>

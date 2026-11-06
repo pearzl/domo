@@ -1,5 +1,5 @@
-//! Offline, relocatable snapshots. An OS-held lease excludes the server and
-//! concurrent backup/restore; checksums cover files, symlinks and Git archives.
+//! Offline snapshots and verification. An OS-held lease excludes the server
+//! and concurrent backups; checksums cover files, symlinks and Git archives.
 use crate::{config::Config, git, models::ProjectRow};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -309,102 +309,6 @@ pub async fn verify(source: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn restore(source: &Path, destination: &Path) -> Result<()> {
-    verify(source).await?;
-    std::fs::create_dir(destination).context("恢复目标必须不存在，不覆盖现有数据")?;
-    let destination = std::fs::canonicalize(destination)?;
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(source.join("manifest.json"))?)?;
-    std::fs::create_dir(destination.join("data"))?;
-    std::fs::copy(
-        source.join("data/domo.db"),
-        destination.join("data/domo.db"),
-    )?;
-    let _lease = lease(&destination.join("data"))?;
-    for root in &manifest.roots {
-        copy_tree(
-            &source.join(&root.relative),
-            &destination.join(&root.relative),
-        )?;
-    }
-    // Rewrite only Git administrative pointers, never audit prompts or artifacts.
-    for worktree in &manifest.worktrees {
-        let tree = mapped(worktree, &manifest, &destination)?;
-        let dotgit = tree.join(".git");
-        if dotgit.is_file() {
-            rewrite_pointer(&dotgit, &manifest, &destination)?;
-        }
-    }
-    for original in &manifest.git_admin {
-        let admin = mapped(original, &manifest, &destination)?;
-        let linked = admin.join("worktrees");
-        if linked.exists() {
-            for entry in std::fs::read_dir(linked)? {
-                let entry = entry?;
-                for name in ["gitdir", "commondir"] {
-                    let path = entry.path().join(name);
-                    if path.is_file() {
-                        rewrite_pointer(&path, &manifest, &destination)?;
-                    }
-                }
-            }
-        }
-        git::run_git(&admin, &["--git-dir=.", "fsck", "--full"]).await?;
-    }
-    let pool = crate::db::connect(&destination.join("data/domo.db")).await?;
-    let projects = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects")
-        .fetch_all(&pool)
-        .await?;
-    for project in projects {
-        let workspace = mapped(Path::new(&project.workspace), &manifest, &destination)?;
-        let repo = mapped(Path::new(&project.repo_path), &manifest, &destination)?;
-        let tasks: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, worktree FROM tasks WHERE project_id = ? AND worktree IS NOT NULL",
-        )
-        .bind(&project.id)
-        .fetch_all(&pool)
-        .await?;
-        for (id, old) in tasks {
-            let path = Path::new(&old);
-            let new = mapped(path, &manifest, &destination)?;
-            sqlx::query("UPDATE tasks SET worktree = ? WHERE id = ?")
-                .bind(new.to_string_lossy().as_ref())
-                .bind(id)
-                .execute(&pool)
-                .await?;
-        }
-        sqlx::query("UPDATE projects SET workspace = ?, repo_path = ?, status = CASE WHEN status IN ('running', 'pausing') THEN 'paused' ELSE status END WHERE id = ?")
-            .bind(workspace.to_string_lossy().as_ref()).bind(repo.to_string_lossy().as_ref()).bind(project.id).execute(&pool).await?;
-    }
-    pool.close().await;
-    for tree in &manifest.worktrees {
-        let restored = mapped(tree, &manifest, &destination)?;
-        git::run_git(&restored, &["status", "--porcelain"])
-            .await
-            .context("恢复的 worktree 无法访问")?;
-    }
-    println!("恢复完成；恢复的运行中项目保持暂停，请核对后继续。\nDOMO_DATA_ROOT={}\nDOMO_WORKSPACE_ROOT={}", destination.join("data").display(), mapped(&manifest.workspace, &manifest, &destination)?.display());
-    Ok(())
-}
-
-fn rewrite_pointer(path: &Path, manifest: &Manifest, target: &Path) -> Result<()> {
-    if std::fs::symlink_metadata(path)?.file_type().is_symlink()
-        || !std::fs::canonicalize(path)?.starts_with(target)
-    {
-        bail!("拒绝改写恢复目录外的 Git 管理指针");
-    }
-    let mut text = std::fs::read_to_string(path)?;
-    let mut roots: Vec<&Root> = manifest.roots.iter().collect();
-    roots.sort_by_key(|r| std::cmp::Reverse(r.original.components().count()));
-    for root in roots {
-        text = text.replace(
-            root.original.to_string_lossy().as_ref(),
-            target.join(&root.relative).to_string_lossy().as_ref(),
-        );
-    }
-    std::fs::write(path, text)?;
-    Ok(())
-}
-
 fn backup_relative(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty()
         || path
@@ -419,10 +323,15 @@ fn backup_relative(path: &Path) -> Result<()> {
 pub async fn cli(cfg: &Config) -> Result<bool> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--backup") if args.len() == 2 => { create(cfg, Path::new(&args[1])).await?; Ok(true) },
-        Some("--verify-backup") if args.len() == 2 => { verify(Path::new(&args[1])).await?; Ok(true) },
-        Some("--restore") if args.len() == 3 => { restore(Path::new(&args[1]), Path::new(&args[2])).await?; Ok(true) },
-        Some(_) => bail!("用法：domo-server [--backup <新目录> | --verify-backup <备份目录> | --restore <备份目录> <新目录>]") ,
+        Some("--backup") if args.len() == 2 => {
+            create(cfg, Path::new(&args[1])).await?;
+            Ok(true)
+        }
+        Some("--verify-backup") if args.len() == 2 => {
+            verify(Path::new(&args[1])).await?;
+            Ok(true)
+        }
+        Some(_) => bail!("用法：domo-server [--backup <新目录> | --verify-backup <备份目录>]"),
         None => Ok(false),
     }
 }

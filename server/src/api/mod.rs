@@ -67,6 +67,19 @@ pub struct ApiError {
     message: String,
 }
 
+impl From<crate::transitions::TransitionError> for ApiError {
+    fn from(error: crate::transitions::TransitionError) -> Self {
+        use crate::transitions::TransitionError;
+        match error {
+            TransitionError::ProjectMissing | TransitionError::TaskMissing => {
+                Self::not_found(error.to_string())
+            }
+            TransitionError::Rejected(message) => Self::bad(message),
+            TransitionError::Database(error) => error.into(),
+        }
+    }
+}
+
 impl ApiError {
     fn bad(message: impl Into<String>) -> Self {
         Self {

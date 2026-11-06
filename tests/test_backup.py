@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""真实离线备份/异路径恢复：SQLite 关联、共享仓库、普通产物、jobs、
-Git 归档引用和保留的脏 worktree；运行时锁、篡改检测及拒绝覆盖已有目录。
+"""离线备份与校验：SQLite 关联、共享仓库、普通产物、jobs、Git 归档引用、
+保留的脏 worktree、运行时锁、篡改检测、拒绝覆盖及不支持恢复命令。
 """
 import os
+import json
 import subprocess
 import sqlite3
 from pathlib import Path
@@ -10,7 +11,7 @@ from harness import Server, SERVER_BIN, git, init_repo, temp_root, wait_for
 
 
 def main():
-    with temp_root("domo-backup-restore-") as root:
+    with temp_root("domo-backup-") as root:
         repo = root / "repo"
         init_repo(repo)
         plain = root / "research"
@@ -49,35 +50,36 @@ def main():
             server.stop()
             print(cli("--backup", backup).stdout.strip())
             print(cli("--verify-backup", backup).stdout.strip())
-            restored = root / "restored"
-            print(cli("--restore", backup, restored).stdout.strip())
-            cli("--restore", backup, restored, ok=False)
-            with sqlite3.connect(restored / "data/domo.db") as db:
+            cli("--backup", backup, ok=False)
+            destination = root / "unsupported-target"
+            cli("--restore", backup, destination, ok=False)
+            assert not destination.exists()
+            manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+
+            def saved(path):
+                candidates = [entry for entry in manifest["roots"] if Path(path).is_relative_to(entry["original"])]
+                entry = max(candidates, key=lambda item: len(Path(item["original"]).parts))
+                return backup / entry["relative"] / Path(path).relative_to(entry["original"])
+
+            with sqlite3.connect(backup / "data/domo.db") as db:
                 for original in projects:
                     p = original["project"]
                     path, workspace, status = db.execute("SELECT repo_path, workspace, status FROM projects WHERE id = ?", (p["id"],)).fetchone()
-                    assert str(restored) in path and str(restored) in workspace
+                    assert path == p["repo_path"] and workspace == p["workspace"]
                     assert status == "archived"
-                    assert (Path(workspace) / "shared/.git").is_dir()
-                    assert any((Path(workspace) / "jobs").iterdir())
+                    assert (saved(workspace) / "shared/.git").is_dir()
+                    assert any((saved(workspace) / "jobs").iterdir())
                     if p["workspace_type"] == "plain":
-                        assert (Path(path) / "source.txt").read_text(encoding="utf-8") == "研究资料"
-                        assert (Path(path) / "domo_mock/T1.txt").is_file()
+                        assert (saved(path) / "source.txt").read_text(encoding="utf-8") == "研究资料"
+                        assert (saved(path) / "domo_mock/T1.txt").is_file()
                     else:
-                        refs = git(["for-each-ref", "refs/domo-archive"], Path(path))
+                        refs = git(["--git-dir=.", "for-each-ref", "refs/domo-archive"], saved(Path(path) / ".git"))
                         assert "domo-task" in refs, refs
-                        assert (Path(workspace) / "repo/user-note.txt").read_text(encoding="utf-8") == "归档时保留的人工文件"
-                        git(["status", "--porcelain"], Path(workspace) / "repo")
-            with Server(restored, env={"DOMO_WORKSPACE_ROOT": str(restored / "trees/workspace")}) as recovered:
-                for original in projects:
-                    base = f"/api/projects/{original['project']['id']}"
-                    assert recovered.call("GET", base)["project"]["status"] == "archived"
-                    assert recovered.call("GET", base + "/shared")["records"]
-                    assert recovered.call("GET", base + "/artifacts")["items"]
+                        assert (saved(workspace) / "repo/user-note.txt").read_text(encoding="utf-8") == "归档时保留的人工文件"
             # Corrupt only a test-owned backup copy. Verification must refuse it.
             (backup / "data/domo.db").write_bytes(b"tampered")
             cli("--verify-backup", backup, ok=False)
-            print("备份异路径恢复、引用与审计完整性、锁及篡改拒绝通过")
+            print("离线备份、引用与审计完整性、锁及篡改拒绝通过")
 
 
 if __name__ == "__main__":

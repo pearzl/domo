@@ -30,7 +30,6 @@ mod verifier;
 mod worktree;
 
 use self::agent::{append_log_separator, continuation_allowed, merge_usage, run_agent_job};
-pub(crate) use self::analysis::apply_analysis_plan;
 pub(crate) use self::analysis::apply_analysis_plan_locked;
 use self::analysis::{
     handle_analysis_direct, handle_analysis_failure, handle_analysis_plan,
@@ -328,6 +327,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             stalled: false,
             session_id,
             usage: None,
+            reported_error: None,
         }
     } else {
         run_agent_job(state, &job, &job_dir, &agent, &spec, &progress, run_timeout).await?

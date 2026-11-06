@@ -6,8 +6,9 @@ use crate::events::emit;
 use crate::models::*;
 use crate::replan;
 use crate::state::AppState;
+use crate::transitions::Transitions;
 
-use super::common::{apply_stale_result, has_active_tasks, load_project};
+use super::common::{apply_stale_result, has_active_tasks};
 use super::failure::plan_project_failure;
 
 pub(super) async fn handle_report(
@@ -15,10 +16,10 @@ pub(super) async fn handle_report(
     project: &ProjectRow,
     report: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
-    let current = crate::replan::load_project(&state.db, &project.id)
-        .await?
-        .unwrap_or_else(|| project.clone());
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
     if current.replan_active != 0 {
         sqlx::query(
             "UPDATE projects SET report = ?, report_feedback = NULL, updated_at = ? WHERE id = ?",
@@ -80,6 +81,11 @@ pub(super) async fn handle_project_acceptance(
     replan_reason: &str,
     action: &domain::AcceptanceAction,
 ) -> Result<()> {
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
+    let project = &current;
     let snapshot = serde_json::to_string(&json!({
         "kind": "project_acceptance",
         "summary": summary,
@@ -104,10 +110,6 @@ pub(super) async fn handle_project_acceptance(
     let timestamp = now();
     let replanning;
     {
-        let _guard = state.schedule_lock.lock().await;
-        let current = crate::replan::load_project(&state.db, &project.id)
-            .await?
-            .unwrap_or_else(|| project.clone());
         replanning = current.replan_active != 0;
         if !replanning && has_active_tasks(&state.db, &project.id).await? {
             return apply_stale_result(
@@ -216,7 +218,6 @@ pub(super) async fn handle_project_acceptance(
         return Ok(());
     }
     if action.next_action != "replan" {
-        let _guard = state.schedule_lock.lock().await;
         let reason = format!(
             "{}：{}\n{gap_text}",
             if action.next_action == "wait" {
@@ -240,7 +241,6 @@ pub(super) async fn handle_project_acceptance(
         return Ok(());
     }
     if project.acceptance_round >= domain::MAX_AUTO_ACCEPTANCE_REPLANS {
-        let _guard = state.schedule_lock.lock().await;
         let blocked_reason = format!(
             "项目验收自动重规划次数已达上限（{} 次），最近一次仍未通过，等待人工裁决：\n{gap_text}",
             domain::MAX_AUTO_ACCEPTANCE_REPLANS
@@ -269,7 +269,15 @@ pub(super) async fn handle_project_acceptance(
     }
 
     let reason = format!("{reason}\n{}", action.guidance);
-    let outcome = replan::request(state, &project.id, &reason, REPLAN_SOURCE_ACCEPTANCE).await?;
+    let outcome = replan::request_locked(
+        state,
+        &project.id,
+        &reason,
+        REPLAN_SOURCE_ACCEPTANCE,
+        None,
+        None,
+    )
+    .await?;
     if outcome.is_some() {
         sqlx::query("UPDATE projects SET acceptance_round = ?, updated_at = ? WHERE id = ?")
             .bind(project.acceptance_round + 1)
@@ -291,23 +299,16 @@ pub(super) async fn handle_project_acceptance(
         )
         .await;
     } else {
-        let _guard = state.schedule_lock.lock().await;
-        if let Some(current) = load_project(&state.db, &project.id).await? {
-            if current.stage == STAGE_SUMMARIZING
-                && current.acceptance_passed == 0
-                && current.status.as_deref() != Some(STATUS_ARCHIVED)
-            {
-                sqlx::query(
-                    "UPDATE projects SET status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
-                )
-                .bind(STATUS_BLOCKED)
-                .bind(&reason)
-                .bind(now())
-                .bind(&project.id)
-                .execute(&state.db)
-                .await?;
-            }
-        }
+        sqlx::query(
+            "UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing') \
+             THEN status ELSE ? END, blocked_reason = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(STATUS_BLOCKED)
+        .bind(&reason)
+        .bind(now())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
     }
     Ok(())
 }
@@ -395,10 +396,10 @@ pub(super) async fn handle_project_job_failure(
         agent.map(|agent| (agent, process_failure)),
     )
     .await?;
-    let _guard = state.schedule_lock.lock().await;
-    let current = crate::replan::load_project(&state.db, &project.id)
-        .await?
-        .unwrap_or_else(|| project.clone());
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
     if current.replan_active != 0 {
         sqlx::query(
             "UPDATE projects SET avoid_agent_id = CASE WHEN ? THEN ? ELSE avoid_agent_id END, \

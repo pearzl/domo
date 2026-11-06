@@ -237,6 +237,7 @@ fn recovery_and_diagnostics_are_owned_by_registered_adapters() {
             stalled: false,
             session_id: None,
             usage: None,
+            reported_error: None,
         };
         let diagnostic = diagnose(&AgentRow::test_fixture(kind), &run);
         assert_eq!(

@@ -562,7 +562,25 @@ pub async fn block_workspace(
     job: &JobRow,
     reason: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
+    let transition = crate::transitions::Transitions::lock(state).await;
+    if transition.project_result(project).await?.is_none() {
+        return Ok(());
+    }
+    if let Some(task_id) = &job.task_id {
+        let task =
+            sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
+                .bind(task_id)
+                .bind(&project.id)
+                .fetch_optional(&state.db)
+                .await?;
+        if !task.is_some_and(|task| {
+            task.stage != TASK_STAGE_COMPLETED
+                && task.status.as_deref() != Some(STATUS_CANCELED)
+                && task.contract_id == job.contract_id
+        }) {
+            return Ok(());
+        }
+    }
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE jobs SET status = 'failed', failure_kind = 'task', error = ?, finished_at = ? WHERE id = ? AND status = 'running'")
         .bind(reason).bind(now()).bind(&job.id).execute(&mut *tx).await?;

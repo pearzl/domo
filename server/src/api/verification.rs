@@ -10,6 +10,7 @@ use crate::domain::{self, now};
 use crate::events::emit;
 use crate::models::*;
 use crate::state::AppState;
+use crate::transitions::{TaskAction, Transitions};
 
 use super::detail::load_detail;
 use super::helpers::{load_project_task, require_project, role_label};
@@ -309,23 +310,12 @@ pub(super) async fn submit_arbitration(
     if action == ARBITRATION_GUIDE && guidance.is_none() {
         return Err(ApiError::bad("指导内容不能为空"));
     }
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let (project, task) = transition
+        .task(&project_id, &task_id, TaskAction::Arbitrate)
+        .await?;
     if project.replan_active != 0 {
         return Err(ApiError::conflict("项目正在重规划，不能恢复旧任务"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    if task.stage == TASK_STAGE_COMPLETED {
-        return Err(ApiError::bad("任务已完成"));
-    }
-    if task.status.as_deref() != Some(STATUS_BLOCKED) {
-        return Err(ApiError::bad("只有阻塞中的任务可以裁决"));
     }
     if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
         return Err(ApiError::bad("任务正在等待人工验收，请使用人工验收操作"));

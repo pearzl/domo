@@ -9,6 +9,7 @@ use crate::events::emit;
 use crate::models::*;
 use crate::replan;
 use crate::state::AppState;
+use crate::transitions::{ProjectAction, Transitions};
 
 use super::helpers::require_project;
 use super::ApiError;
@@ -32,8 +33,8 @@ pub(super) async fn submit_report(
     let event_message: String;
     let mut replan_reason: Option<String> = None;
     {
-        let _guard = state.schedule_lock.lock().await;
-        let current = require_project(&state, &id).await?;
+        let transition = Transitions::lock(&state).await;
+        let current = transition.project(&id, ProjectAction::Report).await?;
         if current.replan_generation != project.replan_generation
             || current.stage != project.stage
             || current.report != project.report
@@ -41,9 +42,6 @@ pub(super) async fn submit_report(
             return Err(ApiError::conflict("报告所属计划已变化，请刷新后重试"));
         }
         let project = current;
-        if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-            return Err(ApiError::bad("项目已归档"));
-        }
         match request.action.as_str() {
             // 多轮评议：先记录意见，由规划者在下一轮重写时参考。
             "comment" => {
@@ -150,8 +148,8 @@ pub(super) async fn retry_acceptance(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &id).await?;
+    let transition = Transitions::lock(&state).await;
+    let project = transition.project(&id, ProjectAction::Report).await?;
     if project.stage != STAGE_SUMMARIZING
         || project.status.as_deref() != Some(STATUS_BLOCKED)
         || project.report.is_some()

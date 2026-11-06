@@ -14,7 +14,7 @@ use super::adapter::{
     TurnContext,
 };
 use super::cli::{prompt_for_run, CliAdapter};
-use super::process::run_process;
+use super::process::{run_process, scan_stdout, stdout_offset};
 
 #[derive(Debug, Default)]
 pub struct CodexAdapter;
@@ -85,6 +85,7 @@ async fn codex_turn(
         codex_args(model, &spec.job_dir)
     };
     let prompt = prompt_for_run(spec, can_resume);
+    let offset = stdout_offset(spec).await;
     let mut run = run_process(
         &codex_bin(),
         &args,
@@ -93,9 +94,20 @@ async fn codex_turn(
         Some(prompt.into_bytes()),
     )
     .await?;
-    run.session_id = parse_codex_session_id(&run.stdout)
-        .or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
-    run.usage = parse_codex_usage(&run.stdout);
+    let mut session = None;
+    let mut usage = None;
+    let scanned = scan_stdout(spec, offset, |line| {
+        session = session.take().or_else(|| parse_codex_session_id(line));
+        usage = usage.take().or_else(|| parse_codex_usage(line));
+    })
+    .await;
+    if scanned.is_err() {
+        session = parse_codex_session_id(&run.stdout);
+        usage = parse_codex_usage(&run.stdout);
+    }
+    run.session_id =
+        session.or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
+    run.usage = usage;
     Ok(run)
 }
 

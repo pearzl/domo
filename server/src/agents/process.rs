@@ -1,15 +1,86 @@
 //! Process supervision shared by agent kinds that run an external CLI.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
 use super::adapter::{AgentRun, AgentSpec, JobProgress};
 
 const OUTPUT_CAP: usize = 2 * 1024 * 1024;
+
+/// Bounded database/diagnostic preview. Full bytes remain in the job logs;
+/// keeping both ends preserves launch context and terminal protocol events.
+#[derive(Default)]
+struct OutputPreview {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    total: usize,
+}
+
+impl OutputPreview {
+    fn push(&mut self, bytes: &[u8]) {
+        self.total = self.total.saturating_add(bytes.len());
+        let head_len = bytes.len().min(OUTPUT_CAP / 2 - self.head.len());
+        self.head.extend_from_slice(&bytes[..head_len]);
+        self.tail.extend(&bytes[head_len..]);
+        let excess = self.tail.len().saturating_sub(OUTPUT_CAP / 2);
+        self.tail.drain(..excess);
+    }
+
+    fn finish(self) -> String {
+        let tail: Vec<u8> = self.tail.into_iter().collect();
+        if self.total <= OUTPUT_CAP {
+            let mut bytes = self.head;
+            bytes.extend(tail);
+            return String::from_utf8_lossy(&bytes).into_owned();
+        }
+        // Do not present fragments of cut JSONL records as complete events.
+        let head_end = self
+            .head
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |i| i + 1);
+        let tail_start = tail
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(tail.len(), |i| i + 1);
+        format!(
+            "{}\n--- 输出摘要已省略中间内容；完整输出见作业日志 ---\n{}",
+            String::from_utf8_lossy(&self.head[..head_end]),
+            String::from_utf8_lossy(&tail[tail_start..]),
+        )
+    }
+}
+
+pub(super) async fn stdout_offset(spec: &AgentSpec) -> u64 {
+    tokio::fs::metadata(spec.job_dir.join("stdout.log"))
+        .await
+        .map_or(0, |metadata| metadata.len())
+}
+
+/// Scan just this turn's complete JSONL output without loading the log into
+/// memory or attributing an earlier continuation's usage to the current turn.
+pub(super) async fn scan_stdout(
+    spec: &AgentSpec,
+    offset: u64,
+    mut observe: impl FnMut(&str),
+) -> std::io::Result<()> {
+    let mut file = tokio::fs::File::open(spec.job_dir.join("stdout.log")).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).await? == 0 {
+            return Ok(());
+        }
+        observe(String::from_utf8_lossy(&line).trim());
+    }
+}
 
 pub(super) async fn run_process(
     program: &str,
@@ -102,8 +173,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     stdout: bool,
     log_path: PathBuf,
 ) -> String {
-    let mut output = Vec::new();
-    let mut written = 0usize;
+    let mut output = OutputPreview::default();
     let mut buffer = [0u8; 8192];
     let mut log = tokio::fs::OpenOptions::new()
         .create(true)
@@ -115,16 +185,9 @@ async fn read_capped<R: AsyncRead + Unpin>(
         match reader.read(&mut buffer).await {
             Ok(0) => break,
             Ok(n) => {
-                if output.len() < OUTPUT_CAP {
-                    let take = n.min(OUTPUT_CAP - output.len());
-                    output.extend_from_slice(&buffer[..take]);
-                }
+                output.push(&buffer[..n]);
                 if let Some(log) = &mut log {
-                    if written < OUTPUT_CAP {
-                        let take = n.min(OUTPUT_CAP - written);
-                        let _ = log.write_all(&buffer[..take]).await;
-                        written += take;
-                    }
+                    let _ = log.write_all(&buffer[..n]).await;
                 }
                 if stdout {
                     progress.record_stdout(n);
@@ -135,7 +198,10 @@ async fn read_capped<R: AsyncRead + Unpin>(
             Err(_) => break,
         }
     }
-    String::from_utf8_lossy(&output).to_string()
+    if let Some(log) = &mut log {
+        let _ = log.flush().await;
+    }
+    output.finish()
 }
 
 pub fn kill_process_group(pid: u32) -> bool {
@@ -271,6 +337,78 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::models::JOB_ROLE_EXECUTOR;
+
+    #[test]
+    fn short_output_preview_keeps_every_byte() {
+        let mut preview = OutputPreview::default();
+        let text = "首行\n".repeat(200_000);
+        for chunk in text.as_bytes().chunks(8192) {
+            preview.push(chunk);
+        }
+        assert_eq!(preview.finish(), text);
+    }
+
+    #[tokio::test]
+    async fn large_output_keeps_full_log_and_bounded_head_tail_preview() {
+        let root = std::env::temp_dir().join(format!("domo-output-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let log = root.join("stdout.log");
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let bytes = format!(
+            "{{\"type\":\"thread.started\",\"thread_id\":\"first\"}}\n{}{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":42}}}}\n",
+            "输出内容\n".repeat(300_000)
+        ).into_bytes();
+        let expected = bytes.clone();
+        let sender = tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+        });
+        let progress = JobProgress::new();
+        let preview = read_capped(reader, progress.clone(), true, log.clone()).await;
+        sender.await.unwrap();
+        assert_eq!(tokio::fs::read(&log).await.unwrap(), expected);
+        assert_eq!(progress.output_bytes().0, expected.len() as u64);
+        assert!(preview.len() <= OUTPUT_CAP + 200);
+        assert!(preview.starts_with("{\"type\":\"thread.started\""));
+        assert!(preview.contains("摘要已省略"));
+        assert!(preview.ends_with("\"input_tokens\":42}}\n"));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdout_scan_excludes_previous_turns_and_keeps_unterminated_last_line() {
+        let root = std::env::temp_dir().join(format!("domo-output-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let spec = AgentSpec {
+            job_id: "job_test".into(),
+            role: "executor".into(),
+            cwd: root.clone(),
+            job_dir: root.clone(),
+            prompt: String::new(),
+            original_prompt: String::new(),
+            session_id: None,
+            continuation: true,
+            progress: JobProgress::new(),
+        };
+        let log = root.join("stdout.log");
+        tokio::fs::write(&log, b"old usage\n--- continue ---\n")
+            .await
+            .unwrap();
+        let offset = stdout_offset(&spec).await;
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .await
+            .unwrap();
+        file.write_all(b"new session\nnew usage").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+        let mut lines = Vec::new();
+        scan_stdout(&spec, offset, |line| lines.push(line.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(lines, ["new session", "new usage"]);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

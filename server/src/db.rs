@@ -253,6 +253,14 @@ CREATE TABLE IF NOT EXISTS replan_cleanup (
     PRIMARY KEY (project_id, generation)
 );
 CREATE INDEX IF NOT EXISTS idx_replan_cleanup_status ON replan_cleanup(status, created_at);
+
+CREATE TRIGGER IF NOT EXISTS project_terminal_state BEFORE UPDATE OF stage, status ON projects
+WHEN OLD.status = 'archived' AND (NEW.stage IS NOT OLD.stage OR NEW.status IS NOT OLD.status)
+BEGIN SELECT RAISE(ABORT, 'archived project cannot transition'); END;
+CREATE TRIGGER IF NOT EXISTS task_terminal_state BEFORE UPDATE OF stage, status ON tasks
+WHEN (OLD.status = 'canceled' AND (NEW.stage IS NOT OLD.stage OR NEW.status IS NOT OLD.status))
+    OR (OLD.stage = 'completed' AND NEW.stage IS NOT OLD.stage)
+BEGIN SELECT RAISE(ABORT, 'terminal task cannot transition'); END;
 "#;
 
 pub async fn connect(path: &Path) -> DbResult<SqlitePool> {

@@ -25,6 +25,7 @@ mod resources;
 mod runner;
 mod scheduler;
 mod state;
+mod transitions;
 mod usage;
 mod version;
 

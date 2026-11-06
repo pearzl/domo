@@ -9,6 +9,7 @@ use crate::git;
 use crate::models::*;
 use crate::replan;
 use crate::state::AppState;
+use crate::transitions::{TaskAction, Transitions};
 
 use super::detail::load_detail;
 use super::helpers::{load_project_task, require_project};
@@ -26,26 +27,10 @@ pub(super) async fn save_task_guidance(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad("人工指导不能为空"))?
         .to_string();
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    let Some(task) =
-        sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ? AND project_id = ?")
-            .bind(&task_id)
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?
-    else {
-        return Err(ApiError::not_found("任务不存在"));
-    };
-    if task.stage == TASK_STAGE_COMPLETED {
-        return Err(ApiError::bad("任务已完成，不能再添加指导"));
-    }
-    if task.status.as_deref() == Some(STATUS_CANCELED) {
-        return Err(ApiError::bad("任务已取消，不能再添加指导"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let (_, task) = transition
+        .task(&project_id, &task_id, TaskAction::Guide)
+        .await?;
     let timestamp = now();
     sqlx::query("UPDATE tasks SET guidance = ?, updated_at = ? WHERE id = ?")
         .bind(&guidance)
@@ -80,21 +65,10 @@ pub(super) async fn set_task_milestone(
         (None, Some("clear" | "cancel" | "disable")) => false,
         _ => return Err(ApiError::bad("必须指定 milestone 布尔值或 set/clear 动作")),
     };
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    if task.stage == TASK_STAGE_COMPLETED {
-        return Err(ApiError::bad("任务已完成，不能修改里程碑标记"));
-    }
-    if task.status.as_deref() == Some(STATUS_CANCELED) {
-        return Err(ApiError::bad("任务已取消，不能修改里程碑标记"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let (_, task) = transition
+        .task(&project_id, &task_id, TaskAction::Milestone)
+        .await?;
     if task.human_gate.as_deref() == Some(HUMAN_GATE_MILESTONE) {
         return Err(ApiError::bad("任务正在等待人工验收，不能修改里程碑标记"));
     }
@@ -136,21 +110,16 @@ pub(super) async fn accept_milestone(
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
-    let _guard = state.schedule_lock.lock().await;
+    let _guard = Transitions::lock(&state).await;
     let (project, task) = {
-        let project = require_project(&state, &project_id).await?;
-        if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-            return Err(ApiError::bad("项目已归档"));
-        }
-        if project.stage == STAGE_COMPLETED {
-            return Err(ApiError::bad("项目已完成"));
-        }
+        let (project, task) = _guard
+            .task(&project_id, &task_id, TaskAction::Milestone)
+            .await?;
         if project.replan_active != 0 {
             return Err(ApiError::conflict(
                 "重规划期间不能合入旧里程碑，请先确认或放弃草稿",
             ));
         }
-        let task = load_project_task(&state, &project_id, &task_id).await?;
         if task.status.as_deref() != Some(STATUS_BLOCKED)
             || task.human_gate.as_deref() != Some(HUMAN_GATE_MILESTONE)
         {
@@ -319,7 +288,9 @@ async fn restore_milestone_gate_unlocked(
     reason: &str,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "UPDATE tasks SET human_gate = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+         "UPDATE tasks SET human_gate = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ? \
+          AND human_gate IN ('milestone_replanning', 'milestone_accepting') AND stage != 'completed' AND COALESCE(status, '') != 'canceled' \
+          AND EXISTS (SELECT 1 FROM projects WHERE id = tasks.project_id AND COALESCE(status, '') != 'archived')",
     )
     .bind(HUMAN_GATE_MILESTONE)
     .bind(STATUS_BLOCKED)
@@ -347,15 +318,10 @@ pub(super) async fn reject_milestone(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let disposition = milestone_reject_disposition(request.action.as_deref())?;
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let task = load_project_task(&state, &project_id, &task_id).await?;
+    let _guard = Transitions::lock(&state).await;
+    let (project, task) = _guard
+        .task(&project_id, &task_id, TaskAction::Milestone)
+        .await?;
     if task.status.as_deref() != Some(STATUS_BLOCKED)
         || task.human_gate.as_deref() != Some(HUMAN_GATE_MILESTONE)
     {

@@ -315,6 +315,7 @@ mod tests {
             stalled: false,
             session_id: None,
             usage: None,
+            reported_error: None,
         }
     }
     #[test]

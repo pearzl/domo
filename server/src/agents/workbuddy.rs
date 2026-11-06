@@ -14,7 +14,7 @@ use super::adapter::{
     TurnContext,
 };
 use super::cli::{prompt_for_run, CliAdapter};
-use super::process::run_process;
+use super::process::{run_process, scan_stdout, stdout_offset};
 
 #[derive(Debug, Default)]
 pub struct WorkbuddyAdapter;
@@ -85,6 +85,7 @@ async fn workbuddy_turn(
         workbuddy_args(model, &spec.job_dir)
     };
     let prompt = prompt_for_run(spec, can_resume);
+    let offset = stdout_offset(spec).await;
     let mut run = run_process(
         &workbuddy_bin(),
         &args,
@@ -93,10 +94,27 @@ async fn workbuddy_turn(
         Some(prompt.into_bytes()),
     )
     .await?;
-    run.session_id = parse_workbuddy_session_id(&run.stdout)
-        .or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
-    run.usage = parse_workbuddy_usage(&run.stdout);
-    run.reported_error = parse_workbuddy_error(&run.stdout);
+    let mut session = None;
+    let mut usage = WorkbuddyUsage::default();
+    let mut reported_error = None;
+    let scanned = scan_stdout(spec, offset, |line| {
+        session = session.take().or_else(|| parse_workbuddy_session_id(line));
+        usage.observe(line);
+        reported_error = parse_workbuddy_error(line).or(reported_error.take());
+    })
+    .await;
+    if scanned.is_err() {
+        session = parse_workbuddy_session_id(&run.stdout);
+        usage = WorkbuddyUsage::default();
+        for line in run.stdout.lines() {
+            usage.observe(line);
+        }
+        reported_error = parse_workbuddy_error(&run.stdout);
+    }
+    run.session_id =
+        session.or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
+    run.usage = usage.finish();
+    run.reported_error = reported_error;
     Ok(run)
 }
 
@@ -225,20 +243,24 @@ pub(super) fn parse_workbuddy_session_id(stdout: &str) -> Option<String> {
 
 /// WorkBuddy reports the session total in the `result` event. When that event
 /// lacks usage, the last assistant message carries the per-request counts.
-pub(super) fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
-    let mut result_usage = None;
-    let mut result_cost = None;
-    let mut last_assistant_usage = None;
-    for line in stdout.lines() {
+#[derive(Default)]
+struct WorkbuddyUsage {
+    result_usage: Option<serde_json::Map<String, serde_json::Value>>,
+    result_cost: Option<f64>,
+    last_assistant_usage: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl WorkbuddyUsage {
+    fn observe(&mut self, line: &str) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
+            return;
         };
         match value.get("type").and_then(|item| item.as_str()) {
             Some("result") => {
                 if let Some(usage) = value.get("usage").and_then(|item| item.as_object()) {
-                    result_usage = Some(usage.clone());
+                    self.result_usage = Some(usage.clone());
                 }
-                result_cost = value.get("total_cost_usd").and_then(|item| item.as_f64());
+                self.result_cost = value.get("total_cost_usd").and_then(|item| item.as_f64());
             }
             Some("assistant") => {
                 if let Some(usage) = value
@@ -246,23 +268,34 @@ pub(super) fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
                     .and_then(|message| message.get("usage"))
                     .and_then(|item| item.as_object())
                 {
-                    last_assistant_usage = Some(usage.clone());
+                    self.last_assistant_usage = Some(usage.clone());
                 }
             }
             _ => {}
         }
     }
-    let usage = result_usage.or(last_assistant_usage)?;
-    let record = UsageRecord {
-        input_tokens: json_i64(usage.get("input_tokens")),
-        output_tokens: json_i64(usage.get("output_tokens")),
-        cache_read_tokens: json_i64(usage.get("cache_read_input_tokens")),
-        cache_write_tokens: json_i64(usage.get("cache_creation_input_tokens")),
-        reasoning_tokens: None,
-        cost: result_cost,
-        duration_ms: None,
-    };
-    record.known().then_some(record)
+    fn finish(self) -> Option<UsageRecord> {
+        let usage = self.result_usage.or(self.last_assistant_usage)?;
+        let record = UsageRecord {
+            input_tokens: json_i64(usage.get("input_tokens")),
+            output_tokens: json_i64(usage.get("output_tokens")),
+            cache_read_tokens: json_i64(usage.get("cache_read_input_tokens")),
+            cache_write_tokens: json_i64(usage.get("cache_creation_input_tokens")),
+            reasoning_tokens: None,
+            cost: self.result_cost,
+            duration_ms: None,
+        };
+        record.known().then_some(record)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
+    let mut usage = WorkbuddyUsage::default();
+    for line in stdout.lines() {
+        usage.observe(line);
+    }
+    usage.finish()
 }
 
 #[cfg(test)]

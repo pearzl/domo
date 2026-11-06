@@ -307,20 +307,30 @@ def main():
             )
             task_t2 = next(task for task in detail["tasks"] if task["key"] == "T2")
             assert task_t2["stage"], task_t2
+
+            # 验收前的报告驳回必须填写意见。
+            try:
+                call("POST", f"/api/projects/{pid_c}/report", {"action": "reject", "feedback": "  "})
+            except AssertionError as error:
+                assert "填写意见" in str(error), error
+            else:
+                raise AssertionError("报告驳回接受了空意见")
+
             call("POST", f"/api/projects/{pid_c}/report", {"action": "accept"})
             assert call("GET", f"/api/projects/{pid_c}")["project"]["stage"] == "completed"
 
-            # ---- 反合法输入 ------------------------------------------------------
-            errors = []
+            # 完成的项目不能再通过报告驳回重新流转。
             try:
                 call(
                     "POST",
                     f"/api/projects/{pid_c}/report",
-                    {"action": "reject", "feedback": "  "},
+                    {"action": "reject", "feedback": "重新撰写"},
                 )
             except AssertionError as error:
-                errors.append(str(error))
-            assert any("填写意见" in text or "等待验收" in text for text in errors), errors
+                assert "项目已完成" in str(error), error
+            else:
+                raise AssertionError("已完成项目接受了报告驳回")
+            assert call("GET", f"/api/projects/{pid_c}")["project"]["stage"] == "completed"
 
             print("报告多轮评议冒烟测试通过")
             print(f"  评议记录: {len(reviews)} 条")

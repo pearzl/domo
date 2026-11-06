@@ -11,10 +11,11 @@ use crate::events::emit;
 use crate::models::*;
 use crate::paths;
 use crate::state::AppState;
+use crate::transitions::{ProjectAction, TaskAction, Transitions};
 use crate::usage;
 
 use super::detail::load_detail;
-use super::helpers::{confirm_mode, load_project_task, parse_list, require_project, stage_label};
+use super::helpers::{confirm_mode, load_project_task, parse_list, stage_label};
 use super::ApiError;
 
 pub(super) async fn create_task(
@@ -22,11 +23,8 @@ pub(super) async fn create_task(
     Path(id): Path<String>,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskView>, ApiError> {
-    let _guard = state.schedule_lock.lock().await;
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档，不能再添加任务"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let project = transition.project(&id, ProjectAction::AddTask).await?;
     if project.replan_active != 0 {
         return Err(ApiError::conflict(
             "重规划期间不能添加任务，请先确认或放弃草稿",
@@ -188,23 +186,12 @@ pub(super) async fn pause_task(
 ) -> Result<Json<ProjectDetail>, ApiError> {
     let request = body.map(|Json(value)| value).unwrap_or_default();
     let force = request.forced();
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let workspace = PathBuf::from(&project.workspace);
     {
-        let _guard = state.schedule_lock.lock().await;
-        let task = load_project_task(&state, &project_id, &task_id).await?;
-        if task.stage == TASK_STAGE_COMPLETED {
-            return Err(ApiError::bad("任务已完成"));
-        }
-        if task.status.as_deref() == Some(STATUS_CANCELED) {
-            return Err(ApiError::bad("任务已取消"));
-        }
+        let transition = Transitions::lock(&state).await;
+        let (project, task) = transition
+            .task(&project_id, &task_id, TaskAction::Pause)
+            .await?;
+        let workspace = PathBuf::from(&project.workspace);
         if force {
             let running = sqlx::query_as::<_, JobRow>(
                 "SELECT * FROM jobs WHERE task_id = ? AND status = 'running'",
@@ -297,22 +284,11 @@ pub(super) async fn resume_task(
     State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
     {
-        let _guard = state.schedule_lock.lock().await;
-        let task = load_project_task(&state, &project_id, &task_id).await?;
-        if !matches!(
-            task.status.as_deref(),
-            Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
-        ) {
-            return Err(ApiError::bad("任务当前没有暂停"));
-        }
+        let transition = Transitions::lock(&state).await;
+        let (project, task) = transition
+            .task(&project_id, &task_id, TaskAction::Resume)
+            .await?;
         sqlx::query(
             "UPDATE tasks SET status = ?, waiting_reason = NULL, updated_at = ? \
              WHERE id = ? AND status IN (?, ?)",
@@ -389,27 +365,10 @@ pub(super) async fn reorder_task_queue(
     if request.position.is_none() && !matches!(direction, "up" | "down") {
         return Err(ApiError::bad("direction 必须是 up 或 down"));
     }
-    let project = require_project(&state, &project_id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let _guard = state.schedule_lock.lock().await;
-    let task = load_project_task(&state, &project_id, &task_id).await?;
-    if !matches!(
-        task.stage.as_str(),
-        TASK_STAGE_PENDING | TASK_STAGE_EXECUTING
-    ) || task.attempts > 0
-        || task.rejections > 0
-        || !matches!(
-            task.status.as_deref(),
-            None | Some(STATUS_QUEUED | STATUS_PAUSED)
-        )
-    {
-        return Err(ApiError::bad("只有尚未开始的任务可以调整排队顺序"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let (_, task) = transition
+        .task(&project_id, &task_id, TaskAction::Reorder)
+        .await?;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut queue = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks WHERE project_id = ? AND stage IN ('pending', 'executing') AND attempts = 0 \
@@ -518,34 +477,11 @@ pub(super) async fn post_analysis_message(
         .as_deref()
         .map(confirm_mode)
         .transpose()?;
-    let project = require_project(&state, &id).await?;
-    if project.stage != STAGE_ANALYSIS {
-        return Err(ApiError::bad("当前阶段不允许输入项目分析消息"));
-    }
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if matches!(
-        project.status.as_deref(),
-        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
-    ) {
-        return Err(ApiError::bad("项目已暂停，请先恢复"));
-    }
-    if running_project_job(&state, &id, JOB_ROLE_ANALYSIS).await? {
-        return Err(ApiError::bad("规划者正在处理上一条消息"));
-    }
     {
-        let _guard = state.schedule_lock.lock().await;
-        let current = require_project(&state, &id).await?;
-        if current.stage != STAGE_ANALYSIS {
-            return Err(ApiError::conflict("项目阶段已变化，请刷新后重试"));
-        }
-        if current.replan_active != project.replan_active
-            || current.replan_generation != project.replan_generation
-            || current.replan_proposal != project.replan_proposal
-            || current.proposal != project.proposal
-        {
-            return Err(ApiError::conflict("项目方案已变化，请刷新后重试"));
+        let transition = Transitions::lock(&state).await;
+        transition.project(&id, ProjectAction::Analysis).await?;
+        if running_project_job(&state, &id, JOB_ROLE_ANALYSIS).await? {
+            return Err(ApiError::bad("规划者正在处理上一条消息"));
         }
         sqlx::query(
             "INSERT INTO messages (id, project_id, role, content, created_at) \
@@ -593,21 +529,9 @@ pub(super) async fn update_analysis_policy(
     Json(request): Json<AnalysisPolicyRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
     let mode = confirm_mode(&request.mode)?;
-    let project = require_project(&state, &id).await?;
-    if project.stage != STAGE_ANALYSIS {
-        return Err(ApiError::bad("只有项目分析阶段可以调整确认方式"));
-    }
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if matches!(
-        project.status.as_deref(),
-        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
-    ) {
-        return Err(ApiError::bad("项目已暂停，请先恢复"));
-    }
     {
-        let _guard = state.schedule_lock.lock().await;
+        let transition = Transitions::lock(&state).await;
+        transition.project(&id, ProjectAction::Analysis).await?;
         sqlx::query("UPDATE projects SET confirm_mode = ?, updated_at = ? WHERE id = ?")
             .bind(mode)
             .bind(now())
@@ -639,19 +563,8 @@ pub(super) async fn confirm_analysis(
     Path(id): Path<String>,
     Json(request): Json<ConfirmAnalysisRequest>,
 ) -> Result<Json<ProjectDetail>, ApiError> {
-    let project = require_project(&state, &id).await?;
-    if project.stage != STAGE_ANALYSIS {
-        return Err(ApiError::bad("当前阶段不允许确认项目方案"));
-    }
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if matches!(
-        project.status.as_deref(),
-        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
-    ) {
-        return Err(ApiError::bad("项目已暂停，请先恢复"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let project = transition.project(&id, ProjectAction::Analysis).await?;
     if running_project_job(&state, &id, JOB_ROLE_ANALYSIS).await? {
         return Err(ApiError::bad("规划者正在更新项目方案，请稍后再确认"));
     }
@@ -704,21 +617,11 @@ pub(super) async fn confirm_analysis(
             ));
         }
         if project.replan_active != 0 {
-            crate::replan::apply_direct(&state, &project, proposal_raw)
+            crate::replan::apply_direct_locked(&state, &project, proposal_raw)
                 .await
                 .map_err(replan_apply_error)?;
         } else {
-            let _guard = state.schedule_lock.lock().await;
-            let current = require_project(&state, &id).await?;
-            if current.stage != STAGE_ANALYSIS || current.proposal.as_deref() != Some(proposal_raw)
-            {
-                return Err(ApiError::conflict("方案已变化，请重新审查"));
-            }
-            if current.goal_locked_at.is_some()
-                && (current.replan_generation != project.replan_generation
-                    || current.goal != project.goal
-                    || current.goal.trim() != goal.trim())
-            {
+            if project.goal_locked_at.is_some() && project.goal.trim() != goal.trim() {
                 return Err(ApiError::conflict("已确认目标只能通过主动修改目标入口变更"));
             }
             sqlx::query(
@@ -761,7 +664,7 @@ pub(super) async fn confirm_analysis(
                 .collect(),
         )
         .map_err(ApiError::bad)?;
-        crate::runner::apply_analysis_plan(
+        crate::runner::apply_analysis_plan_locked(
             &state,
             &project,
             &goal,
@@ -800,16 +703,10 @@ pub(super) async fn pause_project(
 ) -> Result<Json<Value>, ApiError> {
     let request = body.map(|Json(value)| value).unwrap_or_default();
     let force = request.forced();
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档"));
-    }
-    if project.stage == STAGE_COMPLETED {
-        return Err(ApiError::bad("项目已完成"));
-    }
-    let workspace = PathBuf::from(&project.workspace);
     {
-        let _guard = state.schedule_lock.lock().await;
+        let transition = Transitions::lock(&state).await;
+        let project = transition.project(&id, ProjectAction::Pause).await?;
+        let workspace = PathBuf::from(&project.workspace);
         if force {
             let running = sqlx::query_as::<_, JobRow>(
                 "SELECT * FROM jobs WHERE project_id = ? AND status = 'running'",
@@ -909,23 +806,14 @@ pub(super) async fn resume_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("项目已归档，无法恢复"));
-    }
-    if !matches!(
-        project.status.as_deref(),
-        Some(STATUS_PAUSING) | Some(STATUS_PAUSED)
-    ) {
-        return Err(ApiError::bad("项目当前没有暂停"));
-    }
+    let transition = Transitions::lock(&state).await;
+    let project = transition.project(&id, ProjectAction::Resume).await?;
     let analysis_pending = project.stage == STAGE_ANALYSIS
         && crate::runner::analysis_needs_dispatch(&state.db, &project).await?;
     let waiting_human = (project.stage == STAGE_ANALYSIS && !analysis_pending)
         || (project.stage == STAGE_SUMMARIZING && project.report.is_some())
         || crate::continuation::pending_manual(&state, &project, None).await?;
     {
-        let _guard = state.schedule_lock.lock().await;
         // 项目恢复只解除项目级派发限制，任务自己的暂停状态保持不变。
         sqlx::query(
             "UPDATE projects SET status = ?, blocked_reason = CASE WHEN ? THEN blocked_reason \

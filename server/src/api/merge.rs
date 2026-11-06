@@ -12,6 +12,7 @@ use crate::git;
 use crate::models::*;
 use crate::paths;
 use crate::state::AppState;
+use crate::transitions::{ProjectAction, Transitions};
 
 use super::detail::load_detail;
 use super::helpers::require_project;
@@ -24,7 +25,8 @@ pub(super) async fn merge_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let result = merge_project_inner(&state, &id).await;
+    let transition = Transitions::lock(&state).await;
+    let result = merge_project_inner(&state, &id, &transition).await;
     if let Err(error) = &result {
         if error.message.starts_with("存在未恢复的合入操作") {
             return result;
@@ -65,24 +67,16 @@ pub(super) async fn merge_project(
     result
 }
 
-async fn merge_project_inner(state: &AppState, id: &str) -> Result<Json<Value>, ApiError> {
-    let project = require_project(state, id).await?;
+async fn merge_project_inner(
+    state: &AppState,
+    id: &str,
+    transition: &Transitions<'_>,
+) -> Result<Json<Value>, ApiError> {
+    let project = transition.project(id, ProjectAction::Merge).await?;
     if !project.is_git() {
         return Err(ApiError::bad("普通工作区没有交付分支，不支持合入"));
     }
-    if project.stage != STAGE_COMPLETED {
-        return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
-    }
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad(
-            "项目已归档，项目分支在 refs/domo-archive 中，无法直接合入",
-        ));
-    }
     let _guard = state.git_lock.lock().await;
-    let project = require_project(state, id).await?;
-    if project.stage != STAGE_COMPLETED {
-        return Err(ApiError::bad("项目尚未完成，只有完成阶段的项目可以合入"));
-    }
     let repo = PathBuf::from(&project.repo_path);
     let worktree = paths::project_repo(&PathBuf::from(&project.workspace));
     let base_branch = project.base_branch.clone();

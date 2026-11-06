@@ -119,7 +119,7 @@ pub(crate) async fn apply_analysis_plan(
 }
 
 /// Applies an already generated plan without another planner invocation.
-/// The scheduler owns the lock while completing a task replan handoff.
+/// Caller holds the scheduling lock through validation and application.
 pub(crate) async fn apply_analysis_plan_locked(
     state: &AppState,
     project: &ProjectRow,
@@ -133,6 +133,12 @@ pub(crate) async fn apply_analysis_plan_locked(
         .bind(&project.id)
         .fetch_one(&mut *tx)
         .await?;
+    if current.status.as_deref() == Some(STATUS_ARCHIVED)
+        || current.replan_generation != project.replan_generation
+        || current.replan_active != project.replan_active
+    {
+        return Err(crate::replan::StaleReplan.into());
+    }
     if current.goal_locked_at.is_some()
         && (current.replan_generation != project.replan_generation
             || current.goal != project.goal
@@ -413,6 +419,9 @@ pub(super) async fn handle_analysis_plan(
         return Ok(());
     }
     let _guard = state.schedule_lock.lock().await;
+    if !crate::replan::analysis_is_current(state, project).await? {
+        return Ok(());
+    }
     let current = crate::replan::load_project(&state.db, &project.id)
         .await?
         .unwrap_or_else(|| project.clone());
@@ -545,11 +554,12 @@ pub(super) async fn handle_analysis_direct(
         return Ok(());
     }
     if auto && project.replan_active != 0 {
-        {
-            let _guard = state.schedule_lock.lock().await;
-            insert_message(&state.db, &project.id, "planner", &content).await?;
+        let _guard = state.schedule_lock.lock().await;
+        if !crate::replan::analysis_is_current(state, project).await? {
+            return Ok(());
         }
-        crate::replan::apply_direct(state, project, &proposal_json).await?;
+        crate::replan::apply_direct_locked(state, project, &proposal_json).await?;
+        insert_message(&state.db, &project.id, "planner", &content).await?;
         emit(
             &state.db,
             &state.bus,
@@ -562,6 +572,9 @@ pub(super) async fn handle_analysis_direct(
         return Ok(());
     }
     let _guard = state.schedule_lock.lock().await;
+    if !crate::replan::analysis_is_current(state, project).await? {
+        return Ok(());
+    }
     let current = crate::replan::load_project(&state.db, &project.id)
         .await?
         .unwrap_or_else(|| project.clone());

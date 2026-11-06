@@ -14,6 +14,7 @@ use crate::git;
 use crate::models::*;
 use crate::paths;
 use crate::state::AppState;
+use crate::transitions::{ProjectAction, Transitions};
 
 use super::helpers::require_project;
 use super::ApiError;
@@ -140,7 +141,8 @@ pub(super) async fn archive_project(
     Path(id): Path<String>,
     Query(query): Query<ArchiveQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let project = require_project(&state, &id).await?;
+    let transition = Transitions::lock(&state).await;
+    let project = transition.project(&id, ProjectAction::Archive).await?;
     if !query.force.unwrap_or(false) {
         let dirty = dirty_worktrees(&state, &project).await?;
         if !dirty.is_empty() {
@@ -155,7 +157,6 @@ pub(super) async fn archive_project(
         }
     }
     {
-        let _guard = state.schedule_lock.lock().await;
         sqlx::query("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?")
             .bind(STATUS_ARCHIVED)
             .bind(now())
@@ -173,6 +174,7 @@ pub(super) async fn archive_project(
             kill_job_dir(&dir);
         }
     }
+    drop(transition);
     if let Err(error) = crate::artifacts::cleanup_project(&state, &project, true).await {
         tracing::warn!(
             project = %id,

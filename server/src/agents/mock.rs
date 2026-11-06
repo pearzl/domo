@@ -46,6 +46,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
             stalled: false,
             session_id: None,
             usage: None,
+            reported_error: None,
         });
     }
     let result = match mock_role_failure(&spec.role, &context) {

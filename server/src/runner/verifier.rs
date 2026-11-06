@@ -5,8 +5,9 @@ use crate::events::emit;
 use crate::git;
 use crate::models::*;
 use crate::state::AppState;
+use crate::transitions::Transitions;
 
-use super::common::{load_task, models_list_json};
+use super::common::models_list_json;
 use super::executor::cleanup_task_artifacts;
 use super::failure::{
     apply_agent_failure, failure_kind_label, has_usable_agent, task_pause_intent,
@@ -30,12 +31,20 @@ pub(super) async fn handle_verdict(
     else {
         anyhow::bail!("缺少验收结论")
     };
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.task_result(project, task).await? else {
+        return Ok(());
+    };
+    let job_running: bool = sqlx::query_scalar("SELECT status = 'running' FROM jobs WHERE id = ?")
+        .bind(&job.id)
+        .fetch_one(&state.db)
+        .await?;
+    if !job_running {
+        return Ok(());
+    }
+    let task = &current;
     if *pass {
-        let current = load_task(&state.db, &task.id)
-            .await?
-            .unwrap_or_else(|| task.clone());
         if current.milestone != 0 {
-            let _guard = state.schedule_lock.lock().await;
             let verdict = if reason.trim().is_empty() {
                 "验收通过".to_string()
             } else {
@@ -104,11 +113,11 @@ pub(super) async fn handle_verdict(
                 .await?;
             }
             Err(error) => {
-                handoff_merge_conflict(state, project, task, &error, agent).await?;
+                handoff_merge_conflict_unlocked(state, project, task, &error, Some(&agent.id))
+                    .await?;
             }
         }
     } else {
-        let _guard = state.schedule_lock.lock().await;
         let execute = action.next_action == "execute";
         let rejections = task.rejections + i64::from(execute);
         let threshold = execute && rejections >= 3;
@@ -213,7 +222,6 @@ async fn complete_verified_task(
     agent: &AgentRow,
     message: String,
 ) -> Result<()> {
-    let guard = state.schedule_lock.lock().await;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, attempts = 0, \
           human_gate = NULL, verifier_issues = '[]', forced_agent_id = NULL, forced_agent_role = NULL, \
@@ -234,7 +242,6 @@ async fn complete_verified_task(
         message,
     )
     .await;
-    drop(guard);
     cleanup_task_artifacts(state, project, task).await;
     Ok(())
 }
@@ -243,17 +250,6 @@ async fn complete_verified_task(
 /// counts against the rejection limit. A merge conflict uses the same handoff
 /// path but keeps the rejection count intact: the executor only resolves the
 /// conflict, then the verifier checks the task again.
-pub(super) async fn handoff_merge_conflict(
-    state: &AppState,
-    project: &ProjectRow,
-    task: &TaskRow,
-    merge_error: &git::GitError,
-    agent: &AgentRow,
-) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
-    handoff_merge_conflict_unlocked(state, project, task, merge_error, Some(&agent.id)).await
-}
-
 /// Caller holds the scheduler lock through Git conflict preparation and the
 /// task transition, including milestone acceptance initiated through the API.
 pub(crate) async fn handoff_merge_conflict_unlocked(
@@ -382,7 +378,11 @@ pub(super) async fn handle_verifier_failure(
 ) -> Result<()> {
     let kind = domain::classify_failure(reason, process_failure);
     let effect = apply_agent_failure(state, agent, reason, kind).await?;
-    let _guard = state.schedule_lock.lock().await;
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.task_result(project, task).await? else {
+        return Ok(());
+    };
+    let task = &current;
     let pause = task_pause_intent(state, &task.id).await?;
     let attempts = domain::task_failure_attempts(task.attempts, kind);
     let mut blocked = kind == FailureKind::Protocol || (kind == FailureKind::Task && attempts >= 3);

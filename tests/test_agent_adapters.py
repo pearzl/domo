@@ -12,7 +12,8 @@
   4. /api/jobs/{id}/activity 分别返回 format=codex 与 format=workbuddy，
      并同时包含 message 与 tool 活动；
   5. 创建 kind=unknown 的 Agent 返回 400，错误信息同时包含 codex 与 workbuddy
-     （假 CLI 尚未启动，验证拒绝发生在进程启动前）。
+      （假 CLI 尚未启动，验证拒绝发生在进程启动前）；
+   6. 大输出完整保存在日志中，会话与用量事件即使位于摘要省略区仍可解析。
 
 使用假 CLI 与内置 mock Agent，不访问外网、不调用真实 codex/codebuddy；
 临时数据全部放在系统临时目录，退出码 0 表示全部通过。
@@ -78,6 +79,7 @@ def emit(event):
     sys.stdout.flush()
 
 
+sys.stdout.write((json.dumps({"type": "output_padding", "text": "x" * 4096}) + "\\n") * 768)
 emit({"type": "thread.started", "thread_id": "thread-agts"})
 emit({"type": "turn.started"})
 emit({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "准备创建产物"}})
@@ -85,6 +87,7 @@ emit({"type": "item.started", "item": {"id": "item_1", "type": "command_executio
 emit({"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "mkdir -p domo_mock", "aggregated_output": "", "exit_code": 0, "status": "completed"}})
 emit({"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "已写入 domo_mock/T1.txt 与 result.json"}})
 emit({"type": "turn.completed", "usage": {"input_tokens": 1234, "cached_input_tokens": 100, "output_tokens": 567, "reasoning_output_tokens": 89}})
+sys.stdout.write((json.dumps({"type": "output_padding", "text": "x" * 4096}) + "\\n") * 768)
 '''
 
 WORKBUDDY_BODY = '''
@@ -96,11 +99,13 @@ def emit(event):
     sys.stdout.flush()
 
 
+sys.stdout.write((json.dumps({"type": "output_padding", "text": "x" * 4096}) + "\\n") * 768)
 emit({"type": "system", "subtype": "init", "session_id": SESSION, "tools": ["Bash", "Write"]})
 emit({"type": "assistant", "session_id": SESSION, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "mkdir -p domo_mock"}}]}})
 emit({"type": "user", "session_id": SESSION, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": [{"type": "text", "text": "Exit Code: 0"}], "is_error": False}]}})
 emit({"type": "assistant", "session_id": SESSION, "message": {"role": "assistant", "content": [{"type": "text", "text": "已写入 domo_mock/T1.txt 与 result.json"}]}})
 emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": duration_ms, "total_cost_usd": 0.0123, "usage": {"input_tokens": 2048, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 50, "output_tokens": 512}})
+sys.stdout.write((json.dumps({"type": "output_padding", "text": "x" * 4096}) + "\\n") * 768)
 '''
 
 
@@ -394,6 +399,13 @@ def main():
                 assert '"turn.completed"' in stdout or '"type": "result"' in stdout, (
                     f"{key} stdout 缺少用量事件"
                 )
+                assert len(stdout.encode("utf-8")) > 6 * 1024 * 1024
+                assert "输出摘要已省略" in job_detail["stdout"]
+                assert '"turn.completed"' not in job_detail["stdout"]
+                assert '"type": "result"' not in job_detail["stdout"]
+                with open(workspace + "/jobs/" + job["id"] + "/continuation.json", encoding="utf-8") as handle:
+                    checkpoint = json.load(handle)
+                assert checkpoint["session"] == ("thread-agts" if key == "codex" else "session-agts"), checkpoint
 
                 reports[key] = {
                     "project": project_id,

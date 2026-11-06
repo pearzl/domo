@@ -277,7 +277,10 @@ pub(super) async fn block_task(
     task: &TaskRow,
     reason: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
+    let transition = crate::transitions::Transitions::lock(state).await;
+    if transition.task_result(project, task).await?.is_none() {
+        return Ok(());
+    }
     sqlx::query("UPDATE tasks SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
         .bind(STATUS_BLOCKED)
         .bind(reason)

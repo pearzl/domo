@@ -236,7 +236,10 @@ pub async fn store_draft(state: &AppState, project: &ProjectRow, raw: &str) -> R
     let Some(current) = load_project(&state.db, &project.id).await? else {
         return Ok(false);
     };
-    if !same_generation(&current, project) || current.stage != STAGE_ANALYSIS {
+    if current.status.as_deref() == Some(STATUS_ARCHIVED)
+        || !same_generation(&current, project)
+        || current.stage != STAGE_ANALYSIS
+    {
         return Ok(false);
     }
     if running_non_analysis_jobs(&state.db, &project.id).await? > 0 {
@@ -257,17 +260,15 @@ pub async fn store_draft(state: &AppState, project: &ProjectRow, raw: &str) -> R
 }
 
 pub async fn analysis_is_current(state: &AppState, project: &ProjectRow) -> Result<bool> {
-    if project.goal_locked_at.is_none() {
-        return Ok(true);
-    }
     let Some(current) = load_project(&state.db, &project.id).await? else {
         return Ok(false);
     };
-    let same_identity = current.goal_locked_at.is_some()
-        && current.goal == project.goal
-        && current.replan_generation == project.replan_generation;
-    let same_replan = project.replan_active == 0 || same_generation(&current, project);
-    Ok(same_identity && same_replan && current.stage == STAGE_ANALYSIS)
+    Ok(current.status.as_deref() != Some(STATUS_ARCHIVED)
+        && current.stage == STAGE_ANALYSIS
+        && current.replan_generation == project.replan_generation
+        && current.replan_active == project.replan_active
+        && (project.goal_locked_at.is_none()
+            || (current.goal_locked_at.is_some() && current.goal == project.goal)))
 }
 
 /// Rejects a draft that attempts to replace a confirmed goal through replanning.
@@ -377,7 +378,8 @@ pub(crate) async fn validate_apply_tx(
         .bind(&project.id)
         .fetch_one(&mut **tx)
         .await?;
-    if !same_generation(&current, project)
+    if current.status.as_deref() == Some(STATUS_ARCHIVED)
+        || !same_generation(&current, project)
         || current.stage != STAGE_ANALYSIS
         || current.replan_proposal.as_deref() != Some(proposal_json)
     {
@@ -578,12 +580,12 @@ async fn cleanup_current(state: &AppState, project_id: &str, generation: i64) {
     }
 }
 
-pub(crate) async fn apply_direct(
+/// Caller holds the scheduling lock through validation and application.
+pub(crate) async fn apply_direct_locked(
     state: &AppState,
     project: &ProjectRow,
     proposal_json: &str,
 ) -> Result<()> {
-    let _guard = state.schedule_lock.lock().await;
     let timestamp = now();
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     validate_apply_tx(&mut tx, project, proposal_json).await?;

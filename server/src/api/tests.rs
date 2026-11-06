@@ -138,6 +138,419 @@ async fn verification_test_state() -> (AppState, PathBuf) {
 }
 
 #[tokio::test]
+async fn default_team_reorders_wait_for_membership_lock() {
+    let (state, root) = verification_test_state().await;
+    for id in ["executor_a", "executor_b", "executor_c"] {
+        sqlx::query("INSERT INTO agents(id, name, kind, roles, created_at, updated_at) VALUES(?, ?, 'mock', '[\"executor\"]', 't', 't')")
+            .bind(id).bind(id).execute(&state.db).await.unwrap();
+    }
+    crate::db::ensure_default_team(&state.db).await.unwrap();
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT agent_id FROM default_team WHERE role = 'executor' ORDER BY priority",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    let guard = state.schedule_lock.lock().await;
+    let mut requests = Vec::new();
+    for id in members.iter().take(2) {
+        let state = state.clone();
+        let id = id.clone();
+        requests.push(tokio::spawn(async move {
+            let _ = super::agents::update_default_team_agent(
+                State(state),
+                Path(("executor".into(), id)),
+                Json(ProjectAgentUpdateRequest {
+                    direction: Some("down".into()),
+                    position: None,
+                    enabled: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(requests.iter().all(|request| !request.is_finished()));
+    drop(guard);
+    for request in requests {
+        request.await.unwrap();
+    }
+    let priorities: Vec<i64> = sqlx::query_scalar(
+        "SELECT priority FROM default_team WHERE role = 'executor' ORDER BY priority",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(priorities, (0..members.len() as i64).collect::<Vec<_>>());
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn queued_resume_commands_cannot_revive_an_archived_project() {
+    let (state, root) = verification_test_state().await;
+    sqlx::query("UPDATE projects SET status = 'paused' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET status = 'paused' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let guard = state.schedule_lock.lock().await;
+    let project_state = state.clone();
+    let project_request = tokio::spawn(async move {
+        super::tasks::resume_project(State(project_state), Path("prj_test".into())).await
+    });
+    let task_state = state.clone();
+    let task_request = tokio::spawn(async move {
+        super::tasks::resume_task(State(task_state), Path(("prj_test".into(), "tsk_a".into())))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(!project_request.is_finished() && !task_request.is_finished());
+    sqlx::query("UPDATE projects SET status = 'archived' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    drop(guard);
+    assert_eq!(
+        project_request.await.unwrap().unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        task_request.await.unwrap().unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM projects WHERE id = 'prj_test'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, STATUS_ARCHIVED);
+    let task_status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = 'tsk_a'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(task_status, STATUS_PAUSED);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn queued_analysis_commands_validate_latest_lifecycle() {
+    let (state, root) = verification_test_state().await;
+    set_project_analysis_state(&state, STATUS_RUNNING).await;
+    let guard = state.schedule_lock.lock().await;
+    let message_state = state.clone();
+    let message = tokio::spawn(async move {
+        super::tasks::post_analysis_message(
+            State(message_state),
+            Path("prj_test".into()),
+            Json(AnalysisMessageRequest {
+                message: "不应进入已归档项目".into(),
+                confirm_mode: None,
+            }),
+        )
+        .await
+    });
+    let policy_state = state.clone();
+    let policy = tokio::spawn(async move {
+        update_analysis_policy(
+            State(policy_state),
+            Path("prj_test".into()),
+            Json(AnalysisPolicyRequest {
+                mode: CONFIRM_AUTO.into(),
+            }),
+        )
+        .await
+    });
+    let confirm_state = state.clone();
+    let confirm = tokio::spawn(async move {
+        super::tasks::confirm_analysis(
+            State(confirm_state),
+            Path("prj_test".into()),
+            Json(ConfirmAnalysisRequest::default()),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(!message.is_finished() && !policy.is_finished() && !confirm.is_finished());
+    sqlx::query("UPDATE projects SET status = 'archived' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    drop(guard);
+    for request in [message, policy, confirm] {
+        let error = request.await.unwrap().unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("归档"));
+    }
+    let messages: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE project_id = 'prj_test'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(messages, 0);
+    let mode: String =
+        sqlx::query_scalar("SELECT confirm_mode FROM projects WHERE id = 'prj_test'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(mode, CONFIRM_MANUAL);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn canceled_task_rejects_delayed_resume_and_result() {
+    let (state, root) = verification_test_state().await;
+    sqlx::query("UPDATE tasks SET status = 'paused' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let project = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    let task = super::helpers::load_project_task(&state, "prj_test", "tsk_a")
+        .await
+        .unwrap();
+    let guard = state.schedule_lock.lock().await;
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        super::tasks::resume_task(
+            State(request_state),
+            Path(("prj_test".into(), "tsk_a".into())),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    sqlx::query("UPDATE tasks SET status = 'canceled' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    drop(guard);
+    assert_eq!(
+        request.await.unwrap().unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
+    let transition = crate::transitions::Transitions::lock(&state).await;
+    assert!(transition
+        .task_result(&project, &task)
+        .await
+        .unwrap()
+        .is_none());
+    drop(transition);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn result_scope_allows_draining_but_rejects_replaced_contracts() {
+    let (state, root) = verification_test_state().await;
+    let project = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    let task = super::helpers::load_project_task(&state, "prj_test", "tsk_a")
+        .await
+        .unwrap();
+    let transition = crate::transitions::Transitions::lock(&state).await;
+    sqlx::query("UPDATE projects SET stage = 'analysis', replan_active = 1, replan_generation = 1 WHERE id = 'prj_test'").execute(&state.db).await.unwrap();
+    assert!(transition
+        .task_result(&project, &task)
+        .await
+        .unwrap()
+        .is_some());
+    sqlx::query("INSERT INTO contracts(project_id, generation, goal, source, created_at) VALUES('prj_test', 1, 'new goal', 'plan', 't')").execute(&state.db).await.unwrap();
+    sqlx::query("UPDATE projects SET contract_id = (SELECT MAX(id) FROM contracts), stage = 'executing', replan_active = 0 WHERE id = 'prj_test'").execute(&state.db).await.unwrap();
+    assert!(transition.project_result(&project).await.unwrap().is_none());
+    assert!(transition
+        .task_result(&project, &task)
+        .await
+        .unwrap()
+        .is_none());
+    drop(transition);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn terminal_state_guards_preserve_audit_and_family_cancellation() {
+    let (state, root) = verification_test_state().await;
+    sqlx::query("UPDATE tasks SET stage = 'completed', status = NULL WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(sqlx::query(
+        "UPDATE tasks SET stage = 'executing', status = 'queued' WHERE id = 'tsk_a'"
+    )
+    .execute(&state.db)
+    .await
+    .is_err());
+    // Completed children may leave the effective plan with their whole family.
+    sqlx::query("UPDATE tasks SET status = 'canceled' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE tasks SET status = NULL WHERE id = 'tsk_a'")
+            .execute(&state.db)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE tasks SET artifacts_released_at = 't' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE projects SET status = 'archived' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE projects SET status = 'running' WHERE id = 'prj_test'")
+            .execute(&state.db)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE projects SET stage = 'analysis' WHERE id = 'prj_test'")
+            .execute(&state.db)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE projects SET updated_at = 't' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = 'project_state_changed' AND json_extract(payload, '$.status') = 'running'").fetch_one(&state.db).await.unwrap();
+    assert_eq!(events, 0);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_pause_keeps_inflight_results_eligible() {
+    let (state, root) = verification_test_state().await;
+    let project = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    let task = super::helpers::load_project_task(&state, "prj_test", "tsk_a")
+        .await
+        .unwrap();
+    let transition = crate::transitions::Transitions::lock(&state).await;
+    for status in [STATUS_PAUSING, STATUS_PAUSED] {
+        sqlx::query("UPDATE projects SET status = ? WHERE id = 'prj_test'")
+            .bind(status)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET status = ? WHERE id = 'tsk_a'")
+            .bind(status)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(transition.project_result(&project).await.unwrap().is_some());
+        assert!(transition
+            .task_result(&project, &task)
+            .await
+            .unwrap()
+            .is_some());
+    }
+    sqlx::query("UPDATE tasks SET stage = 'completed', status = NULL WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(transition
+        .task_result(&project, &task)
+        .await
+        .unwrap()
+        .is_none());
+    drop(transition);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn stale_analysis_plan_cannot_apply_before_goal_confirmation() {
+    let (state, root) = verification_test_state().await;
+    set_project_analysis_state(&state, STATUS_RUNNING).await;
+    let project = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    let _guard = state.schedule_lock.lock().await;
+    sqlx::query("UPDATE projects SET replan_generation = replan_generation + 1, confirm_mode = 'auto' WHERE id = 'prj_test'").execute(&state.db).await.unwrap();
+    let error = crate::runner::apply_analysis_plan_locked(
+        &state,
+        &project,
+        &project.goal,
+        &[],
+        "stale",
+        "{}",
+    )
+    .await
+    .unwrap_err();
+    assert!(error.is::<crate::replan::StaleReplan>());
+    let current = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    assert_eq!(current.stage, STAGE_ANALYSIS);
+    assert!(current.goal_locked_at.is_none());
+    drop(_guard);
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn late_workspace_failure_does_not_block_a_canceled_task_or_archived_project() {
+    let (state, root) = verification_test_state().await;
+    let project = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    insert_running_analysis_job(&state).await;
+    sqlx::query(
+        "UPDATE jobs SET task_id = 'tsk_a', role = 'executor' WHERE id = 'job_analysis_running'",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let job: JobRow = sqlx::query_as("SELECT * FROM jobs WHERE id = 'job_analysis_running'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET status = 'canceled' WHERE id = 'tsk_a'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    crate::resources::block_workspace(&state, &project, &job, "late failure")
+        .await
+        .unwrap();
+    let current = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    assert_eq!(current.status.as_deref(), Some(STATUS_RUNNING));
+    assert!(current.blocked_reason.is_none());
+    let task = super::helpers::load_project_task(&state, "prj_test", "tsk_a")
+        .await
+        .unwrap();
+    assert_eq!(task.status.as_deref(), Some(STATUS_CANCELED));
+    assert!(task.last_error.is_none());
+    sqlx::query("UPDATE projects SET status = 'archived' WHERE id = 'prj_test'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    crate::resources::block_workspace(&state, &project, &job, "late failure")
+        .await
+        .unwrap();
+    let current = super::helpers::require_project(&state, "prj_test")
+        .await
+        .unwrap();
+    assert_eq!(current.status.as_deref(), Some(STATUS_ARCHIVED));
+    assert!(current.blocked_reason.is_none());
+    state.db.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn continuation_ledger_counts_only_unaccounted_usage() {
     let (state, root) = verification_test_state().await;
     sqlx::query("INSERT INTO job_runs(job_id, project_id, role, input_tokens, cost, duration_ms, usage_known, created_at, snapshot) VALUES('continued', 'prj_test', 'executor', 10, 0.25, 100, 1, '2026-01-01T00:00:00Z', '{}')")

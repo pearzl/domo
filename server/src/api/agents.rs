@@ -77,6 +77,7 @@ pub(super) async fn create_agent(
     };
     let id = domain::new_id("agt");
     let timestamp = now();
+    let _guard = state.schedule_lock.lock().await;
     sqlx::query(
         "INSERT INTO agents (id, name, kind, model, roles, priority, max_concurrency, \
          allow_priority_fallback, enabled, command_json, model_args_json, availability_json, \
@@ -235,6 +236,7 @@ pub(super) async fn update_default_team_agent(
     Path((role, agent_id)): Path<(String, String)>,
     Json(request): Json<ProjectAgentUpdateRequest>,
 ) -> Result<Json<ProjectAgentPool>, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
     let role = validate_role(role.trim())?;
     let lookup = sqlx::query_as::<_, DefaultTeamRow>(
         "SELECT * FROM default_team WHERE role = ? AND agent_id = ?",
@@ -397,6 +399,7 @@ pub(super) async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _guard = state.schedule_lock.lock().await;
     sqlx::query("DELETE FROM agents WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
