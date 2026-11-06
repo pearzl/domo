@@ -66,6 +66,7 @@ pub(super) async fn run(state: &AppState, job: &JobRow) -> Result<()> {
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
+        writable_dirs: Vec::new(),
         prompt: prompt.clone(),
         original_prompt: prompt,
         session_id: agents::session_for_job(&agent, &job.id),

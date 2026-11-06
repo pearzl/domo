@@ -331,6 +331,7 @@ mod tests {
             role: crate::models::JOB_ROLE_EXECUTOR.into(),
             cwd: dir.clone(),
             job_dir: dir.clone(),
+            writable_dirs: Vec::new(),
             prompt: "hello".into(),
             original_prompt: "hello".into(),
             session_id: None,

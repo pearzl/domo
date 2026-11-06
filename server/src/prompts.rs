@@ -63,6 +63,8 @@ pub struct PromptData {
     pub canceled_tasks: Vec<SummaryTaskInfo>,
     pub diff_stat: String,
     pub job_dir: String,
+    pub project_resources_dir: String,
+    pub task_resources_dir: Option<String>,
     pub result_path: String,
     pub attempt: i64,
     pub report_feedback: Option<String>,
@@ -179,7 +181,7 @@ fn replan_review_prompt(data: &PromptData) -> String {
         - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，deps 只能引用本批次子任务且必须无环；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
          - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径，确认方式见项目方案确认。\n\
         - reject：不需要重规划，必须提供可执行 guidance；resume_stage 可选 executing（修复实现）或 verifying（补充核验），省略时沿用请求的 resume_stage；不能仅要求重复尝试。\n\
-        - wait：缺输入、SDK、授权或环境等资源，必须写清缺项和解除条件 guidance；任务等待人工补齐，不自动重试。\n\
+         - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，guidance 写清缺项、责任方和解除条件；等待期间不自动重试。\n\
         - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
         - 规划者方案保留项目 assumptions 和 acceptance，子任务验收标准分别写入 tasks[].acceptance。\n\
         - 以审批固定上下文中的请求、当前任务状态和保留成果为决策输入，不修改或执行现有计划。\n{}", confirmation_rules(data))
@@ -277,7 +279,8 @@ fn common_header(data: &PromptData) -> String {
     } else {
         "仓库主工作树及其他工作区只读。"
     };
-    let mut header = format!("# 本次作业\n{mission}\n\n{workspace}\n## 只读边界与运行权限\n- {writes}\n- {isolation}不要在工作区或作业目录以外写入文件。读取项目内容限于提供的工作目录、明确授权的参考输入与运行所需的工具链依赖。\n- 本作业不执行改变暂存区、历史或分支的 Git 命令；允许只读检查状态与版本。\n");
+    let mut header = format!("# 本次作业\n{mission}\n\n{workspace}\n## 只读边界与运行权限\n- {writes}\n- {isolation}可写位置以本节及持续工作资源的角色权限为准，其余目录不写入。读取项目内容限于提供的工作目录、明确授权的参考输入与运行所需的工具链依赖。\n- 本作业不执行改变暂存区、历史或分支的 Git 命令；允许只读检查状态与版本。\n");
+    header.push_str(&work_resource_rules(data));
     header.push_str(input_boundary_rules());
     header.push_str(long_command_rules());
     if let Some(error) = &data.execution_error {
@@ -292,6 +295,24 @@ fn common_header(data: &PromptData) -> String {
         header.push_str(&format!("\n## 最近失败记录\n{detail}\n该记录用于定位未完成操作，不额外增加验收标准；结合当前反馈与文件核实适用性。\n"));
     }
     header
+}
+
+fn work_resource_rules(data: &PromptData) -> String {
+    let access = if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+        "可在本项目资源目录和当前任务资源目录内按范围准备持续使用的工具、依赖及输入；复用前核实版本和适用性。跨任务共享内容使用独立名称，避免覆盖其他作业正在使用的资源；已有资源需要替换时保留原可用版本。"
+    } else {
+        "资源目录只读；可核验并复用已有工具、依赖及输入，不能把资源存在或历史通过声明当作当前验证通过。"
+    };
+    format!(
+        "\n## 持续工作资源\n\
+         - 项目资源目录：{}\n\
+         - 当前任务资源目录：{}\n\
+         - {access}\n\
+         - 仅本轮使用的日志、缓存、构建及测试输出放作业目录或本角色允许的验证输出目录；需要同任务执行、验收和返工复用的条件放任务资源目录，跨任务复用的放项目资源目录。这些目录独立于源码工作树，不随任务提交或合入。\n\
+         - 资源准备者通过现有共享记录交接后续需复用的当前用途、路径、版本依据、使用方法与限制，并引用可核查文件；任务专用记录限定当前任务，跨任务记录标明适用任务或项目范围。不要求读取历史作业，也不自动加载或执行资源目录中的脚本。\n",
+        data.project_resources_dir,
+        data.task_resources_dir.as_deref().unwrap_or("（无当前任务）"),
+    )
 }
 
 /// 普通工作区不由 DOMO 管理分支、worktree 与合入，目录内仍可能包含 Git 仓库。
@@ -367,7 +388,7 @@ fn shared_context(data: &PromptData, shared: &serde_json::Value) -> String {
     let publication = if data.role == JOB_ROLE_REPLAN_REVIEW {
         "本角色只读共享记录，不提交 shared_updates。"
     } else {
-        "有后续任务需要复用的事实、接口约定或改变已有认识的检查结论时，可在结果中添加 shared_updates 数组；没有新知识时省略或填 []，不逐轮复制完成总结。每项含 topic、body、scope（任务 key 数组，[] 为全项目）、evidence（非空引用数组）、supersedes（替代记录 ID 数组）、conflicts（分歧记录 ID 数组）、reason（替代或分歧的原因与影响）。topic 便于按主题检索；body 先给一句结论，再按需要说明事实或接口、后续消费要求、适用范围及未覆盖部分，不强制空小节。详细检查结果放验收证据或作业报告，evidence 引用来源而不重复整份日志。修正旧结论时明确 supersedes，分歧通过 conflicts 保留双方依据；不保存运行提示、授权申请或未验证的完成声明。记录只供知识协作，不修改契约或授予权限。"
+        "有后续作业需要复用的事实、接口约定或改变已有认识的检查结论时，可在结果中添加 shared_updates 数组；没有新知识时省略或填 []，不逐轮复制完成总结。每项含 topic、body、scope（任务 key 数组，[] 为全项目）、evidence（非空引用数组）、supersedes（替代记录 ID 数组）、conflicts（分歧记录 ID 数组）、reason（替代或分歧的原因与影响）。topic 便于按主题检索；body 先给一句结论，再按需要说明事实或接口、后续消费要求、适用范围及未覆盖部分，不强制空小节。详细检查结果放验收证据或作业报告，evidence 引用来源而不重复整份日志。修正旧结论时明确 supersedes，分歧通过 conflicts 保留双方依据；不保存运行提示、授权申请或未验证的完成声明。记录只供知识协作，不修改契约或授予权限。"
     };
     let mut inline = shared.clone();
     if let Some(index) = inline
@@ -409,8 +430,8 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         JOB_ROLE_DIRECT => "{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告\",\"commit_files\":[\"path/to/file\"]}",
         JOB_ROLE_EXECUTOR => concat!(
             "{\"kind\":\"done\",\"summary\":\"交付内容、验证结果与未验证项\",\"commit_files\":[\"path/to/file\"]}\n",
-            "{\"kind\":\"failed\",\"reason\":\"尚未完成的工作、具体原因和解除条件\"}\n",
-            "{\"kind\":\"replan\",\"reason\":\"需上级决策的事实、影响与建议\"}"
+            "{\"kind\":\"failed\",\"reason\":\"本轮执行失败的原因、已完成工作及再次尝试依据\"}\n",
+            "{\"kind\":\"replan\",\"reason\":\"需上级处理的输入、环境、授权或方案问题，已调查事实、影响与建议\"}"
         ),
         JOB_ROLE_VERIFIER => "{\"pass\":true,\"reason\":\"结论与依据\",\"issues\":[],\"evidence\":{\"contract_id\":0,\"artifact_version\":null,\"artifacts\":[\"已检查路径\"],\"risks\":[],\"human_checks\":[],\"criteria\":[{\"criterion\":\"验收标准原文\",\"passed\":true,\"checks\":[{\"method\":\"实际检查方法或命令\",\"result\":\"实际结果及退出码\"}]}]}}",
         JOB_ROLE_ACCEPTANCE => "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"contract_id\":0,\"artifact_version\":null,\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met\",\"evidence\":[\"实际方法与结果\"],\"gap\":\"\"}],\"next_action\":\"report\",\"report\":\"Markdown 项目报告\",\"guidance\":\"\",\"replan_reason\":\"\"}",
@@ -737,8 +758,9 @@ fn executor_prompt(data: &PromptData) -> String {
          \n## 执行要求\n\
          - 由你决定实现与核验方式，满足任务与验收标准；\n\
          - 对当前反馈逐项修复并给出对应验证证据；发现字段、接口或文档不一致时检查任务范围内的全部同类定义，不只修补被点名的位置；\n\
-         - done：任务标准已满足，summary 面向用户和父任务，先说明交付了什么及查看入口，再说明实际自检、仍未覆盖的范围及后续工作；不把模块完成外推为整个项目完成。技术接口按需交给共享记录，逐项检查放证据或作业报告，以引用关联而不重复长日志；failed：当前工作未完成，说明已做工作、剩余缺口及解除条件；\n\
-         - replan：事实前提、范围或约束冲突需要上级决策。子任务由父任务执行者决策，普通任务由项目规划者决策；缺资源时列明确缺项，不用重复分工替代补齐资源；\n\
+         - done：任务标准已满足，summary 面向用户和父任务，先说明交付了什么及查看入口，再说明实际自检、仍未覆盖的范围及后续工作；不把模块完成外推为整个项目完成。技术接口按需交给共享记录，逐项检查放证据或作业报告，以引用关联而不重复长日志；\n\
+         - 能在当前职责和权限内完成的调查、资源准备、修复与核验，继续在本作业内处理。failed 表示本次执行失败，DOMO 会按有限重试策略再次派发；说明已做工作、剩余缺口及再次尝试的依据；\n\
+         - 经调查确认缺少自身无法补齐的输入、环境或授权，或事实前提、范围、约束需上级判断时，使用 replan 请求决策，不以相同 failed 等待条件自行变化。请求说明已完成工作、已核实的可复用条件、具体缺项、影响与处理建议。子任务交父任务执行者，普通任务交项目规划者；该入口不等于必须重规划，上级可指导继续、补充核验、等待条件或调整方案；\n\
          {merge_rules}\
          - 本作业只判断当前任务的完成情况，不承担其他任务或整个项目的进度判断。\n\
          - {}\n",
@@ -1121,6 +1143,8 @@ mod tests {
             }],
             diff_stat: "1 file changed".into(),
             job_dir: "/workspace/jobs/job-1".into(),
+            project_resources_dir: "/workspace/resources/project".into(),
+            task_resources_dir: Some("/workspace/resources/tasks/1".into()),
             result_path: RESULT_PATH.into(),
             attempt: 0,
             report_feedback: None,
@@ -1609,6 +1633,63 @@ mod tests {
     }
 
     #[test]
+    fn persistent_resources_have_role_permissions_without_history_requirements() {
+        for workspace_type in ["git", "plain"] {
+            for role in [
+                JOB_ROLE_EXECUTOR,
+                JOB_ROLE_DIRECT,
+                JOB_ROLE_VERIFIER,
+                JOB_ROLE_ACCEPTANCE,
+                JOB_ROLE_REPLAN_REVIEW,
+                JOB_ROLE_ANALYSIS,
+                JOB_ROLE_SUMMARY,
+            ] {
+                let mut data = sample_data(role);
+                data.workspace_type = workspace_type.into();
+                let prompt = render(&data);
+                assert_eq!(prompt.matches("## 持续工作资源").count(), 1);
+                assert!(prompt.contains(&data.project_resources_dir));
+                assert!(prompt.contains(data.task_resources_dir.as_deref().unwrap()));
+                if matches!(role, JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+                    assert!(prompt.contains("按范围准备持续使用"));
+                } else {
+                    assert!(prompt.contains("资源目录只读"));
+                    assert!(!prompt.contains("按范围准备持续使用"));
+                }
+                assert!(prompt.contains("不随任务提交或合入"));
+                assert!(prompt.contains("不要求读取历史作业"));
+                assert!(prompt.contains("不自动加载或执行"));
+                assert!(continuation_with_prompt(&prompt).ends_with(&prompt));
+                assert!(missing_result_continuation(&data, &prompt).ends_with(&prompt));
+            }
+        }
+        let mut data = sample_data(JOB_ROLE_DIRECT);
+        data.task = None;
+        data.task_resources_dir = None;
+        assert!(render(&data).contains("当前任务资源目录：（无当前任务）"));
+    }
+
+    #[test]
+    fn executor_distinguishes_retry_from_owner_decision_for_missing_conditions() {
+        let mut data = sample_data(JOB_ROLE_EXECUTOR);
+        data.derived_from = Some(DependencyInfo {
+            key: "P".into(),
+            title: "父任务".into(),
+            summary: String::new(),
+        });
+        let prompt = render(&data);
+        assert!(prompt.contains("有限重试策略再次派发"));
+        assert!(prompt.contains("使用 replan 请求决策"));
+        assert!(prompt.contains("不等于必须重规划"));
+        assert!(prompt.contains("自身无法补齐"));
+        let raw = r#"{"kind":"replan","reason":"已核实当前输入，仍缺需要上级落实的访问权限"}"#;
+        assert!(matches!(
+            crate::domain::parse_result(JOB_ROLE_EXECUTOR, raw),
+            Ok(crate::domain::ParsedResult::ExecutorReplan { .. })
+        ));
+    }
+
+    #[test]
     fn direct_and_derived_jobs_keep_workspace_and_protocol_responsibilities() {
         let mut data = sample_data(JOB_ROLE_DIRECT);
         data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
@@ -1855,7 +1936,8 @@ mod tests {
                 assert!(prompt.contains("不要修改交付源码、配置、文档、输入资源或现有交付物"));
                 assert!(prompt.contains("也不要修改忽略规则"));
                 assert!(prompt.contains("不得执行 git add、git commit"));
-                assert!(prompt.contains("不要在工作区或作业目录以外写入文件"));
+                assert!(prompt.contains("其余目录不写入"));
+                assert!(prompt.contains("资源目录只读"));
                 assert!(prompt.contains(&data.result_path));
                 for conflict in [
                     "不要修改任何文件",

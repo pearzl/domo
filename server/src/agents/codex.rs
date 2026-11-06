@@ -84,6 +84,7 @@ async fn codex_turn(
     } else {
         codex_args(model, &spec.job_dir)
     };
+    let args = with_resource_access(args, spec);
     let prompt = prompt_for_run(spec, can_resume);
     let offset = stdout_offset(spec).await;
     let mut run = run_process(
@@ -154,6 +155,28 @@ pub(super) fn codex_resume_args(model: &str, session_id: &str) -> Vec<String> {
     }
     args.push(session_id.to_string());
     args.push("-".to_string());
+    args
+}
+
+fn with_resource_access(mut args: Vec<String>, spec: &AgentSpec) -> Vec<String> {
+    if !spec.writable_dirs.is_empty() {
+        // `exec resume` has no --add-dir option. The config override works for
+        // both fresh and resumed turns and keeps the granted roots explicit.
+        let roots: Vec<_> = std::iter::once(&spec.job_dir)
+            .chain(&spec.writable_dirs)
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        args.splice(
+            3..3,
+            [
+                "-c".to_string(),
+                format!(
+                    "sandbox_workspace_write.writable_roots={}",
+                    serde_json::json!(roots)
+                ),
+            ],
+        );
+    }
     args
 }
 
@@ -242,6 +265,7 @@ mod tests {
             role: crate::models::JOB_ROLE_EXECUTOR.into(),
             cwd: dir.clone(),
             job_dir: dir.clone(),
+            writable_dirs: Vec::new(),
             prompt: "hello".into(),
             original_prompt: "hello".into(),
             session_id: None,
@@ -296,6 +320,52 @@ mod tests {
         assert!(codex.contains(&"--skip-git-repo-check".to_string()));
         assert!(codex.contains(&"thread-1".to_string()));
         assert_eq!(codex.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn resource_roots_are_exact_and_apply_to_fresh_and_resumed_turns() {
+        let mut spec = AgentSpec {
+            job_id: "job_test".into(),
+            role: crate::models::JOB_ROLE_EXECUTOR.into(),
+            cwd: "/workspace/tasks/1".into(),
+            job_dir: "/workspace/jobs/job_test".into(),
+            writable_dirs: vec![
+                "/workspace/resources/project".into(),
+                "C:\\work space\\resources\\tasks\\1".into(),
+            ],
+            prompt: String::new(),
+            original_prompt: String::new(),
+            session_id: None,
+            continuation: false,
+            progress: super::super::JobProgress::new(),
+        };
+        for args in [
+            codex_args("", &spec.job_dir),
+            codex_resume_args("", "thread-1"),
+        ] {
+            let granted = with_resource_access(args.clone(), &spec);
+            assert_eq!(&granted[..3], &args[..3]);
+            assert_eq!(granted[3], "-c");
+            let roots: Vec<String> = serde_json::from_str(
+                granted[4]
+                    .strip_prefix("sandbox_workspace_write.writable_roots=")
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                roots,
+                vec![
+                    spec.job_dir.to_string_lossy().to_string(),
+                    spec.writable_dirs[0].to_string_lossy().to_string(),
+                    spec.writable_dirs[1].to_string_lossy().to_string(),
+                ]
+            );
+            assert_eq!(&granted[5..], &args[3..]);
+        }
+        spec.role = crate::models::JOB_ROLE_VERIFIER.into();
+        spec.writable_dirs.clear();
+        let args = codex_args("", &spec.job_dir);
+        assert_eq!(with_resource_access(args.clone(), &spec), args);
     }
 
     #[test]

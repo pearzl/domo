@@ -118,6 +118,7 @@ mod tests {
             role: JOB_ROLE_EXECUTOR.into(),
             cwd: PathBuf::from("/tmp/repo"),
             job_dir: PathBuf::from("/tmp/job"),
+            writable_dirs: Vec::new(),
             prompt: "x".repeat(40_000),
             original_prompt: String::new(),
             session_id: None,

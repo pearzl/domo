@@ -214,6 +214,14 @@ pub(super) async fn build_prompt_data(
         canceled_tasks,
         diff_stat,
         job_dir: job_dir.to_string_lossy().to_string(),
+        project_resources_dir: paths::project_resources(&workspace)
+            .to_string_lossy()
+            .to_string(),
+        task_resources_dir: task.map(|task| {
+            paths::task_resources(&workspace, task.seq)
+                .to_string_lossy()
+                .to_string()
+        }),
         result_path: job_dir.join("result.json").to_string_lossy().to_string(),
         attempt: job.attempt,
         report_feedback: project.report_feedback.clone(),
@@ -255,6 +263,10 @@ pub(super) fn build_context(
         },
         "cwd": cwd.to_string_lossy(),
         "job_dir": job_dir.to_string_lossy(),
+        "work_resources": {
+            "project": data.project_resources_dir,
+            "task": data.task_resources_dir,
+        },
         "project": {
             "id": project.id,
             "name": project.name,

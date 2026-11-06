@@ -148,6 +148,14 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     }
 
     let workspace = PathBuf::from(&project.workspace);
+    let project_resources = paths::project_resources(&workspace);
+    let task_resources = task
+        .as_ref()
+        .map(|task| paths::task_resources(&workspace, task.seq));
+    fs::create_dir_all(&project_resources).await?;
+    if let Some(path) = &task_resources {
+        fs::create_dir_all(path).await?;
+    }
     let review = job.role == JOB_ROLE_REPLAN_REVIEW;
     let cwd = if resumed.is_some() || collect {
         let context: serde_json::Value =
@@ -291,6 +299,13 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
+        writable_dirs: if matches!(job.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+            std::iter::once(project_resources)
+                .chain(task_resources)
+                .collect()
+        } else {
+            Vec::new()
+        },
         prompt,
         original_prompt: full_prompt,
         session_id: resumed

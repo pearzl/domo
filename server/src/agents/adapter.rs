@@ -111,6 +111,8 @@ pub struct AgentSpec {
     pub role: String,
     pub cwd: PathBuf,
     pub job_dir: PathBuf,
+    /// Additional runtime resource roots writable by this role, not their parent.
+    pub writable_dirs: Vec<PathBuf>,
     pub prompt: String,
     pub original_prompt: String,
     pub session_id: Option<String>,

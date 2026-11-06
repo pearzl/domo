@@ -439,19 +439,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_layout_cleanup_keeps_job_directories() {
+    async fn project_layout_cleanup_keeps_jobs_and_persistent_resources() {
         let workspace =
             std::env::temp_dir().join(format!("domo-artifacts-{}", uuid::Uuid::new_v4()));
-        for name in ["repo", "tasks/1", "verify/1-job", "jobs/job_1"] {
+        for name in [
+            "repo",
+            "tasks/1",
+            "verify/1-job",
+            "jobs/job_1",
+            "resources/project",
+            "resources/tasks/1",
+        ] {
             std::fs::create_dir_all(workspace.join(name)).unwrap();
         }
         std::fs::write(workspace.join("jobs/job_1/stdout.log"), "output").unwrap();
+        std::fs::write(workspace.join("resources/project/sdk"), "sdk").unwrap();
+        std::fs::write(workspace.join("resources/tasks/1/input"), "input").unwrap();
 
         remove_project_layout(&workspace).await.unwrap();
 
         assert!(!workspace.join("repo").exists());
         assert!(!workspace.join("tasks").exists());
         assert!(!workspace.join("verify").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("resources/project/sdk")).unwrap(),
+            "sdk"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("resources/tasks/1/input")).unwrap(),
+            "input"
+        );
         assert_eq!(
             std::fs::read_to_string(workspace.join("jobs/job_1/stdout.log")).unwrap(),
             "output"

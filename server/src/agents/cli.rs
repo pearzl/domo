@@ -166,6 +166,7 @@ mod tests {
             role: JOB_ROLE_EXECUTOR.into(),
             cwd: PathBuf::from("/tmp/repo"),
             job_dir: PathBuf::from("/tmp/job"),
+            writable_dirs: Vec::new(),
             prompt: "继续".into(),
             original_prompt: "原始提示".into(),
             session_id: session_id.map(str::to_string),

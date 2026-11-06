@@ -21,6 +21,18 @@ pub fn job_dir(workspace: &Path, job_id: &str) -> PathBuf {
     workspace.join("jobs").join(job_id)
 }
 
+/// Reusable runtime inputs live outside delivery worktrees and job outputs.
+pub fn project_resources(workspace: &Path) -> PathBuf {
+    workspace.join("resources").join("project")
+}
+
+pub fn task_resources(workspace: &Path, task_seq: i64) -> PathBuf {
+    workspace
+        .join("resources")
+        .join("tasks")
+        .join(task_seq.to_string())
+}
+
 pub fn task_worktree(workspace: &Path, task_seq: i64) -> PathBuf {
     workspace.join("tasks").join(task_seq.to_string())
 }
@@ -69,6 +81,14 @@ mod tests {
         let workspace = project_workspace(root, "prj_0123456789abcdef0123456789abcdef");
         assert_eq!(workspace, root.join("prj_0123456789abcdef"));
         assert_eq!(task_worktree(&workspace, 128), workspace.join("tasks/128"));
+        assert_eq!(
+            project_resources(&workspace),
+            workspace.join("resources/project")
+        );
+        assert_eq!(
+            task_resources(&workspace, 128),
+            workspace.join("resources/tasks/128")
+        );
         assert_eq!(
             verify_worktree(&workspace, 128, "job_0123456789abcdef0123456789abcdef"),
             workspace.join("verify/128-0123456789abcdef")
