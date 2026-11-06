@@ -34,7 +34,7 @@ import {
   readDraft,
   writeDraftJson,
 } from "../presentation/draft";
-import { Empty, ErrorBox, Icon, PageGuide } from "../ui";
+import { Empty, ErrorBox, Icon, PageHeader } from "../ui";
 
 // 供其它模块与测试直接从页面取到卡片与编辑面板组件。
 export { AgentCard } from "../components/AgentCard";
@@ -202,19 +202,14 @@ export function AgentsPage() {
 
   return (
     <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>Agent 团队</h1>
-          <p className="subtitle">
-            配置团队分工、调度顺序与用量边界，让合适的 Agent 完成合适的工作。
-          </p>
-          <PageGuide>同一 Agent 可扮演多个角色。卡片启停是影响所有项目与任务的全局开关；默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量达到限额后自动跳过，新窗口开始后恢复。</PageGuide>
-        </div>
-        <button className="primary" onClick={startCreate}>
+      <PageHeader icon="agents" eyebrow="工作空间 / 团队与调度" title="Agent 团队"
+        description="配置团队分工、调度顺序与用量边界，让合适的 Agent 完成合适的工作。"
+        guide="同一 Agent 可扮演多个角色。卡片启停是影响所有项目与任务的全局开关；默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量达到限额后自动跳过，新窗口开始后恢复。"
+        actions={<button className="primary" onClick={startCreate}>
           <Icon name="plus" />
           添加 Agent
-        </button>
-      </header>
+        </button>}
+      />
 
       {loadError ? (
         <ErrorBox
@@ -231,6 +226,12 @@ export function AgentsPage() {
         </section>
       ) : null}
 
+      {!loading && agents.length > 0 ? (
+        <div className="team-summary" aria-label="团队角色概况">
+          <div><span className="meta-label">全局已启用</span><strong>{agents.filter(agent => agent.enabled).length}<small> / {agents.length}</small></strong></div>
+          {([ ["planner", "规划者"], ["executor", "执行者"], ["verifier", "验收者"] ] as const).map(([role, label]) => <div key={role}><span className="meta-label">{label}</span><strong>{agents.filter(agent => agent.enabled && agent.roles.includes(role)).length}<small> 个已启用</small></strong></div>)}
+        </div>
+      ) : null}
       <GlobalQueue agents={agents} />
       {team ? (
         <AgentPoolPanel

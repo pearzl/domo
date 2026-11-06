@@ -120,7 +120,7 @@ export default function App() {
 
         <div className="nav-section-label">工作空间</div>
 
-        {/* 窄屏下同一组导航按钮改为顶部横向排布，DOM 结构保持不变。 */}
+        {/* 导航在窄屏顶部横向排布，焦点顺序与桌面一致。 */}
         <nav className="nav-links sidebar-nav" aria-label="主导航">
           <button
             className={isProjects ? "nav-link active" : "nav-link"}
@@ -174,12 +174,12 @@ export default function App() {
             aria-live="polite"
           >
             <span className="connection-dot" aria-hidden="true" />
-            {online ? "服务器在线" : "服务器断开"}
+            <span>{online ? "服务器在线" : "服务器断开"}</span>
           </div>
         </div>
       </aside>
 
-       <main className="content" id="main-content" tabIndex={-1}>
+      <main className="content" id="main-content" tabIndex={-1}>
         {projectMatch ? (
           <ProjectPage
             key={projectMatch[1]}

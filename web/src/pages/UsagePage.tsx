@@ -20,6 +20,7 @@ import {
 import {
   Badge,
   ErrorBox,
+  PageHeader,
   ROLE_LABELS,
   formatMillis,
 } from "../ui";
@@ -212,21 +213,16 @@ export function UsagePage() {
 
   return (
     <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>成本用量</h1>
-          <p className="subtitle">
-            汇总每次 Agent 调用的输入/输出 token、费用与时长，可按项目、Agent、角色和时间范围筛选。
-          </p>
-        </div>
-        <button
+      <PageHeader icon="usage" eyebrow="工作空间 / 资源与成本" title="成本用量"
+        description="查看 Agent 调用的费用、token 与时长，按项目、角色和时间追踪消耗。"
+        actions={<button
           className="secondary"
           onClick={() => setReloadKey((value) => value + 1)}
           disabled={loading}
         >
           {loading ? "刷新中…" : "刷新"}
-        </button>
-      </header>
+        </button>}
+      />
 
       {optionsError ? (
         <ErrorBox
@@ -243,7 +239,22 @@ export function UsagePage() {
         />
       ) : null}
 
-      <section className="panel">
+      {totals ? (
+        <section className="panel" aria-busy={loading}>
+          <div className="panel-head">
+            <h2>汇总</h2>
+            {loading ? <span className="muted" role="status">正在更新…</span> : null}
+          </div>
+          <div className="button-row usage-coverage-row">
+            <UsageCoverageBadge totals={totals} />
+            <span className="muted">未知作业不参与 token 与费用合计。</span>
+          </div>
+          <TotalsCards totals={totals} />
+          <p className="muted">费用为 Agent 上报值；0 表示上报合计为零，不代表实际账单或免费使用。＊ 标记可聚焦查看指标覆盖范围。</p>
+        </section>
+      ) : null}
+
+      <section className="panel usage-filters">
         <h2>筛选</h2>
         <div className="form-grid">
           <label>
@@ -343,20 +354,8 @@ export function UsagePage() {
       </div>
 
       {loading && !totals ? (
-        <section className="panel">
+        <section className="panel" aria-busy={loading}>
           <SkeletonLines label="正在加载用量记录…" />
-        </section>
-      ) : null}
-
-      {totals ? (
-        <section className="panel">
-          <h2>汇总</h2>
-          <div className="button-row usage-coverage-row">
-            <UsageCoverageBadge totals={totals} />
-            <span className="muted">未知作业不参与 token 与费用合计。</span>
-          </div>
-          <TotalsCards totals={totals} />
-          <p className="muted">费用为 Agent 上报值；0 表示上报合计为零，不代表实际账单或免费使用。＊ 标记可聚焦查看指标覆盖范围。</p>
         </section>
       ) : null}
 

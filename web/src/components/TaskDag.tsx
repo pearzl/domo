@@ -1,5 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import type { Task } from "../types";
+import { isTaskRunning } from "../presentation/taskList";
+import { taskMotionStyle, useTaskCompletion } from "./useTaskCompletion";
 import {
   Badge,
   Empty,
@@ -12,15 +15,27 @@ import {
   layoutTaskDag,
 } from "./dagLayout";
 
-const MIN_ZOOM = 0.4;
-const MAX_ZOOM = 1.6;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
 /// 滚动容器里留给缩放工具条的纵向空间，避免工具条压住层级列头。
 const TOOLBAR_BAND = 44;
 
+interface Viewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+function zoomAt(current: Viewport, zoom: number, x: number, y: number): Viewport {
+  const next = clampZoom(zoom);
+  const ratio = next / current.zoom;
+  return { x: x - (x - current.x) * ratio, y: y - (y - current.y) * ratio, zoom: next };
+}
+
 /// 任务 DAG 只读取任务的 deps、parent_id 与展示字段；选中任务通过回调整理，
 /// 图本身不触发任何任务状态变更。
-/// 列间通道折线由 dagLayout 生成；这里只负责高亮、列头与滚动容器内的缩放。
+/// 列间通道折线由 dagLayout 生成；视口平移与缩放独立于任务布局坐标。
 export function TaskDag({
   tasks,
   selectedTaskId,
@@ -36,8 +51,35 @@ export function TaskDag({
     [tasks],
   );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const markerId = useId().replace(/:/g, "");
+  const completed = useTaskCompletion(tasks);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  const [view, setView] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
+  const [dragging, setDragging] = useState(false);
+  const drag = useRef<{ id: number; x: number; y: number; view: Viewport; moved: boolean } | null>(null);
+  const suppressClick = useRef(false);
+  const hasNodes = layout.nodes.length > 0;
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const wheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = element.getBoundingClientRect();
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? element.clientHeight : 1);
+      const factor = Math.exp(-Math.max(-200, Math.min(200, delta)) * 0.002);
+      setView(current => zoomAt(current, current.zoom * factor, event.clientX - rect.left - element.clientLeft, event.clientY - rect.top - element.clientTop - TOOLBAR_BAND));
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  }, [hasNodes]);
+
+  const finishDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drag.current?.id !== event.pointerId) return;
+    drag.current = null;
+    setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
 
   if (layout.nodes.length === 0) {
     return (
@@ -74,7 +116,9 @@ export function TaskDag({
     .map((item) => `${item.taskKey} → ${item.dep}`);
 
   const zoomBy = (delta: number) => {
-    setZoom((current) => clampZoom(current + delta));
+    const element = scrollRef.current;
+    if (!element) return;
+    setView(current => zoomAt(current, current.zoom + delta, element.clientWidth / 2, (element.clientHeight - TOOLBAR_BAND) / 2));
   };
 
   const fitToWindow = () => {
@@ -82,7 +126,8 @@ export function TaskDag({
     if (!element || layout.width <= 0 || layout.height <= 0) return;
     const horizontal = (element.clientWidth - 32) / layout.width;
     const vertical = (element.clientHeight - TOOLBAR_BAND - 16) / layout.height;
-    setZoom(clampZoom(Math.min(1, horizontal, vertical)));
+    const zoom = clampZoom(Math.min(1, horizontal, vertical));
+    setView({ zoom, x: (element.clientWidth - layout.width * zoom) / 2, y: (element.clientHeight - TOOLBAR_BAND - layout.height * zoom) / 2 });
   };
 
   return (
@@ -98,24 +143,66 @@ export function TaskDag({
           已忽略指向不存在或已取消任务的依赖：{missing.join("、")}
         </div>
       ) : null}
-      <div className="dag-scroll-hint" id="dag-scroll-hint">
+      <div className="dag-scroll-hint" id={`${markerId}-hint`}>
         <span className="dag-scroll-hint-icon" aria-hidden="true">↔</span>
-        依赖图内容较宽，可在图内横向或纵向滚动；聚焦图表后可用方向键滚动，左上角可放大、缩小或适应窗口。
+        滚轮缩放 · 拖动画布 · 方向键平移 · Home 适应窗口
       </div>
       <div
         ref={scrollRef}
         className="dag-scroll"
+        data-dragging={dragging}
         role="region"
         aria-label="任务依赖图"
-        aria-describedby="dag-scroll-hint"
+        aria-describedby={`${markerId}-hint`}
         tabIndex={0}
+        onPointerDown={event => {
+          if (event.button !== 0 || !event.isPrimary || (event.target as Element).closest(".dag-toolbar")) return;
+          suppressClick.current = false;
+          drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, view, moved: false };
+          if (!(event.target as Element).closest(".dag-node")) event.currentTarget.focus({ preventScroll: true });
+        }}
+        onPointerMove={event => {
+          const start = drag.current;
+          if (!start || start.id !== event.pointerId) return;
+          const dx = event.clientX - start.x;
+          const dy = event.clientY - start.y;
+          if (!start.moved && Math.hypot(dx, dy) < 5) return;
+          if (!start.moved) {
+            start.moved = true;
+            suppressClick.current = true;
+            setDragging(true);
+            setHoveredTaskId(null);
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }
+          setView({ ...start.view, x: start.view.x + dx, y: start.view.y + dy });
+        }}
+        onPointerUp={finishDrag}
+        onPointerCancel={finishDrag}
+        onLostPointerCapture={finishDrag}
+        onClickCapture={event => {
+          if (!suppressClick.current) return;
+          event.preventDefault();
+          event.stopPropagation();
+          suppressClick.current = false;
+        }}
+        onKeyDown={event => {
+          if (event.target !== event.currentTarget) return;
+          const directions: Record<string, [number, number]> = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] };
+          const delta = directions[event.key];
+          if (delta) {
+            event.preventDefault();
+            setView(current => ({ ...current, x: current.x + delta[0], y: current.y + delta[1] }));
+          } else if (event.key === "+" || event.key === "=" || event.key === "-") {
+            event.preventDefault();
+            zoomBy(event.key === "-" ? -ZOOM_STEP : ZOOM_STEP);
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            fitToWindow();
+          }
+        }}
       >
         <div
           className="dag-zoom-space"
-          style={{
-            width: layout.width * zoom,
-            height: layout.height * zoom + TOOLBAR_BAND,
-          }}
         >
           <div className="dag-toolbar" role="toolbar" aria-label="依赖图缩放">
             <button
@@ -124,12 +211,12 @@ export function TaskDag({
               aria-label="缩小"
               title="缩小"
               onClick={() => zoomBy(-ZOOM_STEP)}
-              disabled={zoom <= MIN_ZOOM + 0.001}
+              disabled={view.zoom <= MIN_ZOOM + 0.001}
             >
               <span aria-hidden="true">−</span>
             </button>
             <span className="dag-zoom-level" aria-live="polite">
-              {Math.round(zoom * 100)}%
+              {Math.round(view.zoom * 100)}%
             </span>
             <button
               type="button"
@@ -137,7 +224,7 @@ export function TaskDag({
               aria-label="放大"
               title="放大"
               onClick={() => zoomBy(ZOOM_STEP)}
-              disabled={zoom >= MAX_ZOOM - 0.001}
+              disabled={view.zoom >= MAX_ZOOM - 0.001}
             >
               <span aria-hidden="true">+</span>
             </button>
@@ -157,7 +244,7 @@ export function TaskDag({
               top: TOOLBAR_BAND,
               width: layout.width,
               height: layout.height,
-              transform: `scale(${zoom})`,
+              transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
               transformOrigin: "top left",
             }}
           >
@@ -181,7 +268,7 @@ export function TaskDag({
             >
               <defs>
                 <marker
-                  id="dag-arrow-dependency"
+                  id={`${markerId}-dependency`}
                   viewBox="0 0 8 8"
                   markerWidth="8"
                   markerHeight="8"
@@ -192,7 +279,7 @@ export function TaskDag({
                   <path d="M 0 0 L 8 4 L 0 8 z" fill="#9aa7b8" />
                 </marker>
                 <marker
-                  id="dag-arrow-derived"
+                  id={`${markerId}-derived`}
                   viewBox="0 0 8 8"
                   markerWidth="8"
                   markerHeight="8"
@@ -205,6 +292,9 @@ export function TaskDag({
               </defs>
               {layout.edges.map((edge) => {
                 const related = relatedEdgeIds.has(edge.id);
+                const source = taskById.get(edge.from);
+                const target = taskById.get(edge.to);
+                const running = edge.kind === "dependency" && source?.stage === "completed" && target && isTaskRunning(target);
                 const classes = ["dag-edge"];
                 classes.push(
                   edge.kind === "dependency"
@@ -214,13 +304,16 @@ export function TaskDag({
                 if (highlightActive) {
                   classes.push(related ? "dag-edge-highlight" : "dag-edge-dimmed");
                 }
+                if (running) classes.push("dag-edge-running");
                 return (
+                  <Fragment key={edge.id}>
                   <path
-                    key={edge.id}
                     d={edge.path}
                     className={classes.join(" ")}
-                    markerEnd={`url(#dag-arrow-${edge.kind})`}
+                    markerEnd={`url(#${markerId}-${edge.kind})`}
                   />
+                  {running ? <path d={edge.path} className={`dag-edge-flow${highlightActive && !related ? " dag-edge-dimmed" : ""}`} pathLength={100} style={taskMotionStyle(edge.to)} /> : null}
+                  </Fragment>
                 );
               })}
             </svg>
@@ -245,7 +338,10 @@ export function TaskDag({
                 <div
                   key={task.id}
                   className={classes.join(" ")}
-                  style={{ left: x, top: y, width: DAG_NODE_WIDTH, height: DAG_NODE_HEIGHT }}
+                  data-running={isTaskRunning(task)}
+                  data-completed={completed.has(task.id)}
+                  data-stage={task.stage}
+                  style={{ ...taskMotionStyle(task.id), left: x, top: y, width: DAG_NODE_WIDTH, height: DAG_NODE_HEIGHT }}
                   role="button"
                   tabIndex={0}
                   aria-label={`打开任务 ${task.key} ${task.title}`}
@@ -276,6 +372,7 @@ export function TaskDag({
                     {task.title}
                   </div>
                   <div className="dag-node-meta">
+                    {isTaskRunning(task) ? <span className="runtime-dot" aria-hidden="true" /> : null}
                     {task.status && task.stage !== "completed" ? <Badge tone="muted">{taskStageLabel(task.stage)}</Badge> : null}
                     <TaskStateBadge stage={task.stage} status={task.status} />
                   </div>
@@ -297,7 +394,8 @@ export function TaskDag({
           <span className="dag-legend-line dag-legend-derived" />
           派生（父 → 子）
         </span>
-        <span>按依赖层级从左到右排列，同一层任务并列；跨层依赖经列间通道折线连接，不穿过任务卡片；已取消任务不参与依赖图。</span>
+        <span className="dag-legend-item"><span className="dag-legend-line dag-legend-running" />运行路径</span>
+        <span>任务按依赖层级排列，连线沿直角通道避让任务卡片；已取消任务不参与依赖图。</span>
       </div>
     </div>
   );

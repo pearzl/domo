@@ -19,6 +19,27 @@ export function PageGuide({ children }: { children: ReactNode }) {
   return <details className="page-guide"><summary>使用说明</summary><div>{children}</div></details>;
 }
 
+export function PageHeader({ icon, eyebrow, title, description, guide, actions }: {
+  icon: Parameters<typeof Icon>[0]["name"];
+  eyebrow: string;
+  title: string;
+  description: string;
+  guide?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <header className="page-header">
+      <div>
+        <div className="page-eyebrow"><Icon name={icon} /><span>{eyebrow}</span></div>
+        <h1>{title}</h1>
+        <p className="subtitle">{description}</p>
+        {guide ? <PageGuide>{guide}</PageGuide> : null}
+      </div>
+      {actions ? <div className="page-header-actions">{actions}</div> : null}
+    </header>
+  );
+}
+
 export const STAGE_LABELS: Record<string, string> = {
   analysis: "项目分析",
   executing: "执行中",
@@ -311,6 +332,7 @@ export function Progress({
 export function Empty({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="empty">
+      <div className="empty-icon"><Icon name="projects" /></div>
       <div className="empty-title">{title}</div>
       {hint ? <div className="empty-hint">{hint}</div> : null}
     </div>
@@ -331,6 +353,7 @@ export function EmptySteps({
 }) {
   return (
     <div className="empty">
+      <div className="empty-icon"><Icon name="projects" /></div>
       <div className="empty-title">{title}</div>
       {hint ? <div className="empty-hint">{hint}</div> : null}
       <ol className="empty-steps">

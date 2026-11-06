@@ -27,7 +27,7 @@ export const TASK_FILTERS: { id: TaskFilter; label: string }[] = [
 ];
 
 /// 进行中只包含正在运行的任务，阶段不代表当前正在占用 Agent。
-function isRunning(task: Task): boolean {
+export function isTaskRunning(task: Task): boolean {
   return task.status === "running" && task.stage !== "completed";
 }
 
@@ -35,7 +35,7 @@ function isRunning(task: Task): boolean {
 function isQueued(task: Task): boolean {
   if (task.status === "canceled" || task.stage === "completed") return false;
   if (isAttention(task)) return false;
-  if (isRunning(task)) return false;
+  if (isTaskRunning(task)) return false;
   return task.status === "queued";
 }
 
@@ -54,7 +54,7 @@ export function matchesTaskFilter(task: Task, filter: TaskFilter): boolean {
     case "all":
       return true;
     case "active":
-      return isRunning(task);
+      return isTaskRunning(task);
     case "queued":
       return isQueued(task);
     case "pending":

@@ -4,7 +4,7 @@ import { api, errorMessage } from "../api";
 import { PROJECT_ATTENTION_LABELS } from "../projectFilter";
 import { attentionItems } from "../presentation/attention";
 import { formatElapsed } from "../presentation/projectStatus";
-import { ErrorBox, Icon, formatTime } from "../ui";
+import { Empty, ErrorBox, Icon, PageHeader, formatTime } from "../ui";
 import { SkeletonLines } from "../components/Skeleton";
 
 const REFRESH_MS = 5000;
@@ -50,15 +50,10 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
 
   return (
     <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>待我处理</h1>
-          <p className="subtitle">
-            所有需要你回答、确认、验收或裁决的项目；处理完成后事项会离开此列表。
-          </p>
-        </div>
-        <span className="page-count" role="status">{loading ? "加载中…" : loadError && items.length === 0 ? "待办暂不可用" : `${items.length} 项待办`}</span>
-      </header>
+      <PageHeader icon="attention" eyebrow="工作空间 / 需要你的决策" title="待我处理"
+        description="集中处理回答、确认、验收与裁决，按等待时间优先查看。"
+        actions={<span className="page-count" role="status">{loading ? "加载中…" : loadError && items.length === 0 ? "待办暂不可用" : `${items.length} 项待办`}</span>}
+      />
 
       {loadError ? (
         <ErrorBox message={loadError} onRetry={() => setReloadKey((value) => value + 1)} retrying={loading} />
@@ -69,10 +64,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
           <SkeletonLines label="加载中…" />
         </div>
       ) : items.length === 0 && loadError ? null : items.length === 0 ? (
-        <div className="empty">
-          <div className="empty-title">没有待处理事项</div>
-          <div className="empty-hint">需要你驱动的项目会出现在这里。</div>
-        </div>
+        <Empty title="没有待处理事项" hint="需要你驱动的项目会出现在这里。" />
       ) : (
         <div className="attention-list">
           {items.map(({ project, action, waitingMs, id, affectedTasks, blocksMilestone, projectAdvancing }) => {
@@ -81,6 +73,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
               <article
                 key={id ?? project.id}
                 className="panel attention-item"
+                data-tone={attention === "failed" || attention === "blocked" ? "danger" : "warn"}
                 role="button"
                 tabIndex={0}
                 onClick={() => onOpen(project.id, action.task?.id)}
@@ -96,7 +89,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
                     {attention ? PROJECT_ATTENTION_LABELS[attention] : "待处理"}
                   </span>
                   <h2>{project.name}</h2>
-                  <span className="muted">
+                  <span className="attention-waiting">
                     已等待 {formatElapsed(waitingMs)}
                   </span>
                   <span className="attention-open">前往处理 <Icon name="arrow" /></span>
@@ -104,6 +97,7 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
                 <p className="goal-line">
                   {project.goal || "尚未输入项目目标"}
                 </p>
+                {action.reason ? <p className="attention-reason">{firstLine(action.reason)}</p> : null}
                 <div className="meta-line">
                   {action.task ? (
                     <span>
@@ -115,9 +109,6 @@ export function AttentionPage({ onOpen }: { onOpen: (id: string, taskId?: string
                     最近变化 {formatTime(project.updated_at)}
                   </span>
                   {affectedTasks !== undefined ? <span>影响后继 {affectedTasks} 项 · {blocksMilestone ? "阻挡里程碑" : "无里程碑阻挡"} · {projectAdvancing ? "项目仍可推进" : "等待人工处理"}</span> : null}
-                  {action.reason ? (
-                    <span>阻塞：{firstLine(action.reason)}</span>
-                  ) : null}
                   <span>
                     {project.workspace_type === "plain"
                       ? "普通工作区"

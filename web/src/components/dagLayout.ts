@@ -31,7 +31,7 @@ export interface DagRect {
   height: number;
 }
 
-export type DagEdgeRouting = "curve" | "channel";
+export type DagEdgeRouting = "channel";
 
 export interface DagNodeLayout {
   task: Task;
@@ -49,7 +49,7 @@ export interface DagEdgeLayout {
   to: string;
   kind: DagEdgeKind;
   path: string;
-  /** 路径顶点：首点是源端口，末点是目标端口，中间是折线/采样点。 */
+  /** 路径顶点：首点是源端口，末点是目标端口，中间是通道折线点。 */
   points: DagPoint[];
   /** 跨层依赖：目标层级 > 来源层级 + 1，走层间垂直通道折线。 */
   crossLevel: boolean;
@@ -97,8 +97,6 @@ interface PlannedEdge {
   span: number;
   /** 走通道折线时依次经过的层间区段编号。 */
   gaps: number[];
-  /** 是否使用通道折线路由（跨层或同列）。 */
-  channel: boolean;
 }
 
 /// 布局只依赖任务的 deps 与 parent_id：取消的任务不进入图，缺失依赖被忽略，
@@ -278,37 +276,31 @@ export function layoutTaskDag(tasks: Task[]): DagLayout {
     let startX: number;
     let endX: number;
     let gaps: number[] = [];
-    let channel: boolean;
 
     if (span >= 2) {
       // 跨层（正向）：右侧出、左侧进，中间的每个层间区段各占一条通道。
       startX = fromNode.x + DAG_NODE_WIDTH;
       endX = toNode.x;
       gaps = ascend(fromNode.level, toNode.level - 1);
-      channel = true;
     } else if (span <= -2) {
       // 跨层（反向，例如派生关系跨回更左侧）：左侧出、右侧进。
       startX = fromNode.x;
       endX = toNode.x + DAG_NODE_WIDTH;
       gaps = descend(fromNode.level - 1, toNode.level);
-      channel = true;
     } else if (span === 0) {
       // 同列（只可能来自环内任务）：绕到右侧通道，再从左侧通道回落到目标。
       startX = fromNode.x + DAG_NODE_WIDTH;
       endX = toNode.x;
       gaps = [fromNode.level, fromNode.level - 1 >= 0 ? fromNode.level - 1 : LEFT_MARGIN_GAP];
-      channel = true;
     } else {
-      // 相邻层：平滑曲线，端口分别在源节点右侧与目标节点左侧。
+      // 相邻层的垂直通道与跨层边共享间距分配，端口朝向目标列。
       startX = backwards ? fromNode.x : fromNode.x + DAG_NODE_WIDTH;
       endX = backwards ? toNode.x + DAG_NODE_WIDTH : toNode.x;
-      channel = false;
+      gaps = [Math.min(fromNode.level, toNode.level)];
     }
 
-    if (channel) {
-      for (const gap of gaps) {
-        gapDemand.set(gap, (gapDemand.get(gap) ?? 0) + 1);
-      }
+    for (const gap of gaps) {
+      gapDemand.set(gap, (gapDemand.get(gap) ?? 0) + 1);
     }
 
     plans.push({
@@ -319,7 +311,6 @@ export function layoutTaskDag(tasks: Task[]): DagLayout {
       endY,
       span,
       gaps,
-      channel,
     });
   }
 
@@ -394,12 +385,8 @@ export function layoutTaskDag(tasks: Task[]): DagLayout {
       corridors.push(corridorFor(crossed, (plan.startY + plan.endY) / 2));
     }
 
-    const points = plan.channel
-      ? channelPoints(plan.startX, plan.startY, plan.endX, plan.endY, lanes, corridors)
-      : curveSamples(plan.startX, plan.startY, plan.endX, plan.endY);
-    const path = plan.channel
-      ? polylinePath(points)
-      : curvePath(plan.startX, plan.startY, plan.endX, plan.endY);
+    const points = channelPoints(plan.startX, plan.startY, plan.endX, plan.endY, lanes, corridors);
+    const path = polylinePath(points);
 
     edges.push({
       id: `${plan.spec.kind}:${plan.spec.from.id}->${plan.spec.to.id}`,
@@ -409,7 +396,7 @@ export function layoutTaskDag(tasks: Task[]): DagLayout {
       path,
       points,
       crossLevel: plan.span >= 2,
-      routing: plan.channel ? "channel" : "curve",
+      routing: "channel",
     });
   }
 
@@ -528,47 +515,6 @@ function dedupePoints(points: DagPoint[]): DagPoint[] {
 
 function nearlyEqual(a: number, b: number): boolean {
   return Math.abs(a - b) < 0.01;
-}
-
-function curveReach(startX: number, endX: number): number {
-  return Math.max(48, Math.abs(endX - startX) / 2);
-}
-
-function curveDirection(startX: number, endX: number): number {
-  return endX >= startX ? 1 : -1;
-}
-
-/// 相邻层之间的平滑曲线；控制点沿走向伸出，曲线整体落在两列之间的通道里。
-function curvePath(startX: number, startY: number, endX: number, endY: number): string {
-  const reach = curveReach(startX, endX);
-  const direction = curveDirection(startX, endX);
-  const c1x = startX + direction * reach;
-  const c2x = endX - direction * reach;
-  return `M ${round(startX)} ${round(startY)} C ${round(c1x)} ${round(startY)}, ${round(c2x)} ${round(endY)}, ${round(endX)} ${round(endY)}`;
-}
-
-/// 与 curvePath 用同一条三次贝塞尔，采样成折线点供测试与高亮判定使用。
-function curveSamples(
-  startX: number,
-  startY: number,
-  endX: number,
-  endY: number,
-  steps = 32,
-): DagPoint[] {
-  const reach = curveReach(startX, endX);
-  const direction = curveDirection(startX, endX);
-  const c1x = startX + direction * reach;
-  const c2x = endX - direction * reach;
-  const samples: DagPoint[] = [];
-  for (let index = 0; index <= steps; index += 1) {
-    const t = index / steps;
-    const u = 1 - t;
-    samples.push([
-      u * u * u * startX + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * endX,
-      u * u * u * startY + 3 * u * u * t * startY + 3 * u * t * t * endY + t * t * t * endY,
-    ]);
-  }
-  return samples;
 }
 
 function polylinePath(points: DagPoint[]): string {

@@ -8,7 +8,7 @@ import {
   EmptySteps,
   ErrorBox,
   Icon,
-  PageGuide,
+  PageHeader,
   Progress,
   StageBadge,
   StatusBadge,
@@ -74,6 +74,29 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
     [projects, filters, query, sort],
   );
 
+  const summaryCards: {
+    label: string;
+    value: number;
+    hint: string;
+    icon?: "projects" | "attention";
+    tone?: "info" | "success";
+    filters: ProjectFilters;
+    attention?: boolean;
+  }[] = [
+    { label: "全部项目", value: projects.length, hint: "查看工作空间", icon: "projects", filters: EMPTY_PROJECT_FILTERS },
+    { label: "运行中", value: countProjectStatus(projects, "running"), hint: "正在推进的项目", tone: "info", filters: { ...EMPTY_PROJECT_FILTERS, statuses: ["running"] } },
+    { label: "待我处理的项目", value: countProjectAttention(projects), hint: "确认、验收与决策", icon: "attention", attention: true, filters: { ...EMPTY_PROJECT_FILTERS, attentionOnly: true } },
+    { label: "已完成", value: countProjectStage(projects, "completed"), hint: "查看交付结果", tone: "success", filters: { ...EMPTY_PROJECT_FILTERS, stages: ["completed"] } },
+  ];
+
+  function summarySelected(candidate: ProjectFilters) {
+    return !query.trim() && filters.attentionOnly === candidate.attentionOnly
+      && filters.stages.length === candidate.stages.length
+      && filters.statuses.length === candidate.statuses.length
+      && candidate.stages.every(stage => filters.stages.includes(stage))
+      && candidate.statuses.every(status => filters.statuses.includes(status));
+  }
+
   function clearFilters() {
     setFilters(resetProjectFilters());
     setQuery("");
@@ -108,17 +131,14 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <div className="page">
-      <header className="page-header">
-        <div>
-          <h1>项目</h1>
-          <p className="subtitle">从目标到交付，掌握每个项目的进展与下一步。</p>
-          <PageGuide>每个项目在独立工作区中推进。Git 工作区使用 worktree 与交付分支，普通工作区在本地目录中串行推进。任务是可独立验收的工作单元；作业是一次 Agent 调用记录。</PageGuide>
-        </div>
-        <button className="primary" disabled={creating} aria-expanded={showForm} aria-controls={showForm ? "create-project" : undefined} onClick={() => setShowForm((value) => !value)}>
+      <PageHeader icon="projects" eyebrow="工作空间 / 项目总览" title="项目"
+        description="从目标到交付，掌握每个项目的进展与下一步。"
+        guide="每个项目在独立工作区中推进。Git 工作区使用 worktree 与交付分支，普通工作区在本地目录中串行推进。任务是可独立验收的工作单元；作业是一次 Agent 调用记录。"
+        actions={<button className="primary" disabled={creating} aria-expanded={showForm} aria-controls={showForm ? "create-project" : undefined} onClick={() => setShowForm((value) => !value)}>
           {!showForm ? <Icon name="plus" /> : null}
           {showForm ? "取消" : "新建项目"}
-        </button>
-      </header>
+        </button>}
+      />
 
       {loadError ? (
         <ErrorBox
@@ -214,11 +234,21 @@ export function ProjectsPage({ onOpen }: { onOpen: (id: string) => void }) {
 
       {!loading && projects.length > 0 ? (
         <>
-          <div className="portfolio-summary" aria-label="项目总览">
-            <div><span>全部项目</span><strong>{projects.length}</strong></div>
-            <div><span>运行中</span><strong>{countProjectStatus(projects, "running")}</strong></div>
-            <div className={countProjectAttention(projects) > 0 ? "summary-attention" : ""}><span>待我处理的项目</span><strong>{countProjectAttention(projects)}</strong></div>
-            <div><span>已完成</span><strong>{countProjectStage(projects, "completed")}</strong></div>
+          <div className="portfolio-summary" role="group" aria-label="项目总览与快捷筛选">
+            {summaryCards.map(card => (
+              <button key={card.label} type="button"
+                className={card.attention && card.value > 0 ? "summary-attention" : undefined}
+                aria-pressed={summarySelected(card.filters)}
+                onClick={() => { setQuery(""); setFilters(card.filters); }}
+              >
+                <span className="summary-label">
+                  {card.icon ? <Icon name={card.icon} /> : <span className={`summary-dot summary-dot-${card.tone}`} aria-hidden="true" />}
+                  {card.label}
+                </span>
+                <strong>{card.value}</strong>
+                <span className="summary-hint">{card.hint}</span>
+              </button>
+            ))}
           </div>
           <section className="panel project-browser" aria-label="查找项目">
             <div className="project-search-row">
@@ -282,6 +312,7 @@ function renderProjectCards(
     <article
       key={project.id}
       className="project-card"
+      data-attention={project.attention_items.length > 0 || undefined}
       onClick={() => onOpen(project.id)}
       role="button"
       tabIndex={0}
@@ -295,6 +326,8 @@ function renderProjectCards(
       <div className="project-card-main">
         <div className="project-card-title">
           <h2>{project.name}</h2>
+        </div>
+        <div className="project-card-badges">
           <StageBadge stage={project.stage} />
           <StatusBadge status={project.status} />
           {project.attention_items[0] ? (
@@ -302,7 +335,7 @@ function renderProjectCards(
               tone={
                 project.attention_items[0].kind === "failed" || project.attention_items[0].kind === "blocked"
                   ? "danger"
-                  : "success"
+                  : "warn"
               }
             >
               {PROJECT_ATTENTION_LABELS[project.attention_items[0].kind]}

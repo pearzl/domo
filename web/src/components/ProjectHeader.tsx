@@ -1,6 +1,7 @@
 import type { ProjectDetail } from "../types";
 import { ProjectGoal } from "./ProjectOverview";
 import { CopyButton } from "./CopyButton";
+import { ExecutionActivityBand } from "./ExecutionActivityBand";
 import { RichContent } from "./RichContent";
 import { StageBadge, StatusBadge, formatTime } from "../ui";
 
@@ -100,6 +101,7 @@ export function ProjectHeader({
           ) : null}
         </div>
       </div>
+      {!archived && project.stage !== "completed" ? <ExecutionActivityBand tasks={tasks} jobs={jobs} /> : null}
       <ProjectGoal goal={project.goal} />
       <ProjectSourceInfo
         repoPath={project.repo_path}

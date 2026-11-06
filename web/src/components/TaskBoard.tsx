@@ -14,10 +14,12 @@ import type { ReactNode } from "react";
 import type { JobSummary, Task } from "../types";
 import {
   queueSummary,
+  isTaskRunning,
   type QueuePositionSummary,
 } from "../presentation/taskList";
 import { isReordableQueueTask } from "../taskQueue";
 import { Badge, TaskStateBadge, taskStateLabel } from "../ui";
+import { taskMotionStyle, useTaskCompletion } from "./useTaskCompletion";
 
 /// 任务面板头部的操作区，位于面板标题右侧。
 export function TaskPanelActions({ children }: { children: ReactNode }) {
@@ -86,6 +88,7 @@ export function TaskRow({
   counts,
   deps,
   summary,
+  justCompleted = false,
   onSelect,
   children,
 }: {
@@ -97,6 +100,7 @@ export function TaskRow({
   deps?: ReactNode;
   /// 计数区的说明文案。
   summary?: string;
+  justCompleted?: boolean;
   onSelect: () => void;
   /// 队列重排控件，与打开任务的按钮同级，避免嵌套交互。
   children?: ReactNode;
@@ -104,6 +108,9 @@ export function TaskRow({
   return (
     <div
       className={`task-row ${selected ? "selected" : ""}${task.parent_id ? " task-row-derived" : ""}`}
+      data-running={isTaskRunning(task)}
+      data-completed={justCompleted}
+      style={taskMotionStyle(task.id)}
       role="group"
       aria-label={`${task.key} ${task.title}，${taskStateLabel(task.stage, task.status)}`}
     >
@@ -112,6 +119,7 @@ export function TaskRow({
           <span className="task-key">{task.key}</span>
           <span className="task-title">{task.title}</span>
           <span className="task-state">
+            {isTaskRunning(task) ? <span className="runtime-dot" aria-hidden="true" /> : null}
             <TaskStateBadge stage={task.stage} status={task.status} />
             {task.queue_position !== null ? (
               <Badge tone="info">队列 #{task.queue_position}</Badge>
@@ -212,6 +220,7 @@ export function TaskList({
   busy: boolean;
   onReorder: (taskId: string, direction: "up" | "down") => void;
 }) {
+  const completed = useTaskCompletion(activeTasks);
   return (
     <TaskListShell>
       {tasks.flatMap((task) => task.parent_id && tasks.some(parent => parent.id === task.parent_id) ? [] : [task, ...tasks.filter(child => child.parent_id === task.id)]).map((task) => {
@@ -243,6 +252,7 @@ export function TaskList({
             key={task.id}
             task={task}
             selected={task.id === selectedTaskId}
+            justCompleted={completed.has(task.id)}
             agent={agentName(task.agent_id)}
             counts={counts}
             deps={deps}
