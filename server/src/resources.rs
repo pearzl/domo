@@ -242,6 +242,17 @@ pub async fn shared_snapshot(
                 .map(str::to_string)
         })
         .collect();
+    // The catalog makes cross-task knowledge discoverable without inlining its
+    // body. Related records remain complete: free text cannot be safely abridged.
+    let record_index = job.map(|_| {
+        all.iter()
+            .map(|r| {
+                json!({"id": r["id"], "topic": r["topic"], "scope": r["scope"],
+                    "task_id": r["task_id"], "job_id": r["job_id"], "created_at": r["created_at"],
+                    "supersedes": r["supersedes"], "conflicts": r["conflicts"]})
+            })
+            .collect::<Vec<_>>()
+    });
     let related: Vec<Value> = all
         .into_iter()
         .filter(|r| {
@@ -268,10 +279,12 @@ pub async fn shared_snapshot(
         sqlx::query("INSERT OR IGNORE INTO job_shared_versions(job_id, version, record_ids, created_at) VALUES(?, ?, ?, ?)")
             .bind(&job.id).bind(&version).bind(json!(related.iter().map(|r| &r["id"]).collect::<Vec<_>>()).to_string()).bind(now()).execute(&state.db).await?;
     }
-    Ok(
-        json!({"version": version, "repository": repo, "records": related, "superseded_ids": superseded,
-        "read_endpoint": format!("/api/projects/{}/shared", project.id)}),
-    )
+    let mut snapshot = json!({"version": version, "repository": repo, "records": related, "superseded_ids": superseded,
+        "read_endpoint": format!("/api/projects/{}/shared", project.id)});
+    if let Some(index) = record_index {
+        snapshot["record_index"] = json!(index);
+    }
+    Ok(snapshot)
 }
 
 pub fn safe_relative(path: &str) -> Result<PathBuf> {

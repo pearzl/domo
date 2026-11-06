@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """共享仓库与显式成果索引：不可变记录、替代/分歧、版本读取、作业引用，
-目录输入无需登记、路径逃逸拒绝、当前现场接力、产物预览、归档保留。
+跨任务知识导航与固定版本读取、目录输入无需登记、路径逃逸拒绝、当前现场接力、产物预览、归档保留。
 标准库 + mock，无模型或外网。
 """
 import json
@@ -29,7 +29,8 @@ def main():
             first_id = first["records"][0]["id"]
             second = call("POST", base + "/shared", [record("修正事实", supersedes=[first_id], reason="复核原始资料；影响所有报告任务")])
             second_id = next(r["id"] for r in second["records"] if r["body"] == "修正事实")
-            third = call("POST", base + "/shared", [record("另一种有证据的结论", conflicts=[second_id], reason="资料解释有分歧，需报告任务补充核验")])
+            third = call("POST", base + "/shared", [record("另一种有证据的结论", topic="跨任务资料口径", scope=["OTHER"], conflicts=[second_id], reason="资料解释有分歧，需报告任务补充核验")])
+            third_id = next(r["id"] for r in third["records"] if r["body"] == "另一种有证据的结论")
             assert first_id in third["superseded_ids"], third
             assert len(third["records"]) == 3
             old = call("GET", base + "/shared?version=" + first["version"])
@@ -44,6 +45,21 @@ def main():
             assert json.loads((context_path.parent / "artifacts.json").read_text(encoding="utf-8")) == context["artifacts"]
             assert context["shared"]["version"] == third["version"]
             assert not any(r["id"] == first_id for r in context["shared"]["records"])
+            assert not any(r["id"] == third_id for r in context["shared"]["records"])
+            catalog = {r["id"]: r for r in context["shared"]["record_index"]}
+            assert catalog[third_id]["conflicts"] == [second_id]
+            assert catalog[third_id]["topic"] == "跨任务资料口径"
+            assert "body" not in catalog[third_id] and "evidence" not in catalog[third_id]
+            prompt = (context_path.parent / "prompt.md").read_text(encoding="utf-8")
+            assert third_id in prompt and "另一种有证据的结论" not in prompt
+            assert "修正事实" in prompt and first_id in prompt
+            fixed_record = json.loads(git(["show", f"{context['shared']['version']}:records/{third_id}.json"], context["shared"]["repository"]))
+            assert fixed_record["body"] == "另一种有证据的结论"
+            # Current knowledge may change, but the job's catalog and repository
+            # reference still retrieve the version used to form its input.
+            revised = call("POST", base + "/shared", [record("后续修订", supersedes=[second_id], reason="新的研究资料")])
+            fixed_record = json.loads(git(["show", f"{context['shared']['version']}:records/{second_id}.json"], context["shared"]["repository"]))
+            assert fixed_record["body"] == "修正事实"
             with sqlite3.connect(server.root / "data" / "domo.db") as db:
                 assert db.execute("SELECT COUNT(*) FROM job_shared_versions WHERE job_id = ?", (job["id"],)).fetchone()[0] == 1
             assets = call("GET", base + "/artifacts")
@@ -69,7 +85,7 @@ def main():
             detail = wait_for(completed, "外部变化后基于当前目录完成", 20)
             assert (delivery / "source.txt").read_text(encoding="utf-8") == "manually reviewed input"
             call("POST", base + "/archive", {})
-            assert call("GET", base + "/shared")["version"] == third["version"]
+            assert call("GET", base + "/shared")["version"] == revised["version"]
             assert (delivery / "domo_mock/T1.txt").is_file()
             assert call("GET", base + "/artifacts/" + output["id"])["text"]
             # Simulate shutdown after durable intent but before its Git commit.
@@ -82,7 +98,7 @@ def main():
             with sqlite3.connect(server.root / "data" / "domo.db") as db:
                 assert db.execute("SELECT commit_id FROM shared_records WHERE id = 'info_recovery'").fetchone()[0]
             server.restart()
-            assert len(call("GET", base + "/shared")["records"]) == 4
+            assert len(call("GET", base + "/shared")["records"]) == 5
             suggestions = call("GET", "/api/agents/recommendations")
             assert suggestions["automatic_changes"] is False
             advice = next(item for item in suggestions["items"] if item["agent_name"] == "resources")
