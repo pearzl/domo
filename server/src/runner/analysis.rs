@@ -71,13 +71,14 @@ pub(super) async fn handle_analysis_questions(
     Ok(())
 }
 
-/// Loads the keys that still occupy the project's unique-key namespace.
-/// Canceled tasks are excluded because their keys may be reused.
-pub(super) async fn load_task_keys<'e, E>(executor: E, _project_id: &str) -> Result<HashSet<String>>
+/// Loads the keys that occupy the project's lifetime unique-key namespace.
+/// Canceled tasks are included because their keys are never released.
+pub(super) async fn load_task_keys<'e, E>(executor: E, project_id: &str) -> Result<HashSet<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM tasks WHERE project_id = ?")
+        .bind(project_id)
         .fetch_all(executor)
         .await?;
     Ok(keys.into_iter().collect())
@@ -575,6 +576,66 @@ mod tests {
     fn empty_mapping_keeps_proposal_raw() {
         let raw = r#"{"kind":"plan","summary":"s","tasks":[]}"#;
         assert_eq!(remap_proposal_keys(raw, &HashMap::new()).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn task_keys_are_scoped_to_the_project_and_include_canceled_tasks() {
+        let root = std::env::temp_dir().join(format!("domo-task-keys-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::connect(&root.join("data/domo.db"))
+            .await
+            .unwrap();
+        let timestamp = "2026-01-01T00:00:00Z";
+        for project_id in ["prj_a", "prj_b"] {
+            sqlx::query(
+                "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
+                 stage, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(project_id)
+            .bind("test")
+            .bind("goal")
+            .bind("/tmp/repo")
+            .bind("main")
+            .bind("domo/p-test")
+            .bind("/tmp/workspace")
+            .bind(STAGE_ANALYSIS)
+            .bind(STATUS_RUNNING)
+            .bind(timestamp)
+            .bind(timestamp)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        for (seq, (id, project_id, key, status)) in [
+            ("tsk_a1", "prj_a", "T1", None),
+            ("tsk_a2", "prj_a", "T2", Some(STATUS_CANCELED)),
+            ("tsk_b1", "prj_b", "T9", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO tasks (id, project_id, seq, key, title, description, acceptance, \
+                 deps, stage, status, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, '', '', '[]', '[]', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(project_id)
+            .bind(seq as i64 + 1)
+            .bind(key)
+            .bind(TASK_STAGE_PENDING)
+            .bind(status)
+            .bind(timestamp)
+            .bind(timestamp)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        let keys = load_task_keys(&db, "prj_a").await.unwrap();
+        assert_eq!(keys, HashSet::from(["T1".to_string(), "T2".to_string()]));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

@@ -683,8 +683,8 @@ pub fn validate_plan(raw_tasks: Vec<PlanTask>) -> Result<Vec<NormalizedTask>, St
     Ok(tasks)
 }
 
-/// Assigns globally unique keys to a plan. Keys that do not collide with the
-/// project's non-canceled tasks are kept; colliding keys move to the next free
+/// Assigns globally unique keys to a plan. Keys that do not collide with any
+/// existing task in the project are kept; colliding keys move to the next free
 /// `T<n>` numbers. Dependency references are rewritten with the same mapping so
 /// the DAG stays consistent.
 pub fn reserve_plan_keys(

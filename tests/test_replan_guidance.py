@@ -4,7 +4,7 @@
 覆盖范围：
   1. 人工指导保存后可查询审计事件，并出现在任务下一次执行作业的 prompt 中；
   2. 执行者返回 replan 后由规划者在同一决策作业生成方案，应用后才作废旧计划；
-  3. 已完成任务保留，未完成任务退出活动 DAG，新规划可复用旧 key 并最终产出报告；
+  3. 已完成任务保留，未完成任务退出活动 DAG，已用 key 不释放、新规划自动顺延编号并最终产出报告；
   4. 暂停中的项目可提交重规划，暂停期间不产生新的规划作业，恢复后按新计划推进；
   5. 归档中的项目拒绝重规划，状态和规划作业数量不变；
   6. 使用同一数据目录重启服务后，指导、重规划和取消任务记录仍可读取，schema 初始化幂等。
@@ -322,12 +322,10 @@ def main():
                 task["stage"] == "completed" and task["status"] is None
                 for task in new_tasks
             ), new_tasks
-            assert any(
-                task["key"] == "T2" for task in new_tasks
-            ), "新规划未能复用被取消任务的 key"
-            # 重规划方案复用已完成任务的 key 时，服务端为冲突任务重新编号。
+            # 任务 key 项目内终身唯一，取消任务也不释放；冲突任务自动顺延编号。
+            old_keys = {old_t1["key"], old_t2["key"]}
             assert all(
-                task["key"] != old_t1["key"] for task in new_tasks
+                task["key"] not in old_keys for task in new_tasks
             ), new_tasks
             active_keys = [task["key"] for task in active_tasks(detail)]
             assert len(active_keys) == len(set(active_keys)), active_keys
