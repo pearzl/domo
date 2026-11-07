@@ -12,17 +12,18 @@ describe("项目资源与团队操作", () => {
     expect(html).toContain("项目共享信息");
     expect(html).toContain("无需逐文件登记");
     expect(html).toContain("普通工作区不保留文件历史");
-    expect(html).toContain("登记重要成果或参考输入");
+    expect(html).not.toContain("登记重要成果");
+    expect(html).toContain("按任务过滤");
     expect(html).not.toContain("授权该任务修改指定路径");
     expect(html).not.toContain("记录检查结果并允许后续重试");
     expect(html).not.toContain("确认风险并处理冲突");
   });
-  it("归档项目只读展示成果与参考输入", () => {
+  it("归档项目只读展示成果", () => {
     const archived = { ...detail, project: { ...detail.project, status: "archived" } };
     const html = renderToStaticMarkup(<ResourcePanel detail={archived} onSaved={() => {}} />);
     expect(html).not.toContain("授权该任务修改指定路径");
-    expect(html).not.toContain("登记重要成果或参考输入");
-    expect(html).toContain("成果与参考输入");
+    expect(html).not.toContain("登记重要成果");
+    expect(html).toContain("<summary>成果");
   });
   it("Git 完成项目明确说明人工风险和独立项目作业", () => {
     const git = { ...detail, project: { ...detail.project, workspace_type: "git" as const } };

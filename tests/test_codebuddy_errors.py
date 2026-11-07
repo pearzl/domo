@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WorkBuddy 结果事件错误测试。
+"""CodeBuddy 结果事件错误测试。
 
 场景：
   1. CodeBuddy 以退出码 0 结束，但在 result 事件报告 429 配额错误；
@@ -71,7 +71,7 @@ emit({
 
 
 def main():
-    with temp_root("domo-workbuddy-quota-") as temp:
+    with temp_root("domo-codebuddy-quota-") as temp:
         repo = temp / "repo"
         init_repo(repo)
         fake = temp / "fake_codebuddy.py"
@@ -110,7 +110,7 @@ def main():
                 "/api/agents",
                 {
                     "name": "Quota Executor",
-                    "kind": "workbuddy",
+                    "kind": "codebuddy",
                     "roles": ["executor"],
                     "max_concurrency": 1,
                 },
@@ -120,7 +120,7 @@ def main():
                 "POST",
                 "/api/projects",
                 {
-                    "name": "WorkBuddy Quota",
+                    "name": "CodeBuddy Quota",
                     "repo_path": str(repo),
                     "base_branch": "main",
                 },
@@ -182,7 +182,7 @@ def main():
             assert "频率限制" in (job_detail["error"] or ""), job_detail
 
             activity = call("GET", f"/api/jobs/{job['id']}/activity")
-            assert activity["format"] == "workbuddy", activity
+            assert activity["format"] == "codebuddy", activity
             assert any(
                 item["kind"] == "line" and "429" in (item["text"] or "")
                 for item in activity["items"]
@@ -202,7 +202,7 @@ def main():
             assert len(entries) == 1, f"429 失败不应追加继续提示: {entries}"
             assert "-p" in entries[0]["args"], entries[0]
 
-            print("WorkBuddy 429 失败适配测试通过")
+            print("CodeBuddy 429 失败适配测试通过")
             print(f"  项目 {project_id} 作业 {job['id']}")
 
 

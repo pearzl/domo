@@ -73,13 +73,93 @@ pub(super) async fn handle_report(
     Ok(())
 }
 
+/// A rejected report is decided by the planner: return a report to rewrite it,
+/// or a full plan when the delivery itself must change.
+pub(super) async fn handle_report_plan(
+    state: &AppState,
+    project: &ProjectRow,
+    plan: &domain::ProjectPlan,
+) -> Result<()> {
+    let transition = Transitions::lock(state).await;
+    let Some(current) = transition.project_result(project).await? else {
+        return Ok(());
+    };
+    if current.replan_active != 0 || current.stage != STAGE_SUMMARIZING {
+        return Ok(());
+    }
+    let goal = plan
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .unwrap_or(current.goal.trim());
+    if current.goal_locked_at.is_some() && goal != current.goal.trim() {
+        anyhow::bail!("报告驳回后的方案不能修改已确认目标");
+    }
+    let proposal = AnalysisProposal {
+        kind: "plan".into(),
+        summary: plan.message.clone(),
+        goal: Some(goal.to_string()),
+        assumptions: plan.assumptions.clone(),
+        acceptance: plan.acceptance.clone(),
+        tasks: plan
+            .tasks
+            .iter()
+            .map(|task| ProposalTask {
+                key: task.key.clone(),
+                title: task.title.clone(),
+                description: task.description.clone(),
+                acceptance: task.acceptance.clone(),
+                deps: task.deps.clone(),
+            })
+            .collect(),
+        replan_impact: None,
+    };
+    let proposal_json = serde_json::to_string(&proposal)?;
+    let timestamp = now();
+    let updated = sqlx::query(
+        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, replan_active = 1, replan_generation = replan_generation + 1, \
+         replan_source = 'report_reject', replan_proposal = ?, replan_previous_stage = ?, \
+         replan_previous_goal = ?, replan_requested_at = ?, blocked_reason = NULL, \
+         report = NULL, report_feedback = NULL, acceptance = NULL, acceptance_passed = 0, \
+         acceptance_at = NULL, updated_at = ? WHERE id = ? AND replan_active = 0",
+    )
+    .bind(STAGE_ANALYSIS)
+    .bind(STATUS_RUNNING)
+    .bind(&proposal_json)
+    .bind(&current.stage)
+    .bind(&current.goal)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&current.id)
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(());
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&current.id),
+        None,
+        "report_replan_prepared",
+        "报告被驳回，规划者判断需要调整交付方案，已生成替换方案等待确认",
+    )
+    .await;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_project_acceptance(
     state: &AppState,
     project: &ProjectRow,
     summary: &str,
     criteria: &[AcceptanceCriterion],
+    issues: &[String],
     replan_reason: &str,
     action: &domain::AcceptanceAction,
+    plan: &Option<domain::ProjectPlan>,
 ) -> Result<()> {
     let transition = Transitions::lock(state).await;
     let Some(current) = transition.project_result(project).await? else {
@@ -97,12 +177,17 @@ pub(super) async fn handle_project_acceptance(
             "evidence": &item.evidence,
             "gap": &item.gap,
         })).collect::<Vec<_>>(),
+        "issues": issues,
         "replan_reason": replan_reason,
         "next_action": action.next_action,
         "guidance": action.guidance,
-        "user_action": action.user_action,
     }))
     .unwrap_or_default();
+    if action.next_action == "replan" {
+        if let Some(plan) = plan {
+            return prepare_acceptance_plan(state, project, plan, &snapshot).await;
+        }
+    }
     let gaps: Vec<&AcceptanceCriterion> = criteria
         .iter()
         .filter(|item| item.blocks_report())
@@ -229,7 +314,7 @@ pub(super) async fn handle_project_acceptance(
             action.guidance
         );
         sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('paused', 'pausing', 'archived') THEN status ELSE 'blocked' END, blocked_reason = ?, updated_at = ? WHERE id = ?")
-            .bind(action.user_action.as_ref().map(|action| action.summary.as_str()).unwrap_or(&reason)).bind(now()).bind(&project.id).execute(&state.db).await?;
+            .bind(&reason).bind(now()).bind(&project.id).execute(&state.db).await?;
         emit(
             &state.db,
             &state.bus,
@@ -311,6 +396,81 @@ pub(super) async fn handle_project_acceptance(
         .execute(&state.db)
         .await?;
     }
+    Ok(())
+}
+
+/// Stores a plan produced by project acceptance so the scheduler can apply it
+/// without spawning another planning job. The acceptance job itself is still
+/// running; the scheduler applies only after it settles and no other
+/// non-analysis job remains.
+async fn prepare_acceptance_plan(
+    state: &AppState,
+    project: &ProjectRow,
+    plan: &domain::ProjectPlan,
+    snapshot: &str,
+) -> Result<()> {
+    let goal = plan
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .unwrap_or(project.goal.trim());
+    if project.goal_locked_at.is_some() && goal != project.goal.trim() {
+        anyhow::bail!("项目验收方案不能修改已确认目标");
+    }
+    let proposal = AnalysisProposal {
+        kind: "plan".into(),
+        summary: plan.message.clone(),
+        goal: Some(goal.to_string()),
+        assumptions: plan.assumptions.clone(),
+        acceptance: plan.acceptance.clone(),
+        tasks: plan
+            .tasks
+            .iter()
+            .map(|task| ProposalTask {
+                key: task.key.clone(),
+                title: task.title.clone(),
+                description: task.description.clone(),
+                acceptance: task.acceptance.clone(),
+                deps: task.deps.clone(),
+            })
+            .collect(),
+        replan_impact: None,
+    };
+    let proposal_json = serde_json::to_string(&proposal)?;
+    let timestamp = now();
+    let updated = sqlx::query(
+        "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
+         THEN status ELSE ? END, replan_active = 1, replan_generation = replan_generation + 1, \
+         replan_source = 'acceptance_plan', replan_proposal = ?, replan_previous_stage = ?, \
+         replan_previous_goal = ?, replan_requested_at = ?, blocked_reason = NULL, \
+         acceptance = ?, acceptance_passed = 0, acceptance_at = ?, report = NULL, \
+         report_feedback = NULL, updated_at = ? WHERE id = ? AND replan_active = 0",
+    )
+    .bind(STAGE_ANALYSIS)
+    .bind(STATUS_RUNNING)
+    .bind(&proposal_json)
+    .bind(&project.stage)
+    .bind(&project.goal)
+    .bind(&timestamp)
+    .bind(snapshot)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&project.id)
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(());
+    }
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&project.id),
+        None,
+        "acceptance_plan_prepared",
+        "项目验收要求更多 Agent 工作，已保存替代方案，等待在途作业结算后应用",
+    )
+    .await;
     Ok(())
 }
 

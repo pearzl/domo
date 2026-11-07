@@ -268,7 +268,7 @@ export function AgentFormPanel({
             >
               <option value="opencode">opencode CLI</option>
               <option value="codex">Codex CLI</option>
-              <option value="workbuddy">WorkBuddy CLI</option>
+              <option value="codebuddy">CodeBuddy CLI</option>
               <option value="mock">mock（测试）</option>
               <option value="cli">自定义 CLI</option>
             </select>

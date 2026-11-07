@@ -107,14 +107,14 @@ impl Diagnosis {
 pub(super) enum Protocol {
     Generic,
     Codex,
-    Workbuddy,
+    Codebuddy,
     Opencode,
 }
 
 fn error_event(protocol: Protocol, v: &Value) -> bool {
     match protocol {
         Protocol::Codex => matches!(v["type"].as_str(), Some("error" | "turn.failed")),
-        Protocol::Workbuddy => {
+        Protocol::Codebuddy => {
             v["type"] == "error" || (v["type"] == "result" && v["is_error"] == true)
         }
         Protocol::Opencode => v["type"] == "error" || v["type"] == "error.event",
@@ -326,7 +326,7 @@ mod tests {
                 r#"{"type":"turn.failed","error":{"status":503,"message":"unavailable"}}"#,
             ),
             (
-                Protocol::Workbuddy,
+                Protocol::Codebuddy,
                 r#"{"type":"result","is_error":true,"error":{"status_code":503}}"#,
             ),
             (

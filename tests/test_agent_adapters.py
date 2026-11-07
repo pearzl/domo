@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""DOMO 内置 Agent 适配器（Codex CLI / WorkBuddy CLI）端到端测试。
+"""DOMO 内置 Agent 适配器（Codex CLI / CodeBuddy CLI）端到端测试。
 
 覆盖范围：
   1. 通过 DOMO_CODEX_BIN、DOMO_WORKBUDDY_BIN 注入假 codex 与假 codebuddy，
      被测作业由假 CLI 执行，规划与验收由内置 mock 负责；假 CLI 从 stdin 读取
      提示词，向 DOMO_JOB_DIR/result.json 写入不含 usage 的结果，并在 cwd 创建
-     domo_mock/T1.txt，分别输出 Codex 与 WorkBuddy 的 JSONL 事件；
-  2. Codex 项目与 WorkBuddy 项目的执行作业均为 succeeded，产物存续于交付分支，
+     domo_mock/T1.txt，分别输出 Codex 与 CodeBuddy 的 JSONL 事件；
+  2. Codex 项目与 CodeBuddy 项目的执行作业均为 succeeded，产物存续于交付分支，
      作业 usage_known=true 且输入/输出 token、费用与假 CLI 输出一致；
   3. result.json 不携带 usage 字段；
-  4. /api/jobs/{id}/activity 分别返回 format=codex 与 format=workbuddy，
+  4. /api/jobs/{id}/activity 分别返回 format=codex 与 format=codebuddy，
      并同时包含 message 与 tool 活动；
-  5. 创建 kind=unknown 的 Agent 返回 400，错误信息同时包含 codex 与 workbuddy
+  5. 创建 kind=unknown 的 Agent 返回 400，错误信息同时包含 codex 与 codebuddy
       （假 CLI 尚未启动，验证拒绝发生在进程启动前）；
    6. 大输出完整保存在日志中，会话与用量事件即使位于摘要省略区仍可解析。
 
@@ -147,7 +147,7 @@ def main():
             bin_dir / "codex.py", "codex", call_log, CODEX_BODY
         )
         codebuddy_script = write_fake_cli(
-            bin_dir / "codebuddy.py", "workbuddy", call_log, WORKBUDDY_BODY
+            bin_dir / "codebuddy.py", "codebuddy", call_log, WORKBUDDY_BODY
         )
         codex_launcher = write_python_launcher(codex_script)
         codebuddy_launcher = write_python_launcher(codebuddy_script)
@@ -186,10 +186,10 @@ def main():
                     "cost": None,
                     "binary": str(codex_launcher),
                 },
-                "workbuddy": {
-                    "kind": "workbuddy",
-                    "label": "WorkBuddy CLI",
-                    "format": "workbuddy",
+                "codebuddy": {
+                    "kind": "codebuddy",
+                    "label": "CodeBuddy CLI",
+                    "format": "codebuddy",
                     "input_tokens": 2048,
                     "output_tokens": 512,
                     "cache_read_tokens": 200,
@@ -210,7 +210,7 @@ def main():
             )
             assert status == 400, f"unknown 类型应返回 400，实际 {status}: {body}"
             message = json.dumps(body, ensure_ascii=False)
-            for marker in ("codex", "workbuddy"):
+            for marker in ("codex", "codebuddy"):
                 assert marker in message, f"400 错误信息缺少 {marker}: {message}"
             assert len(calls()) == before, "未知类型不应启动任何 CLI 进程"
 

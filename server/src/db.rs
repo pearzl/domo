@@ -92,9 +92,13 @@ CREATE TABLE IF NOT EXISTS projects (
     proposal TEXT,
     confirmed_at TEXT,
     goal_locked_at TEXT,
-    completion_mode TEXT NOT NULL DEFAULT 'tasks',
+    accepted_commit TEXT,
+    accept_reason TEXT,
     merged_at TEXT,
     merged_commit TEXT,
+    merge_rebased INTEGER NOT NULL DEFAULT 0,
+    merge_agent_resolved INTEGER NOT NULL DEFAULT 0,
+    merge_conflicts TEXT,
     avoid_agent_id TEXT,
     avoid_agent_role TEXT,
     retry_agent_id TEXT,
@@ -171,6 +175,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     artifacts_released_at TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     rejections INTEGER NOT NULL DEFAULT 0,
+    merge_conflicts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     last_failure_kind TEXT,
     waiting_reason TEXT,
@@ -183,8 +188,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, seq);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(project_id, queue_order, seq);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_key ON tasks(project_id, key)
-    WHERE COALESCE(status, '') != 'canceled';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_key ON tasks(project_id, key);
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
@@ -285,7 +289,7 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     )
     .fetch_one(&pool)
     .await?;
-    if tables > 0 && version != 3 {
+    if tables > 0 && version != 4 {
         return Err(DbError::UnsupportedSchema);
     }
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
@@ -294,7 +298,7 @@ pub async fn connect(path: &Path) -> DbResult<SqlitePool> {
     crate::queue::initialize(&pool).await?;
     crate::replan_review::initialize(&pool).await?;
     seed_defaults(&pool).await?;
-    sqlx::raw_sql("PRAGMA user_version = 3")
+    sqlx::raw_sql("PRAGMA user_version = 4")
         .execute(&pool)
         .await?;
     Ok(pool)

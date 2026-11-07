@@ -11,7 +11,7 @@
      配置模型时附带 --model；续跑使用同一 session，用量以该 session 的 SQLite 账本为准。
   4. 各适配器作业的 args、prompt_chars、session 与 usage 数值和既有契约一致。
 
-codex 与 workbuddy 的参数、stdin、会话与用量由 tests/test_agent_adapters.py 与
+codex 与 codebuddy 的参数、stdin、会话与用量由 tests/test_agent_adapters.py 与
 tests/test_session_reuse.py 覆盖。本脚本只使用 Python 3 标准库与 tests/harness.py，
 以假 CLI 代替真实 Agent，不访问外网；临时数据由 temp_root 清理。
 """

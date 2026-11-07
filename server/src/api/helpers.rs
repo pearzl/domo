@@ -51,23 +51,12 @@ pub(super) async fn load_project_task(
 pub(super) fn role_label(role: &str) -> &'static str {
     match role {
         JOB_ROLE_ANALYSIS => "项目分析",
-        JOB_ROLE_DIRECT => "直接完成",
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",
         JOB_ROLE_ACCEPTANCE => "项目验收",
         JOB_ROLE_SUMMARY => "总结",
         JOB_ROLE_REPLAN_REVIEW => "重规划决策",
         ROLE_PLANNER => "规划",
-        _ => "未知",
-    }
-}
-
-pub(super) fn stage_label(stage: &str) -> &'static str {
-    match stage {
-        STAGE_ANALYSIS => "项目分析",
-        STAGE_EXECUTING => "执行",
-        STAGE_SUMMARIZING => "总结",
-        STAGE_COMPLETED => "完成",
         _ => "未知",
     }
 }

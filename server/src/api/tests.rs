@@ -138,72 +138,6 @@ async fn verification_test_state() -> (AppState, PathBuf) {
 }
 
 #[tokio::test]
-async fn user_actions_belong_to_the_current_blockage_not_historical_jobs() {
-    let (state, root) = verification_test_state().await;
-    let notice = serde_json::json!({
-        "summary": "请提供原始销售数据", "why": "缺少原始记录，无法核对报表。",
-        "owner": "数据提供方", "steps": ["上传 CSV，并告知文件路径。"],
-        "after": "记录路径并继续，AI 将核验数据并完成报表。"
-    });
-    let result = serde_json::json!({"pass": false, "reason": "原始记录缺项", "issues": [],
-        "next_action": "wait", "guidance": "核对 CSV 字段并重新计算", "user_action": notice});
-    sqlx::query("INSERT INTO jobs(id, project_id, task_id, role, status, prompt, result, created_at) VALUES('notice_job', 'prj_test', 'tsk_a', 'verifier', 'succeeded', '', ?, 't')")
-        .bind(result.to_string()).execute(&state.db).await.unwrap();
-    let cause = "原始记录缺项\n处理指导：核对 CSV 字段并重新计算";
-    sqlx::query("UPDATE tasks SET status = 'blocked', last_error = ? WHERE id = 'tsk_a'")
-        .bind(cause)
-        .execute(&state.db)
-        .await
-        .unwrap();
-    async fn action(state: &AppState) -> Option<crate::user_action::UserAction> {
-        let task: TaskRow = sqlx::query_as("SELECT * FROM tasks WHERE id = 'tsk_a'")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        crate::user_action::for_task(&state.db, &task)
-            .await
-            .unwrap()
-    }
-    assert_eq!(action(&state).await.unwrap().summary, "请提供原始销售数据");
-    for (status, error) in [
-        ("queued", cause),
-        ("paused", cause),
-        ("blocked", "另一个错误"),
-    ] {
-        sqlx::query("UPDATE tasks SET status = ?, last_error = ? WHERE id = 'tsk_a'")
-            .bind(status)
-            .bind(error)
-            .execute(&state.db)
-            .await
-            .unwrap();
-        assert!(action(&state).await.is_none());
-    }
-    sqlx::query("UPDATE tasks SET status = 'blocked', last_error = ? WHERE id = 'tsk_a'")
-        .bind(cause)
-        .execute(&state.db)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO jobs(id, project_id, task_id, role, status, prompt, created_at) VALUES('new_job', 'prj_test', 'tsk_a', 'verifier', 'running', '', 't')")
-        .execute(&state.db).await.unwrap();
-    assert!(
-        action(&state).await.is_none(),
-        "a newer attempt invalidates the old notice"
-    );
-    let snapshot = serde_json::json!({"next_action": "wait", "user_action": notice});
-    sqlx::query("UPDATE projects SET stage = 'summarizing', status = 'blocked', acceptance = ?, blocked_reason = ? WHERE id = 'prj_test'")
-        .bind(snapshot.to_string()).bind("请提供原始销售数据").execute(&state.db).await.unwrap();
-    let mut project: ProjectRow = sqlx::query_as("SELECT * FROM projects WHERE id = 'prj_test'")
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
-    assert!(crate::user_action::for_project(&project).is_some());
-    project.blocked_reason = Some("新的阻塞".into());
-    assert!(crate::user_action::for_project(&project).is_none());
-    state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[tokio::test]
 async fn default_team_reorders_wait_for_membership_lock() {
     let (state, root) = verification_test_state().await;
     for id in ["executor_a", "executor_b", "executor_c"] {
@@ -250,7 +184,7 @@ async fn default_team_reorders_wait_for_membership_lock() {
     .unwrap();
     assert_eq!(priorities, (0..members.len() as i64).collect::<Vec<_>>());
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -300,7 +234,18 @@ async fn queued_resume_commands_cannot_revive_an_archived_project() {
         .unwrap();
     assert_eq!(task_status, STATUS_PAUSED);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
+}
+
+fn cleanup(root: std::path::PathBuf) {
+    for _ in 0..20 {
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -365,7 +310,7 @@ async fn queued_analysis_commands_validate_latest_lifecycle() {
             .unwrap();
     assert_eq!(mode, CONFIRM_MANUAL);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -408,7 +353,7 @@ async fn canceled_task_rejects_delayed_resume_and_result() {
         .is_none());
     drop(transition);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -437,7 +382,7 @@ async fn result_scope_allows_draining_but_rejects_replaced_contracts() {
         .is_none());
     drop(transition);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -491,7 +436,7 @@ async fn terminal_state_guards_preserve_audit_and_family_cancellation() {
     let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = 'project_state_changed' AND json_extract(payload, '$.status') = 'running'").fetch_one(&state.db).await.unwrap();
     assert_eq!(events, 0);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -533,7 +478,7 @@ async fn ordinary_pause_keeps_inflight_results_eligible() {
         .is_none());
     drop(transition);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -563,7 +508,7 @@ async fn stale_analysis_plan_cannot_apply_before_goal_confirmation() {
     assert!(current.goal_locked_at.is_none());
     drop(_guard);
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -613,7 +558,7 @@ async fn late_workspace_failure_does_not_block_a_canceled_task_or_archived_proje
     assert_eq!(current.status.as_deref(), Some(STATUS_ARCHIVED));
     assert!(current.blocked_reason.is_none());
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -786,7 +731,7 @@ async fn retry_target_requires_the_latest_role_job_to_be_failed_or_explicitly_st
         );
     }
     state.db.close().await;
-    std::fs::remove_dir_all(root).unwrap();
+    cleanup(root);
 }
 
 #[tokio::test]
@@ -812,7 +757,7 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
         JOB_ROLE_VERIFIER,
         JOB_STATUS_SUCCEEDED,
         1,
-        Some(r#"{"pass":true,"reason":"符合验收标准","issues":[]}"#),
+        Some(r#"{"result":"pass","issues":[],"evidence":{}}"#),
         true,
         "2026-01-01T00:00:01Z",
         Some("agt_verifier"),
@@ -851,7 +796,7 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
         JOB_ROLE_VERIFIER,
         JOB_STATUS_SUCCEEDED,
         2,
-        Some(r#"{"pass":false,"reason":"测试失败","issues":["a","b"],"next_action":"execute","guidance":"修复测试"}"#),
+        Some(r#"{"result":"execute","issues":[{"title":"a"},{"title":"b"}]}"#),
         true,
         "2026-01-01T00:00:05Z",
         None,
@@ -890,7 +835,7 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
         JOB_ROLE_VERIFIER,
         JOB_STATUS_SUCCEEDED,
         3,
-        Some(r#"{"pass":true,"reason":"第二轮通过","issues":[]}"#),
+        Some(r#"{"result":"pass","issues":[],"evidence":{}}"#),
         true,
         "2026-01-01T00:00:07Z",
         Some("agt_verifier"),
@@ -949,7 +894,7 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
 
     let passed = &response.verifications[1];
     assert_eq!(passed.passed, Some(true));
-    assert_eq!(passed.reason.as_deref(), Some("符合验收标准"));
+    assert_eq!(passed.reason.as_deref(), Some("验收通过"));
     assert!(passed.parsed);
     assert!(passed.parse_error.is_none());
     assert_eq!(passed.agent_name.as_deref(), Some("验收 Agent"));
@@ -977,14 +922,14 @@ async fn verification_history_parses_orders_and_reports_unknown_results() {
 
     let rejected = &response.verifications[4];
     assert_eq!(rejected.passed, Some(false));
-    assert_eq!(rejected.reason.as_deref(), Some("测试失败"));
+    assert_eq!(rejected.reason.as_deref(), Some("a；b"));
     assert_eq!(rejected.issues, vec!["a", "b"]);
     assert_eq!(rejected.agent_name, None);
 
     let second_round = &response.verifications[5];
     assert_eq!(second_round.round, 2);
     assert_eq!(second_round.passed, Some(true));
-    assert_eq!(second_round.reason.as_deref(), Some("第二轮通过"));
+    assert_eq!(second_round.reason.as_deref(), Some("验收通过"));
 
     let empty = task_verifications(
         State(state.clone()),

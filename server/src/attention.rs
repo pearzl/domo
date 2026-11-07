@@ -157,10 +157,9 @@ pub(crate) async fn items(
                 key: task.key.clone(),
                 title: task.title.clone(),
             }),
-            reason: crate::user_action::for_task(pool, task)
-                .await?
-                .map(|action| action.summary)
-                .or_else(|| task.waiting_reason.clone())
+            reason: task
+                .waiting_reason
+                .clone()
                 .or_else(|| task.last_error.clone()),
             since: since.unwrap_or_else(|| task.updated_at.clone()),
             affected_tasks: affected.len().saturating_sub(1),

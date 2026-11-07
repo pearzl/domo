@@ -91,9 +91,6 @@ export function ProjectPage({
     goalValue,
     setGoalValue,
     goalDraftKey,
-    addTaskOpen,
-    taskForm,
-    setTaskField,
     taskView,
     setTaskView,
     taskQuery,
@@ -108,16 +105,12 @@ export function ProjectPage({
     run,
     selectTask,
     selectTab,
-    openAddTaskForm,
-    toggleAddTaskForm,
     handleArchive,
     handleMerge,
-    handleAddTask,
     resetTaskFilter,
     sendAnalysis,
     confirmProposal,
     submitReport,
-    requestReportReplan,
     abandonReplan,
     submitReplan,
     toggleReplan,
@@ -149,7 +142,6 @@ export function ProjectPage({
     selectedTaskId,
     taskQuery,
     taskFilter,
-    taskDraft: taskForm,
     message,
     busy,
     confirming,
@@ -170,14 +162,10 @@ export function ProjectPage({
     agentName,
     projectJobs,
     analysisJob,
-    directJob,
-    directMode,
     retryableProjectJobId,
     queueIds,
     taskCounts,
     searchActive,
-    draftCheck,
-    depOptions,
     replanPreview,
     activeBlock,
     badgeInput,
@@ -555,20 +543,14 @@ export function ProjectPage({
           analysisBlock
         ) : activeBlock === "tasks" ? (
           <ProjectTasksSection
-            project={project}
             tasks={tasks}
             jobs={jobs}
             activeTasks={activeTasks}
             visibleTasks={visibleTasks}
-            directMode={directMode}
-            directJob={directJob}
             archived={archived}
             busy={busy}
-            proposal={proposal}
             taskView={taskView}
             onTaskViewChange={setTaskView}
-            addTaskOpen={addTaskOpen}
-            onToggleAddTask={toggleAddTaskForm}
             taskQuery={taskQuery}
             onTaskQueryChange={setTaskQuery}
             taskFilter={taskFilter}
@@ -576,11 +558,6 @@ export function ProjectPage({
             taskCounts={taskCounts}
             searchActive={searchActive}
             onResetTaskFilter={resetTaskFilter}
-            draft={taskForm}
-            draftCheck={draftCheck}
-            depOptions={depOptions}
-            onTaskField={setTaskField}
-            onAddTask={handleAddTask}
             selectedTaskId={selectedTaskId}
             onSelectTask={selectTask}
             agentName={agentName}
@@ -600,8 +577,6 @@ export function ProjectPage({
             archived={archived}
             onSubmitReport={(action) => void submitReport(action)}
             onRetryAcceptance={() => void run(() => api.retryProjectAcceptance(project.id))}
-            onRequestReplan={requestReportReplan}
-            onAddTask={openAddTaskForm}
             onOpenTasks={() => selectTab("tasks")}
           />
         ) : (

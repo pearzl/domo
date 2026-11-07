@@ -58,7 +58,6 @@ pub(super) async fn list_projects(
             replan_reason: row.replan_reason,
             replan_source: row.replan_source,
             confirm_mode: row.confirm_mode,
-            completion_mode: row.completion_mode,
             merged_at: row.merged_at,
             merged_commit: row.merged_commit,
             created_at: row.created_at,
@@ -193,8 +192,8 @@ pub(super) async fn create_project(
     let blocked_reason = goal.is_empty().then_some("等待输入项目目标");
     let result = sqlx::query(
         "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
-         workspace_type, stage, status, blocked_reason, confirm_mode, completion_mode, \
-         created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         workspace_type, stage, status, blocked_reason, confirm_mode, \
+         created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&project_id)
     .bind(name)
@@ -208,7 +207,6 @@ pub(super) async fn create_project(
     .bind(status)
     .bind(blocked_reason)
     .bind(confirm)
-    .bind(COMPLETION_TASKS)
     .bind(&timestamp)
     .bind(&timestamp)
     .execute(&state.db)

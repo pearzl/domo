@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::{
-    parse_string_list, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT,
-    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, ROLE_EXECUTOR, ROLE_VERIFIER,
+    parse_string_list, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_REPLAN_REVIEW,
+    JOB_ROLE_SUMMARY, ROLE_EXECUTOR, ROLE_VERIFIER,
 };
 
 pub fn now() -> String {
@@ -86,24 +86,9 @@ pub enum ParsedResult {
         assumptions: Vec<String>,
         acceptance: Vec<String>,
         tasks: Vec<NormalizedTask>,
-        skip_confirmation: bool,
-    },
-    AnalysisDirect {
-        summary: String,
-        goal: Option<String>,
-        plan: Vec<String>,
-        verification: Vec<String>,
-        skip_confirmation: bool,
-    },
-    DirectDone {
-        summary: String,
-        report: String,
     },
     ExecutorDone {
         summary: String,
-    },
-    ExecutorFailed {
-        reason: String,
     },
     ExecutorReplan {
         reason: String,
@@ -113,7 +98,6 @@ pub enum ParsedResult {
         reason: String,
         guidance: String,
         resume_stage: Option<String>,
-        user_action: Option<crate::user_action::UserAction>,
     },
     ExecutorDerive {
         summary: String,
@@ -128,11 +112,16 @@ pub enum ParsedResult {
     Report {
         summary: String,
     },
+    ReportPlan {
+        plan: ProjectPlan,
+    },
     ProjectAcceptance {
         summary: String,
         criteria: Vec<AcceptanceCriterion>,
+        issues: Vec<String>,
         replan_reason: String,
         action: AcceptanceAction,
+        plan: Option<ProjectPlan>,
     },
 }
 
@@ -142,31 +131,6 @@ pub struct AcceptanceAction {
     pub next_action: String,
     pub guidance: String,
     pub report: String,
-    pub user_action: Option<crate::user_action::UserAction>,
-}
-
-fn acceptance_action(value: &Value, allowed: &[&str]) -> Result<AcceptanceAction, String> {
-    let next_action = string_field(value, "next_action").unwrap_or_default();
-    if !allowed.contains(&next_action.as_str()) {
-        return Err(format!("next_action 必须是 {}", allowed.join("、")));
-    }
-    let guidance = string_field(value, "guidance").unwrap_or_default();
-    let report = string_field(value, "report").unwrap_or_default();
-    if next_action == "report" && report.is_empty() {
-        return Err("生成报告时必须提供非空 report".into());
-    }
-    if next_action != "report" && !report.is_empty() {
-        return Err("未完成验收时不能同时提交完成报告".into());
-    }
-    if next_action != "report" && guidance.is_empty() {
-        return Err("未完成验收时必须提供非空 guidance，说明后续工作或责任方与解除条件".into());
-    }
-    Ok(AcceptanceAction {
-        next_action,
-        guidance,
-        report,
-        user_action: crate::user_action::parse(value)?,
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +150,71 @@ impl AcceptanceCriterion {
     pub fn blocks_report(&self) -> bool {
         matches!(self.verdict.as_str(), "unmet" | "unverifiable")
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectPlan {
+    pub message: String,
+    pub goal: Option<String>,
+    #[allow(dead_code)]
+    pub constraints: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub acceptance: Vec<String>,
+    pub tasks: Vec<NormalizedTask>,
+}
+
+struct IssueInput {
+    title: String,
+    detail: String,
+}
+
+fn parse_issues(value: &Value) -> Result<Vec<IssueInput>, String> {
+    let Some(items) = value.get("issues") else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = items.as_array() else {
+        return Err("issues 必须是数组".into());
+    };
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Value::String(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                check_len(text, 30, "issue")?;
+                out.push(IssueInput {
+                    title: text.to_string(),
+                    detail: String::new(),
+                });
+            }
+            Value::Object(map) => {
+                let title = map
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if title.is_empty() {
+                    return Err("issue 缺少非空 title".into());
+                }
+                check_len(title, 30, "issue title")?;
+                let detail = map
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                check_len(&detail, 400, "issue detail")?;
+                out.push(IssueInput {
+                    title: title.to_string(),
+                    detail,
+                });
+            }
+            _ => return Err("issues 必须是字符串或对象".into()),
+        }
+    }
+    Ok(out)
 }
 
 pub fn extract_json(raw: &str) -> Option<Value> {
@@ -217,7 +246,6 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
     let value = extract_json(raw).ok_or_else(|| "结果不是合法 JSON".to_string())?;
     match role {
         JOB_ROLE_ANALYSIS => parse_analysis_result(&value),
-        JOB_ROLE_DIRECT => parse_direct_result(&value),
         ROLE_EXECUTOR => parse_executor_result(&value),
         ROLE_VERIFIER => parse_verifier_result(&value),
         JOB_ROLE_SUMMARY => parse_report_result(&value),
@@ -225,39 +253,6 @@ pub fn parse_result(role: &str, raw: &str) -> Result<ParsedResult, String> {
         JOB_ROLE_REPLAN_REVIEW => parse_replan_review(&value),
         other => Err(format!("未知作业角色: {other}")),
     }
-}
-
-/// Writing results declare the exact files DOMO may stage. Keep the declaration
-/// in the immutable raw result so audit consumers can inspect the model's choice.
-pub fn commit_files(raw: &str) -> Result<Vec<String>, String> {
-    let value = extract_json(raw).ok_or("结果不是合法 JSON")?;
-    let files = value
-        .get("commit_files")
-        .and_then(Value::as_array)
-        .ok_or("写作业结果缺少 commit_files 文件数组；没有入库改动时显式填写 []")?;
-    let mut paths = Vec::new();
-    for item in files {
-        let path = item
-            .as_str()
-            .filter(|p| !p.is_empty())
-            .ok_or("commit_files 必须是非空路径字符串数组")?;
-        if !valid_commit_path(path) {
-            return Err(format!("commit_files 包含不安全路径: {path}"));
-        }
-        if !paths.iter().any(|p| p == path) {
-            paths.push(path.to_string());
-        }
-    }
-    Ok(paths)
-}
-
-pub fn valid_commit_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains(['\0', '\\', ':', '*', '?', '[', ']'])
-        && !path.starts_with('/')
-        && !path.split('/').any(|part| {
-            part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
-        })
 }
 
 fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
@@ -286,7 +281,6 @@ fn parse_replan_review(value: &Value) -> Result<ParsedResult, String> {
         decision,
         reason,
         guidance,
-        user_action: crate::user_action::parse(value)?,
         resume_stage: match string_field(value, "resume_stage") {
             Some(stage) if !matches!(stage.as_str(), "executing" | "verifying") => {
                 return Err("resume_stage 必须是 executing 或 verifying".into());
@@ -313,20 +307,7 @@ fn parse_analysis_result(value: &Value) -> Result<ParsedResult, String> {
         }
         return Ok(ParsedResult::Questions { questions, summary });
     }
-    let skip_confirmation = value
-        .get("skip_confirmation")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let goal = string_field(value, "goal");
-    if kind == "direct" {
-        return Ok(ParsedResult::AnalysisDirect {
-            summary,
-            goal,
-            plan: string_array(value.get("plan")),
-            verification: string_array(value.get("verification")),
-            skip_confirmation,
-        });
-    }
     if !matches!(kind, "" | "plan") {
         return Err(format!("未知项目分析结果类型: {kind}"));
     }
@@ -351,25 +332,7 @@ fn parse_analysis_result(value: &Value) -> Result<ParsedResult, String> {
         assumptions: string_array(value.get("assumptions")),
         acceptance: string_array(value.get("acceptance")),
         tasks,
-        skip_confirmation,
     })
-}
-
-fn parse_direct_result(value: &Value) -> Result<ParsedResult, String> {
-    if let Some(reason) = parse_project_failure(value) {
-        return Err(reason);
-    }
-    let kind = value
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if !matches!(kind, "direct_done" | "report" | "done") {
-        return Err(format!("直接完成结果类型不合法: {kind}"));
-    }
-    let report =
-        string_field(value, "report").ok_or_else(|| "直接完成结果缺少 report".to_string())?;
-    let summary = string_field(value, "summary").unwrap_or_else(|| "直接完成".into());
-    Ok(ParsedResult::DirectDone { summary, report })
 }
 
 fn parse_executor_result(value: &Value) -> Result<ParsedResult, String> {
@@ -412,22 +375,6 @@ fn parse_executor_result(value: &Value) -> Result<ParsedResult, String> {
             tasks,
         });
     }
-    let failed = value
-        .get("failed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-        || kind
-            .map(|v| v == "failed" || v == "blocked")
-            .unwrap_or(false);
-    if failed {
-        return Ok(ParsedResult::ExecutorFailed {
-            reason: if reason.is_empty() {
-                "执行者报告失败".into()
-            } else {
-                reason
-            },
-        });
-    }
     let summary = string_field(value, "summary")
         .or_else(|| string_field(value, "result"))
         .unwrap_or_else(|| "执行完成".into());
@@ -435,42 +382,70 @@ fn parse_executor_result(value: &Value) -> Result<ParsedResult, String> {
 }
 
 fn parse_verifier_result(value: &Value) -> Result<ParsedResult, String> {
-    let pass = value
-        .get("pass")
-        .and_then(|v| v.as_bool())
-        .or_else(|| {
-            value
-                .get("verdict")
-                .and_then(|v| v.as_str())
-                .map(|v| v == "pass" || v == "passed")
-        })
-        .ok_or_else(|| "验收结果缺少 pass 布尔值".to_string())?;
-    let reason = string_field(value, "reason")
-        .or_else(|| string_field(value, "summary"))
-        .unwrap_or_else(|| {
-            if pass {
-                "验收通过".into()
+    let result = string_field(value, "result")
+        .ok_or_else(|| "验收结果缺少 result，必须是 pass、execute 或 request".to_string())?;
+    let parsed = parse_issues(value)?;
+    let issues: Vec<String> = parsed
+        .iter()
+        .map(|issue| {
+            if issue.detail.is_empty() {
+                issue.title.clone()
             } else {
-                "验收未通过".into()
+                format!("{}：{}", issue.title, issue.detail)
             }
-        });
-    let mut issues = string_array(value.get("issues"));
-    if issues.is_empty() && !pass && !reason.is_empty() {
-        issues.push(reason.clone());
-    }
-    Ok(ParsedResult::Verdict {
-        pass,
-        reason,
-        action: if pass {
+        })
+        .collect();
+    match result.as_str() {
+        "pass" => {
             if !issues.is_empty() {
                 return Err("验收通过时 issues 必须为空".into());
             }
-            AcceptanceAction::default()
-        } else {
-            acceptance_action(value, &["execute", "wait", "review"])?
-        },
-        issues,
-    })
+            Ok(ParsedResult::Verdict {
+                pass: true,
+                reason: "验收通过".into(),
+                issues,
+                action: AcceptanceAction::default(),
+            })
+        }
+        "execute" | "request" => {
+            if issues.is_empty() {
+                return Err(format!("{result} 结果必须至少包含一条 issues"));
+            }
+            let reason = parsed
+                .iter()
+                .map(|issue| issue.title.clone())
+                .collect::<Vec<_>>()
+                .join("；");
+            let guidance = parsed
+                .iter()
+                .map(|issue| {
+                    if issue.detail.is_empty() {
+                        issue.title.clone()
+                    } else {
+                        issue.detail.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            Ok(ParsedResult::Verdict {
+                pass: false,
+                reason,
+                issues,
+                action: AcceptanceAction {
+                    next_action: if result == "execute" {
+                        "execute".into()
+                    } else {
+                        "review".into()
+                    },
+                    guidance,
+                    report: String::new(),
+                },
+            })
+        }
+        other => Err(format!(
+            "result 必须是 pass、execute 或 request，实际为 {other}"
+        )),
+    }
 }
 
 /// A project failure reason is user-authored task content, not evidence of
@@ -484,61 +459,125 @@ fn parse_report_result(value: &Value) -> Result<ParsedResult, String> {
     if let Some(reason) = parse_project_failure(value) {
         return Err(reason);
     }
+    if value.get("kind").and_then(Value::as_str) == Some("plan") {
+        return Ok(ParsedResult::ReportPlan {
+            plan: parse_plan_value(value)?,
+        });
+    }
     let summary = string_field(value, "report")
         .or_else(|| string_field(value, "summary"))
         .ok_or_else(|| "总结结果缺少 report 内容".to_string())?;
     Ok(ParsedResult::Report { summary })
 }
 
+fn parse_plan_value(plan: &Value) -> Result<ProjectPlan, String> {
+    let tasks_value = plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "plan 缺少 tasks 数组".to_string())?;
+    let mut raw_tasks = Vec::new();
+    for item in tasks_value {
+        raw_tasks.push(PlanTask {
+            key: string_field(item, "key").unwrap_or_default(),
+            title: string_field(item, "title").unwrap_or_default(),
+            description: string_field(item, "description").unwrap_or_default(),
+            acceptance: string_array(item.get("acceptance")),
+            deps: string_array(item.get("deps")),
+        });
+    }
+    Ok(ProjectPlan {
+        message: string_field(plan, "message").unwrap_or_default(),
+        goal: string_field(plan, "goal"),
+        constraints: string_array(plan.get("constraints")),
+        assumptions: string_array(plan.get("assumptions")),
+        acceptance: string_array(plan.get("acceptance")),
+        tasks: validate_plan(raw_tasks)?,
+    })
+}
+
 fn parse_acceptance_result(value: &Value) -> Result<ParsedResult, String> {
     if let Some(reason) = parse_project_failure(value) {
         return Err(reason);
     }
-    let kind = value
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if kind != "project_acceptance" {
-        return Err(format!("项目验收结果类型不合法: {kind}"));
-    }
-    let items = value
-        .get("criteria")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "项目验收结果缺少 criteria 数组".to_string())?;
-    if items.is_empty() {
-        return Err("项目验收结果 criteria 不能为空".to_string());
-    }
-    let mut criteria = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let verdict = string_field(item, "verdict")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !matches!(
-            verdict.as_str(),
-            "met" | "unmet" | "unverifiable" | "human_required"
-        ) {
-            return Err(format!("项目验收条目 verdict 不合法: {verdict}"));
+    let result = string_field(value, "result")
+        .ok_or_else(|| "项目验收结果缺少 result，必须是 deliver 或 execute".to_string())?;
+    let parsed = parse_issues(value)?;
+    let issues: Vec<String> = parsed
+        .iter()
+        .map(|issue| {
+            if issue.detail.is_empty() {
+                issue.title.clone()
+            } else {
+                format!("{}：{}", issue.title, issue.detail)
+            }
+        })
+        .collect();
+    match result.as_str() {
+        "deliver" => {
+            let report = string_field(value, "report")
+                .ok_or_else(|| "deliver 必须提交非空 report".to_string())?;
+            if value.get("plan").is_some() {
+                return Err("deliver 不能同时提交 plan".into());
+            }
+            let summary = report
+                .lines()
+                .next()
+                .unwrap_or("项目验收通过")
+                .chars()
+                .take(80)
+                .collect();
+            Ok(ParsedResult::ProjectAcceptance {
+                summary,
+                criteria: Vec::new(),
+                issues,
+                replan_reason: String::new(),
+                action: AcceptanceAction {
+                    next_action: "report".into(),
+                    guidance: String::new(),
+                    report,
+                },
+                plan: None,
+            })
         }
-        criteria.push(AcceptanceCriterion {
-            id: string_field(item, "id").unwrap_or_else(|| format!("A{}", index + 1)),
-            source: string_field(item, "source").unwrap_or_else(|| "goal".into()),
-            criterion: string_field(item, "criterion")
-                .ok_or_else(|| "项目验收条目缺少 criterion".to_string())?,
-            verdict,
-            evidence: string_array(item.get("evidence")),
-            gap: string_field(item, "gap").unwrap_or_default(),
-        });
+        "execute" => {
+            if issues.is_empty() {
+                return Err("execute 必须至少包含一条 issues".into());
+            }
+            let plan = value
+                .get("plan")
+                .ok_or_else(|| "execute 必须提交完整 plan".to_string())?;
+            let plan = parse_plan_value(plan)?;
+            let gap = issues.join("；");
+            Ok(ParsedResult::ProjectAcceptance {
+                plan: Some(plan),
+                summary: "项目验收需要更多 Agent 工作".into(),
+                criteria: vec![AcceptanceCriterion {
+                    id: "A1".into(),
+                    source: "goal".into(),
+                    criterion: "项目验收".into(),
+                    verdict: "unmet".into(),
+                    evidence: Vec::new(),
+                    gap: gap.clone(),
+                }],
+                issues,
+                replan_reason: gap.clone(),
+                action: AcceptanceAction {
+                    next_action: "replan".into(),
+                    guidance: gap,
+                    report: String::new(),
+                },
+            })
+        }
+        other => Err(format!("result 必须是 deliver 或 execute，实际为 {other}")),
     }
-    let action = acceptance_action(value, &["report", "wait", "replan", "arbitrate"])?;
-    if action.next_action == "report" && criteria.iter().any(AcceptanceCriterion::blocks_report) {
-        return Err("存在未满足或无法验证条目，不能生成完成报告".into());
+}
+
+fn check_len(text: &str, max: usize, label: &str) -> Result<(), String> {
+    if text.chars().count() > max {
+        Err(format!("{label} 不能超过 {max} 字"))
+    } else {
+        Ok(())
     }
-    Ok(ParsedResult::ProjectAcceptance {
-        summary: string_field(value, "summary").unwrap_or_default(),
-        criteria,
-        replan_reason: string_field(value, "replan_reason").unwrap_or_default(),
-        action,
-    })
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -836,71 +875,6 @@ fn detect_cycle(tasks: &[NormalizedTask]) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates one human-added task against the project's active tasks. The
-/// returned task keeps the project DAG acyclic and falls back to the plan
-/// defaults for missing acceptance criteria.
-pub fn validate_manual_task(
-    active: &[NormalizedTask],
-    key: &str,
-    title: &str,
-    description: &str,
-    acceptance: Vec<String>,
-    deps: Vec<String>,
-) -> Result<NormalizedTask, String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("任务 key 不能为空".into());
-    }
-    if key.len() > 32 {
-        return Err(format!("任务 key 过长: {key}"));
-    }
-    if active.iter().any(|task| task.key == key) {
-        return Err(format!("任务 key 已存在: {key}"));
-    }
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return Err(format!("任务 {key} 缺少标题"));
-    }
-    let description = description.trim().to_string();
-    if description.is_empty() {
-        return Err(format!("任务 {key} 缺少描述"));
-    }
-    let mut acceptance: Vec<String> = acceptance
-        .into_iter()
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-        .collect();
-    if acceptance.is_empty() {
-        acceptance.push("实现任务描述中的要求，并通过项目已有测试".into());
-    }
-    let deps = normalize_deps(deps);
-    let keys: HashSet<String> = active.iter().map(|task| task.key.clone()).collect();
-    for dep in &deps {
-        if dep == key {
-            return Err(format!("任务 {key} 不能依赖自身"));
-        }
-        if !keys.contains(dep) {
-            return Err(format!("任务 {key} 依赖了不存在的任务 {dep}"));
-        }
-    }
-    let mut tasks = active.to_vec();
-    tasks.push(NormalizedTask {
-        key: key.to_string(),
-        title: title.clone(),
-        description: description.clone(),
-        acceptance: acceptance.clone(),
-        deps: deps.clone(),
-    });
-    detect_cycle(&tasks)?;
-    Ok(NormalizedTask {
-        key: key.to_string(),
-        title,
-        description,
-        acceptance,
-        deps,
-    })
-}
-
 pub fn deps_complete(deps: &[String], completed: &HashSet<String>) -> bool {
     deps.iter().all(|dep| completed.contains(dep))
 }
@@ -1022,16 +996,11 @@ pub fn classify_job_failure(
     if !process_failure
         && raw.is_some_and(|raw| {
             matches!(
-                parse_result(role, raw),
-                Ok(ParsedResult::ExecutorFailed { .. })
-            ) || (matches!(
                 role,
                 crate::models::JOB_ROLE_ANALYSIS
-                    | crate::models::JOB_ROLE_DIRECT
                     | crate::models::JOB_ROLE_ACCEPTANCE
                     | crate::models::JOB_ROLE_SUMMARY
-            ) && extract_json(raw)
-                .is_some_and(|value| parse_project_failure(&value).is_some()))
+            ) && extract_json(raw).is_some_and(|value| parse_project_failure(&value).is_some())
         })
     {
         FailureKind::Task
@@ -1171,31 +1140,7 @@ fn parse_amount(text: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn writing_results_require_an_explicit_file_array() {
-        assert!(super::commit_files(r#"{"kind":"done"}"#).is_err());
-        assert!(super::commit_files(r#"{"commit_files":"src/file"}"#).is_err());
-        assert!(super::commit_files(r#"{"commit_files":[null]}"#).is_err());
-        assert!(super::commit_files(r#"{"commit_files":[""]}"#).is_err());
-        assert!(super::commit_files(r#"{"commit_files":[]}"#)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            super::commit_files(r#"{"commit_files":["old","new","old"]}"#).unwrap(),
-            vec!["old", "new"]
-        );
-    }
     use super::*;
-
-    fn task(key: &str, deps: &[&str]) -> PlanTask {
-        PlanTask {
-            key: key.into(),
-            title: format!("task {key}"),
-            description: "do something".into(),
-            acceptance: vec!["works".into()],
-            deps: deps.iter().map(|v| v.to_string()).collect(),
-        }
-    }
 
     #[test]
     fn rejects_cycle() {
@@ -1296,14 +1241,12 @@ mod tests {
                 assumptions,
                 acceptance,
                 tasks,
-                skip_confirmation,
                 ..
             } => {
                 assert_eq!(goal.as_deref(), Some("g"));
                 assert_eq!(assumptions, vec!["a"]);
                 assert_eq!(acceptance, vec!["b"]);
                 assert_eq!(tasks.len(), 1);
-                assert!(skip_confirmation);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1319,118 +1262,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_analysis_direct() {
-        let direct = r#"{"kind":"direct","summary":"s","goal":"g","plan":["p"],"verification":["v"],"skip_confirmation":false}"#;
-        match parse_result(JOB_ROLE_ANALYSIS, direct).unwrap() {
-            ParsedResult::AnalysisDirect {
-                goal,
-                plan,
-                verification,
-                ..
-            } => {
-                assert_eq!(goal.as_deref(), Some("g"));
-                assert_eq!(plan, vec!["p"]);
-                assert_eq!(verification, vec!["v"]);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_direct_completion_report() {
-        let raw = r#"{"kind":"direct_done","summary":"s","report":"report body"}"#;
-        match parse_result(JOB_ROLE_DIRECT, raw).unwrap() {
-            ParsedResult::DirectDone { report, .. } => assert_eq!(report, "report body"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_project_acceptance_and_only_blocks_on_agent_gaps() {
-        let raw = r#"{"kind":"project_acceptance","summary":"s","criteria":[
-            {"id":"A1","criterion":"产物可运行","verdict":"met","evidence":["command: check -> exit 0"]},
-            {"id":"A2","criterion":"人工签字","verdict":"human_required","evidence":[]},
-            {"id":"A3","criterion":"缺失的能力","verdict":"unmet","gap":"尚未实现"}
-        ],"next_action":"replan","guidance":"修复缺失能力"}"#;
-        match parse_result(JOB_ROLE_ACCEPTANCE, raw).unwrap() {
-            ParsedResult::ProjectAcceptance {
-                summary, criteria, ..
-            } => {
-                assert_eq!(summary, "s");
-                assert_eq!(criteria.len(), 3);
-                assert_eq!(criteria[0].source, "goal");
-                assert_eq!(
-                    criteria
-                        .iter()
-                        .filter(|item| item.blocks_report())
-                        .map(|item| item.id.as_str())
-                        .collect::<Vec<_>>(),
-                    vec!["A3"]
-                );
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_project_acceptance_without_criteria_or_verdict() {
-        assert!(parse_result(JOB_ROLE_ACCEPTANCE, r#"{"kind":"project_acceptance"}"#).is_err());
-        assert!(parse_result(
-            JOB_ROLE_ACCEPTANCE,
-            r#"{"kind":"project_acceptance","criteria":[{"criterion":"x","verdict":"maybe"}]}"#
-        )
-        .is_err());
-    }
-
-    #[test]
     fn rejects_empty_analysis_plan() {
         let raw = r#"{"kind":"plan","tasks":[]}"#;
         assert!(parse_result(JOB_ROLE_ANALYSIS, raw).is_err());
-    }
-
-    #[test]
-    fn parses_verdict() {
-        let raw = r#"{"pass":false,"reason":"tests fail","issues":["a"],"next_action":"execute","guidance":"修复测试"}"#;
-        match parse_result(ROLE_VERIFIER, raw).unwrap() {
-            ParsedResult::Verdict { pass, issues, .. } => {
-                assert!(!pass);
-                assert_eq!(issues, vec!["a"]);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn acceptance_dispositions_require_explicit_actions_and_truthful_reports() {
-        for action in ["execute", "wait", "review"] {
-            let raw = format!(
-                r#"{{"pass":false,"reason":"设备缺项","next_action":"{action}","guidance":"用户补齐后重新核验"}}"#
-            );
-            assert!(parse_result(ROLE_VERIFIER, &raw).is_ok());
-        }
-        for raw in [
-            r#"{"pass":false}"#,
-            r#"{"pass":false,"next_action":"wait"}"#,
-            r#"{"pass":false,"next_action":"approve","guidance":"x"}"#,
-            r#"{"pass":true,"issues":["缺少证据"]}"#,
-        ] {
-            assert!(parse_result(ROLE_VERIFIER, raw).is_err());
-        }
-        for verdict in ["met", "unmet", "unverifiable", "human_required"] {
-            for action in ["report", "wait", "replan", "arbitrate"] {
-                let report = if action == "report" { "报告" } else { "" };
-                let raw = format!(
-                    r#"{{"kind":"project_acceptance","criteria":[{{"criterion":"核验报告","verdict":"{verdict}"}}],"next_action":"{action}","guidance":"补齐条件","report":"{report}"}}"#
-                );
-                let expected = action != "report" || matches!(verdict, "met" | "human_required");
-                assert_eq!(
-                    parse_result(JOB_ROLE_ACCEPTANCE, &raw).is_ok(),
-                    expected,
-                    "{raw}"
-                );
-            }
-        }
-        assert!(parse_result(JOB_ROLE_ACCEPTANCE, r#"{"kind":"project_acceptance","criteria":[{"criterion":"x","verdict":"met"}],"next_action":"report","report":" "}"#).is_err());
     }
 
     #[test]
@@ -1461,6 +1295,16 @@ mod tests {
         .is_err());
         assert!(parse_result(JOB_ROLE_REPLAN_REVIEW, r#"{"kind":"plan","tasks":[]}"#).is_err());
         assert!(matches!(parse_result(JOB_ROLE_REPLAN_REVIEW, r#"{"kind":"plan","tasks":[{"key":"T1","title":"替代任务","description":"明确范围"}]}"#).unwrap(), ParsedResult::AnalysisPlan { .. }));
+    }
+
+    fn task(key: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            key: key.into(),
+            title: format!("任务 {key}"),
+            description: "完成测试任务".into(),
+            acceptance: vec!["产物存在".into()],
+            deps: deps.iter().map(|v| v.to_string()).collect(),
+        }
     }
 
     fn derive_task(key: &str, deps: &[&str]) -> PlanTask {
@@ -1616,82 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_task_collapses_duplicate_dependencies() {
-        let active = vec![normalized("A", &[]), normalized("B", &["A"])];
-        let task = validate_manual_task(
-            &active,
-            "C",
-            "补充任务",
-            "完成补充工作",
-            vec!["产物存在".into()],
-            vec!["B".into(), "A".into(), "B".into()],
-        )
-        .unwrap();
-        assert_eq!(task.deps, vec!["B".to_string(), "A".to_string()]);
-    }
-
-    #[test]
-    fn manual_task_accepts_valid_task() {
-        let active = vec![normalized("T1", &[]), normalized("T2", &["T1"])];
-        let task = validate_manual_task(
-            &active,
-            "T3",
-            "补充任务",
-            "完成补充工作",
-            vec![" 产物存在 ".into()],
-            vec![" T2 ".into(), "".into()],
-        )
-        .unwrap();
-        assert_eq!(task.key, "T3");
-        assert_eq!(task.deps, vec!["T2".to_string()]);
-        assert_eq!(task.acceptance, vec!["产物存在".to_string()]);
-    }
-
-    #[test]
-    fn manual_task_fills_default_acceptance() {
-        let task = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), Vec::new()).unwrap();
-        assert!(!task.acceptance.is_empty());
-    }
-
-    #[test]
-    fn manual_task_rejects_cycle() {
-        let active = vec![normalized("B", &["A"])];
-        let error =
-            validate_manual_task(&active, "A", "标题", "描述", Vec::new(), vec!["B".into()])
-                .unwrap_err();
-        assert!(error.contains("环"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn manual_task_rejects_duplicate_key() {
-        let active = vec![normalized("T1", &[])];
-        let error = validate_manual_task(&active, "T1", "标题", "描述", Vec::new(), Vec::new())
-            .unwrap_err();
-        assert!(error.contains("已存在"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn manual_task_rejects_missing_dependency() {
-        let error = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), vec!["T9".into()])
-            .unwrap_err();
-        assert!(error.contains("不存在"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn manual_task_rejects_self_dependency() {
-        let error = validate_manual_task(&[], "T1", "标题", "描述", Vec::new(), vec!["T1".into()])
-            .unwrap_err();
-        assert!(error.contains("自身"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn manual_task_rejects_missing_fields() {
-        assert!(validate_manual_task(&[], "", "标题", "描述", Vec::new(), Vec::new()).is_err());
-        assert!(validate_manual_task(&[], "T1", " ", "描述", Vec::new(), Vec::new()).is_err());
-        assert!(validate_manual_task(&[], "T1", "标题", " ", Vec::new(), Vec::new()).is_err());
-    }
-
-    #[test]
     fn slug_is_stable() {
         assert_eq!(slug("Hello World!"), "hello-world");
         assert_eq!(slug("***"), "task");
@@ -1749,25 +1517,6 @@ mod tests {
             classify_failure("request id 14290", false),
             FailureKind::Task
         );
-    }
-
-    #[test]
-    fn task_results_cannot_drive_provider_health_or_spend_other_budgets() {
-        for reason in [
-            "SDK credentials provider 含 session token；尚未完成验收",
-            "HTTP 429 quota network timeout unavailable forbidden；测试失败",
-            "结果协议不合法: 用户业务解析失败",
-            "aws.rs:401-403，认证与 status 字段未完成",
-        ] {
-            let raw = serde_json::json!({"kind":"failed", "reason":reason}).to_string();
-            assert_eq!(
-                classify_job_failure(ROLE_EXECUTOR, Some(&raw), reason, false),
-                FailureKind::Task
-            );
-        }
-        assert_eq!(task_failure_attempts(2, FailureKind::Transient), 2);
-        assert_eq!(task_failure_attempts(2, FailureKind::Task), 3);
-        assert_eq!(task_failure_attempts(2, FailureKind::Protocol), 2);
     }
 
     #[test]

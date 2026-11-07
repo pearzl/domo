@@ -5,7 +5,7 @@
   1. Agent 进程退出码为 0 但没有写 result.json 时，DOMO 在同一作业、
      同一 OpenCode session 内追加包含缺失原因、当前契约和结果路径的提示；
      Agent 只有收到这些信息才实际写入结果。
-   2. 同一作业最多追加 5 轮继续提示；5 轮后仍没有结果时直接协议失败并
+   2. 同一作业最多追加 2 轮结果缺失续写；2 轮后仍没有结果时直接协议失败并
       阻塞任务，不切换到下一优先级 Agent。
    3. 非法结果携带具体校验错误在同一会话内纠错；耗尽预算后直接阻塞。
    4. 合法任务失败正文中的 provider、HTTP 状态码等不影响 Agent 健康；
@@ -238,7 +238,7 @@ def main():
         assert "派生子任务" in executor_entries[1]["prompt"], executor_entries[1]
         assert "未能读取结果文件" in executor_entries[1]["prompt"], executor_entries[1]
 
-        # 2. 最多 5 轮继续后仍无结果：协议失败并阻塞，不切换 Agent。
+        # 2. 最多 2 轮结果缺失续写后仍无结果：协议失败并阻塞，不切换 Agent。
         log2 = temp / "opencode-2.jsonl"
         state2 = temp / "state-2"
         env2 = {
@@ -281,7 +281,7 @@ def main():
 
         never_entries = [entry for entry in entries if entry["model"] == "never"]
         backup_entries = [entry for entry in entries if entry["model"] == "continue"]
-        assert len(never_entries) == 6, never_entries
+        assert len(never_entries) == 3, never_entries
         assert not backup_entries, backup_entries
         assert all(entry["session"] == never_entries[0]["session"] for entry in never_entries)
         assert all("继续" in entry["prompt"] for entry in never_entries[1:]), never_entries[1:]

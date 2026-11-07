@@ -44,6 +44,12 @@ export function DeliveryPanel({ detail, onSaved }: { detail: ProjectDetail; onSa
         <strong>{item.verdict} · {item.criterion}</strong><p>{item.evidence.join("；")}</p>{item.gap ? <p>风险 / 缺口：{item.gap}</p> : null}
       </li>)}</ul>
     </details> : null}
+    {detail.project.stage === "completed" ? <details className="reference-fold"><summary>最终交付记录</summary>
+      <p>被验收版本：{detail.project.accepted_commit ?? "未记录"}；合入版本：{detail.project.merged_commit ?? "未合入"}</p>
+      <p>接受时间：{detail.project.merged_at ?? "见验收记录"}；接受理由：{detail.project.accept_reason ?? "无"}</p>
+      <p>合入时 base 已前进：{detail.project.merge_rebased ? "是" : "否"}；冲突由 Agent 解决：{detail.project.merge_agent_resolved ? "是" : "否"}</p>
+      {detail.project.merge_conflicts?.length ? <p>冲突文件：{detail.project.merge_conflicts.join("、")}</p> : null}
+    </details> : null}
     {delivery.merge_operation?.error ? <div className="error-box">
       合入操作 {delivery.merge_operation.phase}：{delivery.merge_operation.error}
       <p>目标操作前引用：{delivery.merge_operation.base_before}；项目操作前引用：{delivery.merge_operation.project_before}</p>
@@ -52,8 +58,8 @@ export function DeliveryPanel({ detail, onSaved }: { detail: ProjectDetail; onSa
     <details><summary>契约版本与方案差异（{delivery.contracts.length}）</summary>
       {delivery.contracts.map((item, index) => {
         const before = delivery.contracts[index - 1];
-        const criteria = item.proposal?.acceptance ?? item.proposal?.verification ?? [];
-        const oldCriteria = before?.proposal?.acceptance ?? before?.proposal?.verification ?? [];
+        const criteria = item.proposal?.acceptance ?? [];
+        const oldCriteria = before?.proposal?.acceptance ?? [];
         return <details key={item.id}><summary>#{item.id} · {formatTime(item.created_at)} · {item.source}</summary>
           <RichContent content={item.goal} />
           {before && before.goal !== item.goal ? <p>目标发生变化：{before.goal} → {item.goal}</p> : null}

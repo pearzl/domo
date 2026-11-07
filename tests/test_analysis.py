@@ -161,57 +161,10 @@ def main():
             assert any(job["role"] == "analysis" for job in auto_detail["jobs"]), auto_detail["jobs"]
             call("POST", f"/api/projects/{auto['id']}/archive?force=true", {})
 
-            # 4. 人工确认的直接完成：确认前不修改仓库，确认后提交并生成报告。
-            direct = create_project("Direct")
-            submit(direct["id"], "[direct] 直接完成一个简单目标")
-            proposal = wait_proposal(direct["id"], "direct")
-            branch = proposal["project"]["branch"]
-            result = subprocess.run(
-                ["git", "-C", str(repo), "show", f"{branch}:domo_mock/direct.txt"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            assert result.returncode != 0, "人工确认前仓库不应出现产物"
-            call("POST", f"/api/projects/{direct['id']}/analysis/confirm", {})
-            direct_done = wait_report(direct["id"])
-            assert direct_done["project"]["completion_mode"] == "direct", direct_done["project"]
-            assert direct_done["tasks"] == [], direct_done["tasks"]
-            assert any(job["role"] == "direct" for job in direct_done["jobs"]), direct_done["jobs"]
-            assert [item["kind"] for item in project_summary(direct["id"])["attention_items"]] == ["review"]
-            content = git(["show", f"{branch}:domo_mock/direct.txt"], repo)
-            assert "mock direct completion" in content, content
-
-            # 4.1 只重写报告，不重新执行直接完成。
-            call(
-                "POST",
-                f"/api/projects/{direct['id']}/report",
-                {"action": "reject", "feedback": "请补充报告使用说明。"},
-            )
-            redone = wait_project(
-                direct["id"],
-                lambda detail: detail["project"]["report"]
-                and sum(1 for job in detail["jobs"] if job["role"] == "summary") == 1,
-                "直接完成报告重写",
-            )
-            assert redone["project"]["completion_mode"] == "direct", redone["project"]
-            assert sum(job["role"] == "direct" for job in redone["jobs"]) == 1
-            call("POST", f"/api/projects/{direct['id']}/report", {"action": "accept"})
-            assert [item["kind"] for item in project_summary(direct["id"])["attention_items"]] == ["merge"]
-
-            # 5. 自动确认的直接完成：不需要人工确认。
-            auto_direct = create_project("AutoDirect")
-            submit(auto_direct["id"], "[direct] 自动直接完成", "auto")
-            auto_direct_done = wait_report(auto_direct["id"])
-            assert any(
-                job["role"] == "direct" for job in auto_direct_done["jobs"]
-            ), auto_direct_done["jobs"]
-            assert auto_direct_done["project"]["confirm_mode"] == "auto", auto_direct_done["project"]
-
             # 6. 人工确认模式忽略规划者的跳过请求。
             forced = create_project("ForcedManual")
             submit(forced["id"], "[skipforce] 人工确认不能被跳过")
             forced_ready = wait_proposal(forced["id"], "plan")
-            assert forced_ready["proposal"]["skip_confirmation"] is True, forced_ready["proposal"]
             assert forced_ready["project"]["stage"] == "analysis", forced_ready["project"]
             assert forced_ready["project"]["status"] == "blocked", forced_ready["project"]
             call("POST", f"/api/projects/{forced['id']}/analysis/confirm", {})
@@ -277,7 +230,6 @@ def main():
                 assert proposed["tasks"] == [], proposed["tasks"]
                 call("POST", f"/api/projects/{project_id}/analysis/confirm", {})
                 completed = wait_report(project_id)
-                assert completed["project"]["completion_mode"] == "tasks"
                 assert len(completed["tasks"]) == 1, completed["tasks"]
                 assert completed["tasks"][0]["stage"] == "completed"
                 succeeded = [

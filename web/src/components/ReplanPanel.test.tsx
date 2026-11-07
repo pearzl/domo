@@ -24,7 +24,6 @@ const project: Project = {
   replan_requested_at: null,
   confirm_mode: "auto",
   confirmed_at: "2026-01-01T00:00:00Z",
-  completion_mode: "tasks",
   merged_at: null,
   merged_commit: null,
   created_at: "2026-01-01T00:00:00Z",
@@ -43,13 +42,10 @@ describe("安全重规划入口", () => {
         busy={false}
         archived={false}
         onSubmitReport={() => {}}
-        onRequestReplan={() => {}}
-        onAddTask={() => {}}
       />,
     );
-    expect(markup).toContain("要求重新规划");
-    expect(markup).toContain("先预览影响");
-    expect(markup).toContain("确认草稿时才应用");
+    expect(markup).toContain("驳回");
+    expect(markup).toContain("由规划者判断");
   });
 
   it("主动修改目标与方案影响确认是两个独立步骤", () => {

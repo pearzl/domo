@@ -115,7 +115,6 @@ function detail(tasks: Task[], jobs: JobSummary[] = []): ProjectDetail {
       replan_requested_at: null,
       confirm_mode: "manual",
       confirmed_at: null,
-      completion_mode: "tasks",
       merged_at: null,
       merged_commit: null,
       created_at: at(0),

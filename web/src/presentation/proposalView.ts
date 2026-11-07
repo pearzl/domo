@@ -6,8 +6,6 @@ export const PROPOSAL_SECTION_KEYS = [
   "assumptions",
   "acceptance",
   "tasks",
-  "plan",
-  "verification",
 ] as const;
 
 export type ProposalSectionKey = (typeof PROPOSAL_SECTION_KEYS)[number];
@@ -17,8 +15,6 @@ export const PROPOSAL_SECTION_LABELS: Record<ProposalSectionKey, string> = {
   assumptions: "假设",
   acceptance: "验收口径",
   tasks: "任务方案",
-  plan: "执行步骤",
-  verification: "自检方式",
 };
 
 /// 任务方案小节标题固定带数量，便于不开卡片就能看出拆分规模。
@@ -48,8 +44,6 @@ export function proposalSize(proposal: AnalysisProposal): number {
     (proposal.goal?.length ?? 0) +
     lengthOf(proposal.assumptions) +
     lengthOf(proposal.acceptance) +
-    lengthOf(proposal.plan) +
-    lengthOf(proposal.verification) +
     proposal.tasks.reduce(
       (total, task) =>
         total +
@@ -73,16 +67,12 @@ export function proposalSections(proposal: AnalysisProposal): ProposalSection[] 
     assumptions: proposal.assumptions.length,
     acceptance: proposal.acceptance.length,
     tasks: proposal.tasks.length,
-    plan: proposal.plan.length,
-    verification: proposal.verification.length,
   };
   const filled: Record<ProposalSectionKey, boolean> = {
     goal: !!proposal.goal?.trim(),
     assumptions: counts.assumptions > 0,
     acceptance: counts.acceptance > 0,
     tasks: counts.tasks > 0,
-    plan: counts.plan > 0,
-    verification: counts.verification > 0,
   };
   const long = isLongProposal(proposal);
   return PROPOSAL_SECTION_KEYS.map((key) => ({
@@ -165,21 +155,6 @@ export function confirmImpact(
       note: replan.high_impact
         ? "这是高影响重规划草稿；生成后由 DOMO 自动应用，不受方案确认方式影响。"
         : "这是低影响重规划草稿；生成后由 DOMO 自动应用，不受方案确认方式影响。",
-    };
-  }
-  if (proposal.kind === "direct") {
-    return {
-      items: [
-        activeTasks.length > 0
-          ? `已有 ${activeTasks.length} 个任务，不能改为直接完成`
-          : "不拆分任务，规划者一次性完成实现与自检",
-        "项目进入执行阶段并派发直接完成作业",
-        "完成后生成项目报告，仍需你在报告选项卡验收",
-      ],
-      note:
-        mode === "auto"
-          ? "自动确认只跳过方案确认，报告验收始终由你完成。"
-          : "当前为人工确认，需要你在这里点击确认。",
     };
   }
   const counts = proposal.tasks.length

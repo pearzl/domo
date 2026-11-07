@@ -171,19 +171,6 @@ async fn recover(state: &AppState) -> Result<()> {
             .bind(STAGE_ANALYSIS)
             .execute(&state.db)
             .await?;
-        } else if job.role == JOB_ROLE_DIRECT {
-            sqlx::query(
-                "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-                 THEN status ELSE ? END, blocked_reason = NULL, updated_at = ? \
-                 WHERE id = ? AND stage = ?",
-            )
-            .bind(STAGE_EXECUTING)
-            .bind(STATUS_RUNNING)
-            .bind(now())
-            .bind(&job.project_id)
-            .bind(STAGE_EXECUTING)
-            .execute(&state.db)
-            .await?;
         } else if job.role == JOB_ROLE_ACCEPTANCE {
             sqlx::query(
                 "UPDATE projects SET stage = ?, status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
@@ -251,7 +238,6 @@ async fn recover(state: &AppState) -> Result<()> {
                 .blocked_reason
                 .as_deref()
                 .is_some_and(|reason| !reason.is_empty())
-            && project.completion_mode == COMPLETION_DIRECT
         {
             // 协议失败与人工决策不能通过重启解除。
             continue;
@@ -458,6 +444,38 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 {
                     continue;
                 }
+                if project.replan_active != 0
+                    && project.replan_source.as_deref() == Some("acceptance_plan")
+                {
+                    if let Some(raw) = project.replan_proposal.as_deref() {
+                        let proposal: AnalysisProposal = serde_json::from_str(raw)?;
+                        let goal = proposal
+                            .goal
+                            .clone()
+                            .unwrap_or_else(|| project.goal.clone());
+                        let tasks: Vec<domain::NormalizedTask> = proposal
+                            .tasks
+                            .iter()
+                            .map(|task| domain::NormalizedTask {
+                                key: task.key.clone(),
+                                title: task.title.clone(),
+                                description: task.description.clone(),
+                                acceptance: task.acceptance.clone(),
+                                deps: task.deps.clone(),
+                            })
+                            .collect();
+                        crate::runner::apply_analysis_plan_locked(
+                            state,
+                            &project,
+                            &goal,
+                            &tasks,
+                            &proposal.summary,
+                            raw,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
                 if has_project_job(&state.db, &project.id, JOB_ROLE_ANALYSIS).await? {
                     continue;
                 }
@@ -503,32 +521,6 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                     if let Some(job_id) = spawn_replan_review(state, &project, &request).await? {
                         spawns.push(job_id);
                     }
-                }
-                if project.completion_mode == COMPLETION_DIRECT {
-                    if has_project_job(&state.db, &project.id, JOB_ROLE_DIRECT).await? {
-                        continue;
-                    }
-                    let choice = choose_agent(state, &project, ROLE_PLANNER, None).await?;
-                    let Some(agent) = choice.agent else {
-                        note_waiting(
-                            state,
-                            &project,
-                            choice
-                                .reason
-                                .as_deref()
-                                .unwrap_or("等待可用的直接完成 Agent"),
-                            choice.recoverable,
-                        )
-                        .await?;
-                        continue;
-                    };
-                    if let Some(job_id) =
-                        spawn_project_job(state, &project, &agent, JOB_ROLE_DIRECT, &choice.yielded)
-                            .await?
-                    {
-                        spawns.push(job_id);
-                    }
-                    continue;
                 }
                 let tasks = sqlx::query_as::<_, TaskRow>(
                     "SELECT * FROM tasks WHERE project_id = ? ORDER BY queue_order ASC, seq ASC",
@@ -735,9 +727,7 @@ async fn reconcile(state: &AppState) -> Result<Vec<String>> {
                 recompute_blocked(state, &project.id).await?;
             }
             STAGE_SUMMARIZING => {
-                let (role, waiting) = if project.acceptance_passed == 0
-                    && project.completion_mode != COMPLETION_DIRECT
-                {
+                let (role, waiting) = if project.acceptance_passed == 0 {
                     if project.acceptance.is_some() {
                         let reason = "项目验收未通过，等待重规划或人工裁决";
                         sqlx::query(
@@ -857,14 +847,13 @@ async fn recompute_blocked(state: &AppState, project_id: &str) -> Result<()> {
     if runnable {
         return Ok(());
     }
-    let mut reason = None;
-    for task in &pending_tasks {
-        if let Some(action) = crate::user_action::for_task(&state.db, task).await? {
-            reason = Some(format!("{}：{}", task.key, action.summary));
-            break;
-        }
-    }
-    let reason = reason
+    let reason = pending_tasks
+        .iter()
+        .find_map(|task| {
+            task.waiting_reason
+                .clone()
+                .map(|reason| format!("{}：{reason}", task.key))
+        })
         .or_else(|| {
             pending_tasks
                 .iter()
@@ -1769,7 +1758,7 @@ async fn note_waiting(
     reason: &str,
     recoverable: bool,
 ) -> Result<()> {
-    if project.stage != STAGE_EXECUTING || project.completion_mode == COMPLETION_DIRECT {
+    if project.stage != STAGE_EXECUTING {
         crate::queue::waiting(&state.db, project, None, ROLE_PLANNER, reason).await?;
     }
     if project.blocked_reason.as_deref() == Some(reason) {
@@ -1824,7 +1813,6 @@ fn parse_list(raw: &str) -> Vec<String> {
 fn role_label(role: &str) -> &'static str {
     match role {
         JOB_ROLE_ANALYSIS => "项目分析",
-        JOB_ROLE_DIRECT => "直接完成",
         ROLE_PLANNER => "规划",
         ROLE_EXECUTOR => "执行",
         ROLE_VERIFIER => "验收",

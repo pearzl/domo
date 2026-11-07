@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DOMO Codex CLI / WorkBuddy CLI 真实冒烟测试。
+"""DOMO Codex CLI / CodeBuddy CLI 真实冒烟测试。
 
 只有在设置 DOMO_RT_CODEX_MODEL 或 DOMO_RT_WORKBUDDY_MODEL 时运行对应真实
 CLI，例如：
@@ -33,8 +33,8 @@ from harness import (
 
 def main():
     codex_model = os.environ.get("DOMO_RT_CODEX_MODEL")
-    workbuddy_model = os.environ.get("DOMO_RT_WORKBUDDY_MODEL")
-    if not codex_model and not workbuddy_model:
+    codebuddy_model = os.environ.get("DOMO_RT_WORKBUDDY_MODEL")
+    if not codex_model and not codebuddy_model:
         print(
             "跳过：未设置 DOMO_RT_CODEX_MODEL 或 DOMO_RT_WORKBUDDY_MODEL（真实 CLI 用例）"
         )
@@ -43,9 +43,9 @@ def main():
     cases = []
     if codex_model:
         cases.append({"kind": "codex", "model": codex_model, "format": "codex"})
-    if workbuddy_model:
+    if codebuddy_model:
         cases.append(
-            {"kind": "workbuddy", "model": workbuddy_model, "format": "workbuddy"}
+            {"kind": "codebuddy", "model": codebuddy_model, "format": "codebuddy"}
         )
 
     timeout_secs = int(os.environ.get("DOMO_JOB_TIMEOUT_SECS", "900"))

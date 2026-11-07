@@ -15,169 +15,8 @@ use crate::transitions::{ProjectAction, TaskAction, Transitions};
 use crate::usage;
 
 use super::detail::load_detail;
-use super::helpers::{confirm_mode, load_project_task, parse_list, stage_label};
+use super::helpers::{confirm_mode, load_project_task};
 use super::ApiError;
-
-pub(super) async fn create_task(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<CreateTaskRequest>,
-) -> Result<Json<TaskView>, ApiError> {
-    let transition = Transitions::lock(&state).await;
-    let project = transition.project(&id, ProjectAction::AddTask).await?;
-    if project.replan_active != 0 {
-        return Err(ApiError::conflict(
-            "重规划期间不能添加任务，请先确认或放弃草稿",
-        ));
-    }
-    crate::db::ensure_project_agents(&state.db, &id).await?;
-    if !matches!(
-        project.stage.as_str(),
-        STAGE_ANALYSIS | STAGE_EXECUTING | STAGE_SUMMARIZING | STAGE_COMPLETED
-    ) {
-        return Err(ApiError::bad("当前阶段不允许添加任务"));
-    }
-    let rows = sqlx::query_as::<_, TaskRow>(
-        "SELECT * FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ? ORDER BY seq ASC",
-    )
-    .bind(&id)
-    .bind(STATUS_CANCELED)
-    .fetch_all(&state.db)
-    .await?;
-    let active: Vec<domain::NormalizedTask> = rows
-        .iter()
-        .map(|row| domain::NormalizedTask {
-            key: row.key.clone(),
-            title: row.title.clone(),
-            description: row.description.clone(),
-            acceptance: parse_list(&row.acceptance),
-            deps: parse_list(&row.deps),
-        })
-        .collect();
-    let task = domain::validate_manual_task(
-        &active,
-        &request.key,
-        &request.title,
-        &request.description,
-        request.acceptance,
-        request.deps,
-    )
-    .map_err(ApiError::bad)?;
-    if rows
-        .iter()
-        .any(|row| row.parent_id.is_some() && task.deps.contains(&row.key))
-    {
-        return Err(ApiError::bad(
-            "跨任务族依赖必须指向父任务，不能直接依赖派生子任务",
-        ));
-    }
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    let max_seq: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM tasks WHERE project_id = ?")
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await?;
-    let max_queue: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(queue_order), 0) FROM tasks WHERE project_id = ?")
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await?;
-    let task_id = domain::new_id("tsk");
-    let timestamp = now();
-    sqlx::query(
-        "INSERT INTO tasks (id, project_id, seq, queue_order, key, title, description, \
-         acceptance, deps, milestone, stage, status, attempts, rejections, verifier_issues, \
-         created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '[]', ?, ?)",
-    )
-    .bind(&task_id)
-    .bind(&id)
-    .bind(max_seq + 1)
-    .bind(max_queue + 1)
-    .bind(&task.key)
-    .bind(&task.title)
-    .bind(&task.description)
-    .bind(string_list_json(&task.acceptance))
-    .bind(string_list_json(&task.deps))
-    .bind(if request.milestone { 1 } else { 0 })
-    .bind(TASK_STAGE_PENDING)
-    .bind(STATUS_QUEUED)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .execute(&mut *tx)
-    .await?;
-    // 任务与任务池快照在同一事务里创建。
-    crate::db::initialize_task_agents_tx(&mut tx, &task_id).await?;
-    // A project in the analysis, summarizing, or completed stage moves back to
-    // executing so the DAG schedules the added task. A report that would not
-    // cover every task is dropped and written again after the new work finishes.
-    let reopened = project.completion_mode == COMPLETION_DIRECT
-        || !matches!(project.stage.as_str(), STAGE_ANALYSIS | STAGE_EXECUTING);
-    let had_report = project.report.is_some();
-    if reopened {
-        sqlx::query(
-            "UPDATE projects SET stage = ?, status = CASE WHEN status IN \
-             ('pausing', 'paused', 'archived') THEN status ELSE ? END, blocked_reason = NULL, \
-             report = NULL, report_feedback = NULL, acceptance = NULL, acceptance_passed = 0, \
-             acceptance_round = 0, acceptance_at = NULL, completion_mode = ?, merged_at = NULL, \
-             merged_commit = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(STAGE_EXECUTING)
-        .bind(STATUS_RUNNING)
-        .bind(COMPLETION_TASKS)
-        .bind(&timestamp)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    emit(
-        &state.db,
-        &state.bus,
-        Some(&id),
-        Some(&task_id),
-        "task_created",
-        format!(
-            "人工添加任务 {}：{}（依赖 {}）",
-            task.key,
-            task.title,
-            if task.deps.is_empty() {
-                "无".to_string()
-            } else {
-                task.deps.join("、")
-            }
-        ),
-    )
-    .await;
-    if reopened {
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&id),
-            None,
-            "project_reopened",
-            if had_report {
-                format!(
-                    "人工添加任务 {}，项目回到执行阶段，原报告作废待重写",
-                    task.key
-                )
-            } else {
-                format!(
-                    "人工添加任务 {}，项目从{}进入执行阶段",
-                    task.key,
-                    stage_label(&project.stage)
-                )
-            },
-        )
-        .await;
-    }
-    state.notify_scheduler();
-    let row = sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
-        .bind(&task_id)
-        .fetch_one(&state.db)
-        .await?;
-    Ok(Json(TaskView::from_row(row)))
-}
 
 pub(super) async fn pause_task(
     State(state): State<AppState>,
@@ -584,7 +423,7 @@ pub(super) async fn confirm_analysis(
             return Err(ApiError::conflict("方案已变化，请审查最新草稿后重新确认"));
         }
     }
-    if !matches!(proposal.kind.as_str(), "plan" | "direct") {
+    if proposal.kind != "plan" {
         return Err(ApiError::bad("当前项目方案不能确认"));
     }
     let goal = proposal
@@ -597,93 +436,39 @@ pub(super) async fn confirm_analysis(
     if goal.is_empty() {
         return Err(ApiError::bad("目标内容为空"));
     }
-    if proposal.kind == "direct" {
-        let active_tasks: i64 = if project.replan_active != 0 {
-            0
-        } else {
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM tasks WHERE project_id = ? AND stage != ? \
-                 AND COALESCE(status, '') != ?",
-            )
-            .bind(&id)
-            .bind(TASK_STAGE_COMPLETED)
-            .bind(STATUS_CANCELED)
-            .fetch_one(&state.db)
-            .await?
-        };
-        if active_tasks > 0 {
-            return Err(ApiError::bad(
-                "项目已有任务，不能直接完成；请继续规划或删除任务",
-            ));
-        }
-        if project.replan_active != 0 {
-            crate::replan::apply_direct_locked(&state, &project, proposal_raw)
-                .await
-                .map_err(replan_apply_error)?;
-        } else {
-            if project.goal_locked_at.is_some() && project.goal.trim() != goal.trim() {
-                return Err(ApiError::conflict("已确认目标只能通过主动修改目标入口变更"));
-            }
-            sqlx::query(
-                    "UPDATE projects SET goal = ?, proposal = proposal, stage = ?, status = ?, completion_mode = ?, \
-                 confirmed_at = ?, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
-                 goal_locked_at = COALESCE(goal_locked_at, ?), updated_at = ? WHERE id = ?",
-            )
-            .bind(&goal)
-            .bind(STAGE_EXECUTING)
-            .bind(STATUS_RUNNING)
-            .bind(COMPLETION_DIRECT)
-            .bind(now())
-            .bind(now())
-            .bind(now())
-            .bind(&id)
-            .execute(&state.db)
-            .await?;
-        }
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&id),
-            None,
-            "analysis_confirmed",
-            "方案已确认，开始直接完成",
-        )
-        .await;
-    } else {
-        let tasks = domain::validate_plan(
-            proposal
-                .tasks
-                .iter()
-                .map(|task| domain::PlanTask {
-                    key: task.key.clone(),
-                    title: task.title.clone(),
-                    description: task.description.clone(),
-                    acceptance: task.acceptance.clone(),
-                    deps: task.deps.clone(),
-                })
-                .collect(),
-        )
-        .map_err(ApiError::bad)?;
-        crate::runner::apply_analysis_plan_locked(
-            &state,
-            &project,
-            &goal,
-            &tasks,
-            &proposal.summary,
-            proposal_raw,
-        )
-        .await
-        .map_err(replan_apply_error)?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&id),
-            None,
-            "analysis_confirmed",
-            "方案已确认，开始执行任务",
-        )
-        .await;
-    }
+    let tasks = domain::validate_plan(
+        proposal
+            .tasks
+            .iter()
+            .map(|task| domain::PlanTask {
+                key: task.key.clone(),
+                title: task.title.clone(),
+                description: task.description.clone(),
+                acceptance: task.acceptance.clone(),
+                deps: task.deps.clone(),
+            })
+            .collect(),
+    )
+    .map_err(ApiError::bad)?;
+    crate::runner::apply_analysis_plan_locked(
+        &state,
+        &project,
+        &goal,
+        &tasks,
+        &proposal.summary,
+        proposal_raw,
+    )
+    .await
+    .map_err(replan_apply_error)?;
+    emit(
+        &state.db,
+        &state.bus,
+        Some(&id),
+        None,
+        "analysis_confirmed",
+        "方案已确认，开始执行任务",
+    )
+    .await;
     state.notify_scheduler();
     load_detail(&state, &id).await.map(Json)
 }

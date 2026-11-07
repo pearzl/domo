@@ -183,6 +183,7 @@ pub(super) async fn accept_milestone(
                 &task,
                 &error,
                 task.agent_id.as_deref(),
+                None,
             )
             .await?;
             sqlx::query("UPDATE projects SET status = CASE WHEN status IN ('pausing', 'paused', 'archived') \

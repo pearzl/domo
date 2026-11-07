@@ -1,28 +1,17 @@
 /// 项目详情页的状态与动作：轮询快照、URL 视图同步、草稿清理与各类提交。
 /// 组件只读取返回值并渲染；所有请求与本地状态都留在本 hook 内。
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
 import type { ProjectArchiveRefs, ProjectDetail } from "../types";
 import { api, errorMessage, subscribeEvents } from "../api";
-import { useDraftJson, useDraftValue } from "../components/useDraft";
+import { useDraftValue } from "../components/useDraft";
 import { verificationSignature } from "./taskSummary";
-import {
-  filterTasks,
-  nextTaskKey,
-  validateTaskDraft,
-  type TaskFilter,
-} from "./taskList";
+import { filterTasks, type TaskFilter } from "./taskList";
 import { resolveProjectTab } from "./projectLayout";
 import {
   readProjectView,
   updateProjectView,
   type ProjectViewState,
 } from "./projectView";
-import {
-  EMPTY_TASK_DRAFT,
-  isAddTaskDraft,
-  type AddTaskDraft,
-} from "./addTaskDraft";
 
 function readWindowView(): ProjectViewState {
   if (typeof window === "undefined") return { tab: null, taskId: null, jobId: null };
@@ -65,7 +54,6 @@ export function useProjectPageController({ id }: { id: string }) {
     initialView.jobId,
   );
   const [replanOpen, setReplanOpen] = useState(false);
-  const [replanOrigin, setReplanOrigin] = useState<"project" | "report">("project");
   const replanDraft = useDraftValue(
     { projectId: id, field: "replan-reason" },
     "",
@@ -76,13 +64,6 @@ export function useProjectPageController({ id }: { id: string }) {
   const goalDraft = useDraftValue({ projectId: id, field: "project-goal" }, "");
   const goalValue = goalDraft.value;
   const setGoalValue = goalDraft.setValue;
-  const [addTaskOpen, setAddTaskOpen] = useState(false);
-  const taskDraft = useDraftJson(
-    { projectId: id, field: "add-task-form" },
-    EMPTY_TASK_DRAFT,
-    isAddTaskDraft,
-  );
-  const taskForm = taskDraft.value;
   /// 任务面板视图只在页面内保持，不写入任务数据。
   const [taskView, setTaskView] = useState<"list" | "dag">("list");
   /// 任务搜索与筛选同样只存在于页面状态，不改变任务数据。
@@ -97,12 +78,6 @@ export function useProjectPageController({ id }: { id: string }) {
     null,
   );
 
-  function setTaskField<K extends keyof AddTaskDraft>(
-    field: K,
-    value: AddTaskDraft[K],
-  ) {
-    taskDraft.setValue((current) => ({ ...current, [field]: value }));
-  }
 
   /// 视图状态写入 URL：用户切换选项卡或打开抽屉时新增历史，程序修正时替换当前历史。
   function applyProjectView(
@@ -296,24 +271,6 @@ export function useProjectPageController({ id }: { id: string }) {
     }
   }
 
-  // 打开添加任务表单：切到任务选项卡，key 为空时自动填入下一个可用的 T 编号。
-  function openAddTaskForm() {
-    selectTab("tasks");
-    setAddTaskOpen(true);
-    taskDraft.setValue((current) => ({
-      ...current,
-      key: current.key.trim() || nextTaskKey(detail?.tasks ?? []),
-    }));
-  }
-
-  function toggleAddTaskForm() {
-    if (addTaskOpen) {
-      setAddTaskOpen(false);
-      return;
-    }
-    openAddTaskForm();
-  }
-
   async function handleMerge() {
     if (!detail) return;
     const project = detail.project;
@@ -336,39 +293,6 @@ export function useProjectPageController({ id }: { id: string }) {
     } finally {
       setMerging(false);
     }
-  }
-
-  async function handleAddTask(event: FormEvent) {
-    event.preventDefault();
-    if (!detail) return;
-    const activeTasks = detail.tasks.filter((task) => task.status !== "canceled");
-    const draftCheck = validateTaskDraft(
-      {
-        key: taskForm.key,
-        title: taskForm.title,
-        description: taskForm.description,
-        deps: taskForm.deps,
-      },
-      activeTasks,
-    );
-    if (!draftCheck.valid) return;
-    const key = taskForm.key.trim();
-    const ok = await run(() =>
-      api.createTask(detail.project.id, {
-        key,
-        title: taskForm.title.trim(),
-        description: taskForm.description.trim(),
-        acceptance: taskForm.acceptance
-          .split("\n")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        deps: taskForm.deps,
-        milestone: taskForm.milestone,
-      }),
-    );
-    if (!ok) return;
-    taskDraft.clear(EMPTY_TASK_DRAFT);
-    setAddTaskOpen(false);
   }
 
   function resetTaskFilter() {
@@ -397,32 +321,19 @@ export function useProjectPageController({ id }: { id: string }) {
     if (ok) feedbackDraft.clear();
   }
 
-  function requestReportReplan() {
-    if (!feedback.trim()) return;
-    setReplanReason(feedback);
-    setReplanOrigin("report");
-    setReplanOpen(true);
-  }
-
   async function abandonReplan() {
     const ok = await run(() => api.abandonReplan(id));
     if (ok) setReplanOpen(false);
   }
 
   async function submitReplan() {
-    const ok = await run(() =>
-      replanOrigin === "report"
-        ? api.submitReport(id, "replan", replanReason)
-        : api.replanProject(id, replanReason),
-    );
+    const ok = await run(() => api.replanProject(id, replanReason));
     if (!ok) return;
     replanDraft.clear();
-    if (replanOrigin === "report") feedbackDraft.clear();
     setReplanOpen(false);
   }
 
   function toggleReplan() {
-    setReplanOrigin("project");
     setGoalEditOpen(false);
     setReplanOpen((value) => !value);
   }
@@ -448,7 +359,6 @@ export function useProjectPageController({ id }: { id: string }) {
 
   function cancelReplan() {
     setReplanOpen(false);
-    setReplanOrigin("project");
     replanDraft.clear();
   }
 
@@ -476,9 +386,6 @@ export function useProjectPageController({ id }: { id: string }) {
     goalValue,
     setGoalValue,
     goalDraftKey: goalDraft.key,
-    addTaskOpen,
-    taskForm,
-    setTaskField,
     taskView,
     setTaskView,
     taskQuery,
@@ -492,16 +399,12 @@ export function useProjectPageController({ id }: { id: string }) {
     run,
     selectTask,
     selectTab,
-    openAddTaskForm,
-    toggleAddTaskForm,
     handleArchive,
     handleMerge,
-    handleAddTask,
     resetTaskFilter,
     sendAnalysis,
     confirmProposal,
     submitReport,
-    requestReportReplan,
     abandonReplan,
     submitReplan,
     toggleReplan,

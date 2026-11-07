@@ -2,22 +2,17 @@ import type { Message, Project } from "../types";
 import { InputBox } from "./InputBox";
 import { RichContent } from "./RichContent";
 import { Empty } from "../ui";
-import { UserActionNotice } from "./UserActionNotice";
 
-function acceptanceContext(project: Project) {
+
+function acceptanceIssueCount(project: Project) {
   try {
-    const snapshot: Record<string, unknown> = JSON.parse(project.acceptance ?? "null");
-    if (!snapshot || typeof snapshot !== "object") return { details: project.blocked_reason };
-    const guidance = typeof snapshot.guidance === "string" ? snapshot.guidance : null;
-    delete snapshot.guidance;
-    delete snapshot.user_action;
-    return { guidance, details: [project.blocked_reason, JSON.stringify(snapshot, null, 2)].filter(Boolean).join("\n\n") };
+    const snapshot = JSON.parse(project.acceptance ?? "null");
+    return Array.isArray(snapshot?.issues) ? snapshot.issues.length : 0;
   } catch {
-    return { details: [project.blocked_reason, project.acceptance].filter(Boolean).join("\n\n") };
+    return 0;
   }
 }
-
-/// 项目报告与评议：报告内容、意见记录与四类提交动作。
+/// 项目报告与评议：报告内容、意见记录与三类提交动作。
 export function ProjectReportPanel({
   project,
   reviewMessages,
@@ -27,8 +22,6 @@ export function ProjectReportPanel({
   busy,
   archived,
   onSubmitReport,
-  onRequestReplan,
-  onAddTask,
   onOpenTasks,
   onRetryAcceptance,
 }: {
@@ -40,11 +33,10 @@ export function ProjectReportPanel({
   busy: boolean;
   archived: boolean;
   onSubmitReport: (action: "accept" | "comment" | "reject") => void;
-  onRequestReplan: () => void;
-  onAddTask: () => void;
   onOpenTasks?: () => void;
   onRetryAcceptance?: () => void;
 }) {
+  const unclosedCount = acceptanceIssueCount(project);
   if (project.stage !== "summarizing" && !project.report) return (
     <section className="panel" aria-label="项目报告">
       <Empty title="项目报告尚未生成" hint={archived ? "项目已归档，未保存项目报告。任务与作业记录仍可查阅。" : project.stage === "analysis" ? "确认项目方案并完成交付后，规划者将生成报告。" : "任务仍在推进，任务完成后规划者将进行项目验收并生成报告。"} />
@@ -71,11 +63,13 @@ export function ProjectReportPanel({
         <RichContent content={project.report} className="report" />
       ) : project.stage === "summarizing" ? (
         project.blocked_reason ? (
-          <div><UserActionNotice action={project.user_action} {...acceptanceContext(project)} />
-            {project.acceptance && !project.acceptance_passed && project.status === "blocked" && onRetryAcceptance ? <button className="primary" disabled={busy} onClick={onRetryAcceptance}>条件已补齐，重新验收</button> : <p className="muted">可在作业记录中查看原因及适用操作。</p>}
+          <div className="blocked-banner">
+            <p><strong>等待处理</strong></p>
+            <RichContent content={project.blocked_reason} />
+            {project.acceptance && !project.acceptance_passed && project.status === "blocked" && onRetryAcceptance ? <button className="primary" disabled={busy} onClick={onRetryAcceptance}>条件已补齐，重新验收</button> : null}
           </div>
         ) : (
-          <p className="muted">规划者正在依据评议意见重写报告…</p>
+          <p className="muted">规划者正在依据评议意见判断后续处理…</p>
         )
       ) : null}
       {project.stage === "summarizing" && !archived ? (
@@ -86,12 +80,12 @@ export function ProjectReportPanel({
             draftKey={feedbackDraftKey}
             rows={3}
             maxAutoGrowChars={520}
-            placeholder="对报告的意见（提交意见可供多轮讨论；要求重写或重新规划时必须填写）。"
+            placeholder="对报告的意见（提交意见可多轮讨论；驳回时必须填写）。"
             actions={
               <div className="button-row">
                 <button
                   className="primary"
-                  disabled={busy || !project.report}
+                  disabled={busy || !project.report || (unclosedCount > 0 && !feedback.trim())}
                   onClick={() => onSubmitReport("accept")}
                 >
                   通过并完成
@@ -107,42 +101,21 @@ export function ProjectReportPanel({
                   className="secondary"
                   disabled={busy || !project.report || !feedback.trim()}
                   onClick={() => onSubmitReport("reject")}
-                   title="记录意见并要求规划者只读重写报告，不重新实施"
+                  title="只表达不接受；规划者判断补工作、调整契约还是重写报告"
                 >
-                   重新撰写
+                  驳回
                 </button>
-                <button
-                  className="secondary"
-                  disabled={busy || !project.report || !feedback.trim()}
-                  onClick={onRequestReplan}
-                  title="先预览影响；提交后生成方案草稿，确认草稿时才应用"
-                >
-                  要求重新规划
-                </button>
-                {project.completion_mode !== "direct" ? (
-                  <button
-                    className="secondary"
-                    disabled={busy || archived}
-                    onClick={onAddTask}
-                    title="通过添加任务表单增加新任务；添加后项目回到执行阶段，原报告作废"
-                  >
-                    增加新任务
-                  </button>
-                ) : null}
               </div>
             }
           />
-          {project.completion_mode !== "direct" ? (
-            <p className="muted">
-              “增加新任务”会打开任务面板的添加任务表单（复用人工加任务端点）；提交后项目回到执行阶段，原报告作废待重写。
-            </p>
-          ) : (
-            <p className="muted">
-               重新撰写只修改报告；交付内容需要修复时，请要求重新规划。
-            </p>
-          )}
+          <p className="muted">
+            {unclosedCount > 0
+              ? "报告有 " + unclosedCount + " 项未闭合项，接受时必须填写理由。"
+              : "驳回只表达不接受；是否补工作、调整契约或重写报告由规划者判断。"}
+          </p>
         </div>
       ) : null}
     </section>
+
   );
 }

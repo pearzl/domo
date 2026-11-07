@@ -98,6 +98,13 @@ pub(super) async fn run_process(
         .env("DOMO_JOB_ID", &spec.job_id)
         .env("DOMO_JOB_ROLE", &spec.role)
         .env("DOMO_JOB_DIR", &spec.job_dir)
+        .env("GIT_AUTHOR_NAME", "DOMO")
+        .env("GIT_AUTHOR_EMAIL", "domo@local")
+        .env("GIT_COMMITTER_NAME", "DOMO")
+        .env("GIT_COMMITTER_EMAIL", "domo@local")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {

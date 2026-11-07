@@ -88,7 +88,7 @@ pub fn last_error_line(text: &str) -> Option<&str> {
     })
 }
 
-/// Error events come from OpenCode as `type=error` and from WorkBuddy as a
+/// Error events come from OpenCode as `type=error` and from CodeBuddy as a
 /// `result` event whose `is_error` or `subtype` marks the failure.
 fn is_error_event(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) == Some("error") {
@@ -622,13 +622,13 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_workbuddy_error_result() {
+    fn summarizes_codebuddy_error_result() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s"}"#,
             "\n",
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["429 您的使用量已超出频率限制…\n更多说明"],"errors_info":[{"status":429,"code":6004,"category":"quota","details":"429 您的使用量已超出频率限制…"}]}"#
         );
-        let summary = summarize(Some(raw)).expect("workbuddy error is summarized");
+        let summary = summarize(Some(raw)).expect("codebuddy error is summarized");
         assert_eq!(summary.kind, KIND_RATE_LIMIT);
         assert_eq!(summary.message, "429 您的使用量已超出频率限制…");
         assert_eq!(summary.status, Some(429));
@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_workbuddy_error_result_line() {
+    fn selects_codebuddy_error_result_line() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s"}"#,
             "\n",

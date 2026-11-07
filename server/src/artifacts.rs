@@ -516,8 +516,8 @@ mod tests {
         let now = crate::domain::now();
         sqlx::query(
             "INSERT INTO projects (id, name, goal, repo_path, base_branch, branch, workspace, \
-             stage, status, confirm_mode, completion_mode, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             stage, status, confirm_mode, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("prj_test")
         .bind("test")

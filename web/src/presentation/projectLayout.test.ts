@@ -221,7 +221,6 @@ function project(stage: string, overrides: Partial<Project> = {}): Project {
     replan_requested_at: null,
     confirm_mode: "manual",
     confirmed_at: null,
-    completion_mode: "tasks",
     merged_at: null,
     merged_commit: null,
     created_at: "2026-01-10T10:00:00Z",
@@ -322,9 +321,6 @@ function proposal(): AnalysisProposal {
     assumptions: [],
     acceptance: [],
     tasks: [],
-    plan: [],
-    verification: [],
-    skip_confirmation: false,
   };
 }
 

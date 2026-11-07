@@ -10,9 +10,9 @@ export async function resourceRequest<T>(url: string, method = "GET", body?: unk
   if (!response.ok) throw new Error(result.error ?? `请求失败 ${response.status}`);
   return result as T;
 }
-interface SharedRecord { id: string; topic: string; body: string; scope: string[]; evidence: string[]; supersedes: string[]; conflicts: string[]; reason: string; task_id: string | null; job_id: string | null; created_at: string }
+interface SharedRecord { id: string; no: string; text: string; supersedes: string; invalidated_by: string | null; task_id: string | null; job_id: string | null; created_at: string }
 interface Shared { version: string; repository: string; records: SharedRecord[]; superseded_ids: string[] }
-interface Artifact { id: string; path: string; kind: string; format: string; verification: string; task_id: string | null; commit: string | null }
+interface Artifact { id: string; path: string; format: string; verification: string; task_id: string | null; commit: string | null }
 interface Artifacts { root: string; items: Artifact[] }
 interface Preview { path: string; text: string; commit: string | null; versions: string[] }
 interface MergeStatus { request: { agent_id: string; state: string; job_id: string | null; error: string | null } | null }
@@ -25,22 +25,14 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   const [merge, setMerge] = useState<MergeStatus | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [topic, setTopic] = useState("");
   const [version, setVersion] = useState("");
   const [selectedVersion, setSelectedVersion] = useState("");
   const [taskFilter, setTaskFilter] = useState("");
-  const [kindFilter, setKindFilter] = useState("");
   const [preview, setPreview] = useState<(Preview & { artifactId: string }) | null>(null);
   const previewRequestRef = useRef(0);
-  const [path, setPath] = useState("");
-  const [kind, setKind] = useState("delivery");
-  const [format, setFormat] = useState("");
-  const [verification, setVerification] = useState("");
-  const [task, setTask] = useState("");
   const [agent, setAgent] = useState("");
   const readonly = detail.project.status === "archived";
-  const kindLabels: Record<string, string> = { input: "参考输入", intermediate: "中间成果", delivery: "最终交付" };
-  const filteredArtifacts = (artifacts?.items ?? []).filter(item => (!taskFilter || item.task_id === taskFilter) && (!kindFilter || item.kind === kindFilter));
+  const filteredArtifacts = (artifacts?.items ?? []).filter(item => !taskFilter || item.task_id === taskFilter);
   useEffect(() => {
     setPreview(null);
     return () => { previewRequestRef.current += 1; };
@@ -69,49 +61,33 @@ export function ResourcePanel({ detail, onSaved }: { detail: ProjectDetail; onSa
   return <>
     <details className="panel resource-panel"><summary>项目共享信息 <span className="section-count">{shared ? `${shared.records.length} 条记录` : "加载中…"}</span></summary>
       <div className="resource-body">
-      <p className="muted">独立本地 Git 仓库，不跟踪普通工作区交付文件；修正追加替代记录，分歧保留各方依据，不以最后提交者为准。</p>
+      <p className="muted">独立本地 Git 仓库；只展示执行者提交且仍有效的项目记忆。修正用 supersedes 指向被替代的 M 编号，旧记录失效但保留在历史中；验收者不提交。</p>
       <p>共享版本：<code>{shared?.version ?? "读取中"}</code></p>
-      <div className="form-grid"><label>主题过滤<input value={topic} onChange={e => setTopic(e.target.value)} /></label>
-      <label>历史共享提交<input value={version} onChange={e => setVersion(e.target.value)} placeholder="完整提交哈希；留空查看当前版本" /></label>
+      <div className="form-grid"><label>历史共享提交<input value={version} onChange={e => setVersion(e.target.value)} placeholder="完整提交哈希；留空查看当前版本" /></label>
       </div><div><button className="secondary" disabled={busy} onClick={() => { setBusy(true); setError(""); void resourceRequest<Shared>(`${base}/shared${version ? `?version=${encodeURIComponent(version)}` : ""}`).then(value => { setShared(value); setSelectedVersion(version); }).catch(err => setError(errorMessage(err))).finally(() => setBusy(false)); }}>读取共享版本</button></div>
-      {shared?.records.filter(record => record.topic.includes(topic)).map(record => <details key={record.id}>
-        <summary>{record.topic} · {shared.superseded_ids?.includes(record.id) ? "已被替代" : "有效记录"}{record.conflicts.length ? " · 存在分歧，需局部核验" : ""}</summary>
-        <code>{record.id}</code><RichContent content={record.body} />
-        <p>适用任务：{record.scope.join("、") || "全项目"}；来源任务 {record.task_id ?? "人工"} / 作业 {record.job_id ?? "—"}</p>
-        <p>证据：{record.evidence.join("；")}</p><p>替代：{record.supersedes.join("、") || "无"}；分歧：{record.conflicts.join("、") || "无"}</p><p>{record.reason}</p>
+      {shared?.records.map(record => <details key={record.id}>
+        <summary>[{record.no}]{record.supersedes ? ` 替代 ${record.supersedes}` : ""} · 来源 {record.task_id ?? "项目"}</summary>
+        <RichContent content={record.text} />
+        <p>编号 {record.no} · 来源任务 {record.task_id ?? "项目"} / 作业 {record.job_id ?? "—"}</p>
+        {record.supersedes ? <p>替代：{record.supersedes}</p> : null}
       </details>)}
-      {shared?.records.length === 0 ? <p>暂无共享记录。Agent 可在作业结果的 shared_updates 中提交事实、接口与结论。</p> : null}
+      {shared?.records.length === 0 ? <p>暂无项目记忆。执行者可在结果 shared_updates 中提交 {"{text, supersedes}"}。</p> : null}
       </div>
     </details>
-    <details className="panel resource-panel"><summary>成果与参考输入 <span className="section-count">{artifacts ? `${artifacts.items.filter(item => item.kind === "delivery").length} 项最终交付 · ${artifacts.items.length} 项登记` : "加载中…"}</span></summary><div className="resource-body"><p>工作区 / 项目输入目录：<span className="mono">{artifacts?.root}</span></p>
+    <details className="panel resource-panel"><summary>成果 <span className="section-count">{artifacts ? `${artifacts.items.length} 项登记` : "加载中…"}</span></summary><div className="resource-body"><p>工作区 / 项目输入目录：<span className="mono">{artifacts?.root}</span></p>
       <p className="muted">目录及其内容就是项目输入，无需逐文件登记。这里仅展示显式登记的重要成果与参考资料，登记不表示验收通过，也不决定文件修改权限。</p>
       <p className="muted">{detail.project.workspace_type === "plain" ? "任务串行使用当前目录；普通工作区不保留文件历史，初始内容请自行备份。" : "任务在隔离 worktree 中执行；已登记成果可查看对应的 Git 提交版本。"}建议暂停后再手工编辑；中断保留文件现场，后续执行先检查再接续。</p>
       <div className="form-grid"><label>按任务过滤<select value={taskFilter} onChange={e => setTaskFilter(e.target.value)}><option value="">全部任务</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
-      <label>按类型过滤<select value={kindFilter} onChange={e => setKindFilter(e.target.value)}><option value="">全部类型</option><option value="input">参考输入</option><option value="intermediate">中间成果</option><option value="delivery">最终交付</option></select></label>
       </div>
-      {artifacts && filteredArtifacts.length === 0 ? <p className="muted">当前筛选下没有登记的重要成果或参考输入；工作区文件仍可按任务需要直接使用。</p> : null}
-      {["delivery", "input", "intermediate", ...new Set(filteredArtifacts.map(item => item.kind).filter(value => !kindLabels[value]))].map(group => {
-        const items = filteredArtifacts.filter(item => item.kind === group);
-        if (!items.length) return null;
-        return <details key={group} className="artifact-group" open={group !== "intermediate"}>
-          <summary>{kindLabels[group] ?? group}（{items.length}）</summary>
-          <ul className="artifact-list">{items.map(item => <li key={item.id}>
-            <div className="artifact-title"><strong>{item.path}</strong><Badge>{detail.tasks.find(task => task.id === item.task_id)?.key ?? "项目"}</Badge></div>
-            <p className="muted">{item.format || "格式未声明"}{item.verification ? ` · ${item.verification}` : ""}</p>
-            <div className="button-row"><button className="secondary" onClick={() => void viewArtifact(item.id)}>查看 / 版本</button><button className="ghost" onClick={() => void action(() => resourceRequest(`${base}/artifacts/${item.id}/reveal`, "POST", {}))}>打开所在目录</button></div>
-          </li>)}</ul>
-        </details>;
-      })}
+      {artifacts && filteredArtifacts.length === 0 ? <p className="muted">当前筛选下没有登记的重要成果；工作区文件仍可按任务需要直接使用。</p> : null}
+      <ul className="artifact-list">{filteredArtifacts.map(item => <li key={item.id}>
+        <div className="artifact-title"><strong>{item.path}</strong><Badge>{detail.tasks.find(task => task.id === item.task_id)?.key ?? "项目"}</Badge></div>
+        <p className="muted">{item.format || "格式未声明"}{item.verification ? ` · ${item.verification}` : ""}</p>
+        <div className="button-row"><button className="secondary" onClick={() => void viewArtifact(item.id)}>查看 / 版本</button><button className="ghost" onClick={() => void action(() => resourceRequest(`${base}/artifacts/${item.id}/reveal`, "POST", {}))}>打开所在目录</button></div>
+      </li>)}</ul>
       {preview ? <details open><summary>{preview.path} · {preview.commit?.slice(0, 12) ?? "当前文件"}</summary>
         {preview.versions.length ? <select aria-label="产物版本" value={preview.commit ?? ""} onChange={e => void viewArtifact(preview.artifactId, e.target.value)}>{preview.versions.map(v => <option key={v} value={v}>{v}</option>)}</select> : null}
         <pre>{preview.text}</pre>
-      </details> : null}
-      {!readonly ? <details><summary>登记重要成果或参考输入</summary>
-        <label>相对路径<input value={path} onChange={e => setPath(e.target.value)} placeholder="outputs/report.md" /></label>
-        <label>类型<select value={kind} onChange={e => setKind(e.target.value)}><option value="input">参考输入</option><option value="intermediate">中间成果</option><option value="delivery">最终交付</option></select></label>
-        <label>格式<input value={format} onChange={e => setFormat(e.target.value)} /></label><label>验收方式<input value={verification} onChange={e => setVerification(e.target.value)} /></label>
-        <label>来源任务<select value={task} onChange={e => setTask(e.target.value)}><option value="">项目</option>{detail.tasks.map(t => <option key={t.id} value={t.id}>{t.key} {t.title}</option>)}</select></label>
-        <button className="secondary" disabled={busy || !path} onClick={() => void action(() => resourceRequest(`${base}/artifacts`, "POST", { path, kind, format, verification, task_id: task || null }))}>登记产物</button>
       </details> : null}
     </div></details>
     {detail.project.workspace_type === "git" && detail.project.stage === "completed" && !readonly && !detail.merged_into_base ? <section className="panel"><h2>合入冲突处理</h2>

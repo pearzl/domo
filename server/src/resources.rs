@@ -19,10 +19,11 @@ pub async fn initialize(pool: &SqlitePool) -> crate::db::DbResult<()> {
         r#"
 CREATE TABLE IF NOT EXISTS shared_records (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), task_id TEXT, job_id TEXT,
- topic TEXT NOT NULL, body TEXT NOT NULL, scope TEXT NOT NULL, evidence TEXT NOT NULL,
- supersedes TEXT NOT NULL, conflicts TEXT NOT NULL, reason TEXT NOT NULL,
+ memory_no INTEGER NOT NULL, body TEXT NOT NULL, supersedes TEXT NOT NULL DEFAULT '',
+ invalidated_by TEXT, invalidated_at TEXT,
  commit_id TEXT, created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_no ON shared_records(project_id, memory_no);
 CREATE INDEX IF NOT EXISTS idx_shared_project ON shared_records(project_id, created_at);
 CREATE TABLE IF NOT EXISTS job_shared_versions (
  job_id TEXT NOT NULL REFERENCES jobs(id), version TEXT NOT NULL, record_ids TEXT NOT NULL,
@@ -82,18 +83,9 @@ async fn ensure_repo(project: &ProjectRow) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedInput {
-    pub topic: String,
-    pub body: String,
+    pub text: String,
     #[serde(default)]
-    pub scope: Vec<String>,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    #[serde(default)]
-    pub supersedes: Vec<String>,
-    #[serde(default)]
-    pub conflicts: Vec<String>,
-    #[serde(default)]
-    pub reason: String,
+    pub supersedes: String,
 }
 
 /// Persist intent before Git. Re-entry writes the same immutable file, commits
@@ -138,24 +130,25 @@ async fn shared_record(pool: &SqlitePool, project_id: &str, id: &str) -> Result<
         String,
         Option<String>,
         Option<String>,
+        i64,
         String,
         String,
-        String,
-        String,
-        String,
-        String,
-        String,
+        Option<String>,
         String,
     );
-    let (id, task, job, topic, body, scope, evidence, supersedes, conflicts, reason, at): Row = sqlx::query_as(
-        "SELECT id, task_id, job_id, topic, body, scope, evidence, supersedes, conflicts, reason, created_at FROM shared_records WHERE project_id = ? AND id = ?",
+    let (id, task, job, memory_no, body, supersedes, invalidated_by, at): Row = sqlx::query_as(
+        "SELECT id, task_id, job_id, memory_no, body, supersedes, invalidated_by, created_at FROM shared_records WHERE project_id = ? AND id = ?",
     ).bind(project_id).bind(id).fetch_one(pool).await?;
-    Ok(
-        json!({"id": id, "task_id": task, "job_id": job, "topic": topic, "body": body,
-        "scope": serde_json::from_str::<Value>(&scope)?, "evidence": serde_json::from_str::<Value>(&evidence)?,
-        "supersedes": serde_json::from_str::<Value>(&supersedes)?, "conflicts": serde_json::from_str::<Value>(&conflicts)?,
-        "reason": reason, "created_at": at}),
-    )
+    Ok(json!({
+        "id": id,
+        "no": format!("M{memory_no}"),
+        "text": body,
+        "task_id": task,
+        "job_id": job,
+        "supersedes": supersedes,
+        "invalidated_by": invalidated_by,
+        "created_at": at,
+    }))
 }
 
 pub async fn publish(
@@ -165,50 +158,89 @@ pub async fn publish(
     job_id: Option<&str>,
     records: &[SharedInput],
 ) -> Result<()> {
-    if records.len() > 50 {
-        bail!("一次最多提交 50 条共享记录");
+    if records.len() > 5 {
+        bail!("一次最多提交 5 条项目记忆");
     }
     let _guard = state.git_lock.lock().await;
     settle_shared(state, project).await?;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let mut seen = std::collections::HashSet::new();
     for record in records {
-        if record.topic.trim().is_empty()
-            || record.body.trim().is_empty()
-            || record.body.len() > 100_000
-        {
-            bail!("共享记录必须有主题和正文，正文不超过 100000 字节");
+        let text = record.text.trim();
+        if text.is_empty() {
+            bail!("项目记忆正文不能为空");
         }
-        if record.evidence.is_empty() {
-            bail!("共享记录必须引用证据或产物路径");
+        if text.chars().count() > 120 {
+            bail!("项目记忆正文不能超过 120 字");
         }
-        if (!record.supersedes.is_empty() || !record.conflicts.is_empty())
-            && record.reason.trim().is_empty()
-        {
-            bail!("修正结论或登记分歧必须说明依据、替代关系和受影响任务");
+        if !seen.insert(text.to_string()) {
+            continue;
         }
-        for id in record.supersedes.iter().chain(&record.conflicts) {
-            let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shared_records WHERE project_id = ? AND id = ? AND commit_id IS NOT NULL")
-                .bind(&project.id).bind(id).fetch_one(&mut *tx).await?;
-            if found == 0 {
-                bail!("共享信息引用不存在或尚未提交：{id}");
-            }
-        }
-        // A repeated result from the same job must not duplicate its records.
-        let encoded = serde_json::to_string(record)?;
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE project_id = ? AND job_id IS ? AND kind = 'shared_submission' AND message = ?")
-            .bind(&project.id).bind(job_id).bind(&encoded).fetch_one(&mut *tx).await?;
+        let target = if record.supersedes.trim().is_empty() {
+            None
+        } else {
+            let no = record.supersedes.trim();
+            let number: i64 = no
+                .strip_prefix('M')
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| anyhow!("supersedes 必须是 M 编号，例如 M12"))?;
+            let target_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM shared_records WHERE project_id = ? AND memory_no = ? AND commit_id IS NOT NULL",
+            )
+            .bind(&project.id)
+            .bind(number)
+            .fetch_optional(&mut *tx)
+            .await?;
+            Some((
+                no.to_string(),
+                target_id.ok_or_else(|| anyhow!("supersedes 指向的项目记忆不存在：{no}"))?,
+            ))
+        };
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE project_id = ? AND job_id IS ? AND kind = 'shared_submission' AND message = ?",
+        )
+        .bind(&project.id)
+        .bind(job_id)
+        .bind(text)
+        .fetch_one(&mut *tx)
+        .await?;
         if exists != 0 {
             continue;
         }
+        let memory_no: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(memory_no), 0) + 1 FROM shared_records WHERE project_id = ?",
+        )
+        .bind(&project.id)
+        .fetch_one(&mut *tx)
+        .await?;
         let id = new_id("info");
-        sqlx::query("INSERT INTO shared_records(id, project_id, task_id, job_id, topic, body, scope, evidence, supersedes, conflicts, reason, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(&id).bind(&project.id).bind(task_id).bind(job_id).bind(&record.topic).bind(&record.body)
-            .bind(serde_json::to_string(&record.scope)?).bind(serde_json::to_string(&record.evidence)?)
-            .bind(serde_json::to_string(&record.supersedes)?).bind(serde_json::to_string(&record.conflicts)?)
-            .bind(&record.reason).bind(now()).execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO shared_records(id, project_id, task_id, job_id, memory_no, body, supersedes, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&project.id)
+        .bind(task_id)
+        .bind(job_id)
+        .bind(memory_no)
+        .bind(text)
+        .bind(target.as_ref().map(|(no, _)| no.as_str()).unwrap_or(""))
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        if let Some((_, target_id)) = &target {
+            sqlx::query(
+                "UPDATE shared_records SET invalidated_by = ?, invalidated_at = ? WHERE id = ? AND project_id = ? AND invalidated_by IS NULL",
+            )
+            .bind(&id)
+            .bind(now())
+            .bind(target_id)
+            .bind(&project.id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("INSERT INTO events(project_id, task_id, job_id, kind, message, payload, created_at) VALUES(?, ?, ?, 'shared_submission', ?, ?, ?)")
-            .bind(&project.id).bind(task_id).bind(job_id).bind(encoded)
-            .bind(json!({"version": 1, "record_id": id, "scope": record.scope, "conflicts": record.conflicts}).to_string())
+            .bind(&project.id).bind(task_id).bind(job_id).bind(text)
+            .bind(json!({"version": 1, "record_id": id, "memory_no": format!("M{memory_no}"), "supersedes": target.as_ref().map(|(no, _)| no)}).to_string())
             .bind(now()).execute(&mut *tx).await?;
     }
     tx.commit().await?;
@@ -219,67 +251,47 @@ pub async fn shared_snapshot(
     state: &AppState,
     project: &ProjectRow,
     job: Option<&JobRow>,
-    task: Option<&TaskRow>,
+    _task: Option<&TaskRow>,
 ) -> Result<Value> {
     let _guard = state.git_lock.lock().await;
     settle_shared(state, project).await?;
     let repo = shared_repo(project);
     let version = git::commit_of(&repo, "HEAD").await?;
-    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM shared_records WHERE project_id = ? AND commit_id IS NOT NULL ORDER BY created_at, id")
-        .bind(&project.id).fetch_all(&state.db).await?;
-    let mut all = Vec::new();
-    for id in ids {
-        all.push(shared_record(&state.db, &project.id, &id).await?);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM shared_records WHERE project_id = ? AND commit_id IS NOT NULL AND invalidated_by IS NULL ORDER BY memory_no",
+    )
+    .bind(&project.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut records = Vec::new();
+    for id in &ids {
+        records.push(shared_record(&state.db, &project.id, id).await?);
     }
-    let superseded: std::collections::HashSet<String> = all
-        .iter()
-        .flat_map(|r| {
-            r["supersedes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-        })
-        .collect();
-    // The catalog makes cross-task knowledge discoverable without inlining its
-    // body. Related records remain complete: free text cannot be safely abridged.
+    let superseded_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM shared_records WHERE project_id = ? AND invalidated_by IS NOT NULL ORDER BY memory_no",
+    )
+    .bind(&project.id)
+    .fetch_all(&state.db)
+    .await?;
     let record_index = job.map(|_| {
-        all.iter()
-            .map(|r| {
-                json!({"id": r["id"], "topic": r["topic"], "scope": r["scope"],
-                    "task_id": r["task_id"], "job_id": r["job_id"], "created_at": r["created_at"],
-                    "supersedes": r["supersedes"], "conflicts": r["conflicts"]})
+        records
+            .iter()
+            .map(|record| {
+                json!({
+                    "no": record["no"],
+                    "text": record["text"],
+                    "task_id": record["task_id"],
+                    "created_at": record["created_at"],
+                    "supersedes": record["supersedes"],
+                })
             })
             .collect::<Vec<_>>()
     });
-    let related: Vec<Value> = all
-        .into_iter()
-        .filter(|r| {
-            if job.is_none() {
-                return true;
-            }
-            if superseded.contains(r["id"].as_str().unwrap_or_default()) {
-                return false;
-            }
-            task.is_none()
-                || r["scope"].as_array().is_none_or(|scope| {
-                    scope.is_empty()
-                        || scope.iter().any(|s| {
-                            s == "*"
-                                || task.is_some_and(|t| {
-                                    s == &t.key
-                                        || parse_string_list(&t.deps).iter().any(|dep| s == dep)
-                                })
-                        })
-                })
-        })
-        .collect();
     if let Some(job) = job {
         sqlx::query("INSERT OR IGNORE INTO job_shared_versions(job_id, version, record_ids, created_at) VALUES(?, ?, ?, ?)")
-            .bind(&job.id).bind(&version).bind(json!(related.iter().map(|r| &r["id"]).collect::<Vec<_>>()).to_string()).bind(now()).execute(&state.db).await?;
+            .bind(&job.id).bind(&version).bind(json!(ids).to_string()).bind(now()).execute(&state.db).await?;
     }
-    let mut snapshot = json!({"version": version, "repository": repo, "records": related, "superseded_ids": superseded,
+    let mut snapshot = json!({"version": version, "repository": repo, "records": records, "superseded_ids": superseded_ids,
         "read_endpoint": format!("/api/projects/{}/shared", project.id)});
     if let Some(index) = record_index {
         snapshot["record_index"] = json!(index);
@@ -340,46 +352,13 @@ pub fn delivery_root(project: &ProjectRow) -> PathBuf {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArtifactInput {
     pub path: String,
-    pub kind: String,
     #[serde(default)]
     pub format: String,
     #[serde(default)]
     pub verification: String,
 }
 
-pub async fn register_artifact(
-    state: &AppState,
-    project: &ProjectRow,
-    task_id: Option<&str>,
-    job_id: Option<&str>,
-    input: &ArtifactInput,
-) -> Result<()> {
-    let root = delivery_root(project);
-    validate_artifact(&root, input).await?;
-    let commit = if project.is_git() {
-        Some(git::commit_of(&root, &project.branch).await?)
-    } else {
-        None
-    };
-    save_artifact_batch(
-        state,
-        project,
-        &ArtifactSource {
-            task_id,
-            job_id,
-            contract_id: project.contract_id,
-            root: &root,
-            commit: commit.as_deref(),
-        },
-        std::slice::from_ref(input),
-    )
-    .await
-}
-
 async fn validate_artifact(root: &Path, input: &ArtifactInput) -> Result<()> {
-    if !matches!(input.kind.as_str(), "input" | "intermediate" | "delivery") {
-        bail!("产物 kind 必须为 input、intermediate 或 delivery");
-    }
     let path = contained(root, &input.path).await?;
     let metadata = tokio::fs::symlink_metadata(&path)
         .await
@@ -396,10 +375,19 @@ async fn declared_artifacts(raw: &str, cwd: &Path) -> Result<Vec<ArtifactInput>>
     let result = crate::domain::extract_json(raw).ok_or_else(|| anyhow!("结果不是 JSON 对象"))?;
     let records: Vec<ArtifactInput> = match result.get("artifacts") {
         Some(value) => {
+            if value
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item.get("kind").is_some()))
+            {
+                bail!("artifacts 不再接受 kind；成果只有一种类型");
+            }
             serde_json::from_value(value.clone()).context("artifacts 必须是产物声明数组")?
         }
         None => Vec::new(),
     };
+    if records.len() > 4 {
+        bail!("artifacts 最多 4 条");
+    }
     let mut paths = std::collections::HashSet::new();
     for record in &records {
         if !paths.insert(&record.path) {
@@ -413,26 +401,14 @@ async fn declared_artifacts(raw: &str, cwd: &Path) -> Result<Vec<ArtifactInput>>
 pub async fn validate_delivery_artifacts(raw: &str, cwd: &Path, is_git: bool) -> Result<()> {
     let records = declared_artifacts(raw, cwd).await?;
     if is_git {
-        let files = crate::domain::commit_files(raw).map_err(anyhow::Error::msg)?;
         for record in records {
-            let declared = files.iter().any(|file| {
-                (file == &record.path || file.starts_with(&format!("{}/", record.path)))
-                    && cwd.join(file).is_file()
-            });
-            if !declared
-                && !git::run_git(
-                    cwd,
-                    &["--literal-pathspecs", "ls-files", "-z", "--", &record.path],
-                )
-                .await?
-                .split('\0')
-                .any(|file| {
-                    !file.is_empty()
-                        && (!files.iter().any(|deleted| deleted == file)
-                            || cwd.join(file).is_file())
-                })
-            {
-                bail!("产物未被 Git 跟踪，也不在 commit_files 中：{}", record.path);
+            let tracked = git::run_git(
+                cwd,
+                &["--literal-pathspecs", "ls-files", "--", &record.path],
+            )
+            .await?;
+            if tracked.trim().is_empty() {
+                bail!("产物未被 Git 跟踪：{}", record.path);
             }
         }
     }
@@ -473,10 +449,10 @@ async fn save_artifact_batch(
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for input in inputs {
         let artifact_id: String = sqlx::query_scalar("INSERT INTO artifacts(id, project_id, task_id, job_id, path, kind, format, verification, commit_id, contract_id, created_at, updated_at) \
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, path) DO UPDATE SET \
-            kind = excluded.kind, format = excluded.format, verification = excluded.verification, task_id = excluded.task_id, job_id = excluded.job_id, \
+            VALUES(?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, path) DO UPDATE SET \
+            kind = '', format = excluded.format, verification = excluded.verification, task_id = excluded.task_id, job_id = excluded.job_id, \
             commit_id = excluded.commit_id, contract_id = excluded.contract_id, updated_at = excluded.updated_at RETURNING id")
-            .bind(new_id("art")).bind(&project.id).bind(source.task_id).bind(source.job_id).bind(&input.path).bind(&input.kind).bind(&input.format).bind(&input.verification)
+            .bind(new_id("art")).bind(&project.id).bind(source.task_id).bind(source.job_id).bind(&input.path).bind(&input.format).bind(&input.verification)
             .bind(source.commit).bind(source.contract_id).bind(&timestamp).bind(&timestamp).fetch_one(&mut *tx).await?;
         if let Some(commit) = source.commit {
             sqlx::query("INSERT OR IGNORE INTO artifact_versions(artifact_id, commit_id, job_id, recorded_at) VALUES(?, ?, ?, ?)")
@@ -493,17 +469,16 @@ pub async fn artifact_snapshot(state: &AppState, project: &ProjectRow) -> Result
         String,
         String,
         String,
-        String,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<i64>,
         String,
     );
-    let rows: Vec<Row> = sqlx::query_as("SELECT id, path, kind, format, verification, task_id, job_id, commit_id, contract_id, updated_at FROM artifacts WHERE project_id = ? ORDER BY kind, path")
+    let rows: Vec<Row> = sqlx::query_as("SELECT id, path, format, verification, task_id, job_id, commit_id, contract_id, updated_at FROM artifacts WHERE project_id = ? ORDER BY path")
         .bind(&project.id).fetch_all(&state.db).await?;
-    let items = rows.into_iter().map(|(id, path, kind, format, verification, task_id, job_id, commit, contract, at)| json!({
-        "id": id, "path": path, "kind": kind, "format": format, "verification": verification,
+    let items = rows.into_iter().map(|(id, path, format, verification, task_id, job_id, commit, contract, at)| json!({
+        "id": id, "path": path, "format": format, "verification": verification,
         "task_id": task_id, "job_id": job_id, "commit": commit, "contract_id": contract, "updated_at": at
     })).collect::<Vec<_>>();
     Ok(json!({"root": delivery_root(project), "items": items}))
@@ -516,44 +491,15 @@ pub async fn settle_artifacts(
     cwd: &Path,
     raw: &str,
 ) -> Result<()> {
-    if !matches!(job.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+    if job.role != JOB_ROLE_EXECUTOR {
         return Ok(());
     }
-    let mut inputs = declared_artifacts(raw, cwd).await?;
-    let files = crate::domain::commit_files(raw).map_err(anyhow::Error::msg)?;
+    let inputs = declared_artifacts(raw, cwd).await?;
     let commit = if project.is_git() {
         Some(git::commit_of(cwd, "HEAD").await?)
     } else {
         None
     };
-    let snapshot = artifact_snapshot(state, project).await?;
-    for item in snapshot["items"].as_array().into_iter().flatten() {
-        let path = item["path"].as_str().unwrap_or_default();
-        let changed = files
-            .iter()
-            .any(|file| file == path || file.starts_with(&format!("{path}/")));
-        if changed && !inputs.iter().any(|input| input.path == path) {
-            let input = ArtifactInput {
-                path: path.into(),
-                kind: item["kind"].as_str().unwrap_or("intermediate").into(),
-                format: item["format"].as_str().unwrap_or_default().into(),
-                verification: item["verification"].as_str().unwrap_or_default().into(),
-            };
-            // An old navigation entry is not a write gate. Deleted or no longer
-            // accessible results retain their last registered Git version.
-            if validate_artifact(cwd, &input).await.is_ok() {
-                if let Some(commit) = &commit {
-                    if git::run_git(cwd, &["cat-file", "-e", &format!("{commit}:{path}")])
-                        .await
-                        .is_err()
-                    {
-                        continue;
-                    }
-                }
-                inputs.push(input);
-            }
-        }
-    }
     save_artifact_batch(
         state,
         project,
@@ -623,16 +569,17 @@ mod tests {
         for raw in [r#"{"commit_files":[]}"#, r#"{"artifacts":[]}"#] {
             assert!(declared_artifacts(raw, &root).await.unwrap().is_empty());
         }
-        let valid = r#"{"artifacts":[{"path":"outputs/report.md","kind":"delivery"},{"path":"outputs","kind":"intermediate"}]}"#;
+        let valid = r#"{"artifacts":[{"path":"outputs/report.md"},{"path":"outputs"}]}"#;
         assert_eq!(declared_artifacts(valid, &root).await.unwrap().len(), 2);
         for value in [
             json!(null),
-            json!({"path":"outputs/report.md", "kind":"delivery"}),
-            json!([{"path":"missing.md", "kind":"delivery"}]),
-            json!([{"path":"../outside.md", "kind":"input"}]),
-            json!([{"path":".git/config", "kind":"input"}]),
-            json!([{"path":"outputs/report.md", "kind":"unknown"}]),
-            json!([{"path":"outputs/report.md", "kind":"delivery"}, {"path":"outputs/report.md", "kind":"input"}]),
+            json!({"path":"outputs/report.md"}),
+            json!([{"path":"missing.md"}]),
+            json!([{"path":"../outside.md"}]),
+            json!([{"path":".git/config"}]),
+            json!([{"path":"outputs/report.md"}, {"path":"outputs/report.md"}]),
+            json!([{"path":"outputs/report.md", "kind":"delivery"}]),
+            json!([{"path":"outputs/report.md"}, {"path":"outputs"}, {"path":"outputs/report.md"}, {"path":"outputs"}, {"path":"outputs"}]),
         ] {
             let raw = json!({"artifacts":value}).to_string();
             assert!(declared_artifacts(&raw, &root).await.is_err(), "{raw}");
@@ -656,18 +603,15 @@ mod tests {
         tokio::fs::write(root.join("outputs/report.md"), "report")
             .await
             .unwrap();
-        let raw = json!({"commit_files":[], "artifacts":[{"path":"outputs/report.md", "kind":"delivery"}]}).to_string();
+        let raw = json!({"artifacts":[{"path":"outputs/report.md"}]}).to_string();
         assert!(validate_delivery_artifacts(&raw, &root, true)
             .await
             .is_err());
-        let raw = json!({"commit_files":["outputs/report.md"], "artifacts":[{"path":"outputs/report.md", "kind":"delivery"}]}).to_string();
+        git::commit_all(&root, "deliver report").await.unwrap();
         validate_delivery_artifacts(&raw, &root, true)
             .await
             .unwrap();
-        tokio::fs::remove_file(root.join("outputs/seed.md"))
-            .await
-            .unwrap();
-        let raw = json!({"commit_files":["outputs/seed.md"], "artifacts":[{"path":"outputs", "kind":"delivery"}]}).to_string();
+        let raw = json!({"artifacts":[{"path":"outputs/missing.md"}]}).to_string();
         assert!(validate_delivery_artifacts(&raw, &root, true)
             .await
             .is_err());

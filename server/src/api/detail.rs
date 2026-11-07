@@ -13,8 +13,7 @@ use super::helpers::{parse_list, require_project};
 use super::ApiError;
 
 pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDetail, ApiError> {
-    let mut project = require_project(state, id).await?;
-    project.user_action = crate::user_action::for_project(&project);
+    let project = require_project(state, id).await?;
     let tasks = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks WHERE project_id = ? ORDER BY queue_order ASC, seq ASC",
     )
@@ -107,19 +106,12 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
         project.proposal.as_deref()
     };
     let proposal = proposal_raw.and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
-    let mut task_actions = HashMap::new();
-    for task in &tasks {
-        if let Some(action) = crate::user_action::for_task(&state.db, task).await? {
-            task_actions.insert(task.id.clone(), action);
-        }
-    }
-    let mut tasks = task_views(tasks);
-    for task in &mut tasks {
-        task.user_action = task_actions.remove(&task.id);
-        if let Some(action) = &task.user_action {
-            task.waiting_reason = Some(action.summary.clone());
-        }
-    }
+    let tasks = task_views(tasks);
+    let merge_conflicts = project
+        .merge_conflicts
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
     Ok(ProjectDetail {
         attention_items: crate::attention::items(&state.db, &project, merged_into_base).await?,
         delivery: crate::delivery::snapshot(&state.db, id).await?,
@@ -127,6 +119,7 @@ pub(super) async fn load_detail(state: &AppState, id: &str) -> Result<ProjectDet
         merged_at: merged_at.clone(),
         merged_commit: merged_commit.clone(),
         merged_into_base,
+        merge_conflicts,
         tasks,
         jobs,
         messages,
@@ -209,9 +202,6 @@ pub(super) fn task_waiting_reason(task: &TaskView, completed: &HashSet<String>) 
         Some(STATUS_PAUSED) => return Some("任务已暂停".into()),
         Some(STATUS_PAUSING) => return Some("暂停中，等待在途作业结束".into()),
         Some(STATUS_BLOCKED) => {
-            if let Some(action) = &task.user_action {
-                return Some(action.summary.clone());
-            }
             if task.last_failure_kind.as_deref() == Some("configuration") {
                 return task
                     .last_error

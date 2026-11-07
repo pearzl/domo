@@ -57,17 +57,41 @@ pub(super) async fn submit_report(
                 if project.stage != STAGE_SUMMARIZING || project.report.is_none() {
                     return Err(ApiError::bad("当前没有等待验收的项目报告"));
                 }
+                let issues = project
+                    .acceptance
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .and_then(|value| value["issues"].as_array().map(Vec::len))
+                    .unwrap_or(0);
+                if issues > 0 && feedback.is_empty() {
+                    return Err(ApiError::bad(
+                        "报告带未闭合项，接受时必须填写理由，说明为什么可以带缺口结项",
+                    ));
+                }
                 if !feedback.is_empty() {
                     let round = record_report_opinion(&state, &id, &feedback).await?;
                     event_message = format!("项目报告已通过（附第 {round} 条意见），项目完成");
                 } else {
                     event_message = "项目报告已通过，项目完成".into();
                 }
+                let accepted_commit = if project.is_git() {
+                    crate::git::commit_of(
+                        &std::path::PathBuf::from(&project.repo_path),
+                        &project.branch,
+                    )
+                    .await
+                    .ok()
+                } else {
+                    None
+                };
                 sqlx::query(
                     "UPDATE projects SET stage = ?, status = NULL, blocked_reason = NULL, \
-                     report_feedback = NULL, updated_at = ? WHERE id = ?",
+                     report_feedback = NULL, accept_reason = ?, accepted_commit = ?, updated_at = ? \
+                     WHERE id = ?",
                 )
                 .bind(STAGE_COMPLETED)
+                .bind((!feedback.is_empty()).then_some(feedback.as_str()))
+                .bind(accepted_commit.as_deref())
                 .bind(now())
                 .bind(&id)
                 .execute(&state.db)

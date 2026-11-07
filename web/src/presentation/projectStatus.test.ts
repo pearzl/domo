@@ -38,7 +38,6 @@ function project(overrides: Partial<Project> = {}): Project {
     replan_requested_at: null,
     confirm_mode: "manual",
     confirmed_at: null,
-    completion_mode: "tasks",
     merged_at: null,
     merged_commit: null,
     created_at: "2026-01-10T10:00:00Z",
@@ -134,9 +133,6 @@ function proposal(overrides: Partial<AnalysisProposal> = {}): AnalysisProposal {
     assumptions: [],
     acceptance: [],
     tasks: [],
-    plan: [],
-    verification: [],
-    skip_confirmation: false,
     ...overrides,
   };
 }
@@ -313,7 +309,7 @@ describe("projectGuidance", () => {
 
   it("有方案时提示确认或继续讨论", () => {
     const guidance = projectGuidance(
-      input({ proposal: proposal({ kind: "direct" }) }),
+      input({ proposal: proposal({}) }),
     );
     expect(guidance.tone).toBe("success");
     expect(guidance.label).toBe("待确认");
@@ -417,20 +413,6 @@ describe("projectGuidance", () => {
     expect(projectAttention(input({ project: plain }))).toBeNull();
   });
 
-  it("执行阶段直接完成模式区分作业运行", () => {
-    const running = projectGuidance(
-      input({
-        project: project({ stage: "executing", completion_mode: "direct" }),
-        jobs: [job({ role: "direct", status: "running" })],
-      }),
-    );
-    expect(running.title).toBe("等待直接完成");
-
-    const idle = projectGuidance(
-      input({ project: project({ stage: "executing", completion_mode: "direct" }) }),
-    );
-    expect(idle.title).toBe("执行中");
-  });
 
   it("执行阶段阻塞时提示人工处理", () => {
     const guidance = projectGuidance(

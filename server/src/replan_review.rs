@@ -187,11 +187,8 @@ pub async fn advance_plans_locked(state: &AppState, project: &ProjectRow) -> Res
             if request.state == "ready" {
                 // Replay only the interrupted automatic application. A manual
                 // draft remains blocked and is handled by the confirmation API.
-                let proposal = load_plan(&state.db, &request).await?;
-                if project.replan_active != 0
-                    && proposal.skip_confirmation
-                    && project.confirm_mode == CONFIRM_AUTO
-                {
+                let _proposal = load_plan(&state.db, &request).await?;
+                if project.replan_active != 0 && project.confirm_mode == CONFIRM_AUTO {
                     apply_project_plan_locked(state, project, &request).await?;
                     return Ok(true);
                 }
@@ -232,7 +229,6 @@ async fn load_plan(pool: &SqlitePool, request: &ReviewRequest) -> Result<Analysi
         goal,
         assumptions,
         acceptance,
-        skip_confirmation,
     } = parse_result(JOB_ROLE_REPLAN_REVIEW, &raw).map_err(anyhow::Error::msg)?
     else {
         anyhow::bail!("重规划结果不是完整方案")
@@ -254,9 +250,6 @@ async fn load_plan(pool: &SqlitePool, request: &ReviewRequest) -> Result<Analysi
         assumptions,
         acceptance,
         tasks,
-        plan: vec![],
-        verification: vec![],
-        skip_confirmation,
         replan_impact: None,
     })
 }
@@ -358,9 +351,8 @@ async fn apply_project_plan_locked(
             .map(|previous| previous.acceptance)
             .unwrap_or_default();
     }
-    proposal.replan_impact = Some(
-        crate::replan::impact(state, &current, "plan", &proposal.acceptance, &[], &tasks).await?,
-    );
+    proposal.replan_impact =
+        Some(crate::replan::impact(state, &current, &proposal.acceptance, &tasks).await?);
     let raw = serde_json::to_string(&proposal)?;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE projects SET replan_proposal = ?, updated_at = ? WHERE id = ?")
@@ -378,7 +370,7 @@ async fn apply_project_plan_locked(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    if proposal.skip_confirmation && current.confirm_mode == CONFIRM_AUTO {
+    if current.confirm_mode == CONFIRM_AUTO {
         crate::runner::apply_analysis_plan_locked(
             state,
             &current,
@@ -682,7 +674,6 @@ pub async fn settle_locked(
         reason,
         guidance,
         resume_stage,
-        user_action,
     }) = parsed
     else {
         let retry = interrupted || request.attempts < 3;
@@ -704,12 +695,19 @@ pub async fn settle_locked(
         .await?;
         return Ok(());
     };
-    let note =
-        crate::user_action::review_note(request.reviewer_task_id.is_some(), reason, guidance);
-    let waiting = user_action
-        .as_ref()
-        .map(|action| action.summary.as_str())
-        .unwrap_or("等待外部条件，请查看处理说明");
+    let note = format!(
+        "{}决策：{reason}\n执行指导：{guidance}",
+        if request.reviewer_task_id.is_some() {
+            "父任务"
+        } else {
+            "规划者"
+        }
+    );
+    let waiting = if reason.trim().is_empty() {
+        "等待外部条件，请查看判定依据"
+    } else {
+        reason.as_str()
+    };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let next = if decision == "reject" {
         "rejected"

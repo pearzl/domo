@@ -11,7 +11,7 @@
 | `server/src/agents/mock.rs` | 进程内 mock Agent。 |
 | `server/src/agents/opencode.rs` | OpenCode CLI Agent。 |
 | `server/src/agents/codex.rs` | Codex CLI Agent。 |
-| `server/src/agents/workbuddy.rs` | WorkBuddy CLI Agent。 |
+| `server/src/agents/codebuddy.rs` | CodeBuddy CLI Agent。 |
 | `server/src/agents/cli.rs` | 自定义命令模板 Agent。 |
 | `server/src/agents/process.rs` | 外部进程启动、输出采集、超时与进程组终止。 |
 | `server/src/agents/diagnostic.rs` | 统一停止原因、错误类别与证据来源，各协议的作业级错误归一化。 |
@@ -44,7 +44,7 @@
 
 `session_for_job(job_id, existing)` 返回该作业应使用的会话标识。`existing` 是上一轮运行报告的会话；返回 `None` 表示该类型不需要会话标识。`server/src/runner/mod.rs` 在作业开始时调用 `agents::session_for_job(&agent, &job.id)` 初始化 `AgentSpec.session_id`，续轮沿用上一轮 `AgentRun.session_id`。
 
-`supports_resume(config)` 只声明实际调用方式具备原会话恢复能力，不承诺外部会话一定存在。`recover_session(config, job_id, stdout, previous)` 用于服务重启、强制停止或异常退出：Codex/WorkBuddy 内置适配器从实际协议事件提取标识，缺失时沿用先前保存的真实标识；OpenCode 与 CLI 可使用显式指定的会话标识。CLI 的 `{session_id}` 必须出现在实际展开的参数中，不能仅凭未使用的模板字段声明支持。
+`supports_resume(config)` 只声明实际调用方式具备原会话恢复能力，不承诺外部会话一定存在。`recover_session(config, job_id, stdout, previous)` 用于服务重启、强制停止或异常退出：Codex/CodeBuddy 内置适配器从实际协议事件提取标识，缺失时沿用先前保存的真实标识；OpenCode 与 CLI 可使用显式指定的会话标识。CLI 的 `{session_id}` 必须出现在实际展开的参数中，不能仅凭未使用的模板字段声明支持。
 
 ### 2.3 执行一轮
 
@@ -88,7 +88,7 @@
 
 ### 2.5 统一结束诊断
 
-`diagnose(config, run)` 返回 `Diagnosis`：停止经过 `stop`、错误类别 `kind`、证据来源 `evidence`、可用的 HTTP 状态、供应商码、重试时间与摘要。内置适配器只解析各自作业级错误事件；配置命令模板的 Codex/WorkBuddy 转交 CLI 诊断。工具结果、推理和引用文本不作为结构化作业故障，最终正常结束不会被中间错误覆盖。
+`diagnose(config, run)` 返回 `Diagnosis`：停止经过 `stop`、错误类别 `kind`、证据来源 `evidence`、可用的 HTTP 状态、供应商码、重试时间与摘要。内置适配器只解析各自作业级错误事件；配置命令模板的 Codex/CodeBuddy 转交 CLI 诊断。工具结果、推理和引用文本不作为结构化作业故障，最终正常结束不会被中间错误覆盖。
 
 无法识别的内容保持未知，stderr 文本推断不授权自动继续。可靠的超时事实或结构化网络/供应商临时错误可以交给有界自动策略；卡死、未知、账户和配置故障供人决定。明确结构化会话或上下文硬错误表示原会话不能继续。适配器不决定暂停、派发、预算或业务返工，这些由作业策略和调度执行。
 
@@ -131,7 +131,7 @@ adapter_registry!(
     MockAdapter,
     OpencodeAdapter,
     CodexAdapter,
-    WorkbuddyAdapter,
+    CodebuddyAdapter,
     CliAdapter,
 );
 ```
@@ -176,20 +176,20 @@ async fn run_with<A: AgentAdapter>(
 
 ## 5. 五类适配器差异
 
-| 维度 | `mock` | `opencode` | `codex` | `workbuddy` | `cli` |
+| 维度 | `mock` | `opencode` | `codex` | `codebuddy` | `cli` |
 |---|---|---|---|---|---|
-| 适配器 | `MockAdapter`（`server/src/agents/mock.rs`） | `OpencodeAdapter`（`server/src/agents/opencode.rs`） | `CodexAdapter`（`server/src/agents/codex.rs`） | `WorkbuddyAdapter`（`server/src/agents/workbuddy.rs`） | `CliAdapter`（`server/src/agents/cli.rs`） |
-| 参数来源 | 进程内 `run_mock(spec)`；读取 `job_dir/context.json`；`DOMO_MOCK_DELAY_MS`、`DOMO_MOCK_EXECUTOR_DELAY_MS`、`DOMO_MOCK_USAGE` 等环境变量 | `opencode_args` 由 `AgentConfig.model` 和 `session_id` 生成；可执行文件来自 `crate::opencode::bin()` | `codex_args` 或 `codex_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `workbuddy_args` 或 `workbuddy_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `AgentConfig.command` 命令模板逐项展开，首项为可执行文件；`AgentConfig.model_args` 参与 `{model_args}` 展开 |
+| 适配器 | `MockAdapter`（`server/src/agents/mock.rs`） | `OpencodeAdapter`（`server/src/agents/opencode.rs`） | `CodexAdapter`（`server/src/agents/codex.rs`） | `CodebuddyAdapter`（`server/src/agents/codebuddy.rs`） | `CliAdapter`（`server/src/agents/cli.rs`） |
+| 参数来源 | 进程内 `run_mock(spec)`；读取 `job_dir/context.json`；`DOMO_MOCK_DELAY_MS`、`DOMO_MOCK_EXECUTOR_DELAY_MS`、`DOMO_MOCK_USAGE` 等环境变量 | `opencode_args` 由 `AgentConfig.model` 和 `session_id` 生成；可执行文件来自 `crate::opencode::bin()` | `codex_args` 或 `codex_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `codebuddy_args` 或 `codebuddy_resume_args`；模型来自 `AgentConfig.model`；配置了命令模板时转交 `CliAdapter` | `AgentConfig.command` 命令模板逐项展开，首项为可执行文件；`AgentConfig.model_args` 参与 `{model_args}` 展开 |
 | 提示词投递 | 不读取 `AgentSpec.prompt`，以 `context.json` 为输入 | stdin | stdin；续轮由 `prompt_for_run` 决定是否拼接原始提示词 | stdin；续轮由 `prompt_for_run` 决定是否拼接原始提示词 | 模板含 `{prompt}` 时作为位置参数，否则写入 stdin；续轮同样经 `prompt_for_run` |
-| 会话恢复 | `session_for_job` 返回 `None`，每作业独立 | `session_for_job` 优先沿用非空 `existing`，否则用 `crate::opencode::session_id(job_id)`；`run_turn` 以 `--session` 传入 | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `codex_resume_args` 的 `exec resume`；`parse_codex_session_id` 从 `thread.started` 读取 `thread_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `workbuddy_resume_args` 的 `--resume`；`parse_workbuddy_session_id` 从事件读取 `session_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；模板或模型参数含 `{session_id}` 时视为支持恢复，`AgentRun.session_id` 回填该值 |
-| usage 来源 | `DOMO_MOCK_USAGE=1` 时把 `usage` 写入 `result.json`；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn` | `finish_job` 按 `finalize_plan` 决策：`Skip` 返回 `PerTurn`；`FetchOnly` 只取账本；`SettleThenFetch` 先 `settle` 再取账本；结果为 `Authoritative` | `parse_codex_usage` 从 `turn.completed` 的 `usage` 生成 `UsageRecord`，写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | `parse_workbuddy_usage` 优先取 `result` 事件的 `usage`，缺失时取最后一条 `assistant` 消息的 `usage`，并读取 `total_cost_usd`；写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | 适配器不产生用量；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn`；结果文件的 `usage` 由 `server/src/runner/lifecycle.rs` 读取 |
+| 会话恢复 | `session_for_job` 返回 `None`，每作业独立 | `session_for_job` 优先沿用非空 `existing`，否则用 `crate::opencode::session_id(job_id)`；`run_turn` 以 `--session` 传入 | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `codex_resume_args` 的 `exec resume`；`parse_codex_session_id` 从 `thread.started` 读取 `thread_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；续轮用 `codebuddy_resume_args` 的 `--resume`；`parse_codebuddy_session_id` 从事件读取 `session_id` | 优先沿用非空 `existing`，否则用 `derived_session_id(job_id)`；模板或模型参数含 `{session_id}` 时视为支持恢复，`AgentRun.session_id` 回填该值 |
+| usage 来源 | `DOMO_MOCK_USAGE=1` 时把 `usage` 写入 `result.json`；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn` | `finish_job` 按 `finalize_plan` 决策：`Skip` 返回 `PerTurn`；`FetchOnly` 只取账本；`SettleThenFetch` 先 `settle` 再取账本；结果为 `Authoritative` | `parse_codex_usage` 从 `turn.completed` 的 `usage` 生成 `UsageRecord`，写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | `parse_codebuddy_usage` 优先取 `result` 事件的 `usage`，缺失时取最后一条 `assistant` 消息的 `usage`，并读取 `total_cost_usd`；写入 `AgentRun.usage`；`finish_job` 用默认 `PerTurn` | 适配器不产生用量；`AgentRun.usage` 为 `None`，`finish_job` 用默认 `PerTurn`；结果文件的 `usage` 由 `server/src/runner/lifecycle.rs` 读取 |
 | 命令模板要求 | 否 | 否 | 否；配置非空时作为自定义模板执行 | 否；配置非空时作为自定义模板执行 | 是；`validate` 拒绝空模板，错误文案为“CLI Agent 必须配置命令模板” |
 | 内置二进制覆盖 | 无，进程内运行 | `DOMO_OPENCODE_BIN`，默认 `opencode` | `DOMO_CODEX_BIN`，默认 `codex` | `DOMO_WORKBUDDY_BIN`，默认 `codebuddy` | 无环境变量覆盖；可执行文件取自命令模板首项 |
 
 补充说明：
 
 - `mock` 的 `AgentRun.session_id` 为 `None`，`server/src/agents/mod.rs` 的 `session_for_job` 对 `AGENT_MOCK` 返回 `None`。
-- `codex` 与 `workbuddy` 的 `requires_command_template` 返回 `false`；命令模板非空时，两者的 `run_turn` 都把本轮交给 `CliAdapter`，模板为空时使用各自的内置参数。
+- `codex` 与 `codebuddy` 的 `requires_command_template` 返回 `false`；命令模板非空时，两者的 `run_turn` 都把本轮交给 `CliAdapter`，模板为空时使用各自的内置参数。
 - `cli` 的 `prompt_for_run(spec, can_resume)` 在无法恢复会话时把 `original_prompt` 与续轮提示词拼接，保证新进程先看到原始目标。
 - `derived_session_id(job_id)` 从作业标识的十六进制片段派生稳定 UUID 形会话标识；`job_id` 不含足够十六进制字符时回退为 `ses_domo<job_id>`。
 
@@ -240,7 +240,7 @@ async fn run_with<A: AgentAdapter>(
 
 3. 按类型的真实行为实现 `requires_command_template`、`validate`、`session_for_job`、`run_turn`。需要权威用量账本时覆盖 `finish_job` 并返回 `JobUsage::Authoritative`；否则沿用默认 `PerTurn`。
 4. 复用 `server/src/agents/` 内的公共能力：`run_process` 负责进程启动、输出采集与进程组终止；`bin_override` 读取 `DOMO_<NAME>_BIN`；`derived_session_id` 派生会话标识；`prompt_for_run` 处理续轮提示词；`json_i64` 读取 JSON 数值。
-5. 命令模板可选的类型可以像 `CodexAdapter`、`WorkbuddyAdapter` 一样，在 `run_turn` 检测到非空 `config.command` 时转交 `CliAdapter`。
+5. 命令模板可选的类型可以像 `CodexAdapter`、`CodebuddyAdapter` 一样，在 `run_turn` 检测到非空 `config.command` 时转交 `CliAdapter`。
 
 ### 6.2 在注册表登记
 
@@ -258,7 +258,7 @@ async fn run_with<A: AgentAdapter>(
        MockAdapter,
        OpencodeAdapter,
        CodexAdapter,
-       WorkbuddyAdapter,
+       CodebuddyAdapter,
        CliAdapter,
        ExampleAdapter,
    );

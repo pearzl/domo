@@ -1,11 +1,11 @@
-# Codex 与 WorkBuddy CLI 协议核对
+# Codex 与 CodeBuddy CLI 协议核对
 
 > 记录 `codex` 与 `codebuddy` 在非交互模式下的真实输出协议，作为 DOMO 把两者接入为一等 Agent 时的解析依据。
 > 文中的 JSONL 样例来自实际运行，只替换了本机路径、会话标识与密钥占位符；事件均由对应 CLI 实际输出，未补造。
 
 ## 0. 核对环境
 
-| 项目 | Codex | WorkBuddy |
+| 项目 | Codex | CodeBuddy |
 |---|---|---|
 | 可执行文件 | `codex` | `codebuddy` |
 | 版本 | `codex-cli 0.160.0` | `2.178.1` |
@@ -15,7 +15,7 @@
 
 两台 CLI 都安装在 Linux x86_64 开发机。Codex 使用的供应商只提供 Chat Completions，不提供 Responses API；原生请求在 `/v1/responses` 返回 404。为核对 Codex 的完整事件流，核对运行在本地放了一个只做协议转译的 Chat Completions → Responses 转接层，模型调用、工具执行与 JSONL 输出都由 `codex` 进程自身完成。转接层不随仓库交付，也不参与自动化验收。
 
-密钥通过环境变量 `QINIU_API_KEY` 提供，值不写入仓库、日志或本文。WorkBuddy 使用自身账号的免费额度，未读取或记录任何凭据。
+密钥通过环境变量 `QINIU_API_KEY` 提供，值不写入仓库、日志或本文。CodeBuddy 使用自身账号的免费额度，未读取或记录任何凭据。
 
 ---
 
@@ -180,7 +180,7 @@ DOMO 的活动字段是 `kind`、`text`、`tool`、`target`、`status`、`error`
 - 真实运行里，模型通过 `exec_command` 写入 `{"kind":"done","summary":"probe"}`，证明“提示词要求 + 可写作业目录”可以产出协议文件。
 - `result.json` 可携带 `usage` 对象；DOMO 既从 `AgentRun.usage` 取用量，也从结果 JSON 的 `usage` 取用量。字段名与 `UsageRecord` 一致：`input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cost`、`duration_ms`。
 - DOMO 的结果解析允许 JSON 前后有说明文字或 `json` 代码围栏，但内容必须是合法 JSON 对象。
-- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 5 轮继续提示，并提示执行者可以派生子任务；OpenCode 复用同一会话，其他支持会话的 Agent 优先复用会话。5 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
+- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 2 轮结果缺失续写提示，并提示执行者可以派生子任务；OpenCode 复用同一会话，其他支持会话的 Agent 优先复用会话。2 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
 - Codex 从首次运行的 `thread.started.thread_id` 取会话标识，继续轮次使用 `codex exec resume <thread_id>`。
 
 执行者角色的最小结果：
@@ -197,7 +197,7 @@ DOMO 的活动字段是 `kind`、`text`、`tool`、`target`、`status`、`error`
 | 出现 `turn.failed` | 作业失败，原因取 `error.message`；即使退出码缺失也按失败处理。 |
 | 退出码为 0 但没有 `turn.completed` | 视为协议不完整，按失败处理。 |
 | `item.type=command_execution` 且 `exit_code != 0` | 只记工具失败，不直接使作业失败；是否失败由后续 `result.json` 或最终 turn 决定。 |
-| 退出码为 0、`turn.completed` 正常，但没有 `result.json` | 在同一作业内最多追加 5 轮继续提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
+| 退出码为 0、`turn.completed` 正常，但没有 `result.json` | 在同一作业内最多追加 2 轮结果缺失续写提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
 | `result.json` 不是合法 JSON 或不符合角色协议 | 归入协议失败。 |
 | 错误文本含 `429`、`rate limit`、`quota` 等 | 归入限流，按重试信息设置冷却。 |
 | 错误文本含 `401`、`403`、`invalid api key`、`invalid_request` 等 | 归入永久错误，不重试。 |
@@ -218,7 +218,7 @@ DOMO 的活动字段是 `kind`、`text`、`tool`、`target`、`status`、`error`
 
 ---
 
-## 2. WorkBuddy（可执行文件 `codebuddy`）
+## 2. CodeBuddy（可执行文件 `codebuddy`）
 
 ### 2.1 可执行命令
 
@@ -274,7 +274,7 @@ DOMO 的 CLI Agent 模板：
 
 - stdout：每行一个 JSON 对象，首个事件是 `system/init`，最后一个事件是 `result`。
 - stderr：成功与模型参数错误时都为空；错误信息在 `result.errors` 和 assistant 文本里。
-- 退出码：正常完成为 0；模型参数错误同样为 0，错误只体现在 `result.is_error`。不能只靠退出码判断 WorkBuddy 作业成败。
+- 退出码：正常完成为 0；模型参数错误同样为 0，错误只体现在 `result.is_error`。不能只靠退出码判断 CodeBuddy 作业成败。
 - 每条事件都有 `type`、`session_id`。assistant/user 事件的消息体在 `message`，内容块在 `message.content`。
 
 实测事件：
@@ -322,7 +322,7 @@ DOMO 的 CLI Agent 模板：
 
 ### 2.6 事件到 DOMO 活动的映射
 
-| WorkBuddy 事件 | DOMO `kind` | 字段映射 | 汇总 |
+| CodeBuddy 事件 | DOMO `kind` | 字段映射 | 汇总 |
 |---|---|---|---|
 | `system/init`、`system/status` | 不产生活动 | 只读取会话元数据 | — |
 | `assistant` 且内容块 `thinking` | `step` | `text=thinking` 首行 | `steps += 1` |
@@ -340,7 +340,7 @@ DOMO 的 CLI Agent 模板：
 
 `result` 事件的字段映射到 DOMO `UsageRecord`：
 
-| WorkBuddy 字段 | DOMO 字段 | 说明 |
+| CodeBuddy 字段 | DOMO 字段 | 说明 |
 |---|---|---|
 | `usage.input_tokens` | `input_tokens` | 跨轮累计输入。 |
 | `usage.output_tokens` | `output_tokens` | 跨轮累计输出。 |
@@ -356,12 +356,12 @@ DOMO 的 CLI Agent 模板：
 
 ### 2.8 result.json
 
-- WorkBuddy 不自动写 `result.json`；真实运行中模型通过 `Write` 工具写出 `{"kind":"done","summary":"read task and observed the missing file"}`。
+- CodeBuddy 不自动写 `result.json`；真实运行中模型通过 `Write` 工具写出 `{"kind":"done","summary":"read task and observed the missing file"}`。
 - 若作业目录不在 `{cwd}` 内，命令模板必须带 `--add-dir "{job_dir}"`，否则 `Write` 可能被权限拒绝。
 - 结果协议与 Codex 共用同一套 DOMO 解析：执行者读 `kind`/`summary`/`reason`，验收者读 `pass`/`reason`/`issues`。
 - `result.json` 可带 `usage` 对象，字段与 `UsageRecord` 一致。CLI runner 不解析事件流；缺少该对象时用量记为未知，解析层读取事件流后可把汇总值填入 `AgentRun.usage`。
-- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 5 轮继续提示，并提示执行者可以派生子任务；5 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
-- WorkBuddy 从首次运行的 `system/init.session_id` 取会话标识，继续轮次使用 `--resume <session_id>`。
+- 退出码为 0 但没有 `result.json` 时，DOMO 在同一作业内最多追加 2 轮结果缺失续写提示，并提示执行者可以派生子任务；2 轮后仍缺少结果按协议失败结算并阻塞，不切换 Agent。
+- CodeBuddy 从首次运行的 `system/init.session_id` 取会话标识，继续轮次使用 `--resume <session_id>`。
 
 ### 2.9 失败判定规则
 
@@ -370,14 +370,14 @@ DOMO 的 CLI Agent 模板：
 | `result.is_error=true` | 作业失败，原因取 `errors[0]` 首行；即使退出码为 0 也按失败处理。 |
 | `result.subtype` 不是 `success` | 作业失败，`error_during_execution` 表示执行期错误。 |
 | 进程退出码非 0 | 进程失败，进入 DOMO 的失败分类。 |
-| 退出码为 0 且 `result.is_error=false`，但没有 `result.json` | 在同一作业内最多追加 5 轮继续提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
+| 退出码为 0 且 `result.is_error=false`，但没有 `result.json` | 在同一作业内最多追加 2 轮结果缺失续写提示；仍未写则按协议失败处理并阻塞，不换 Agent。 |
 | `result.json` 不是合法 JSON 或不符合角色协议 | 归入协议失败。 |
 | `tool_result` 的 `_meta.rawResponse.is_error=true` 或 `exitCode != 0` | 只记工具失败，不直接使会话失败。 |
 | `permission_denials` 非空 | 工具调用被拒绝；会话可能仍为成功，需在作业事件中提示权限不足。 |
 | 错误文本含 `429`、`rate limit`、`quota` 等 | 归入限流，按重试信息设置冷却。 |
 | 错误文本含 `400`、`401`、`403`、`invalid api key`、`model ... not found` 等 | 归入永久错误，不重试。 |
 
-模型参数错误样例的 `subtype=error_during_execution`、`is_error=true`、退出码 `0`，说明“退出码成功”不能作为 WorkBuddy 作业成功的判据。
+模型参数错误样例的 `subtype=error_during_execution`、`is_error=true`、退出码 `0`，说明“退出码成功”不能作为 CodeBuddy 作业成功的判据。
 
 ### 2.10 已知限制与未实测项
 
@@ -387,15 +387,15 @@ DOMO 的 CLI Agent 模板：
 - `--dangerously-skip-permissions` 对 `HIGH/CRITICAL` 风险仍会询问；非交互运行可能卡在询问上，最终由 DOMO 超时或卡死检测终止。
 - 默认会写会话文件；自动化使用 `--no-session-persistence`，避免在用户目录留下会话与日志。
 - `system/init` 的 `tools` 与 `slash_commands` 列表很长；活动投影必须丢弃这两个字段，否则单个事件会占用大量内存。
-- 免费模型存在全局限流。核对中 `qiniu/conatus-free` 曾返回 `429 free_campaign_global_limit`；WorkBuddy 侧的限流错误未实测。
-- WorkBuddy 的网络错误、鉴权失败与超时未实测；样例只覆盖成功会话与模型参数错误。
+- 免费模型存在全局限流。核对中 `qiniu/conatus-free` 曾返回 `429 free_campaign_global_limit`；CodeBuddy 侧的限流错误未实测。
+- CodeBuddy 的网络错误、鉴权失败与超时未实测；样例只覆盖成功会话与模型参数错误。
 - `--input-format stream-json` 未实测；DOMO 只使用 `text` 提示词输入。
 
 ---
 
 ## 3. 接入检查清单
 
-| 检查项 | Codex | WorkBuddy |
+| 检查项 | Codex | CodeBuddy |
 |---|---|---|
 | 命令模板 | `codex exec --json ... -` | `codebuddy -p --output-format stream-json --verbose --dangerously-skip-permissions ...` |
 | 提示词通道 | 不写 `{prompt}`，走 stdin；或用 `-` | 不写 `{prompt}`，走 stdin |

@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS merge_operations (
     prepared_commit TEXT,
     phase TEXT NOT NULL,
     error TEXT,
+    rebased INTEGER NOT NULL DEFAULT 0,
+    agent_resolved INTEGER NOT NULL DEFAULT 0,
+    conflicts TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT
 );
@@ -89,13 +92,22 @@ CREATE TABLE IF NOT EXISTS job_runs (
     snapshot TEXT NOT NULL
 );
 CREATE VIEW IF NOT EXISTS accounting_jobs AS
-    SELECT project_id, agent_id, role, input_tokens, output_tokens, cache_read_tokens,
-        cache_write_tokens, reasoning_tokens, cost, duration_ms, usage_known,
-        started_at, finished_at, created_at FROM jobs
+    SELECT j.project_id, j.agent_id, COALESCE(a.model, '') AS model, j.task_id,
+        COALESCE(t.key, '') AS task_key, j.role, j.input_tokens, j.output_tokens,
+        j.cache_read_tokens, j.cache_write_tokens, j.reasoning_tokens, j.cost,
+        j.duration_ms, j.usage_known, j.started_at, j.finished_at, j.created_at
+    FROM jobs j
+    LEFT JOIN agents a ON a.id = j.agent_id
+    LEFT JOIN tasks t ON t.id = j.task_id
     UNION ALL
-    SELECT project_id, agent_id, role, input_tokens, output_tokens, cache_read_tokens,
-        cache_write_tokens, reasoning_tokens, cost, duration_ms, usage_known,
-        started_at, finished_at, created_at FROM job_runs;
+    SELECT r.project_id, r.agent_id, COALESCE(a.model, '') AS model, j.task_id,
+        COALESCE(t.key, '') AS task_key, r.role, r.input_tokens, r.output_tokens,
+        r.cache_read_tokens, r.cache_write_tokens, r.reasoning_tokens, r.cost,
+        r.duration_ms, r.usage_known, r.started_at, r.finished_at, r.created_at
+    FROM job_runs r
+    LEFT JOIN agents a ON a.id = r.agent_id
+    LEFT JOIN jobs j ON j.id = r.job_id
+    LEFT JOIN tasks t ON t.id = j.task_id;
 CREATE TRIGGER IF NOT EXISTS preserve_job_retry BEFORE UPDATE OF status ON jobs
 WHEN NEW.status = 'running' AND OLD.status = 'failed' BEGIN
     INSERT INTO job_runs(job_id, project_id, agent_id, role, input_tokens, output_tokens,
@@ -360,49 +372,6 @@ pub fn validate_evidence(
         }
         if result.get("pass").and_then(Value::as_bool) == Some(true) && item["passed"] != true {
             return Err("验收结论通过，但存在未通过的验收条目".into());
-        }
-    }
-    Ok(())
-}
-
-pub fn validate_project_evidence(
-    raw: &str,
-    contract: &Value,
-    criteria: &[String],
-    artifact_version: &Value,
-) -> Result<(), String> {
-    let result = crate::domain::extract_json(raw).ok_or("项目验收结果不是 JSON")?;
-    if result.get("contract_id") != contract.get("id")
-        || (artifact_version.is_string()
-            && result.get("artifact_version") != Some(artifact_version))
-    {
-        return Err("项目验收没有引用本轮契约及产物版本".into());
-    }
-    let checked = result
-        .get("criteria")
-        .and_then(Value::as_array)
-        .ok_or("缺少项目验收条目")?;
-    if !criteria.is_empty()
-        && (checked.len() != criteria.len()
-            || checked
-                .iter()
-                .zip(criteria)
-                .any(|(item, criterion)| item["criterion"].as_str() != Some(criterion)))
-    {
-        return Err("项目验收必须逐项覆盖当前契约验收标准".into());
-    }
-    for item in checked {
-        if item["verdict"] == "met"
-            && !item
-                .get("evidence")
-                .and_then(Value::as_array)
-                .is_some_and(|evidence| {
-                    evidence
-                        .iter()
-                        .any(|item| item.as_str().is_some_and(|s| !s.trim().is_empty()))
-                })
-        {
-            return Err("项目验收通过条目必须附实际检查证据".into());
         }
     }
     Ok(())

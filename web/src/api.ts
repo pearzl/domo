@@ -5,7 +5,6 @@ import type {
   ArchivePreview,
   AuditEvent,
   CreateProjectInput,
-  CreateTaskInput,
   DefaultTeamPool,
   Health,
   JobActivity,
@@ -55,11 +54,6 @@ export const api = {
   setProjectLimits: (id: string, limits: NonNullable<ProjectDetail["delivery"]>["limits"]) =>
     request<{ ok: boolean }>(`/api/projects/${id}/limits`, {
       method: "PUT", body: JSON.stringify(limits),
-    }),
-  createTask: (projectId: string, input: CreateTaskInput) =>
-    request<Task>(`/api/projects/${projectId}/tasks`, {
-      method: "POST",
-      body: JSON.stringify(input),
     }),
   getProjectAgents: (id: string) =>
     request<ProjectAgentPool>(`/api/projects/${id}/agents`),
@@ -296,7 +290,7 @@ export const api = {
     role?: string;
     from?: string;
     to?: string;
-    group_by?: "project" | "agent" | "role" | "none";
+    group_by?: "project" | "agent" | "role" | "task" | "model" | "none";
   }) => {
     const search = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {

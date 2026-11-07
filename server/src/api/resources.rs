@@ -1,8 +1,5 @@
 //! Versioned project knowledge and explicitly registered delivery resources.
-use super::{
-    helpers::{load_project_task, require_project},
-    ApiError,
-};
+use super::{helpers::require_project, ApiError};
 use crate::{domain::now, git, models::*, resources, state::AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -15,7 +12,6 @@ use std::path::PathBuf;
 #[derive(Default, Deserialize)]
 pub(super) struct SharedQuery {
     version: Option<String>,
-    topic: Option<String>,
 }
 
 pub(super) async fn get_shared(
@@ -47,40 +43,13 @@ pub(super) async fn get_shared(
         }
         result["superseded_ids"] = json!(records
             .iter()
-            .flat_map(|record| record["supersedes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str))
+            .filter(|record| record["invalidated_by"].as_str().is_some())
+            .filter_map(|record| record["id"].as_str())
             .collect::<Vec<_>>());
         result["version"] = json!(version);
         result["records"] = json!(records);
     }
-    if let Some(topic) = query.topic {
-        result["records"] = json!(result["records"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter(|r| r["topic"].as_str().is_some_and(|s| s.contains(&topic)))
-            .cloned()
-            .collect::<Vec<_>>());
-    }
     Ok(Json(result))
-}
-
-pub(super) async fn post_shared(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(records): Json<Vec<resources::SharedInput>>,
-) -> Result<Json<Value>, ApiError> {
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("归档项目只读"));
-    }
-    resources::publish(&state, &project, None, None, &records)
-        .await
-        .map_err(|e| ApiError::bad(format!("{e:#}")))?;
-    get_shared(State(state), Path(id), Query(SharedQuery::default())).await
 }
 
 pub(super) async fn list_artifacts(
@@ -89,37 +58,6 @@ pub(super) async fn list_artifacts(
 ) -> Result<Json<Value>, ApiError> {
     let project = require_project(&state, &id).await?;
     Ok(Json(resources::artifact_snapshot(&state, &project).await?))
-}
-
-#[derive(Deserialize)]
-pub(super) struct ArtifactRequest {
-    #[serde(flatten)]
-    artifact: resources::ArtifactInput,
-    task_id: Option<String>,
-}
-
-pub(super) async fn put_artifact(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<ArtifactRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let project = require_project(&state, &id).await?;
-    if project.status.as_deref() == Some(STATUS_ARCHIVED) {
-        return Err(ApiError::bad("归档项目只读"));
-    }
-    if let Some(task) = &request.task_id {
-        load_project_task(&state, &id, task).await?;
-    }
-    resources::register_artifact(
-        &state,
-        &project,
-        request.task_id.as_deref(),
-        None,
-        &request.artifact,
-    )
-    .await
-    .map_err(|e| ApiError::bad(format!("{e:#}")))?;
-    list_artifacts(State(state), Path(id)).await
 }
 
 #[derive(Default, Deserialize)]

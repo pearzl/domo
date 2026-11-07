@@ -8,7 +8,6 @@ function detail(proposal: AnalysisProposal): ProjectDetail {
       id: "p1",
       stage: "analysis",
       status: "blocked",
-      completion_mode: "tasks",
       confirm_mode: "manual",
     },
     tasks: [
@@ -31,15 +30,12 @@ function detail(proposal: AnalysisProposal): ProjectDetail {
 
 function proposal(replan: boolean): AnalysisProposal {
   return {
-    kind: "direct",
-    summary: "直接完成",
+    kind: "plan",
+    summary: "方案",
     goal: "目标",
     assumptions: [],
     acceptance: [],
     tasks: [],
-    plan: [],
-    verification: [],
-    skip_confirmation: false,
     replan_impact: replan
       ? {
           high_impact: true,
@@ -63,7 +59,7 @@ const input = {
   confirming: false,
 };
 
-describe("direct 重规划草稿确认", () => {
+describe("重规划草稿确认", () => {
   it("执行阶段保留历史方案但不显示待确认徽标", () => {
     const value = detail(proposal(false));
     value.project.stage = "executing";
@@ -72,13 +68,8 @@ describe("direct 重规划草稿确认", () => {
     value.project.stage = "analysis";
     expect(projectPageView(value, input).badgeInput.proposalPending).toBe(true);
   });
-  it("历史任务不会阻止 direct 重规划草稿确认", () => {
+  it("历史任务不会阻止重规划草稿确认", () => {
     expect(projectPageView(detail(proposal(true)), input).confirmBlockedReason).toBeNull();
   });
 
-  it("初始 direct 方案仍受历史任务约束", () => {
-    expect(projectPageView(detail(proposal(false)), input).confirmBlockedReason).toBe(
-      "项目已有任务，不能直接完成。",
-    );
-  });
 });

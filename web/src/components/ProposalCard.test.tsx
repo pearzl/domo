@@ -36,9 +36,6 @@ function proposal(overrides: Partial<AnalysisProposal> = {}): AnalysisProposal {
         deps: ["T1"],
       },
     ],
-    plan: ["先改展示", "再补测试"],
-    verification: ["npm run test"],
-    skip_confirmation: false,
     ...overrides,
   };
 }
@@ -109,7 +106,7 @@ describe("自动确认开关行", () => {
 });
 
 describe("方案卡片小节", () => {
-  it("六个小节标题齐全且任务方案带数量", () => {
+  it("四个小节标题齐全且任务方案带数量", () => {
     const markup = renderToStaticMarkup(
       <ProposalCard
         proposal={proposal()}
@@ -127,8 +124,8 @@ describe("方案卡片小节", () => {
     }
     expect(markup).toContain(proposalTaskSectionLabel(2));
     expect(markup).toContain("任务方案（2 个任务）");
-    expect((markup.match(/<details/g) ?? []).length).toBe(6);
-    expect((markup.match(/<summary>/g) ?? []).length).toBe(6);
+    expect((markup.match(/<details/g) ?? []).length).toBe(4);
+    expect((markup.match(/<summary>/g) ?? []).length).toBe(4);
   });
 
   it("目标、假设、验收口径、执行步骤与自检方式按固定顺序出现", () => {
@@ -149,8 +146,6 @@ describe("方案卡片小节", () => {
       ">假设<",
       ">验收口径<",
       ">任务方案（2 个任务）<",
-      ">执行步骤<",
-      ">自检方式<",
     ].map((label) => markup.indexOf(label));
     expect(order.every((index) => index > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -246,14 +241,7 @@ describe("确认后影响摘要", () => {
     expect(impact.note).toContain("自动确认");
   });
 
-  it("直接完成模式给出报告验收预期", () => {
-    const impact = confirmImpact(
-      proposal({ kind: "direct", tasks: [] }),
-      [],
-      "manual",
-    );
-    expect(impact.items.join(" ")).toContain("报告");
-  });
+
 
   it("高影响重规划展示影响并由 DOMO 自动应用，不提供确认入口", () => {
     const draft = proposal({

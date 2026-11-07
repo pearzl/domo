@@ -113,10 +113,7 @@ export function ProjectHeader({
       {project.blocked_reason ? (
         <div className="blocked-banner">
           <strong>{project.status === "blocked" ? "阻塞原因" : "提示"}</strong>
-          {project.user_action ? <>
-            <p>{project.user_action.summary}</p>
-            <p className="muted">具体操作与继续方式见项目报告区域的处理说明。</p>
-          </> : project.blocked_reason.length > 200 ? <>
+          {project.blocked_reason.length > 200 ? <>
             <p>项目正在等待处理。原始说明保存在技术详情中。</p>
             <details><summary>技术详情与判断依据</summary><RichContent content={project.blocked_reason} /></details>
           </> : <RichContent content={project.blocked_reason} />}

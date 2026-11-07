@@ -3,8 +3,18 @@ import { describe, expect, it } from "vitest";
 import type { Project } from "../types";
 import { ProjectReportPanel } from "./ProjectReportPanel";
 
+const props = {
+  reviewMessages: [],
+  feedback: "",
+  feedbackDraftKey: "test-report-feedback",
+  onFeedbackChange: () => {},
+  busy: false,
+  archived: false,
+  onSubmitReport: () => {},
+  onOpenTasks: () => {},
+};
+
 describe("报告未生成", () => {
-  const props = { reviewMessages: [], feedback: "", feedbackDraftKey: "test-report-feedback", onFeedbackChange: () => {}, busy: false, archived: false, onSubmitReport: () => {}, onRequestReplan: () => {}, onAddTask: () => {}, onOpenTasks: () => {} };
   it("执行阶段给出明确说明和任务入口，不返回空白面板", () => {
     const markup = renderToStaticMarkup(<ProjectReportPanel {...props} project={{ stage: "executing", report: null } as Project} />);
     expect(markup).toContain("项目报告尚未生成");
@@ -21,31 +31,26 @@ describe("报告未生成", () => {
 
   it("验证条件缺项时展示解除条件和重新验收入口，不声称报告生成失败", () => {
     const markup = renderToStaticMarkup(<ProjectReportPanel {...props} onRetryAcceptance={() => {}}
-      project={{ stage: "summarizing", status: "blocked", report: null, acceptance: '{"next_action":"wait"}', acceptance_passed: 0,
+      project={{ stage: "summarizing", status: "blocked", report: null, acceptance: '{"issues":[]}', acceptance_passed: 0,
         blocked_reason: "等待用户连接目标设备" } as Project} />);
     expect(markup).toContain("等待用户连接目标设备");
     expect(markup).toContain("条件已补齐，重新验收");
     expect(markup).not.toContain("报告生成失败");
   });
 
-  it("直接完成项目重写报告不表示重新实施", () => {
-    const markup = renderToStaticMarkup(<ProjectReportPanel {...props}
-      project={{ stage: "summarizing", status: "blocked", report: "研究报告", completion_mode: "direct" } as Project} />);
-    expect(markup).toContain("重新撰写只修改报告");
-    expect(markup).not.toContain("重做并重新总结");
+  it("报告带未闭合项时提示接受必须填写理由", () => {
+    const markup = renderToStaticMarkup(<ProjectReportPanel {...props} project={{ stage: "summarizing", status: "blocked",
+      report: "研究报告", acceptance: '{"issues":["需要确认口径"]}', acceptance_passed: 1 } as Project} />);
+    expect(markup).toContain("报告有 1 项未闭合项");
+    expect(markup).toContain("接受时必须填写理由");
   });
 
-  it("项目验收用用户说明展示操作，执行指导与验收快照分别折叠", () => {
-    const user_action = { summary: "请确认采用哪个统计口径", why: "两种口径会得到不同的结果。", owner: "报表负责人",
-      steps: ["选择含税或不含税口径，并记录决定。"], after: "记录意见后重新验收，AI 将核对最终报表。" };
-    const markup = renderToStaticMarkup(<ProjectReportPanel {...props} onRetryAcceptance={() => {}}
-      project={{ stage: "summarizing", status: "blocked", report: null, acceptance_passed: 0,
-        user_action, blocked_reason: user_action.summary,
-        acceptance: JSON.stringify({ next_action: "arbitrate", user_action, guidance: "核对所选口径与报表公式", criteria: [] }) } as Project} />);
-    expect(markup).toContain("选择含税或不含税口径");
-    expect(markup).toContain("Agent 执行指导");
-    expect(markup.indexOf("选择含税或不含税口径")).toBeLessThan(markup.indexOf("核对所选口径与报表公式"));
-    expect(markup).not.toMatch(/<details[^>]*\bopen/);
-    expect(markup).toContain("条件已补齐，重新验收");
+  it("人工只表达接受或驳回，不直接选择重写或重规划", () => {
+    const markup = renderToStaticMarkup(<ProjectReportPanel {...props} project={{ stage: "summarizing", status: "blocked",
+      report: "研究报告", acceptance: '{"issues":[]}', acceptance_passed: 1 } as Project} />);
+    expect(markup).toContain("通过并完成");
+    expect(markup).toContain("驳回");
+    expect(markup).not.toContain("重新撰写");
+    expect(markup).not.toContain("要求重新规划");
   });
 });

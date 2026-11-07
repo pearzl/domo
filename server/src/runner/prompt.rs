@@ -96,7 +96,7 @@ pub(super) async fn build_prompt_data(
     .fetch_all(&state.db)
     .await?;
     let mut messages = messages;
-    if matches!(job.role.as_str(), JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT) {
+    if job.role == JOB_ROLE_ANALYSIS {
         // 报告评议由只读报告重写作业处理，不改变分析与实施输入。
         messages.retain(|message| message.role != REPORT_MESSAGE_ROLE);
     }
@@ -174,16 +174,10 @@ pub(super) async fn build_prompt_data(
         .proposal
         .as_deref()
         .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
-    let mut acceptance_criteria = proposal
+    let acceptance_criteria = proposal
         .as_ref()
         .map(|value| value.acceptance.clone())
         .unwrap_or_default();
-    if acceptance_criteria.is_empty() {
-        acceptance_criteria = proposal
-            .as_ref()
-            .map(|value| value.verification.clone())
-            .unwrap_or_default();
-    }
     let project_summary = proposal.as_ref().map(|value| value.summary.clone());
     let project_assumptions = proposal
         .as_ref()
@@ -229,14 +223,6 @@ pub(super) async fn build_prompt_data(
         replan_source: project.replan_source.clone(),
         acceptance_criteria,
         acceptance_result: project.acceptance.clone(),
-        direct_result: if project.completion_mode == COMPLETION_DIRECT
-            && job.role == JOB_ROLE_SUMMARY
-        {
-            sqlx::query_scalar::<_, Option<String>>("SELECT result FROM jobs WHERE project_id = ? AND role = 'direct' AND status = 'succeeded' AND replan_generation = ? ORDER BY rowid DESC LIMIT 1")
-                .bind(&project.id).bind(project.replan_generation).fetch_optional(&state.db).await?.flatten()
-        } else {
-            None
-        },
         project_summary,
         project_assumptions,
         confirm_mode: project.confirm_mode.clone(),
@@ -278,7 +264,6 @@ pub(super) fn build_context(
             "replan_reason": project.replan_reason,
             "replan_source": project.replan_source,
             "confirm_mode": project.confirm_mode,
-            "completion_mode": project.completion_mode,
             "confirmed_at": project.confirmed_at,
             "acceptance_at": project.acceptance_at,
         },
@@ -322,7 +307,7 @@ pub(super) fn build_context(
         "diff_stat": data.diff_stat,
         "acceptance_criteria": data.acceptance_criteria,
         "acceptance_result": data.acceptance_result,
-        "direct_result": data.direct_result,
+        "direct_result": serde_json::Value::Null,
         "report_feedback": data.report_feedback,
         "project_summary": data.project_summary,
         "project_assumptions": data.project_assumptions,

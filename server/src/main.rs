@@ -27,7 +27,6 @@ mod scheduler;
 mod state;
 mod transitions;
 mod usage;
-mod user_action;
 mod version;
 
 use std::time::Duration;

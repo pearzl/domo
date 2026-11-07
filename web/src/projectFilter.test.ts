@@ -37,7 +37,6 @@ function project(
     replan_reason: null,
     replan_source: null,
     confirm_mode: "manual",
-    completion_mode: "tasks",
     merged_at: null,
     merged_commit: null,
     created_at: "2026-01-10T10:00:00Z",

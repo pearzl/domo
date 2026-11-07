@@ -222,7 +222,6 @@ pub(super) async fn task_arbitration(
         .iter()
         .map(|agent| (agent.id.clone(), agent.name.clone()))
         .collect();
-    let explanation = crate::user_action::task_explanation(&state.db, &task).await?;
     Ok(Json(json!({
         "project": {
             "id": project.id,
@@ -241,7 +240,6 @@ pub(super) async fn task_arbitration(
             "failure_summary": crate::failure::summarize_classified(task.last_error.as_deref(), task.last_failure_kind.as_deref()),
             "last_failure_kind": task.last_failure_kind,
             "waiting_reason": task.waiting_reason,
-            "user_action": explanation.as_ref().map(|explanation| &explanation.action),
             "attempts": task.attempts,
             "rejections": task.rejections,
             "milestone": task.milestone != 0,
@@ -285,8 +283,8 @@ pub(super) async fn task_arbitration(
             "created_at": job.created_at,
         })).collect::<Vec<_>>(),
         "replan_request": replan_request,
-        "agent_guidance": explanation.as_ref().map(|explanation| &explanation.guidance),
-        "decision_reason": explanation.as_ref().map(|explanation| &explanation.reason),
+        "agent_guidance": task.guidance,
+        "decision_reason": task.last_error,
         "actions": if let Some(request) = &replan_request {
             if request.state == "waiting" { vec![ARBITRATION_RETRY, ARBITRATION_GUIDE] } else { vec![] }
         } else { vec![ARBITRATION_RETRY, ARBITRATION_SWITCH_AGENT, ARBITRATION_GUIDE] },

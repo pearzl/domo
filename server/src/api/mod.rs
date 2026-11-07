@@ -56,8 +56,8 @@ use self::projects::{
 };
 use self::reports::{retry_acceptance, submit_report};
 use self::tasks::{
-    confirm_analysis, create_task, pause_project, pause_task, post_analysis_message,
-    reorder_task_queue, resume_project, resume_task, update_analysis_policy,
+    confirm_analysis, pause_project, pause_task, post_analysis_message, reorder_task_queue,
+    resume_project, resume_task, update_analysis_policy,
 };
 use self::verification::{retry_task, submit_arbitration, task_arbitration, task_verifications};
 
@@ -193,13 +193,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/usage", get(usage_report))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}", get(get_project))
-        .route(
-            "/api/projects/{id}/shared",
-            get(resources::get_shared).post(resources::post_shared),
-        )
+        .route("/api/projects/{id}/shared", get(resources::get_shared))
         .route(
             "/api/projects/{id}/artifacts",
-            get(resources::list_artifacts).post(resources::put_artifact),
+            get(resources::list_artifacts),
         )
         .route(
             "/api/projects/{id}/artifacts/{artifact}",
@@ -252,7 +249,6 @@ pub fn router(state: AppState) -> Router {
                 .post(resources::request_merge)
                 .delete(resources::cancel_merge),
         )
-        .route("/api/projects/{id}/tasks", post(create_task))
         .route("/api/projects/{id}/tasks/{task_id}/retry", post(retry_task))
         .route(
             "/api/projects/{id}/tasks/{task_id}/guidance",

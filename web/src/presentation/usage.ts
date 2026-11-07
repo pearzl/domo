@@ -14,20 +14,24 @@ import {
 } from "../ui";
 
 /// 用量页的分组维度；页面一次只展示一个维度的一张表。
-export type UsageDimension = "project" | "agent" | "role";
+export type UsageDimension = "project" | "agent" | "role" | "task" | "model";
 
-export const USAGE_DIMENSIONS: UsageDimension[] = ["project", "agent", "role"];
+export const USAGE_DIMENSIONS: UsageDimension[] = ["project", "agent", "role", "task", "model"];
 
 export const USAGE_DIMENSION_LABELS: Record<UsageDimension, string> = {
   project: "按项目",
   agent: "按 Agent",
   role: "按角色",
+  task: "按任务",
+  model: "按模型",
 };
 
 export const USAGE_DIMENSION_HINTS: Record<UsageDimension, string> = {
   project: "每个项目内所有作业的用量合计。",
   agent: "每个 Agent 承担的作业用量；未记录 Agent 的作业单独归入未知分组。",
-  role: "按作业角色汇总，便于对比项目分析、直接完成、执行、验收与总结的成本。",
+  role: "按作业角色汇总，便于对比项目分析、执行、验收与总结的成本。",
+  task: "按任务汇总执行与验收作业；项目级作业单独归入未归属任务。",
+  model: "按 Agent 配置的模型汇总；未配置模型或未知模型单独归组。",
 };
 
 /// 表格首列表头随维度变化，名称列始终说明分组依据。
@@ -35,11 +39,12 @@ export const USAGE_NAME_HEADERS: Record<UsageDimension, string> = {
   project: "项目",
   agent: "Agent",
   role: "角色",
+  task: "任务",
+  model: "模型",
 };
 
 export const USAGE_ROLE_FILTERS = [
   "analysis",
-  "direct",
   "executor",
   "verifier",
   "summary",
@@ -113,6 +118,12 @@ export function usageGroupName(
       agents.find((agent) => agent.id === group.agent_id)?.name ??
       group.agent_id
     );
+  }
+  if (dimension === "task") {
+    return group.task_key && group.task_key.trim() ? group.task_key : "未归属任务";
+  }
+  if (dimension === "model") {
+    return group.model && group.model.trim() ? group.model : "未记录模型";
   }
   return group.role ? ROLE_LABELS[group.role] ?? group.role : "未记录角色";
 }

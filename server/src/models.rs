@@ -14,7 +14,7 @@ pub const AGENT_MOCK: &str = "mock";
 pub const AGENT_OPENCODE: &str = "opencode";
 pub const AGENT_CLI: &str = "cli";
 pub const AGENT_CODEX: &str = "codex";
-pub const AGENT_WORKBUDDY: &str = "workbuddy";
+pub const AGENT_WORKBUDDY: &str = "codebuddy";
 
 pub const STAGE_ANALYSIS: &str = "analysis";
 pub const STAGE_EXECUTING: &str = "executing";
@@ -64,7 +64,6 @@ pub const FAILURE_PROTOCOL: &str = "protocol";
 pub const FAILURE_TASK: &str = "task";
 
 pub const JOB_ROLE_ANALYSIS: &str = "analysis";
-pub const JOB_ROLE_DIRECT: &str = "direct";
 pub const JOB_ROLE_EXECUTOR: &str = ROLE_EXECUTOR;
 pub const JOB_ROLE_VERIFIER: &str = ROLE_VERIFIER;
 pub const JOB_ROLE_SUMMARY: &str = "summary";
@@ -76,9 +75,6 @@ pub const CONFIRM_AUTO: &str = "auto";
 
 pub const WORKSPACE_GIT: &str = "git";
 pub const WORKSPACE_PLAIN: &str = "plain";
-
-pub const COMPLETION_TASKS: &str = "tasks";
-pub const COMPLETION_DIRECT: &str = "direct";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct AgentRow {
@@ -344,20 +340,12 @@ pub struct AnalysisProposal {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub tasks: Vec<ProposalTask>,
-    #[serde(default)]
-    pub plan: Vec<String>,
-    #[serde(default)]
-    pub verification: Vec<String>,
-    #[serde(default)]
-    pub skip_confirmation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replan_impact: Option<ReplanImpact>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct ProjectRow {
-    #[sqlx(skip)]
-    pub user_action: Option<crate::user_action::UserAction>,
     pub contract_id: Option<i64>,
     pub id: String,
     pub name: String,
@@ -400,9 +388,14 @@ pub struct ProjectRow {
     pub confirmed_at: Option<String>,
     #[serde(skip_serializing)]
     pub goal_locked_at: Option<String>,
-    pub completion_mode: String,
+    pub accepted_commit: Option<String>,
+    pub accept_reason: Option<String>,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
+    pub merge_rebased: i64,
+    pub merge_agent_resolved: i64,
+    #[serde(skip_serializing)]
+    pub merge_conflicts: Option<String>,
     /// Project-level agents skipped by the next project job dispatch, mirroring
     /// the task-level pair.
     #[serde(skip_serializing)]
@@ -458,6 +451,7 @@ pub struct TaskRow {
     /// failures and in-job protocol corrections. Job.attempt is the audit sequence.
     pub attempts: i64,
     pub rejections: i64,
+    pub merge_conflicts: i64,
     pub last_error: Option<String>,
     pub last_failure_kind: Option<String>,
     pub waiting_reason: Option<String>,
@@ -626,7 +620,6 @@ pub struct ProjectSummary {
     pub replan_reason: Option<String>,
     pub replan_source: Option<String>,
     pub confirm_mode: String,
-    pub completion_mode: String,
     pub merged_at: Option<String>,
     pub merged_commit: Option<String>,
     pub created_at: String,
@@ -635,7 +628,6 @@ pub struct ProjectSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
-    pub user_action: Option<crate::user_action::UserAction>,
     pub contract_id: Option<i64>,
     pub id: String,
     pub project_id: String,
@@ -661,6 +653,7 @@ pub struct TaskView {
     pub artifacts_released_at: Option<String>,
     pub attempts: i64,
     pub rejections: i64,
+    pub merge_conflicts: i64,
     pub last_error: Option<String>,
     pub last_failure_kind: Option<String>,
     pub waiting_reason: Option<String>,
@@ -674,7 +667,6 @@ pub struct TaskView {
 impl TaskView {
     pub fn from_row(row: TaskRow) -> Self {
         Self {
-            user_action: None,
             contract_id: row.contract_id,
             id: row.id,
             project_id: row.project_id,
@@ -700,6 +692,7 @@ impl TaskView {
             artifacts_released_at: row.artifacts_released_at,
             attempts: row.attempts,
             rejections: row.rejections,
+            merge_conflicts: row.merge_conflicts,
             last_error: row.last_error,
             last_failure_kind: row.last_failure_kind,
             waiting_reason: row.waiting_reason,
@@ -788,6 +781,7 @@ pub struct ProjectDetail {
     pub merged_commit: Option<String>,
     /// 目标分支已经包含项目分支提交；包括 DOMO 记录的合入和人工在外部完成的合入。
     pub merged_into_base: bool,
+    pub merge_conflicts: Vec<String>,
     pub tasks: Vec<TaskView>,
     pub jobs: Vec<JobSummary>,
     pub messages: Vec<MessageRow>,
@@ -825,19 +819,6 @@ pub struct AnalysisPolicyRequest {
 pub struct ConfirmAnalysisRequest {
     /// 界面确认时提交所审查的完整草稿，用于拒绝过期确认。
     pub proposal: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateTaskRequest {
-    pub key: String,
-    pub title: String,
-    pub description: String,
-    #[serde(default)]
-    pub acceptance: Vec<String>,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    #[serde(default)]
-    pub milestone: bool,
 }
 
 #[derive(Debug, Deserialize)]

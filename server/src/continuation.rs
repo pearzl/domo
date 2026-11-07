@@ -9,12 +9,16 @@ use serde::{Deserialize, Serialize};
 use crate::{agents, domain, models::*, paths, state::AppState};
 
 pub const MAX_CONTINUES: u64 = 2;
+pub const MAX_MISSING: usize = 2;
+pub const MAX_PROTOCOL: usize = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub session: String,
     pub agent_kind: String,
     pub turns: u64,
+    #[serde(default)]
+    pub missing_rounds: usize,
     pub protocol_rounds: usize,
     pub eligible: bool,
     pub diagnostic: agents::Diagnosis,
@@ -36,8 +40,8 @@ pub async fn save(dir: &Path, record: &Checkpoint) -> Result<()> {
     {
         tokio::fs::write(
             dir.join(format!(
-                "diagnostic-{}-{}.json",
-                record.turns, record.protocol_rounds
+                "diagnostic-{}-{}-{}.json",
+                record.turns, record.missing_rounds, record.protocol_rounds
             )),
             &bytes,
         )
@@ -47,29 +51,22 @@ pub async fn save(dir: &Path, record: &Checkpoint) -> Result<()> {
 }
 
 pub fn valid_outcome(role: &str, raw: Option<&str>) -> bool {
-    raw.is_some_and(|raw| {
-        let complete = match domain::parse_result(role, raw) {
-            Ok(
-                domain::ParsedResult::ExecutorDone { .. }
-                | domain::ParsedResult::ExecutorDerive { .. }
-                | domain::ParsedResult::DirectDone { .. },
-            ) => domain::commit_files(raw).is_ok(),
-            Ok(domain::ParsedResult::Verdict { .. }) => {
-                domain::extract_json(raw).is_some_and(|v| v["evidence"].is_object())
-            }
-            Ok(_) => true,
-            Err(_) => false,
-        };
-        complete
-            || domain::extract_json(raw).is_some_and(|v| {
-                v["kind"] == "failed" && v["reason"].as_str().is_some_and(|s| !s.trim().is_empty())
-            })
+    raw.is_some_and(|raw| match domain::parse_result(role, raw) {
+        Ok(
+            domain::ParsedResult::ExecutorDone { .. } | domain::ParsedResult::ExecutorDerive { .. },
+        ) => true,
+        Ok(domain::ParsedResult::Verdict { .. }) => {
+            domain::extract_json(raw).is_some_and(|v| v["evidence"].is_object())
+        }
+        Ok(_) => true,
+        Err(_) => false,
     })
 }
 
 /// Record every completed process round, including non-resumable diagnostics.
 /// Only interruptions without a valid outcome or exhausted protocol correction
 /// remain eligible; file/config equality is not a condition.
+#[allow(clippy::too_many_arguments)]
 pub async fn checkpoint(
     agent: &AgentRow,
     job: &JobRow,
@@ -77,6 +74,7 @@ pub async fn checkpoint(
     run: &agents::AgentRun,
     raw: Option<&str>,
     turns: u64,
+    missing_rounds: usize,
     protocol_rounds: usize,
 ) -> Result<Option<Checkpoint>> {
     let previous = load(dir).await.ok();
@@ -94,19 +92,24 @@ pub async fn checkpoint(
         && agents::supports_resume(agent)
         && run.process_failure()
         && !valid_outcome(&job.role, raw)
-        && protocol_rounds < 5
+        && missing_rounds < MAX_MISSING
+        && protocol_rounds < MAX_PROTOCOL
         && !diagnostic.session_unavailable();
     let record = Checkpoint {
         session,
         agent_kind: agent.kind.clone(),
         turns,
+        missing_rounds,
         protocol_rounds,
         eligible,
         diagnostic,
     };
     save(dir, &record).await?;
     tokio::fs::write(
-        dir.join(format!("diagnostic-{}-{}.json", turns, protocol_rounds)),
+        dir.join(format!(
+            "diagnostic-{}-{}-{}.json",
+            turns, missing_rounds, protocol_rounds
+        )),
         serde_json::to_vec(&record)?,
     )
     .await?;
@@ -121,6 +124,7 @@ pub async fn starting(
     dir: &Path,
     session: Option<&str>,
     turns: u64,
+    missing_rounds: usize,
     protocol_rounds: usize,
 ) -> Result<()> {
     if let Some(session) = agents::recover_session(agent, &job.id, "", session) {
@@ -130,6 +134,7 @@ pub async fn starting(
                 session,
                 agent_kind: agent.kind.clone(),
                 turns,
+                missing_rounds,
                 protocol_rounds,
                 eligible: true,
                 diagnostic: agents::Diagnosis::stopped(agents::StopReason::ServiceInterrupted),
@@ -172,16 +177,19 @@ pub async fn interrupted(state: &AppState, job: &JobRow, stop: agents::StopReaso
         session,
         agent_kind: agent.kind,
         turns: previous.as_ref().map_or(0, |r| r.turns),
+        missing_rounds: previous.as_ref().map_or(0, |r| r.missing_rounds),
         protocol_rounds: previous.as_ref().map_or(0, |r| r.protocol_rounds),
         eligible: !valid_outcome(&job.role, raw.as_deref())
-            && previous.as_ref().is_none_or(|r| r.protocol_rounds < 5),
+            && previous
+                .as_ref()
+                .is_none_or(|r| r.missing_rounds < MAX_MISSING && r.protocol_rounds < MAX_PROTOCOL),
         diagnostic: agents::Diagnosis::stopped(stop),
     };
     save(&dir, &record).await?;
     tokio::fs::write(
         dir.join(format!(
-            "diagnostic-{}-{}.json",
-            record.turns, record.protocol_rounds
+            "diagnostic-{}-{}-{}.json",
+            record.turns, record.missing_rounds, record.protocol_rounds
         )),
         serde_json::to_vec(&record)?,
     )
@@ -220,7 +228,11 @@ pub async fn validate(state: &AppState, job: &JobRow) -> Result<Checkpoint> {
         bail!("上一轮输出与费用仍在结算，请稍后继续");
     }
     let record = load(&dir).await?;
-    if !record.eligible || record.diagnostic.session_unavailable() || record.protocol_rounds >= 5 {
+    if !record.eligible
+        || record.diagnostic.session_unavailable()
+        || record.missing_rounds >= MAX_MISSING
+        || record.protocol_rounds >= MAX_PROTOCOL
+    {
         bail!("上次结果需要新会话或业务处置，不能继续");
     }
     if record.turns >= MAX_CONTINUES {
@@ -276,17 +288,14 @@ pub async fn validate(state: &AppState, job: &JobRow) -> Result<Checkpoint> {
     } else {
         let stage = match job.role.as_str() {
             JOB_ROLE_ANALYSIS => STAGE_ANALYSIS,
-            JOB_ROLE_DIRECT => STAGE_EXECUTING,
             JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => STAGE_SUMMARIZING,
             _ => "",
         };
         if project.stage != stage
             || project.report.is_some()
-            || (job.role == JOB_ROLE_DIRECT && project.completion_mode != COMPLETION_DIRECT)
+            || false
             || (job.role == JOB_ROLE_ACCEPTANCE && project.acceptance_passed != 0)
-            || (job.role == JOB_ROLE_SUMMARY
-                && project.acceptance_passed == 0
-                && project.completion_mode != COMPLETION_DIRECT)
+            || (job.role == JOB_ROLE_SUMMARY && project.acceptance_passed == 0)
         {
             bail!("项目阶段不允许继续");
         }

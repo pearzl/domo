@@ -1,4 +1,4 @@
-//! WorkBuddy CLI adapter. Arguments are built in-process; the CLI reports its
+//! CodeBuddy CLI adapter. Arguments are built in-process; the CLI reports its
 //! session id and result usage as JSONL on stdout. A configured command
 //! template takes precedence and runs through the custom CLI adapter.
 
@@ -17,9 +17,9 @@ use super::cli::{prompt_for_run, CliAdapter};
 use super::process::{run_process, scan_stdout, stdout_offset};
 
 #[derive(Debug, Default)]
-pub struct WorkbuddyAdapter;
+pub struct CodebuddyAdapter;
 
-impl AgentAdapter for WorkbuddyAdapter {
+impl AgentAdapter for CodebuddyAdapter {
     const KIND: &'static str = AGENT_WORKBUDDY;
 
     fn requires_command_template(_config: &AgentConfig) -> bool {
@@ -42,7 +42,7 @@ impl AgentAdapter for WorkbuddyAdapter {
         if !context.config.command.is_empty() {
             return CliAdapter.run_turn(context).await;
         }
-        workbuddy_turn(context.config.model.trim(), context.spec, context.timeout).await
+        codebuddy_turn(context.config.model.trim(), context.spec, context.timeout).await
     }
 
     fn supports_resume(config: &AgentConfig) -> bool {
@@ -53,7 +53,7 @@ impl AgentAdapter for WorkbuddyAdapter {
         if !config.command.is_empty() {
             return CliAdapter::diagnose(config, run);
         }
-        super::diagnostic::diagnose(super::diagnostic::Protocol::Workbuddy, run)
+        super::diagnostic::diagnose(super::diagnostic::Protocol::Codebuddy, run)
     }
 
     fn recover_session(
@@ -65,11 +65,11 @@ impl AgentAdapter for WorkbuddyAdapter {
         if !config.command.is_empty() {
             return CliAdapter::recover_session(config, job_id, stdout, previous);
         }
-        parse_workbuddy_session_id(stdout).or_else(|| previous.map(str::to_string))
+        parse_codebuddy_session_id(stdout).or_else(|| previous.map(str::to_string))
     }
 }
 
-async fn workbuddy_turn(
+async fn codebuddy_turn(
     model: &str,
     spec: &AgentSpec,
     timeout: std::time::Duration,
@@ -80,14 +80,14 @@ async fn workbuddy_turn(
         .filter(|session_id| !session_id.trim().is_empty());
     let can_resume = spec.continuation && resume_id.is_some();
     let args = if can_resume {
-        workbuddy_resume_args(model, &spec.job_dir, resume_id.unwrap_or_default())
+        codebuddy_resume_args(model, &spec.job_dir, resume_id.unwrap_or_default())
     } else {
-        workbuddy_args(model, &spec.job_dir)
+        codebuddy_args(model, &spec.job_dir)
     };
     let prompt = prompt_for_run(spec, can_resume);
     let offset = stdout_offset(spec).await;
     let mut run = run_process(
-        &workbuddy_bin(),
+        &codebuddy_bin(),
         &args,
         spec,
         timeout,
@@ -95,21 +95,21 @@ async fn workbuddy_turn(
     )
     .await?;
     let mut session = None;
-    let mut usage = WorkbuddyUsage::default();
+    let mut usage = CodebuddyUsage::default();
     let mut reported_error = None;
     let scanned = scan_stdout(spec, offset, |line| {
-        session = session.take().or_else(|| parse_workbuddy_session_id(line));
+        session = session.take().or_else(|| parse_codebuddy_session_id(line));
         usage.observe(line);
-        reported_error = parse_workbuddy_error(line).or(reported_error.take());
+        reported_error = parse_codebuddy_error(line).or(reported_error.take());
     })
     .await;
     if scanned.is_err() {
-        session = parse_workbuddy_session_id(&run.stdout);
-        usage = WorkbuddyUsage::default();
+        session = parse_codebuddy_session_id(&run.stdout);
+        usage = CodebuddyUsage::default();
         for line in run.stdout.lines() {
             usage.observe(line);
         }
-        reported_error = parse_workbuddy_error(&run.stdout);
+        reported_error = parse_codebuddy_error(&run.stdout);
     }
     run.session_id =
         session.or_else(|| can_resume.then(|| resume_id.unwrap_or_default().to_string()));
@@ -118,19 +118,19 @@ async fn workbuddy_turn(
     Ok(run)
 }
 
-/// WorkBuddy reports execution failures inside the final `result` event while
+/// CodeBuddy reports execution failures inside the final `result` event while
 /// the process still exits 0. The reason is the first line of the first
 /// structured error so a provider payload never becomes the job error.
-pub(crate) fn parse_workbuddy_error(stdout: &str) -> Option<String> {
+pub(crate) fn parse_codebuddy_error(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
         .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("result"))
-        .filter_map(|value| workbuddy_result_error(&value))
-        .last()
+        .filter_map(|value| codebuddy_result_error(&value))
+        .next_back()
 }
 
-pub(crate) fn workbuddy_result_error(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn codebuddy_result_error(value: &serde_json::Value) -> Option<String> {
     let subtype = value
         .get("subtype")
         .and_then(serde_json::Value::as_str)
@@ -161,8 +161,8 @@ pub(crate) fn workbuddy_result_error(value: &serde_json::Value) -> Option<String
         })
         .or_else(|| {
             Some(match subtype {
-                Some(subtype) => format!("WorkBuddy 执行失败：{subtype}"),
-                None => "WorkBuddy 报告执行错误".to_string(),
+                Some(subtype) => format!("CodeBuddy 执行失败：{subtype}"),
+                None => "CodeBuddy 报告执行错误".to_string(),
             })
         })
 }
@@ -185,11 +185,11 @@ fn first_line(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(super) fn workbuddy_bin() -> String {
+pub(super) fn codebuddy_bin() -> String {
     bin_override("DOMO_WORKBUDDY_BIN", "codebuddy")
 }
 
-pub(super) fn workbuddy_args(model: &str, job_dir: &Path) -> Vec<String> {
+pub(super) fn codebuddy_args(model: &str, job_dir: &Path) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -207,7 +207,7 @@ pub(super) fn workbuddy_args(model: &str, job_dir: &Path) -> Vec<String> {
     args
 }
 
-pub(super) fn workbuddy_resume_args(model: &str, job_dir: &Path, session_id: &str) -> Vec<String> {
+pub(super) fn codebuddy_resume_args(model: &str, job_dir: &Path, session_id: &str) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -227,7 +227,7 @@ pub(super) fn workbuddy_resume_args(model: &str, job_dir: &Path, session_id: &st
     args
 }
 
-pub(super) fn parse_workbuddy_session_id(stdout: &str) -> Option<String> {
+pub(super) fn parse_codebuddy_session_id(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
@@ -241,16 +241,16 @@ pub(super) fn parse_workbuddy_session_id(stdout: &str) -> Option<String> {
     None
 }
 
-/// WorkBuddy reports the session total in the `result` event. When that event
+/// CodeBuddy reports the session total in the `result` event. When that event
 /// lacks usage, the last assistant message carries the per-request counts.
 #[derive(Default)]
-struct WorkbuddyUsage {
+struct CodebuddyUsage {
     result_usage: Option<serde_json::Map<String, serde_json::Value>>,
     result_cost: Option<f64>,
     last_assistant_usage: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-impl WorkbuddyUsage {
+impl CodebuddyUsage {
     fn observe(&mut self, line: &str) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             return;
@@ -290,8 +290,8 @@ impl WorkbuddyUsage {
 }
 
 #[cfg(test)]
-pub(super) fn parse_workbuddy_usage(stdout: &str) -> Option<UsageRecord> {
-    let mut usage = WorkbuddyUsage::default();
+pub(super) fn parse_codebuddy_usage(stdout: &str) -> Option<UsageRecord> {
+    let mut usage = CodebuddyUsage::default();
     for line in stdout.lines() {
         usage.observe(line);
     }
@@ -312,7 +312,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn configured_command_runs_through_the_cli_adapter() {
-        let dir = std::env::temp_dir().join(format!("domo-workbuddy-cli-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("domo-codebuddy-cli-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = AgentConfig {
             kind: AGENT_WORKBUDDY.into(),
@@ -338,7 +338,7 @@ mod tests {
             continuation: false,
             progress: JobProgress::new(),
         };
-        let run = WorkbuddyAdapter
+        let run = CodebuddyAdapter
             .run_turn(TurnContext {
                 config: &config,
                 spec: &spec,
@@ -351,8 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_args_cover_stream_protocol_flags() {
-        let args = workbuddy_args("", Path::new("/tmp/job"));
+    fn codebuddy_args_cover_stream_protocol_flags() {
+        let args = codebuddy_args("", Path::new("/tmp/job"));
         assert!(args.contains(&"-p".to_string()));
         assert!(args_contain_pair(&args, "--output-format", "stream-json"));
         assert!(args.contains(&"--verbose".to_string()));
@@ -360,32 +360,32 @@ mod tests {
         assert!(args_contain_pair(&args, "--add-dir", "/tmp/job"));
         assert!(!args.contains(&"--model".to_string()));
 
-        let with_model = workbuddy_args("hy3", Path::new("/tmp/job"));
+        let with_model = codebuddy_args("hy3", Path::new("/tmp/job"));
         assert!(args_contain_pair(&with_model, "--model", "hy3"));
     }
 
     #[test]
     fn resume_args_keep_the_agent_session_id() {
-        let workbuddy = workbuddy_resume_args("hy3", Path::new("/tmp/job"), "session-1");
-        assert!(workbuddy.contains(&"--resume".to_string()));
-        assert!(workbuddy.contains(&"session-1".to_string()));
-        assert!(workbuddy.contains(&"--add-dir".to_string()));
+        let codebuddy = codebuddy_resume_args("hy3", Path::new("/tmp/job"), "session-1");
+        assert!(codebuddy.contains(&"--resume".to_string()));
+        assert!(codebuddy.contains(&"session-1".to_string()));
+        assert!(codebuddy.contains(&"--add-dir".to_string()));
     }
 
     #[test]
     fn parses_session_ids_from_agent_streams() {
-        let workbuddy = concat!(
+        let codebuddy = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"session-1\"}\n",
             "{\"type\":\"result\",\"subtype\":\"success\"}\n"
         );
         assert_eq!(
-            parse_workbuddy_session_id(workbuddy).as_deref(),
+            parse_codebuddy_session_id(codebuddy).as_deref(),
             Some("session-1")
         );
     }
 
     #[test]
-    fn workbuddy_usage_maps_result_totals_and_cost() {
+    fn codebuddy_usage_maps_result_totals_and_cost() {
         let stdout = concat!(
             "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":10,",
             "\"output_tokens\":2}},\"session_id\":\"s\"}\n",
@@ -394,7 +394,7 @@ mod tests {
             "\"output_tokens\":274,\"cache_creation_input_tokens\":3,",
             "\"cache_read_input_tokens\":49088}}\n"
         );
-        let usage = parse_workbuddy_usage(stdout).expect("usage");
+        let usage = parse_codebuddy_usage(stdout).expect("usage");
         assert_eq!(usage.input_tokens, Some(73243));
         assert_eq!(usage.output_tokens, Some(274));
         assert_eq!(usage.cache_read_tokens, Some(49088));
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_usage_falls_back_to_last_assistant_message() {
+    fn codebuddy_usage_falls_back_to_last_assistant_message() {
         let stdout = concat!(
             "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":10,",
             "\"output_tokens\":2}},\"session_id\":\"s\"}\n",
@@ -412,7 +412,7 @@ mod tests {
             "\"output_tokens\":5,\"cache_read_input_tokens\":12}},\"session_id\":\"s\"}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n"
         );
-        let usage = parse_workbuddy_usage(stdout).expect("usage");
+        let usage = parse_codebuddy_usage(stdout).expect("usage");
         assert_eq!(usage.input_tokens, Some(40));
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.cache_read_tokens, Some(12));
@@ -428,7 +428,7 @@ mod tests {
             "\n"
         );
         assert_eq!(
-            parse_workbuddy_error(stdout).as_deref(),
+            parse_codebuddy_error(stdout).as_deref(),
             Some("429 您的使用量已超出频率限制…")
         );
     }
@@ -440,7 +440,7 @@ mod tests {
             "\n"
         );
         assert_eq!(
-            parse_workbuddy_error(stdout).as_deref(),
+            parse_codebuddy_error(stdout).as_deref(),
             Some("Request timed out")
         );
     }
@@ -452,7 +452,7 @@ mod tests {
             "\n"
         );
         assert_eq!(
-            parse_workbuddy_error(stdout).as_deref(),
+            parse_codebuddy_error(stdout).as_deref(),
             Some("400 model service info not found")
         );
     }
@@ -465,7 +465,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
             "\n"
         );
-        assert_eq!(parse_workbuddy_error(stdout), None);
+        assert_eq!(parse_codebuddy_error(stdout), None);
     }
 
     #[test]
@@ -475,16 +475,16 @@ mod tests {
             "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n",
             "not json\n"
         );
-        assert_eq!(parse_workbuddy_usage(stdout), None);
+        assert_eq!(parse_codebuddy_usage(stdout), None);
     }
 
     #[test]
     fn bin_overrides_follow_environment() {
         std::env::remove_var("DOMO_WORKBUDDY_BIN");
-        assert_eq!(workbuddy_bin(), "codebuddy");
+        assert_eq!(codebuddy_bin(), "codebuddy");
 
         std::env::set_var("DOMO_WORKBUDDY_BIN", "/opt/codebuddy-cli");
-        assert_eq!(workbuddy_bin(), "/opt/codebuddy-cli");
+        assert_eq!(codebuddy_bin(), "/opt/codebuddy-cli");
 
         std::env::remove_var("DOMO_WORKBUDDY_BIN");
     }

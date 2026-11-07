@@ -5,25 +5,21 @@ import { analysisThread } from "./analysisThread";
 import { retryableProjectJobId } from "./jobSelection";
 import { reordableQueueIds } from "../taskQueue";
 import {
-  dependencyOptions,
   filterTasks,
   hasActiveQuery,
   replanSummary,
   taskFilterCounts,
-  validateTaskDraft,
   type TaskFilter,
 } from "./taskList";
 import {
   resolveProjectTab,
 } from "./projectLayout";
-import type { AddTaskDraft } from "./addTaskDraft";
 
 export interface ProjectPageViewInput {
   activeTab: string | null;
   selectedTaskId: string | null;
   taskQuery: string;
   taskFilter: TaskFilter;
-  taskDraft: AddTaskDraft;
   message: string;
   busy: boolean;
   confirming: boolean;
@@ -55,26 +51,12 @@ export function projectPageView(
   );
   const analysisJob =
     analysisJobs.find((job) => job.status === "running") ?? null;
-  const directJob =
-    jobs.find((job) => job.role === "direct" && job.status === "running") ?? null;
-  const directMode = project.completion_mode === "direct";
   const retryableJobId = retryableProjectJobId(project, projectJobs);
   // 队列位置由可调整任务的 (queue_order, seq) 顺序推导，与服务端重排口径一致。
   const queueIds = reordableQueueIds(tasks, archived);
 
   const taskCounts = taskFilterCounts(tasks);
   const searchActive = hasActiveQuery(input.taskQuery, input.taskFilter);
-  // 添加任务草稿的行内校验；活动任务复用 activeTasks，与依赖候选、服务端口径一致。
-  const draftCheck = validateTaskDraft(
-    {
-      key: input.taskDraft.key,
-      title: input.taskDraft.title,
-      description: input.taskDraft.description,
-      deps: input.taskDraft.deps,
-    },
-    activeTasks,
-  );
-  const depOptions = dependencyOptions(activeTasks);
   const replanPreview = replanSummary(tasks);
   const activeBlock = resolveProjectTab(project.stage, input.activeTab);
   // 选项卡徽标：任务数、待确认方案与报告就绪标记。
@@ -94,9 +76,7 @@ export function projectPageView(
     ? null
     : input.message.trim()
       ? "输入框里有未发送的修改意见，发送或清空后再确认。"
-      : proposal.kind === "direct" && activeTasks.length > 0 && !proposal.replan_impact
-        ? "项目已有任务，不能直接完成。"
-        : null;
+      : null;
 
   return {
     ...detail,
@@ -111,14 +91,10 @@ export function projectPageView(
     agentName,
     projectJobs,
     analysisJob,
-    directJob,
-    directMode,
     retryableProjectJobId: retryableJobId,
     queueIds,
     taskCounts,
     searchActive,
-    draftCheck,
-    depOptions,
     replanPreview,
     activeBlock,
     badgeInput,

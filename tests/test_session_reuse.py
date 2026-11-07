@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""DOMO Codex 与 WorkBuddy 会话复用测试。
+"""DOMO Codex 与 CodeBuddy 会话复用测试。
 
 覆盖范围：
   1. Codex 首次运行没有写 result.json 时，继续轮次使用
      `codex exec resume <thread_id>`，而不是重新开一个会话。
-  2. WorkBuddy 首次运行没有写 result.json 时，继续轮次使用
+  2. CodeBuddy 首次运行没有写 result.json 时，继续轮次使用
      `--resume <session_id>`，而不是重新开一个会话。
   3. 继续提示词携带当前任务与输出契约、结果文件缺失原因和绝对路径。
 
@@ -27,7 +27,7 @@ import sys
 
 args = sys.argv[1:]
 kind = "opencode" if args and args[0] == "run" else (
-    "codex" if "exec" in args else "workbuddy"
+    "codex" if "exec" in args else "codebuddy"
 )
 
 def option(name):
@@ -70,7 +70,7 @@ if not marker.exists():
     marker.write_text("1", encoding="utf-8")
     if kind == "codex":
         print(json.dumps({"type": "thread.started", "thread_id": session}), flush=True)
-    elif kind == "workbuddy":
+    elif kind == "codebuddy":
         print(json.dumps({
             "type": "system",
             "subtype": "init",
@@ -227,23 +227,23 @@ def main():
         assert "未能读取结果文件" in entries[1]["prompt"], entries[1]
         assert "当前有效的任务与输出契约" in entries[1]["prompt"], entries[1]
 
-        workbuddy_log = temp / "workbuddy.jsonl"
+        codebuddy_log = temp / "codebuddy.jsonl"
         detail, entries = run_case(
             temp,
             repo,
             {
                 **base_env,
                 "DOMO_WORKBUDDY_BIN": str(launcher),
-                "FAKE_LOG": str(workbuddy_log),
-                "FAKE_STATE": str(temp / "workbuddy-state"),
+                "FAKE_LOG": str(codebuddy_log),
+                "FAKE_STATE": str(temp / "codebuddy-state"),
             },
-            "workbuddy",
-            "WorkBuddy",
+            "codebuddy",
+            "CodeBuddy",
         )
         executor_jobs = [job for job in detail["jobs"] if job["role"] == "executor"]
         assert executor_jobs and all(job["status"] == "succeeded" for job in executor_jobs), executor_jobs
         assert len(entries) == 2, entries
-        assert entries[0]["kind"] == "workbuddy" and not entries[0]["resume"], entries[0]
+        assert entries[0]["kind"] == "codebuddy" and not entries[0]["resume"], entries[0]
         assert entries[1]["resume"], entries[1]
         assert entries[1]["session"] == "session-1", entries[1]
         assert "继续" in entries[1]["prompt"], entries[1]
@@ -251,7 +251,7 @@ def main():
         assert "未能读取结果文件" in entries[1]["prompt"], entries[1]
         assert "当前有效的任务与输出契约" in entries[1]["prompt"], entries[1]
 
-        print("Codex 与 WorkBuddy 会话复用测试通过")
+        print("Codex 与 CodeBuddy 会话复用测试通过")
 
 
 if __name__ == "__main__":

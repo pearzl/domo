@@ -118,8 +118,9 @@ async fn merge_project_inner(
         ));
     }
     sqlx::query("INSERT INTO merge_operations(project_id, base_before, project_before, phase, started_at) \
-        VALUES(?, ?, ?, 'rebasing', ?) ON CONFLICT(project_id) DO UPDATE SET base_before = excluded.base_before, \
-        project_before = excluded.project_before, prepared_commit = NULL, phase = 'rebasing', error = NULL, \
+        VALUES(?, ?, ?, 'rebasing', ?)         ON CONFLICT(project_id) DO UPDATE SET base_before = excluded.base_before, \
+        project_before = excluded.project_before, prepared_commit = NULL, phase = 'rebasing', \
+        rebased = 0, agent_resolved = 0, conflicts = NULL, error = NULL, \
         started_at = excluded.started_at, finished_at = NULL")
         .bind(id).bind(&base_before).bind(&project_before).bind(now()).execute(&state.db).await?;
 
@@ -131,8 +132,16 @@ async fn merge_project_inner(
     }
 
     let project_after = git::commit_of(&repo, &project_branch).await?;
-    sqlx::query("UPDATE merge_operations SET prepared_commit = ?, phase = 'fast_forwarding' WHERE project_id = ?")
-        .bind(&project_after).bind(id).execute(&state.db).await?;
+    let rebased = !git::is_ancestor(&repo, &base_before, &project_before).await?;
+    sqlx::query(
+        "UPDATE merge_operations SET prepared_commit = ?, phase = 'fast_forwarding', \
+         rebased = ? WHERE project_id = ?",
+    )
+    .bind(&project_after)
+    .bind(i64::from(rebased))
+    .bind(id)
+    .execute(&state.db)
+    .await?;
     let base_now = git::commit_of(&repo, &base_branch).await?;
     if base_now != base_before {
         restore_project_branch(&repo, &worktree, &project_branch, &project_before).await;
@@ -238,10 +247,14 @@ pub(crate) async fn publish_assisted(
     if let Some(path) = &target {
         ensure_base_worktree_clean(path, &project.base_branch).await?;
     }
-    sqlx::query("INSERT INTO merge_operations(project_id, base_before, project_before, prepared_commit, phase, started_at) VALUES(?, ?, ?, ?, 'fast_forwarding', ?) \
+    let rebased = !git::is_ancestor(&repo, base_before, project_before).await?;
+    sqlx::query("INSERT INTO merge_operations(project_id, base_before, project_before, prepared_commit, phase, \
+        rebased, agent_resolved, started_at) VALUES(?, ?, ?, ?, 'fast_forwarding', ?, 1, ?) \
         ON CONFLICT(project_id) DO UPDATE SET base_before = excluded.base_before, project_before = excluded.project_before, \
-        prepared_commit = excluded.prepared_commit, phase = excluded.phase, error = NULL, started_at = excluded.started_at, finished_at = NULL")
-        .bind(&project.id).bind(base_before).bind(project_before).bind(prepared).bind(now()).execute(&state.db).await?;
+        prepared_commit = excluded.prepared_commit, phase = excluded.phase, rebased = excluded.rebased, \
+        agent_resolved = 1, error = NULL, started_at = excluded.started_at, finished_at = NULL")
+        .bind(&project.id).bind(base_before).bind(project_before).bind(prepared)
+        .bind(i64::from(rebased)).bind(now()).execute(&state.db).await?;
     git::reset_hard_to(&checkout, prepared).await?;
     let result = if let Some(path) = &target {
         git::merge_ff_only(path, &project.branch).await
@@ -365,16 +378,39 @@ pub(super) async fn finish_project_merge(
     } else {
         (now(), commit.to_string())
     };
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query(
-        "UPDATE projects SET merged_at = ?, merged_commit = ?, updated_at = ? WHERE id = ?",
+    let flags: (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT rebased, agent_resolved, conflicts FROM merge_operations WHERE project_id = ?",
     )
-    .bind(&merged_at)
-    .bind(&merged_commit)
-    .bind(&merged_at)
     .bind(&project.id)
-    .execute(&mut *tx)
-    .await?;
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or((0, 0, None));
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if status == "up_to_date" {
+        sqlx::query(
+            "UPDATE projects SET merged_at = ?, merged_commit = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&merged_at)
+        .bind(&merged_commit)
+        .bind(&merged_at)
+        .bind(&project.id)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE projects SET merged_at = ?, merged_commit = ?, merge_rebased = ?, \
+             merge_agent_resolved = ?, merge_conflicts = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&merged_at)
+        .bind(&merged_commit)
+        .bind(flags.0)
+        .bind(flags.1)
+        .bind(&flags.2)
+        .bind(&merged_at)
+        .bind(&project.id)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "UPDATE merge_operations SET phase = 'completed', finished_at = ? WHERE project_id = ?",
     )

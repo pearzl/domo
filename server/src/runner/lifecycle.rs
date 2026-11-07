@@ -8,7 +8,6 @@ use crate::state::AppState;
 
 use super::analysis::handle_analysis_failure;
 use super::common::{load_job, load_project, load_task, role_label};
-use super::direct::handle_direct_failure;
 use super::executor::handle_executor_failure;
 use super::project::{handle_acceptance_failure, handle_summary_failure};
 use super::verifier::handle_verifier_failure;
@@ -226,8 +225,6 @@ pub(super) async fn fail_runtime(state: &AppState, job_id: &str, reason: &str) -
                 }
             } else if job.role == JOB_ROLE_ANALYSIS {
                 handle_analysis_failure(state, &project, reason, job_agent.as_ref(), true).await?;
-            } else if job.role == JOB_ROLE_DIRECT {
-                handle_direct_failure(state, &project, reason, job_agent.as_ref(), true).await?;
             } else if job.role == JOB_ROLE_ACCEPTANCE {
                 handle_acceptance_failure(state, &project, reason, job_agent.as_ref(), true)
                     .await?;

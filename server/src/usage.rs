@@ -37,6 +37,10 @@ pub const WINDOW_MONTH: &str = "month";
 
 pub const UNKNOWN_AGENT_KEY: &str = "unknown";
 pub const UNKNOWN_AGENT_LABEL: &str = "未记录";
+pub const UNKNOWN_TASK_KEY: &str = "unassigned";
+pub const UNKNOWN_TASK_LABEL: &str = "未归属任务";
+pub const UNKNOWN_MODEL_KEY: &str = "unknown";
+pub const UNKNOWN_MODEL_LABEL: &str = "未记录模型";
 
 /// A usage snapshot from a result payload or an OpenCode session ledger.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -135,6 +139,9 @@ pub fn elapsed_ms(started_at: Option<&str>, finished_at: &str) -> Option<i64> {
 pub struct UsageJobRow {
     pub project_id: String,
     pub agent_id: Option<String>,
+    pub model: String,
+    pub task_id: Option<String>,
+    pub task_key: String,
     pub role: String,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -153,9 +160,10 @@ pub async fn load_jobs(
     pool: &SqlitePool,
     project_id: Option<&str>,
 ) -> UsageResult<Vec<UsageJobRow>> {
-    const COLUMNS: &str = "SELECT project_id, agent_id, role, input_tokens, output_tokens, \
-                          cache_read_tokens, cache_write_tokens, reasoning_tokens, cost, \
-                          duration_ms, usage_known, started_at, finished_at, created_at FROM accounting_jobs";
+    const COLUMNS: &str = "SELECT project_id, agent_id, model, task_id, task_key, role, \
+                          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, \
+                          reasoning_tokens, cost, duration_ms, usage_known, started_at, \
+                          finished_at, created_at FROM accounting_jobs";
     let rows = match project_id {
         Some(project_id) => {
             sqlx::query_as::<_, UsageJobRow>(&format!("{COLUMNS} WHERE project_id = ?"))
@@ -287,6 +295,8 @@ pub enum UsageGroupBy {
     Project,
     Agent,
     Role,
+    Task,
+    Model,
     None,
 }
 
@@ -300,8 +310,10 @@ impl UsageGroupBy {
             GROUP_PROJECT | "projects" => Ok(Self::Project),
             GROUP_AGENT | "agents" => Ok(Self::Agent),
             GROUP_ROLE | "roles" => Ok(Self::Role),
+            GROUP_TASK | "tasks" => Ok(Self::Task),
+            GROUP_MODEL | "models" => Ok(Self::Model),
             "none" | "total" | "all" => Ok(Self::None),
-            _ => Err("group_by 必须是 project、agent、role 或 none".into()),
+            _ => Err("group_by 必须是 project、agent、role、task、model 或 none".into()),
         }
     }
 
@@ -310,6 +322,8 @@ impl UsageGroupBy {
             Self::Project => GROUP_PROJECT,
             Self::Agent => GROUP_AGENT,
             Self::Role => GROUP_ROLE,
+            Self::Task => GROUP_TASK,
+            Self::Model => GROUP_MODEL,
             Self::None => "none",
         }
     }
@@ -318,6 +332,8 @@ impl UsageGroupBy {
 pub const GROUP_PROJECT: &str = "project";
 pub const GROUP_AGENT: &str = "agent";
 pub const GROUP_ROLE: &str = "role";
+pub const GROUP_TASK: &str = "task";
+pub const GROUP_MODEL: &str = "model";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageGroup {
@@ -326,6 +342,9 @@ pub struct UsageGroup {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub role: Option<String>,
+    pub task_id: Option<String>,
+    pub task_key: Option<String>,
+    pub model: Option<String>,
     #[serde(flatten)]
     pub totals: UsageTotals,
 }
@@ -378,10 +397,14 @@ pub fn summarize(
     let mut index: HashMap<String, usize> = HashMap::new();
     for row in rows.iter().filter(|row| filter.matches(row)) {
         totals.add(row);
-        let (key, project_id, agent_id, agent_name, role) = match group_by {
+        let (key, project_id, agent_id, agent_name, role, task_id, task_key, model) = match group_by
+        {
             UsageGroupBy::Project => (
                 row.project_id.clone(),
                 Some(row.project_id.clone()),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -389,7 +412,16 @@ pub fn summarize(
             UsageGroupBy::Agent => match &row.agent_id {
                 Some(agent_id) => {
                     let name = agent_names.get(agent_id).cloned();
-                    (agent_id.clone(), None, Some(agent_id.clone()), name, None)
+                    (
+                        agent_id.clone(),
+                        None,
+                        Some(agent_id.clone()),
+                        name,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 }
                 None => (
                     UNKNOWN_AGENT_KEY.to_string(),
@@ -397,10 +429,70 @@ pub fn summarize(
                     None,
                     Some(UNKNOWN_AGENT_LABEL.to_string()),
                     None,
+                    None,
+                    None,
+                    None,
                 ),
             },
-            UsageGroupBy::Role => (row.role.clone(), None, None, None, Some(row.role.clone())),
-            UsageGroupBy::None => ("all".to_string(), None, None, None, None),
+            UsageGroupBy::Role => (
+                row.role.clone(),
+                None,
+                None,
+                None,
+                Some(row.role.clone()),
+                None,
+                None,
+                None,
+            ),
+            UsageGroupBy::Task => match &row.task_id {
+                Some(task_id) => (
+                    task_id.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(task_id.clone()),
+                    Some(row.task_key.clone()),
+                    None,
+                ),
+                None => (
+                    UNKNOWN_TASK_KEY.to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(UNKNOWN_TASK_LABEL.to_string()),
+                    None,
+                ),
+            },
+            UsageGroupBy::Model => {
+                let model = row.model.trim();
+                if model.is_empty() {
+                    (
+                        UNKNOWN_MODEL_KEY.to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(UNKNOWN_MODEL_LABEL.to_string()),
+                    )
+                } else {
+                    (
+                        model.to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(model.to_string()),
+                    )
+                }
+            }
+            UsageGroupBy::None => ("all".to_string(), None, None, None, None, None, None, None),
         };
         let position = match index.get(&key) {
             Some(position) => *position,
@@ -413,6 +505,9 @@ pub fn summarize(
                     agent_id,
                     agent_name,
                     role,
+                    task_id,
+                    task_key,
+                    model,
                     totals: UsageTotals::default(),
                 });
                 position
@@ -841,6 +936,9 @@ mod tests {
         UsageJobRow {
             project_id: project.into(),
             agent_id: agent.map(str::to_string),
+            model: String::new(),
+            task_id: None,
+            task_key: String::new(),
             role: role.into(),
             input_tokens: input,
             output_tokens: output,

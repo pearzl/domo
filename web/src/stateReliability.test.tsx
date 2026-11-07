@@ -170,7 +170,6 @@ function project(overrides: Partial<Project> = {}): Project {
     replan_requested_at: null,
     confirm_mode: "manual",
     confirmed_at: null,
-    completion_mode: "tasks",
     merged_at: null,
     merged_commit: null,
     created_at: "2026-01-10T10:00:00Z",
@@ -210,8 +209,6 @@ describe("归档只读", () => {
         busy={false}
         archived
         onSubmitReport={() => {}}
-        onRequestReplan={() => {}}
-        onAddTask={() => {}}
       />,
     );
     expect(markup).toContain("报告内容");

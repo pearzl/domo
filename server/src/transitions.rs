@@ -14,7 +14,6 @@ pub enum ProjectAction {
     Analysis,
     Archive,
     ManageTask,
-    AddTask,
     Report,
     Merge,
 }
@@ -127,9 +126,6 @@ fn check_project(project: &ProjectRow, action: ProjectAction) -> Result<()> {
     }
     if project.status.as_deref() == Some(STATUS_ARCHIVED) {
         return Err(TransitionError::Rejected("项目已归档"));
-    }
-    if matches!(action, ProjectAction::AddTask) {
-        return Ok(());
     }
     if matches!(action, ProjectAction::Merge) {
         return if project.stage == STAGE_COMPLETED {

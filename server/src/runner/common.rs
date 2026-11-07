@@ -11,7 +11,7 @@ use crate::state::AppState;
 pub(super) fn result_is_failure(role: &str, raw: &str) -> bool {
     if !matches!(
         role,
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+        JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
     ) {
         return false;
     }
@@ -137,17 +137,13 @@ pub(super) fn models_list_json(items: &[String]) -> String {
     serde_json::to_string(items).unwrap_or_else(|_| "[]".into())
 }
 
-pub(super) fn parsed_error(parsed: &ParsedResult) -> Option<String> {
-    match parsed {
-        ParsedResult::ExecutorFailed { reason } => Some(reason.clone()),
-        _ => None,
-    }
+pub(super) fn parsed_error(_parsed: &ParsedResult) -> Option<String> {
+    None
 }
 
 pub(super) fn role_label(role: &str) -> &'static str {
     match role {
         JOB_ROLE_ANALYSIS => "项目分析",
-        JOB_ROLE_DIRECT => "直接完成",
         JOB_ROLE_EXECUTOR => "执行",
         JOB_ROLE_VERIFIER => "验收",
         JOB_ROLE_ACCEPTANCE => "项目验收",

@@ -382,9 +382,9 @@ export function TaskDrawer({
         return (
           <div className="kv" key={field}>
             <span>{label}</span>
-            <span>{task.status === "blocked" && !task.user_action
-              ? "查看任务顶部的处理说明或技术详情"
-              : task.user_action?.summary ?? task.waiting_reason ?? "—"}</span>
+            <span>{task.status === "blocked"
+              ? task.waiting_reason ?? "查看技术详情或作业记录"
+              : task.waiting_reason ?? "—"}</span>
           </div>
         );
       case "failureKind":

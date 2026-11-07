@@ -8,8 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::AsyncWriteExt;
 
 use crate::models::{
-    CONFIRM_AUTO, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR,
-    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
+    JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_EXECUTOR, JOB_ROLE_REPLAN_REVIEW,
+    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER,
 };
 
 use super::adapter::{AgentAdapter, AgentConfig, AgentRun, AgentSpec, TurnContext};
@@ -53,7 +53,6 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         Some(result) => result,
         None => match spec.role.as_str() {
             JOB_ROLE_ANALYSIS => mock_analysis(&context),
-            JOB_ROLE_DIRECT => mock_direct(&context, &spec.cwd)?,
             JOB_ROLE_EXECUTOR => mock_execute(&context, &spec.cwd)?,
             JOB_ROLE_VERIFIER => mock_verify(&context, &spec.cwd)?,
             JOB_ROLE_ACCEPTANCE => mock_project_acceptance(&context, &spec.cwd)?,
@@ -78,7 +77,7 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
                         {
                             tasks.push(serde_json::json!({"key": "T1.4", "title": "后继子任务", "description": "读取前置子任务成果并完成交付", "acceptance": ["产物存在"], "deps": ["T1.3"]}));
                         }
-                        serde_json::json!({"kind": "plan", "goal": context["project"]["goal"], "summary": "mock 父任务局部替代方案", "skip_confirmation": true,
+                        serde_json::json!({"kind": "plan", "goal": context["project"]["goal"], "summary": "mock 父任务局部替代方案",
                             "tasks": tasks})
                     } else {
                         mock_replan_plan(
@@ -98,22 +97,8 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
         },
     };
     let mut result = attach_mock_usage(result, &context);
-    if result["decision"] == "wait"
-        || matches!(result["next_action"].as_str(), Some("wait" | "arbitrate"))
-    {
-        result["user_action"] = serde_json::json!({
-            "summary": "请连接验收所需的设备", "why": "设备尚未连接，AI 无法完成实际验证。",
-            "owner": "设备提供方", "steps": ["连接测试设备，并确认当前作业能够访问。"],
-            "after": if spec.role == JOB_ROLE_REPLAN_REVIEW { "在任务中记录设备已连接并继续，AI 将核实环境并接续原任务。" } else { "点击“条件已补齐，重新验收”，AI 将完成检查与证据整理。" }
-        });
-    }
-    if matches!(
-        result["kind"].as_str(),
-        Some("done" | "derive" | "direct_done")
-    ) {
-        let files = if result["kind"] == "direct_done" {
-            vec!["domo_mock/direct.txt".to_string()]
-        } else if result["kind"] == "derive" {
+    if matches!(result["kind"].as_str(), Some("done" | "derive")) {
+        let files = if result["kind"] == "derive" {
             Vec::new()
         } else {
             vec![format!(
@@ -121,21 +106,15 @@ async fn run_mock(spec: &AgentSpec) -> Result<AgentRun> {
                 context["task"]["key"].as_str().unwrap_or("T1")
             )]
         };
-        result["artifacts"] = serde_json::json!(files.iter().map(|path| serde_json::json!({
-            "path": path, "kind": "delivery", "format": "text/plain", "verification": "检查 mock 任务交付文件"
-        })).collect::<Vec<_>>());
-        result["commit_files"] = serde_json::json!(files);
+        result["artifacts"] = serde_json::json!(files
+            .iter()
+            .map(|path| serde_json::json!({
+                "path": path, "format": "text/plain", "verification": "检查 mock 任务交付文件"
+            }))
+            .collect::<Vec<_>>());
     }
-    if spec.role == JOB_ROLE_ACCEPTANCE && result.get("criteria").is_some() {
-        result["contract_id"] = context["contract"]["id"].clone();
-        result["artifact_version"] = context["artifact_version"].clone();
-    }
-    if spec.role == JOB_ROLE_VERIFIER && result.get("pass").is_some() {
-        let pass = result["pass"].as_bool().unwrap_or(false);
-        if !pass && result.get("next_action").is_none() {
-            result["next_action"] = serde_json::json!("execute");
-            result["guidance"] = result["reason"].clone();
-        }
+    if spec.role == JOB_ROLE_VERIFIER && result.get("result").is_some() {
+        let pass = result["result"] == "pass";
         let criteria = context["task"]["acceptance"]
             .as_array()
             .cloned()
@@ -290,7 +269,7 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| goal.to_string());
-    let mode = context
+    let _mode = context
         .get("project")
         .and_then(|value| value.get("confirm_mode"))
         .and_then(|value| value.as_str())
@@ -323,18 +302,6 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
             result["goal"] = serde_json::json!(proposed_goal);
         }
         return result;
-    }
-    let skip = goal.contains("[skipforce]") || mode == CONFIRM_AUTO;
-    let force_plan = std::env::var("DOMO_MOCK_ANALYSIS_FORCE_PLAN").is_ok_and(|value| value == "1");
-    if goal.contains("[direct]") && !force_plan {
-        return serde_json::json!({
-            "kind": "direct",
-            "summary": "这个目标足够简单，可以直接完成",
-            "goal": proposed_goal,
-            "plan": ["创建目标文件", "检查文件内容"],
-            "verification": ["读取文件确认内容"],
-            "skip_confirmation": skip
-        });
     }
     let (summary, tasks) = if goal.contains("[single]") {
         (
@@ -403,28 +370,8 @@ fn mock_analysis(context: &serde_json::Value) -> serde_json::Value {
         "goal": proposed_goal,
         "assumptions": ["使用 mock Agent"],
         "acceptance": ["产物符合目标描述"],
-        "tasks": tasks,
-        "skip_confirmation": skip
+        "tasks": tasks
     })
-}
-
-fn mock_direct(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Value> {
-    let goal = context
-        .get("project")
-        .and_then(|value| value.get("goal"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let dir = cwd.join("domo_mock");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("direct.txt"), "mock direct completion\n")?;
-    Ok(serde_json::json!({
-        "kind": "direct_done",
-        "summary": "已直接完成目标",
-        "report": format!(
-            "# Mock 直接完成报告\n\n目标：{}\n\n已完成 `domo_mock/direct.txt` 并通过自检。",
-            goal
-        )
-    }))
 }
 
 fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Value {
@@ -433,21 +380,6 @@ fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Va
         .and_then(|value| value.get("goal"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if goal.contains("[replan-direct]") || goal.contains("[replan-direct-mismatch]") {
-        let draft_goal = if goal.contains("[replan-direct-mismatch]") {
-            "规划者擅自修改的目标"
-        } else {
-            goal
-        };
-        return serde_json::json!({
-            "kind": "direct",
-            "summary": format!("mock 直接重规划：{reason}"),
-            "goal": draft_goal,
-            "plan": ["直接完成重规划工作"],
-            "verification": ["核对直接完成产物"],
-            "skip_confirmation": true
-        });
-    }
     let completed: HashSet<String> = context
         .get("completed_tasks")
         .and_then(|value| value.as_array())
@@ -503,16 +435,10 @@ fn mock_replan_plan(context: &serde_json::Value, reason: &str) -> serde_json::Va
         let second_key = next_mock_key(&taken, &HashSet::new());
         (first_key, second_key)
     };
-    let skip = context
-        .get("project")
-        .and_then(|value| value.get("confirm_mode"))
-        .and_then(|value| value.as_str())
-        == Some(CONFIRM_AUTO);
     serde_json::json!({
         "kind": "plan",
         "summary": format!("mock 重规划：{reason}"),
         "goal": if goal.contains("[replan-goal-mismatch]") { "规划者擅自修改的目标" } else { goal },
-        "skip_confirmation": skip,
         "tasks": [
             {
                 "key": first_key,
@@ -577,23 +503,12 @@ fn mock_switch_matches(context: &serde_json::Value, switch_env: &str, key: &str)
 }
 
 /// Invalid project results exercise the bounded protocol-correction path.
-fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_json::Value> {
+fn mock_role_failure(role: &str, _context: &serde_json::Value) -> Option<serde_json::Value> {
     if !matches!(
         role,
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
+        JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
     ) {
         return None;
-    }
-    if role == JOB_ROLE_DIRECT
-        && std::env::var("DOMO_MOCK_DIRECT_FAIL_GOAL").is_ok_and(|marker| {
-            context
-                .get("project")
-                .and_then(|value| value.get("goal"))
-                .and_then(|value| value.as_str())
-                .is_some_and(|goal| goal.contains(&marker))
-        })
-    {
-        return Some(serde_json::json!({"kind": "invalid_direct_result"}));
     }
     None
 }
@@ -603,9 +518,7 @@ fn mock_role_failure(role: &str, context: &serde_json::Value) -> Option<serde_js
 fn mock_transport_failure(role: &str, context: &serde_json::Value) -> Option<String> {
     let (prefix, key) = match role {
         JOB_ROLE_EXECUTOR => ("DOMO_MOCK", context["task"]["key"].as_str().unwrap_or("T1")),
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
-            ("DOMO_MOCK_PLANNER", "")
-        }
+        JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => ("DOMO_MOCK_PLANNER", ""),
         _ => return None,
     };
     if mock_flag_matches(context, &format!("{prefix}_RATE_LIMIT"), key) {
@@ -819,15 +732,19 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
     let key = task.get("key").and_then(|v| v.as_str()).unwrap_or("T1");
     if let Ok(action) = std::env::var("DOMO_MOCK_VERIFIER_ACTION_ONCE") {
         if take_once_marker(context, cwd, ".mock-verifier-action")? {
+            let outcome = if matches!(action.as_str(), "wait" | "review" | "request") {
+                "request"
+            } else {
+                "execute"
+            };
             return Ok(
-                serde_json::json!({"pass": false, "reason": "mock 验证条件未齐", "issues": ["需补充验证"],
-                "next_action": action, "guidance": "用户补齐设备后重新验收"}),
+                serde_json::json!({"result": outcome, "reason": "mock 验证条件未齐", "issues": ["需补充验证"]}),
             );
         }
     }
     if std::env::var("DOMO_MOCK_REJECT_ALWAYS").as_deref() == Ok("1") {
         return Ok(
-            serde_json::json!({"pass": false, "reason": "mock 持续拒绝", "issues": ["交付仍有缺陷"]}),
+            serde_json::json!({"result": "execute", "reason": "mock 持续拒绝", "issues": ["交付仍有缺陷"]}),
         );
     }
     let reject_once = std::env::var("DOMO_MOCK_REJECT_ONCE")
@@ -846,7 +763,7 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
         if !marker.exists() {
             std::fs::write(&marker, b"1")?;
             return Ok(serde_json::json!({
-                "pass": false,
+                "result": "execute",
                 "reason": "mock 首次验收拒绝",
                 "issues": ["请确认产物内容后再次提交"]
             }));
@@ -869,9 +786,9 @@ fn mock_verify(context: &serde_json::Value, cwd: &Path) -> Result<serde_json::Va
         }
     }
     if missing.is_empty() {
-        Ok(serde_json::json!({"pass": true, "reason": "mock 产物齐全", "issues": []}))
+        Ok(serde_json::json!({"result": "pass", "reason": "mock 产物齐全", "issues": []}))
     } else {
-        Ok(serde_json::json!({"pass": false, "reason": "mock 产物缺失", "issues": missing}))
+        Ok(serde_json::json!({"result": "execute", "reason": "mock 产物缺失", "issues": missing}))
     }
 }
 
@@ -879,21 +796,6 @@ fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<se
     let disposition = match std::env::var("DOMO_MOCK_ACCEPT_ACTION_ONCE") {
         Ok(action) if take_once_marker(context, cwd, ".mock-accept-action")? => Some(action),
         _ => None,
-    };
-    let criteria: Vec<String> = context
-        .get("acceptance_criteria")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let criteria = if criteria.is_empty() {
-        vec!["项目目标已达成".to_string()]
-    } else {
-        criteria
     };
     let always_fail = std::env::var("DOMO_MOCK_ACCEPT_ALWAYS_FAIL")
         .map(|value| value == "1")
@@ -906,54 +808,44 @@ fn mock_project_acceptance(context: &serde_json::Value, cwd: &Path) -> Result<se
         .unwrap_or(false)
         && take_once_marker(context, cwd, ".mock-accept-fail-once")?;
     let fail = disposition.is_some() || (!human_only && (always_fail || fail_once));
-    let items = criteria
-        .iter()
-        .enumerate()
-        .map(|(index, criterion)| {
-            let failed = fail && index == 0;
-            let verdict = if failed && disposition.is_some() {
-                "unverifiable"
-            } else if failed {
-                "unmet"
-            } else if human_only {
-                "human_required"
-            } else {
-                "met"
-            };
-            serde_json::json!({
-                "id": format!("A{}", index + 1),
-                "source": "proposal_acceptance",
-                "criterion": criterion,
-                "verdict": verdict,
-                "evidence": if failed {
-                    serde_json::json!([])
-                } else if human_only {
-                    serde_json::json!(["human: 需要人工确认"])
-                } else {
-                    serde_json::json!(["mock: 项目交付分支产物已核查"])
-                },
-                "gap": if failed {
-                    "mock 项目验收未通过"
-                } else if human_only {
-                    "mock 需要人工确认"
-                } else {
-                    ""
-                },
-            })
-        })
-        .collect::<Vec<_>>();
+    if fail {
+        let goal = context["project"]["goal"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        return Ok(serde_json::json!({
+            "result": "execute",
+            "issues": [{"title": "mock 项目验收未通过", "detail": "mock 项目验收发现未满足条目"}],
+            "plan": {
+                "message": "mock 项目验收发现缺口，安排补充工作后重新验收",
+                "goal": goal,
+                "constraints": [],
+                "assumptions": [],
+                "acceptance": ["项目目标达成"],
+                "tasks": [{
+                    "key": "T1",
+                    "title": "补齐项目验收缺口",
+                    "description": "完成项目验收发现的缺口并重新提交验收。",
+                    "acceptance": ["产物存在"],
+                    "deps": []
+                }]
+            }
+        }));
+    }
+    let mut report = mock_summary(context)["report"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let issues = if human_only {
+        report.push_str("\n## 未闭合项\n需要人工确认或签字。\n");
+        serde_json::json!([{"title": "需要人工确认", "detail": "mock 需要人工确认"}])
+    } else {
+        serde_json::json!([])
+    };
     Ok(serde_json::json!({
-        "kind": "project_acceptance",
-        "summary": if fail { "mock 项目验收未通过" } else { "mock 项目验收通过" },
-        "criteria": items,
-        "replan_reason": if fail { "mock 项目验收发现未满足条目" } else { "" },
-        "next_action": disposition.unwrap_or_else(|| if fail { "replan".into() } else { "report".into() }),
-        "guidance": if fail { "用户补齐设备或按缺口安排修复后重新验收" } else { "" },
-        "report": if fail { serde_json::Value::Null } else {
-            let mut report = mock_summary(context)["report"].as_str().unwrap_or_default().to_string();
-            if human_only { report.push_str("\n## 人工待办\n需要人工确认或签字。\n"); }
-            serde_json::json!(report)
-        },
+        "result": "deliver",
+        "issues": issues,
+        "report": report,
     }))
 }
 

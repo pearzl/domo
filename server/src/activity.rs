@@ -1,4 +1,4 @@
-//! Job activity derived from the job transcript. OpenCode, Codex and WorkBuddy
+//! Job activity derived from the job transcript. OpenCode, Codex and CodeBuddy
 //! runs write one JSON event per line; mock jobs and other agents write plain
 //! text. A transcript is classified by the first event that names a known
 //! format, so only that format's mapping applies to the whole output. The
@@ -18,7 +18,7 @@ pub const MAX_ITEM_CHARS: usize = 500;
 
 pub const FORMAT_OPENCODE: &str = "opencode";
 pub const FORMAT_CODEX: &str = "codex";
-pub const FORMAT_WORKBUDDY: &str = "workbuddy";
+pub const FORMAT_WORKBUDDY: &str = "codebuddy";
 pub const FORMAT_TEXT: &str = "text";
 
 pub const KIND_MESSAGE: &str = "message";
@@ -67,7 +67,7 @@ enum EventKind {
 enum Format {
     Opencode,
     Codex,
-    Workbuddy,
+    Codebuddy,
 }
 
 impl Format {
@@ -75,7 +75,7 @@ impl Format {
         match self {
             Format::Opencode => FORMAT_OPENCODE,
             Format::Codex => FORMAT_CODEX,
-            Format::Workbuddy => FORMAT_WORKBUDDY,
+            Format::Codebuddy => FORMAT_WORKBUDDY,
         }
     }
 }
@@ -194,7 +194,7 @@ fn report_with_bytes(raw: &str, bytes: usize) -> JobActivity {
     match format {
         Format::Opencode => parse_opencode(raw, &mut state),
         Format::Codex => parse_codex(raw, &mut state),
-        Format::Workbuddy => parse_workbuddy(raw, &mut state),
+        Format::Codebuddy => parse_codebuddy(raw, &mut state),
     }
 
     let (items, truncated) = state.items.finish();
@@ -233,8 +233,8 @@ fn format_of(value: &Value) -> Option<Format> {
     if matches!(event, "item.started" | "item.completed") && item_type(value).is_some() {
         return Some(Format::Codex);
     }
-    if is_workbuddy_event(value, event) {
-        return Some(Format::Workbuddy);
+    if is_codebuddy_event(value, event) {
+        return Some(Format::Codebuddy);
     }
     if opencode_kind(event).is_some() {
         return Some(Format::Opencode);
@@ -246,9 +246,9 @@ fn format_of(value: &Value) -> Option<Format> {
     opencode_kind(part_type).map(|_| Format::Opencode)
 }
 
-fn is_workbuddy_event(value: &Value, event: &str) -> bool {
+fn is_codebuddy_event(value: &Value, event: &str) -> bool {
     match event {
-        // WorkBuddy wraps content blocks in `message`; Codex and OpenCode never
+        // CodeBuddy wraps content blocks in `message`; Codex and OpenCode never
         // use these event names.
         "assistant" | "user" => value.get("message").is_some(),
         "result" => {
@@ -553,10 +553,10 @@ fn codex_tool_failed(item: &Value) -> bool {
     )
 }
 
-/// WorkBuddy streams content blocks: assistant events announce text and tool
+/// CodeBuddy streams content blocks: assistant events announce text and tool
 /// uses, user events return tool results keyed by `tool_use_id`. Results are
 /// applied to the announced tool entry, so a failure is counted once.
-fn parse_workbuddy(raw: &str, state: &mut ParseState) {
+fn parse_codebuddy(raw: &str, state: &mut ParseState) {
     let mut tools: HashMap<String, usize> = HashMap::new();
     for value in raw.lines().filter_map(line_value) {
         let event = value
@@ -568,7 +568,7 @@ fn parse_workbuddy(raw: &str, state: &mut ParseState) {
             // A successful `result` only carries session totals. An error
             // result becomes a line so the reason is visible in the activity.
             "result" => {
-                if let Some(error) = crate::agents::workbuddy_result_error(&value) {
+                if let Some(error) = crate::agents::codebuddy_result_error(&value) {
                     state.line(&error);
                 }
                 continue;
@@ -1107,7 +1107,7 @@ mod tests {
         assert_eq!(activity.summary.reasoning, 1);
     }
 
-    fn workbuddy_replay() -> String {
+    fn codebuddy_replay() -> String {
         concat!(
             r#"{"type":"system","subtype":"init","session_id":"s","model":"hy3","permissionMode":"bypassPermissions"}"#,
             "\n",
@@ -1130,8 +1130,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_workbuddy_jsonl_events() {
-        let raw = workbuddy_replay();
+    fn parses_codebuddy_jsonl_events() {
+        let raw = codebuddy_replay();
         let activity = report(&raw);
         assert_eq!(activity.format, FORMAT_WORKBUDDY);
         assert_eq!(activity.bytes, raw.len());
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_tool_result_carries_error_status_independently() {
+    fn codebuddy_tool_result_carries_error_status_independently() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s","tools":["Bash"]}"#,
             "\n",
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_error_result_becomes_a_line() {
+    fn codebuddy_error_result_becomes_a_line() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s"}"#,
             "\n",
@@ -1334,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_thinking_block_becomes_reasoning_not_step() {
+    fn codebuddy_thinking_block_becomes_reasoning_not_step() {
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s"}"#,
             "\n",

@@ -305,9 +305,7 @@ pub async fn reject_goal_change(state: &AppState, project: &ProjectRow) -> Resul
 pub async fn impact(
     state: &AppState,
     project: &ProjectRow,
-    kind: &str,
     acceptance: &[String],
-    verification: &[String],
     tasks: &[domain::NormalizedTask],
 ) -> Result<ReplanImpact> {
     let current = load_tasks(&state.db, &project.id).await?;
@@ -339,18 +337,10 @@ pub async fn impact(
         .proposal
         .as_deref()
         .and_then(|raw| serde_json::from_str::<AnalysisProposal>(raw).ok());
-    let previous_acceptance = previous.as_ref().map_or(&[][..], |proposal| {
-        if proposal.kind == "direct" {
-            &proposal.verification
-        } else {
-            &proposal.acceptance
-        }
-    });
-    let next_acceptance = if kind == "direct" {
-        verification
-    } else {
-        acceptance
-    };
+    let previous_acceptance = previous
+        .as_ref()
+        .map_or(&[][..], |proposal| &proposal.acceptance);
+    let next_acceptance = acceptance;
     let task_acceptance_changed = tasks.iter().any(|task| {
         current_by_key
             .get(&task.key)
@@ -580,43 +570,6 @@ async fn cleanup_current(state: &AppState, project_id: &str, generation: i64) {
     }
 }
 
-/// Caller holds the scheduling lock through validation and application.
-pub(crate) async fn apply_direct_locked(
-    state: &AppState,
-    project: &ProjectRow,
-    proposal_json: &str,
-) -> Result<()> {
-    let timestamp = now();
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-    validate_apply_tx(&mut tx, project, proposal_json).await?;
-    let applied = supersede_tx(&mut tx, &project.id, &timestamp).await?;
-    enqueue_cleanup_tx(&mut tx, &project.id, project.replan_generation, &timestamp).await?;
-    // The acceptance round is cumulative across plans so automatic replans cannot bypass its cap.
-    sqlx::query(
-        "UPDATE projects SET proposal = ?, confirmed_at = ?, stage = ?, \
-         status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-         completion_mode = ?, blocked_reason = NULL, report = NULL, report_feedback = NULL, \
-         acceptance = NULL, acceptance_passed = 0, acceptance_at = NULL, \
-         replan_active = 0, replan_proposal = NULL, replan_previous_stage = NULL, \
-         replan_previous_goal = NULL, goal_locked_at = COALESCE(goal_locked_at, ?), \
-         updated_at = ? WHERE id = ?",
-    )
-    .bind(proposal_json)
-    .bind(&timestamp)
-    .bind(STAGE_EXECUTING)
-    .bind(STATUS_RUNNING)
-    .bind(COMPLETION_DIRECT)
-    .bind(&timestamp)
-    .bind(&timestamp)
-    .bind(&project.id)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    finish_apply(state, project, applied).await;
-    Ok(())
-}
-
-/// Abandons the draft and restores dispatch of the plan that remains confirmed.
 pub async fn cancel(state: &AppState, project_id: &str) -> Result<Option<ProjectRow>> {
     let _guard = state.schedule_lock.lock().await;
     let Some(project) = load_project(&state.db, project_id).await? else {

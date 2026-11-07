@@ -416,8 +416,8 @@ function formatLabel(format: JobActivityData["format"]): string {
   switch (format) {
     case "codex":
       return "Codex";
-    case "workbuddy":
-      return "WorkBuddy";
+    case "codebuddy":
+      return "CodeBuddy";
     case "opencode":
       return "OpenCode";
     default:

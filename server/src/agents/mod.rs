@@ -4,6 +4,7 @@
 
 mod adapter;
 mod cli;
+mod codebuddy;
 mod codex;
 #[cfg(test)]
 mod contract;
@@ -11,7 +12,6 @@ mod diagnostic;
 mod mock;
 mod opencode;
 mod process;
-mod workbuddy;
 
 use std::time::Duration;
 
@@ -45,13 +45,13 @@ pub use adapter::{
     TurnContext,
 };
 pub use cli::CliAdapter;
+pub(crate) use codebuddy::codebuddy_result_error;
+pub use codebuddy::CodebuddyAdapter;
 pub use codex::CodexAdapter;
 pub use diagnostic::{Diagnosis, StopReason};
 pub use mock::MockAdapter;
 pub use opencode::OpencodeAdapter;
 pub use process::{job_process_alive, kill_job_dir};
-pub(crate) use workbuddy::workbuddy_result_error;
-pub use workbuddy::WorkbuddyAdapter;
 
 /// Declares the registered adapter types once. `KINDS` and every dispatch hook
 /// below are generated from this list, so adding an agent kind means writing
@@ -141,7 +141,7 @@ adapter_registry!(
     MockAdapter,
     OpencodeAdapter,
     CodexAdapter,
-    WorkbuddyAdapter,
+    CodebuddyAdapter,
     CliAdapter,
 );
 
@@ -276,7 +276,7 @@ mod tests {
             <MockAdapter as AgentAdapter>::KIND,
             <OpencodeAdapter as AgentAdapter>::KIND,
             <CodexAdapter as AgentAdapter>::KIND,
-            <WorkbuddyAdapter as AgentAdapter>::KIND,
+            <CodebuddyAdapter as AgentAdapter>::KIND,
             <CliAdapter as AgentAdapter>::KIND,
         ] {
             assert_eq!(kinds.iter().filter(|item| **item == kind).count(), 1);

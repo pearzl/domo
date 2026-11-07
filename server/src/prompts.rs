@@ -3,9 +3,9 @@
 
 use crate::domain::{MAX_DERIVED_TASKS, MAX_PLAN_TASKS};
 use crate::models::{
-    MessageRow, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_DIRECT, JOB_ROLE_EXECUTOR,
-    JOB_ROLE_REPLAN_REVIEW, JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE,
-    REPLAN_SOURCE_EXECUTOR, REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
+    MessageRow, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_EXECUTOR, JOB_ROLE_REPLAN_REVIEW,
+    JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE, REPLAN_SOURCE_EXECUTOR,
+    REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
 };
 
 #[derive(Debug, Clone)]
@@ -72,7 +72,6 @@ pub struct PromptData {
     pub replan_source: Option<String>,
     pub acceptance_criteria: Vec<String>,
     pub acceptance_result: Option<String>,
-    pub direct_result: Option<String>,
     pub project_summary: Option<String>,
     pub project_assumptions: Vec<String>,
     pub confirm_mode: String,
@@ -96,7 +95,6 @@ pub struct JobInputs<'a> {
 pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
     let body = match data.role.as_str() {
         JOB_ROLE_ANALYSIS => analysis_prompt(data),
-        JOB_ROLE_DIRECT => direct_prompt(data),
         JOB_ROLE_EXECUTOR => executor_prompt(data),
         JOB_ROLE_VERIFIER => verifier_prompt(data),
         JOB_ROLE_ACCEPTANCE => acceptance_prompt(data),
@@ -105,10 +103,7 @@ pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> 
         _ => format!("未知作业角色: {}", data.role),
     };
     let mut prompt = format!("{}{body}", common_header(data));
-    if matches!(
-        data.role.as_str(),
-        JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY
-    ) {
+    if matches!(data.role.as_str(), JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY) {
         prompt.push_str(user_report_rules());
     }
     if let Some(inputs) = inputs {
@@ -126,7 +121,7 @@ pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> 
 /// Resource indexes locate important results; role, task scope and explicit user
 /// constraints determine write access, never the provenance of a listed file.
 pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> String {
-    let rules = if !matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+    let rules = if data.role != JOB_ROLE_EXECUTOR {
         "登记的成果与参考输入只读参考；登记不授予本角色修改交付文件的权限，写入位置以本次运行权限为准。"
     } else if plain_workspace(data) {
         "普通工作区：所选目录及其内容就是项目输入，任务串行接力。先按需检查当前文件、已有结果与未完成操作，再按已确认目标、任务范围及明确的用户约束修改已有文件和前序任务产物，不因文件来源任务不同要求逐路径授权。用户明确要求只读或保留的资料必须保护；能够安全接续时继续，无法判断或涉及不可逆风险时说明具体问题并请求处理。"
@@ -143,7 +138,6 @@ pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> Str
                 &[
                     "id",
                     "path",
-                    "kind",
                     "task_id",
                     "contract_id",
                     "commit",
@@ -155,7 +149,7 @@ pub fn artifact_context(data: &PromptData, artifacts: &serde_json::Value) -> Str
     let mut inventory = serde_json::json!({
         "root": artifacts["root"],
         "item_count": index.len(),
-        "snapshot_file": std::path::Path::new(&data.job_dir).join("artifacts.json"),
+        "snapshot_file": format!("{}/artifacts.json", data.job_dir.trim_end_matches(['/', '\\'])),
         "index": index,
     });
     if inventory.to_string().len() > 24_000 {
@@ -177,11 +171,11 @@ fn select_fields(value: &serde_json::Value, fields: &[&str]) -> serde_json::Valu
 fn replan_review_prompt(data: &PromptData) -> String {
     format!("## 决策要求\n\
         审批固定上下文 reviewer=parent 时，你代表父任务执行者，只能重新安排该父任务的未完成子任务；reviewer=planner 时，你代表项目规划者，可以替换项目的未完成任务计划。\n\
-        - 同意重规划时必须直接返回完整 kind=plan 方案：包含 summary、当前项目 goal、tasks（key/title/description/acceptance/deps）和 skip_confirmation；不能只返回 approve。\n\
+        - 同意重规划时必须直接返回完整 kind=plan 方案：包含 summary、当前项目 goal、tasks（key/title/description/acceptance/deps）；不能只返回 approve。\n\
         - 父任务方案仅包含需要接续的子任务，最多 {MAX_DERIVED_TASKS} 个，deps 只能引用本批次子任务且必须无环；保留已完成子任务，不修改父任务目标或影响其他任务。父任务的分工方案由 DOMO 直接应用。\n\
          - 规划者方案最多 {MAX_PLAN_TASKS} 个任务，保留已完成交付和当前目标、项目验收口径，确认方式见项目方案确认。\n\
         - reject：不需要重规划，必须提供可执行 guidance；resume_stage 可选 executing（修复实现）或 verifying（补充核验），省略时沿用请求的 resume_stage；不能仅要求重复尝试。\n\
-          - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，另用 user_action 告诉用户具体怎么处理；guidance 保留给后续 Agent 的执行要求，reason 保留判断依据；等待期间不自动重试。\n\
+          - 先依据当前现场与相关共享信息核实可复用条件；reject 可提供原计划内的准备或核验指导，不必更换计划。wait 用于确需外部补齐的输入、授权或环境，在 reason 中说明缺项、影响、处理方、具体操作与恢复入口；guidance 保留给后续 Agent 的执行要求；等待期间不自动重试。\n\
         - 不因单个局部问题推翻全项目；不能自行授予权限、宣称资源已补齐或降低验收口径。\n\
         - 规划者方案保留项目 assumptions 和 acceptance，子任务验收标准分别写入 tasks[].acceptance。\n\
         - 以审批固定上下文中的请求、当前任务状态和保留成果为决策输入，不修改或执行现有计划。\n{}{}", task_decomposition_rules(), confirmation_rules(data))
@@ -249,7 +243,6 @@ fn common_header(data: &PromptData) -> String {
     };
     let mission = match data.role.as_str() {
         JOB_ROLE_ANALYSIS => "规划者：调查项目现状，提出可执行方案；本作业不实施方案。",
-        JOB_ROLE_DIRECT => "直接执行者：按已批准方案一次性完成实现、自检和项目报告，不拆分任务。",
         JOB_ROLE_EXECUTOR => "任务执行者：完成指定任务并自检；有子任务时负责整合其成果。",
         JOB_ROLE_VERIFIER => {
             "任务验收者：独立检查当前任务产物，给出逐项证据与通过或拒绝结论，不修复产物。"
@@ -266,7 +259,7 @@ fn common_header(data: &PromptData) -> String {
         _ => "未知角色。",
     };
     let writes = match data.role.as_str() {
-        JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT => {
+        JOB_ROLE_EXECUTOR => {
             "交付文件可在当前目录内按任务范围及用户明确约束修改；作业目录用于结果、报告及临时数据。"
         }
         JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE => {
@@ -298,7 +291,7 @@ fn common_header(data: &PromptData) -> String {
 }
 
 fn work_resource_rules(data: &PromptData) -> String {
-    let access = if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+    let access = if data.role == JOB_ROLE_EXECUTOR {
         "可在本项目资源目录和当前任务资源目录内按范围准备持续使用的工具、依赖及输入；复用前核实版本和适用性。跨任务共享内容使用独立名称，避免覆盖其他作业正在使用的资源；已有资源需要替换时保留原可用版本。"
     } else {
         "资源目录只读；可核验并复用已有工具、依赖及输入，不能把资源存在或历史通过声明当作当前验证通过。"
@@ -341,11 +334,11 @@ fn verification_rules() -> &'static str {
 }
 
 fn result_rules(data: &PromptData, schema: &str) -> String {
-    let commit_rule = if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+    let commit_rule = if data.role == JOB_ROLE_EXECUTOR {
         if plain_workspace(data) {
-            "- 成功交付或提交子任务分工的结果必须含 commit_files 字符串数组，逐文件声明本轮交付涉及的新增、修改和删除路径；无改动填 []。普通目录不调用 Git，文件直接保留。\n"
+            "- 成功交付的结果不写 commit_files。普通目录不调用 Git，文件直接保留；删除项在 summary 中说明。\n"
         } else {
-            "- 成功交付或提交子任务分工的结果必须含 commit_files 字符串数组，逐文件列出本轮需要提交的新增、修改和删除路径；无改动填 []。DOMO 只提交清单内文件，清单外改动保留现场但不纳入交付提交；合并冲突路径必须完整列出。\n"
+            "- 成功交付前由你在当前任务分支自行提交；结果不写 commit_files。提交只能追加，禁止 amend/rebase/reset；不得改动项目交付分支、base、其他任务分支或 .git/config/hooks。DOMO 读取任务分支 HEAD 作为交付版本。\n"
         }
     } else {
         ""
@@ -378,89 +371,93 @@ fn user_report_rules() -> &'static str {
 
 fn confirmation_rules(data: &PromptData) -> &'static str {
     if data.confirm_mode == crate::models::CONFIRM_AUTO {
-        "\n## 项目方案确认\n自动确认模式：项目方案明确且可执行时，skip_confirmation 设为 true；需要用户审阅时设为 false。\n"
+        "\n## 项目方案确认\n自动确认模式：方案返回即视为确认，DOMO 直接进入执行；仍有歧义时先提问或等待确认。\n"
     } else {
-        "\n## 项目方案确认\n人工确认模式：项目方案的 skip_confirmation 必须为 false；DOMO 在方案确认后派发执行，首次规划和重规划均遵循此设置。\n"
+        "\n## 项目方案确认\n人工确认模式：方案返回后等待用户确认，DOMO 才派发执行；首次规划和重规划均遵循此设置。\n"
     }
 }
 
+const SHARED_INLINE_LIMIT: usize = 5_000;
+
 fn shared_context(data: &PromptData, shared: &serde_json::Value) -> String {
     let publication = if data.role == JOB_ROLE_REPLAN_REVIEW {
-        "本角色只读共享记录，不提交 shared_updates。"
+        "本角色只读项目记忆，不提交 shared_updates。"
     } else {
-        "有后续作业需要复用的事实、接口约定或改变已有认识的检查结论时，可在结果中添加 shared_updates 数组；没有新知识时省略或填 []，不逐轮复制完成总结。每项含 topic、body、scope（任务 key 数组，[] 为全项目）、evidence（非空引用数组）、supersedes（替代记录 ID 数组）、conflicts（分歧记录 ID 数组）、reason（替代或分歧的原因与影响）。topic 便于按主题检索；body 先给一句结论，再按需要说明事实或接口、后续消费要求、适用范围及未覆盖部分，不强制空小节。详细检查结果放验收证据或作业报告，evidence 引用来源而不重复整份日志。修正旧结论时明确 supersedes，分歧通过 conflicts 保留双方依据；不保存运行提示、授权申请或未验证的完成声明。记录只供知识协作，不修改契约或授予权限。"
+        "有后续作业需要复用、且从代码或当前工作区看不出来的事实时，可在结果中添加 shared_updates：最多 5 条，每项 {text: 不超过 120 字, supersedes: 可选，填被替代的 M 编号}。没有新知识时省略或填 []，不逐轮复制完成总结。无法判断哪条失效时不要写记忆，把分歧写进 summary 或按 replan 处理。"
     };
-    let mut inline = shared.clone();
-    if let Some(index) = inline
-        .as_object_mut()
-        .and_then(|s| s.remove("record_index"))
-    {
-        let related: std::collections::HashSet<_> = shared["records"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|r| r["id"].as_str())
-            .collect();
-        let other: Vec<_> = index
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| !r["id"].as_str().is_some_and(|id| related.contains(id)))
-            .cloned()
-            .collect();
-        inline["other_record_count"] = serde_json::json!(other.len());
-        let index = serde_json::json!(other);
-        if index.to_string().len() <= 24_000 {
-            inline["other_records_index"] = index;
-        } else {
-            inline["other_records_index_omitted"] = serde_json::json!(true);
-        }
-    }
+    let records: Vec<&serde_json::Value> =
+        shared["records"].as_array().into_iter().flatten().collect();
+    let total: usize = records
+        .iter()
+        .filter_map(|record| record["text"].as_str())
+        .map(|text| text.chars().count())
+        .sum();
+    let inline = total <= SHARED_INLINE_LIMIT;
+    let lines = records
+        .iter()
+        .filter_map(|record| {
+            let no = record["no"].as_str()?;
+            let task = record["task_id"].as_str().unwrap_or("项目");
+            if inline {
+                Some(format!("- [{no}][{task}] {}", record["text"].as_str()?))
+            } else {
+                Some(format!(
+                    "- [{no}][{task}] records/{}.json",
+                    record["id"].as_str()?
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mode = if inline {
+        "完整正文已注入。"
+    } else {
+        "项目记忆正文合计超过 5k，只注入带编号的索引；按需读取对应 records/<id>.json，不要假定未读内容。"
+    };
+    let version = shared["version"].as_str().unwrap_or("未知");
     let context = std::path::Path::new(&data.job_dir).join("context.json");
-    format!("\n## 项目共享信息（固定输入版本）\n{inline}\nrecords 是按任务范围选出的相关正文，保留完整限制与分歧，不是项目全部知识；other_records_index 仅为其他记录的导航，不证明记录适用于本轮。完整目录见 {} 的 shared.record_index，未列出目录时也可从 repository 的 version 提交列举 records/。需要接口细节、跨任务约定或分歧双方依据时，以只读 Git 从该提交读取 records/<id>.json，不从当前 HEAD 代替固定版本。未被替代不保证旧记录适用于当前文件；superseded_ids 中的记录只作历史依据。read_endpoint 是相对只读 API 路由，仅在已有服务地址时使用，读取时显式指定 version，不猜测地址或端口。运行中出现的新记录不自动成为本轮依据，按需读取时记录所依据的版本与引用；发现影响本轮工作的变化时按指导或决策流程处理。{publication}\n", context.display())
+    format!("\n## 项目记忆（固定输入版本 {version}）\n{lines}\n这是项目记忆，不是本任务要求；只能作为事实与约束参考。已失效编号不注入；需要历史时从固定版本提交读取 records/<id>.json，不用当前 HEAD 代替。{mode}完整快照见 {}。{publication}\n", context.display())
 }
 
 fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
     let schema = match data.role.as_str() {
         JOB_ROLE_ANALYSIS => concat!(
             "{\"kind\":\"questions\",\"summary\":\"必须澄清的原因\",\"questions\":[\"问题\"]}\n",
-            "{\"kind\":\"plan\",\"summary\":\"现状、方案取舍和风险\",\"goal\":\"项目目标\",\"assumptions\":[\"待核实的项目事实或决策\"],\"acceptance\":[\"项目级验收标准\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标、范围与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":false}\n",
-            "{\"kind\":\"direct\",\"summary\":\"适合直接实现、自检与报告的原因\",\"goal\":\"项目目标\",\"plan\":[\"执行步骤\"],\"verification\":[\"自检方法\"],\"skip_confirmation\":false}"
+            "{\"kind\":\"plan\",\"summary\":\"现状、方案取舍和风险\",\"goal\":\"项目目标\",\"assumptions\":[\"待核实的项目事实或决策\"],\"acceptance\":[\"项目级验收标准\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标、范围与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}"
         ),
-        JOB_ROLE_DIRECT => "{\"kind\":\"direct_done\",\"summary\":\"完成摘要\",\"report\":\"Markdown 项目报告\",\"commit_files\":[\"path/to/file\"]}",
         JOB_ROLE_EXECUTOR => concat!(
-            "{\"kind\":\"done\",\"summary\":\"交付内容、验证结果与未验证项\",\"commit_files\":[\"path/to/file\"]}\n",
-            "{\"kind\":\"failed\",\"reason\":\"本轮执行失败的原因、已完成工作及再次尝试依据\"}\n",
+            "{\"kind\":\"done\",\"summary\":\"交付内容、验证结果与未验证项\"}\n",
             "{\"kind\":\"replan\",\"reason\":\"需上级处理的输入、环境、授权或方案问题，已调查事实、影响与建议\"}"
         ),
-        JOB_ROLE_VERIFIER => "{\"pass\":true,\"reason\":\"结论与依据\",\"issues\":[],\"evidence\":{\"contract_id\":0,\"artifact_version\":null,\"artifacts\":[\"已检查路径\"],\"risks\":[],\"human_checks\":[],\"criteria\":[{\"criterion\":\"验收标准原文\",\"passed\":true,\"checks\":[{\"method\":\"实际检查方法或命令\",\"result\":\"实际结果及退出码\"}]}]}}",
-        JOB_ROLE_ACCEPTANCE => "{\"kind\":\"project_acceptance\",\"summary\":\"结论摘要\",\"contract_id\":0,\"artifact_version\":null,\"criteria\":[{\"id\":\"A1\",\"source\":\"proposal_acceptance\",\"criterion\":\"项目验收条目原文\",\"verdict\":\"met\",\"evidence\":[\"实际方法与结果\"],\"gap\":\"\"}],\"next_action\":\"report\",\"report\":\"Markdown 项目报告\",\"guidance\":\"\",\"replan_reason\":\"\"}",
-        JOB_ROLE_SUMMARY => "{\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"}",
+        JOB_ROLE_VERIFIER => "{\"result\":\"pass\",\"issues\":[],\"evidence\":{\"contract_id\":0,\"artifact_version\":null,\"artifacts\":[\"已检查路径\"],\"risks\":[],\"human_checks\":[],\"criteria\":[{\"criterion\":\"验收标准原文\",\"passed\":true,\"checks\":[{\"method\":\"实际检查方法或命令\",\"result\":\"实际结果及退出码\"}]}]}}",
+        JOB_ROLE_ACCEPTANCE => concat!(
+            "{\"result\":\"deliver\",\"issues\":[],\"report\":\"Markdown 项目报告\"}\n",
+            "{\"result\":\"execute\",\"issues\":[{\"title\":\"不超过 30 字的问题或缺失项\",\"detail\":\"可选，不超过 400 字\"}],\"plan\":{\"message\":\"为什么这样调整\",\"goal\":\"当前项目目标\",\"constraints\":[],\"assumptions\":[],\"acceptance\":[],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}}"
+        ),
+        JOB_ROLE_SUMMARY => concat!(
+            "{\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"}\n",
+            "{\"kind\":\"plan\",\"message\":\"为什么只重写报告不够\",\"goal\":\"当前项目目标\",\"constraints\":[],\"assumptions\":[],\"acceptance\":[],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}"
+        ),
         JOB_ROLE_REPLAN_REVIEW => concat!(
-            "{\"kind\":\"plan\",\"summary\":\"替代方案与影响\",\"goal\":\"当前项目目标\",\"assumptions\":[],\"acceptance\":[\"项目验收口径\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}],\"skip_confirmation\":false}\n",
+            "{\"kind\":\"plan\",\"summary\":\"替代方案与影响\",\"goal\":\"当前项目目标\",\"assumptions\":[],\"acceptance\":[\"项目验收口径\"],\"tasks\":[{\"key\":\"T1\",\"title\":\"标题\",\"description\":\"目标与边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}\n",
             "{\"kind\":\"replan_review\",\"decision\":\"reject\",\"reason\":\"判断依据\",\"guidance\":\"继续执行的具体指导\"}\n",
-            "{\"kind\":\"replan_review\",\"decision\":\"wait\",\"reason\":\"判断依据\",\"guidance\":\"给后续 Agent 的执行要求\",\"user_action\":{\"summary\":\"缺什么或需要决定什么\",\"why\":\"对交付的影响\",\"owner\":\"谁来处理\",\"steps\":[\"具体操作\"],\"after\":\"做完如何在 DOMO 继续，以及 AI 接下来做什么\"}}"
+            "{\"kind\":\"replan_review\",\"decision\":\"wait\",\"reason\":\"缺什么或需要谁决定\",\"guidance\":\"给后续 Agent 的执行要求；reason 说明缺项、影响、处理方、操作与恢复入口\"}"
         ),
         _ => "",
     };
     let mut text = schema.to_string();
     if data.role == JOB_ROLE_VERIFIER {
-        text.push_str("\n未通过时 pass=false，必须同时填写 next_action（execute：退回执行修复；wait：等待条件，补齐后重新验收；review：请求上级判断）和非空 guidance（给后续 Agent 的工作要求）。wait 另填 user_action。通过时不填写 next_action。等待和决策请求本身不计入验收拒绝次数。");
+        text.push_str("\n验收结果只填 result：pass（通过，issues 必须为空）、execute（可修复缺陷，退回执行）、request（任务内无法闭合，交规划者/父任务）。execute 与 request 至少写一条 issues，每条形如 {title: 不超过 30 字的问题或缺失项, detail: 可选，不超过 400 字，写位置、实际行为与所需修复或补齐条件}；按重要性排序，每轮是当前完整清单，已解决项不再列入。不填 pass 布尔值、next_action 或 guidance。request 不计入验收拒绝次数。");
     }
     if data.role == JOB_ROLE_ACCEPTANCE {
-        text.push_str("\nnext_action 必填：report（满足报告条件并同时提交非空 report）、wait（条件补齐后重新验收）、replan（确需安排修复工作或调整计划）、arbitrate（需用户决定）。非 report 时必须提供非空 guidance，说明后续 Agent 的工作要求；wait/arbitrate 另填 user_action。不提交完成报告。不因 unmet 或 unverifiable 自动选择重规划。");
+        text.push_str("\n结果只填 result：deliver（Agent 侧已闭合，交人工验收；必须附非空 report，可带 issues 说明未闭合项）或 execute（需要更多 Agent 工作；必须附 issues 与完整 plan，不产报告）。不设 criteria、next_action 或 guidance。等待外部条件、需要人的判断或取舍时使用 deliver + issues，不单独设等待状态。deliver 的报告必须包含「验收执行记录」，按项目级标准逐条写明检查对象、检查范围、检查方法、实际结果与证据位置。");
     }
-    if matches!(data.role.as_str(), JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE) {
+    if data.role == JOB_ROLE_VERIFIER {
         if let Some(inputs) = inputs {
             let mut example: serde_json::Value =
                 serde_json::from_str(schema).expect("valid result example");
-            let target = if data.role == JOB_ROLE_VERIFIER {
-                &mut example["evidence"]
-            } else {
-                &mut example
-            };
-            target["contract_id"] = inputs.contract["id"].clone();
-            target["artifact_version"] = inputs.artifact_version.clone();
+            example["evidence"]["contract_id"] = inputs.contract["id"].clone();
+            example["evidence"]["artifact_version"] = inputs.artifact_version.clone();
             text = format!(
                 "{}\n{}",
                 example,
@@ -469,23 +466,10 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         }
     }
     if data.role == JOB_ROLE_EXECUTOR && data.derived_from.is_none() {
-        text.push_str("\n{\"kind\":\"derive\",\"summary\":\"分工依据及父任务已完成的工作\",\"commit_files\":[],\"tasks\":[{\"key\":\"T1.1\",\"title\":\"标题\",\"description\":\"目标和边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}");
+        text.push_str("\n{\"kind\":\"derive\",\"summary\":\"分工依据及父任务已完成的工作\",\"tasks\":[{\"key\":\"T1.1\",\"title\":\"标题\",\"description\":\"目标和边界\",\"acceptance\":[\"验收标准\"],\"deps\":[]}]}");
     }
-    if matches!(data.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
-        text.push_str("\ncommit_files 使用相对当前目录的逐文件路径，重命名列新旧路径；不得填写目录、通配符、越界或符号链接路径。仅列交付所需文件，日志、缓存、构建产物与下载包不列入源码交付清单。\n需要供用户查看、使用或后续任务直接引用的重要成果入口，可在结果中添加 artifacts 数组，例如 [{\"path\":\"outputs/report.md\",\"kind\":\"delivery\",\"format\":\"text/markdown\",\"verification\":\"核对报告结论与证据\"}]。path 为当前目录内已存在的文件或目录；kind 为 input（特殊参考输入）、intermediate（重要中间成果）或 delivery（最终交付内容，不代表已完成验收），format 与 verification 可省略。Git 成果必须已跟踪或包含在本轮 commit_files 中。按成果用途选择入口，不复制 commit_files 或枚举全部源码与测试；目录足以定位成果时不再逐项登记其中每个文件，重要单文件仍可独立登记。verification 说明检查方式；引用已执行结果时标明范围与证据，不当作当前文件持续有效的验收结论。无需登记时省略或填写 []。artifacts 与逐文件变更清单用途不同，登记不表示验收通过。");
-    }
-    if matches!(
-        data.role.as_str(),
-        JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_SUMMARY | JOB_ROLE_ACCEPTANCE
-    ) {
-        text.push_str(
-            "\n作业本身无法完成时：{\"kind\":\"failed\",\"reason\":\"具体原因、影响与解除条件\"}。",
-        );
-        if data.role == JOB_ROLE_ACCEPTANCE {
-            text.push_str(
-                "验收发现不满足标准或证据不足时使用逐项 verdict，不用 failed 替代验收结果。",
-            );
-        }
+    if data.role == JOB_ROLE_EXECUTOR {
+        text.push_str("\n需要供用户查看、使用或后续任务直接引用的重要成果入口，可在结果中添加 artifacts 数组，最多 4 条，例如 [{\"path\":\"outputs/report.md\",\"format\":\"text/markdown\",\"verification\":\"核对报告结论与证据\"}]。path 为当前目录内已存在的文件或目录；不区分类型，format 与 verification 可省略。Git 成果必须在任务分支 HEAD 可达。按成果用途选择入口，不复制提交清单或枚举全部源码与测试；目录优先，重要单文件仍可独立登记。verification 说明检查方式；引用已执行结果时标明范围与证据，不当作当前文件持续有效的验收结论。无需登记时省略或填写 []。登记不表示验收通过。");
     }
     if matches!(data.role.as_str(), JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE) {
         let location = if data.role == JOB_ROLE_VERIFIER {
@@ -505,12 +489,6 @@ fn result_schema(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> String {
         text.push_str(
             "criteria 按本轮验收标准原文与顺序逐项填写；无产物、风险或人工检查时相应数组填 []。",
         );
-    }
-    if matches!(
-        data.role.as_str(),
-        JOB_ROLE_REPLAN_REVIEW | JOB_ROLE_VERIFIER | JOB_ROLE_ACCEPTANCE
-    ) {
-        text.push_str("\n## 用户处理说明\n等待用户或外部条件（decision=wait 或 next_action=wait/arbitrate）时必须填写独立的 user_action 对象：summary（一行、不超过120字，直接说缺什么或需要决定什么）、why（为什么影响交付）、owner（实际处理方）、steps（1–8项具体操作，可用 Markdown 命令或明确的选项）、after（处理后使用 DOMO 的哪个入口继续，以及 AI 将完成什么）。用用户能理解的语言，不要求用户阅读日志才能知道下一步；只让用户处理确实需要其输入、授权或外部资源的部分，测试、修复和证据整理仍由 Agent 完成。操作必须有已核实的依据，不编造命令或把申请当成已有授权；存在选择时说明选项及影响。已解决的缺项不再要求用户处理。源码位置、摘要、测试矩阵和历史记录放 reason/验收证据；后续 Agent 的工作细节放 guidance，不复制进用户说明。after 必须符合当前角色的实际恢复入口：任务决策等待可用“记录指导并继续”接续原任务，或“重新决策”；任务验收等待用“条件已补齐，重新验收”；项目验收等待用项目重新验收入口。不要宣称用户补齐后会自动检测或已经验收通过。\n");
     }
     text
 }
@@ -576,25 +554,6 @@ fn analysis_prompt(data: &PromptData) -> String {
         replan,
         task_decomposition_rules(),
         confirmation_rules(data),
-        conversation_history(data),
-    )
-}
-
-fn direct_prompt(data: &PromptData) -> String {
-    let feedback = data
-        .report_feedback
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("\n## 上一轮报告意见（本次必须处理）\n{value}\n"))
-        .unwrap_or_default();
-    format!(
-        "\n## 执行要求\n\
-         - 以交付契约中的 plan 和 verification 为已批准方案，自行选择实现细节，完成目标并核验；\n\
-         - summary 简述交付结果及自检边界，report 按面向用户的报告要求说明结果，并给出实际自检命令与结果；无法完成时输出 failed，说明已完成部分与具体阻塞。\n\
-         {}\
-         \n## 项目分析对话\n{}\n",
-        feedback,
         conversation_history(data),
     )
 }
@@ -781,8 +740,8 @@ fn executor_prompt(data: &PromptData) -> String {
          - 由你决定实现与核验方式，满足任务与验收标准；\n\
          - 对当前反馈逐项修复并给出对应验证证据；发现字段、接口或文档不一致时检查任务范围内的全部同类定义，不只修补被点名的位置；\n\
          - done：任务标准已满足，summary 面向用户和父任务，先说明交付了什么及查看入口，再说明实际自检、仍未覆盖的范围及后续工作；不把模块完成外推为整个项目完成。技术接口按需交给共享记录，逐项检查放证据或作业报告，以引用关联而不重复长日志；\n\
-         - 能在当前职责和权限内完成的调查、资源准备、修复与核验，继续在本作业内处理。failed 表示本次执行失败，DOMO 会按有限重试策略再次派发；说明已做工作、剩余缺口及再次尝试的依据；\n\
-         - 经调查确认缺少自身无法补齐的输入、环境或授权，或事实前提、范围、约束需上级判断时，使用 replan 请求决策，不以相同 failed 等待条件自行变化。请求说明已完成工作、已核实的可复用条件、具体缺项、影响与处理建议。子任务交父任务执行者，普通任务交项目规划者；该入口不等于必须重规划，上级可指导继续、补充核验、等待条件或调整方案；\n\
+         - 能在当前职责和权限内完成的调查、资源准备、修复与核验，继续在本作业内处理；本轮无法完成时如实说明已做工作、剩余缺口及依据。\n\
+         - 经调查确认缺少自身无法补齐的输入、环境或授权，或事实前提、范围、约束需上级判断时，使用 replan 请求决策，不以重复请求替代上级判断。请求说明已完成工作、已核实的可复用条件、具体缺项、影响与处理建议。子任务交父任务执行者，普通任务交项目规划者；该入口不等于必须重规划，上级可指导继续、补充核验、等待条件或调整方案；\n\
          {merge_rules}\
          - 本作业只判断当前任务的完成情况，不承担其他任务或整个项目的进度判断。\n\
          - {}\n",
@@ -864,7 +823,7 @@ fn verifier_prompt(data: &PromptData) -> String {
          - 以任务描述和验收标准为唯一判据，由你决定核验方式，不扩大范围；\n\
          - 按当前产物完整核验全部验收标准，并复核上一轮问题。检查实际交付路径及行为；测试替身只能证明隔离部分的行为，不能代替标准要求的生产集成或实机证据；\n\
          - reason 先给本任务的验收结论与主要缺口，逐项方法和结果放 evidence，不重复整份日志；每条标准在 evidence.criteria 写 passed 和非空 checks，method/result 记录实际方法与结果。未执行时写明已检查到的阻塞及缺失证据，不能将静态检查描述为运行通过；\n\
-         - 全部标准有充分证据时 pass=true、issues=[]；否则 pass=false，issues 列出本轮确认仍未解决的完整缺口，包括具体位置、实际行为或环境缺项、违反的标准与所需修复或补齐条件。已解决项仅在证据中记录，不继续列入 issues；由你结合当前上下文选择 execute、wait 或 review，不按关键词分类；同时存在可修复缺陷和环境缺项时可先退回执行处理缺陷；\n\
+         - 全部标准有充分证据时 result=pass、issues=[]；否则 result=execute（可修复缺陷）或 request（缺外部条件、授权或需要上级决策），issues 列出本轮确认仍未解决的完整缺口，包括具体位置、实际行为或环境缺项、违反的标准与所需修复或补齐条件。已解决项仅在证据中记录，不继续列入 issues；由你结合当前上下文选择 execute 或 request，不按关键词分类；同时存在可修复缺陷和环境缺项时可先退回执行处理缺陷；\n\
          - 对合并冲突反馈核对文件与标记是否已处理，再验证任务行为；冲突处理本身不增加项目验收标准。\n\
          - {workspace_note}\n\
          {}",
@@ -1065,6 +1024,15 @@ fn summary_prompt(data: &PromptData) -> String {
             format!("\n## 项目验收结论\n```json\n{result}\n```\n")
         })
         .unwrap_or_else(|| "\n## 项目验收结论\n（未提供验收记录，只能报告可核查的事实，不能宣称整体验收已通过。）\n".into());
+    let decision = if data
+        .report_feedback
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "\n## 驳回后的判断\n人工不接受当前报告。先判断原因：报告陈述不清或遗漏时返回 kind=report 重写；交付本身未达到契约、需要补工作或调整目标/契约时返回 kind=plan 完整方案，不产报告。不要用报告修改掩盖交付缺口。\n".to_string()
+    } else {
+        String::new()
+    };
     let (completion_note, workspace_label) = if plain_workspace(data) {
         ("当前计划的活动任务已经完成。", "工作区改动规模")
     } else {
@@ -1073,14 +1041,8 @@ fn summary_prompt(data: &PromptData) -> String {
             "交付分支改动规模",
         )
     };
-    let direct = data
-        .direct_result
-        .as_deref()
-        .map(|result| format!("\n## 直接完成实现与自检记录（不是独立验收）\n{result}\n"))
-        .unwrap_or_default();
     format!(
         "{completion_note}\n\
-         {direct}\n\
          \n## 已完成任务结果\n{}\n\
          {canceled}\
          \n## {workspace_label}\n{}\n\
@@ -1089,7 +1051,7 @@ fn summary_prompt(data: &PromptData) -> String {
          - 按面向用户的报告要求组织结果，必要时解释关键方案；\n\
          - 报告必须与项目验收结论一致；verdict 为 human_required 的条目作为人工待办列出；\n\
          - 引用验收记录、检查报告或实际文件；缺少证据时标注未验证，不将取消任务、空摘要或历史自述计为完成证据；\n\
-         - 根据当前产物处理全部有效报告评议，说明结论及依据；仅在影响使用或交付结论时说明平台限制。\n",
+         - 根据当前产物处理全部有效报告评议，说明结论及依据；仅在影响使用或交付结论时说明平台限制。\n{decision}",
         tasks,
         if data.diff_stat.is_empty() {
             "（未提供差异统计，请检查当前文件）"
@@ -1174,7 +1136,6 @@ mod tests {
             replan_source: None,
             acceptance_criteria: vec!["项目验收条目".into()],
             acceptance_result: None,
-            direct_result: None,
             project_summary: Some("项目方案摘要".into()),
             project_assumptions: vec!["关键假设".into()],
             confirm_mode: CONFIRM_MANUAL.into(),
@@ -1188,11 +1149,10 @@ mod tests {
     fn result_schema_text(role: &str) -> &'static str {
         match role {
             JOB_ROLE_ANALYSIS => "\"kind\":\"questions\"",
-            JOB_ROLE_DIRECT => "\"kind\":\"direct_done\"",
             JOB_ROLE_EXECUTOR => "\"kind\":\"done\"",
-            JOB_ROLE_VERIFIER => "\"pass\":true",
+            JOB_ROLE_VERIFIER => "\"result\":\"pass\"",
             JOB_ROLE_SUMMARY => "\"kind\":\"report\",\"report\":\"Markdown 格式的项目报告\"",
-            JOB_ROLE_ACCEPTANCE => "\"kind\":\"project_acceptance\"",
+            JOB_ROLE_ACCEPTANCE => "\"result\":\"deliver\"",
             other => panic!("未知的作业角色: {other}"),
         }
     }
@@ -1218,7 +1178,6 @@ mod tests {
     fn missing_result_follow_up_identifies_failure_and_required_file() {
         for role in [
             JOB_ROLE_ANALYSIS,
-            JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
             JOB_ROLE_ACCEPTANCE,
@@ -1255,7 +1214,6 @@ mod tests {
     fn every_role_includes_result_path_and_schema() {
         for role in [
             JOB_ROLE_ANALYSIS,
-            JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
             JOB_ROLE_ACCEPTANCE,
@@ -1285,18 +1243,13 @@ mod tests {
         let version = serde_json::json!("checked-commit");
         let shared = serde_json::json!({
             "version": "knowledge-commit", "repository": "/knowledge",
-            "records": [{"id": "info-current", "topic": "资料使用边界", "body": "不得对外发布研究资料", "scope": []}],
-            "record_index": [
-                {"id": "info-current", "topic": "资料使用边界", "scope": []},
-                {"id": "info-other", "topic": "其他任务的研究方法", "scope": ["T2"]}
-            ],
+            "records": [{"no": "M1", "text": "不得对外发布研究资料", "task_id": "T1"}],
             "read_endpoint": "/api/projects/proj-1/shared"
         });
         let artifacts = serde_json::json!({"root": "/workspace", "items": []});
         let review = serde_json::json!({"reviewer": "planner"});
         for role in [
             JOB_ROLE_ANALYSIS,
-            JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
             JOB_ROLE_ACCEPTANCE,
@@ -1312,12 +1265,8 @@ mod tests {
                 review: (role == JOB_ROLE_REPLAN_REVIEW).then_some(&review),
             };
             let prompt = render_with_inputs(&data, Some(&inputs));
-            for essential in [
-                "当前目标",
-                "不得对外发布研究资料",
-                "knowledge-commit",
-                "info-other",
-            ] {
+            for essential in ["当前目标", "不得对外发布研究资料", "knowledge-commit", "M1"]
+            {
                 assert!(prompt.contains(essential), "{role} omitted {essential}");
             }
             for heading in [
@@ -1338,7 +1287,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{role}: {error}: {line}"));
             }
             if role == JOB_ROLE_REPLAN_REVIEW {
-                assert!(prompt.contains("本角色只读共享记录，不提交 shared_updates"));
+                assert!(prompt.contains("本角色只读项目记忆，不提交 shared_updates"));
                 assert!(!prompt.contains("可在结果中添加 shared_updates"));
             }
             for retry in [
@@ -1369,31 +1318,25 @@ mod tests {
                 artifacts: &artifacts,
                 review: None,
             };
-            for role in [JOB_ROLE_VERIFIER, JOB_ROLE_ACCEPTANCE] {
-                let data = sample_data(role);
-                let schema = result_schema(&data, Some(&inputs));
-                let mut result: serde_json::Value =
-                    serde_json::from_str(schema.lines().next().unwrap()).unwrap();
-                if role == JOB_ROLE_VERIFIER {
-                    result["evidence"]["criteria"][0]["criterion"] = serde_json::json!(ACCEPTANCE);
-                    crate::delivery::validate_evidence(
-                        &result.to_string(),
-                        &contract,
-                        &[ACCEPTANCE.into()],
-                        &version,
-                    )
-                    .unwrap();
-                } else {
-                    result["criteria"][0]["criterion"] = serde_json::json!("项目验收条目");
-                    crate::delivery::validate_project_evidence(
-                        &result.to_string(),
-                        &contract,
-                        &["项目验收条目".into()],
-                        &version,
-                    )
-                    .unwrap();
-                }
-            }
+            let data = sample_data(JOB_ROLE_VERIFIER);
+            let schema = result_schema(&data, Some(&inputs));
+            let mut result: serde_json::Value =
+                serde_json::from_str(schema.lines().next().unwrap()).unwrap();
+            result["evidence"]["criteria"][0]["criterion"] = serde_json::json!(ACCEPTANCE);
+            crate::delivery::validate_evidence(
+                &result.to_string(),
+                &contract,
+                &[ACCEPTANCE.into()],
+                &version,
+            )
+            .unwrap();
+
+            let data = sample_data(JOB_ROLE_ACCEPTANCE);
+            let schema = result_schema(&data, Some(&inputs));
+            let result: serde_json::Value =
+                serde_json::from_str(schema.lines().next().unwrap()).unwrap();
+            assert_eq!(result["result"], "deliver");
+            assert!(!result["report"].as_str().unwrap_or_default().is_empty());
         }
     }
 
@@ -1469,7 +1412,6 @@ mod tests {
     fn all_roles_separate_platform_protocol_from_project_content() {
         for role in [
             JOB_ROLE_ANALYSIS,
-            JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
             JOB_ROLE_ACCEPTANCE,
@@ -1510,11 +1452,11 @@ mod tests {
         assert!(prompt.contains(&data.goal));
         assert!(prompt.contains("规划者：调查项目现状"));
         assert!(prompt.contains("仅可写指定结果文件"));
-        assert!(prompt.contains("skip_confirmation 必须为 false"));
+        assert!(prompt.contains("人工确认模式"));
         assert!(!prompt.contains("本工作区不使用 Git"));
         assert!(!prompt.contains("其余写入 assumptions"));
         data.confirm_mode = CONFIRM_AUTO.into();
-        assert!(render(&data).contains("skip_confirmation 设为 true"));
+        assert!(render(&data).contains("方案返回即视为确认"));
     }
 
     #[test]
@@ -1573,69 +1515,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_navigation_preserves_related_caveats_and_discovers_cross_task_records() {
-        let data = sample_data(JOB_ROLE_EXECUTOR);
-        let body = format!(
-            "接口约定{}；末尾限制：未验证集成交付。",
-            "详细事实".repeat(3_000)
-        );
-        let shared = serde_json::json!({
-            "version": "fixed-knowledge-commit", "repository": "/workspace/shared",
-            "records": [{"id": "related", "topic": "研究口径", "body": body,
-                "scope": ["T1"], "conflicts": ["other"], "reason": "样本口径有分歧",
-                "evidence": ["source.txt"]}],
-            "record_index": [
-                {"id": "related", "topic": "研究口径", "scope": ["T1"], "conflicts": ["other"]},
-                {"id": "other", "topic": "跨任务资料来源", "scope": ["T2"], "conflicts": ["related"]}
-            ],
-            "superseded_ids": ["old"]
-        });
-        let prompt = shared_context(&data, &shared);
-        let navigation: serde_json::Value =
-            serde_json::from_str(prompt.lines().nth(2).unwrap()).unwrap();
-        assert_eq!(navigation["records"], shared["records"]);
-        assert_eq!(navigation["other_record_count"], 1);
-        assert_eq!(navigation["other_records_index"][0]["id"], "other");
-        assert_eq!(
-            navigation["other_records_index"][0]["conflicts"][0],
-            "related"
-        );
-        assert_eq!(navigation["superseded_ids"][0], "old");
-        assert_eq!(navigation["version"], shared["version"]);
-        assert!(navigation.get("record_index").is_none());
-        assert!(prompt.contains("不从当前 HEAD 代替固定版本"));
-        assert!(prompt.contains("context.json 的 shared.record_index"));
-        assert_eq!(shared["record_index"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn oversized_knowledge_catalog_keeps_related_records_and_explicit_retrieval() {
-        let data = sample_data(JOB_ROLE_EXECUTOR);
-        let index: Vec<_> = (0..2_000)
-            .map(|i| serde_json::json!({"id": format!("info-{i}"), "topic": format!("研究主题-{i}"), "scope": ["T2"]}))
-            .collect();
-        let shared = serde_json::json!({
-            "version": "fixed-version", "repository": "/workspace/shared", "record_index": index,
-            "records": [{"id": "current", "body": "不可忽略的当前约束", "scope": []}]
-        });
-        let prompt = shared_context(&data, &shared);
-        let navigation: serde_json::Value =
-            serde_json::from_str(prompt.lines().nth(2).unwrap()).unwrap();
-        assert_eq!(navigation["records"], shared["records"]);
-        assert_eq!(navigation["other_record_count"], 2_000);
-        assert_eq!(navigation["other_records_index_omitted"], true);
-        assert!(prompt.contains("shared.record_index"));
-        assert!(prompt.len() < 8_000);
-        // Earlier snapshots without a catalog still have a versioned repository.
-        let legacy = serde_json::json!({"version": "legacy-version", "repository": "/workspace/shared", "records": []});
-        let prompt = shared_context(&data, &legacy);
-        assert!(prompt.contains("legacy-version"));
-        assert!(prompt.contains("列举 records/"));
-    }
-
-    #[test]
     fn user_reports_and_task_handoffs_have_distinct_consumers() {
-        for role in [JOB_ROLE_DIRECT, JOB_ROLE_ACCEPTANCE, JOB_ROLE_SUMMARY] {
+        for role in [JOB_ROLE_ACCEPTANCE, JOB_ROLE_SUMMARY] {
             let prompt = render_role(role);
             assert_eq!(prompt.matches("## 面向用户的报告").count(), 1);
             assert!(prompt.contains("重要缺口或未验证风险"));
@@ -1647,29 +1528,24 @@ mod tests {
         assert!(prompt.contains("不把模块完成外推为整个项目完成"));
         assert!(!prompt.contains("## 面向用户的报告"));
         let schema = result_schema(&data, None);
-        assert!(schema.contains("不复制 commit_files"));
+        assert!(schema.contains("不复制提交清单"));
         assert!(schema.contains("重要单文件仍可独立登记"));
         let prompt = shared_context(&data, &serde_json::json!({"records": []}));
         assert!(prompt.contains("不逐轮复制完成总结"));
-        assert!(prompt.contains("不强制空小节"));
     }
 
     #[test]
-    fn waiting_roles_separate_user_actions_from_agent_guidance() {
-        for role in [
-            JOB_ROLE_VERIFIER,
-            JOB_ROLE_ACCEPTANCE,
-            JOB_ROLE_REPLAN_REVIEW,
-        ] {
-            let prompt = render_role(role);
-            assert_eq!(prompt.matches("## 用户处理说明").count(), 1);
-            for field in ["summary", "why", "owner", "steps", "after"] {
-                assert!(prompt.contains(field));
-            }
-            assert!(prompt.contains("测试、修复和证据整理仍由 Agent 完成"));
-            assert!(prompt.contains("已解决的缺项不再要求用户处理"));
-            assert!(prompt.contains("不编造命令"));
-        }
+    fn shared_records_switch_to_index_above_five_thousand_chars() {
+        let data = sample_data(JOB_ROLE_EXECUTOR);
+        let text = "x".repeat(5_001);
+        let shared = serde_json::json!({
+            "version": "abc",
+            "records": [{"no": "M1", "task_id": "T1", "id": "info_1", "text": text}]
+        });
+        let prompt = shared_context(&data, &shared);
+        assert!(prompt.contains("只注入带编号的索引"), "{prompt}");
+        assert!(prompt.contains("records/info_1.json"), "{prompt}");
+        assert!(!prompt.contains(&"x".repeat(64)), "正文不应内联");
     }
 
     #[test]
@@ -1677,7 +1553,6 @@ mod tests {
         for workspace_type in ["git", "plain"] {
             for role in [
                 JOB_ROLE_EXECUTOR,
-                JOB_ROLE_DIRECT,
                 JOB_ROLE_VERIFIER,
                 JOB_ROLE_ACCEPTANCE,
                 JOB_ROLE_REPLAN_REVIEW,
@@ -1690,7 +1565,7 @@ mod tests {
                 assert_eq!(prompt.matches("## 持续工作资源").count(), 1);
                 assert!(prompt.contains(&data.project_resources_dir));
                 assert!(prompt.contains(data.task_resources_dir.as_deref().unwrap()));
-                if matches!(role, JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+                if role == JOB_ROLE_EXECUTOR {
                     assert!(prompt.contains("按范围准备持续使用"));
                 } else {
                     assert!(prompt.contains("资源目录只读"));
@@ -1703,10 +1578,6 @@ mod tests {
                 assert!(missing_result_continuation(&data, &prompt).ends_with(&prompt));
             }
         }
-        let mut data = sample_data(JOB_ROLE_DIRECT);
-        data.task = None;
-        data.task_resources_dir = None;
-        assert!(render(&data).contains("当前任务资源目录：（无当前任务）"));
     }
 
     #[test]
@@ -1718,7 +1589,7 @@ mod tests {
             summary: String::new(),
         });
         let prompt = render(&data);
-        assert!(prompt.contains("有限重试策略再次派发"));
+        assert!(prompt.contains("本轮无法完成时如实说明"));
         assert!(prompt.contains("使用 replan 请求决策"));
         assert!(prompt.contains("不等于必须重规划"));
         assert!(prompt.contains("自身无法补齐"));
@@ -1730,17 +1601,11 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_derived_jobs_keep_workspace_and_protocol_responsibilities() {
-        let mut data = sample_data(JOB_ROLE_DIRECT);
-        data.workspace_type = crate::models::WORKSPACE_PLAIN.into();
-        let prompt = render(&data);
-        assert!(prompt.contains("普通目录不调用 Git，文件直接保留"));
-        assert!(!prompt.contains("DOMO 只提交清单内文件"));
-        assert!(prompt.contains("明确授权的参考输入"));
+    fn derived_jobs_keep_workspace_and_protocol_responsibilities() {
+        let mut data = sample_data(JOB_ROLE_EXECUTOR);
         data.workspace_type = crate::models::WORKSPACE_GIT.into();
-        assert!(render(&data).contains("DOMO 只提交清单内文件"));
-        data.role = JOB_ROLE_EXECUTOR.into();
         let prompt = render(&data);
+        assert!(prompt.contains("由你在当前任务分支自行提交"));
         assert!(prompt.contains("deps 只能引用本批次内子任务"));
         assert!(prompt.contains("允许兄弟子任务之间存在依赖"));
         assert!(prompt.contains("不在 description 或 acceptance 中暗藏未声明的先后依赖"));
@@ -1802,7 +1667,7 @@ mod tests {
         );
         assert!(prompt.contains("重规划"), "缺少大型项目分阶段推进说明");
         assert!(prompt.contains("\"kind\":\"plan\""), "缺少 plan schema");
-        assert!(prompt.contains("\"kind\":\"direct\""), "缺少 direct schema");
+        assert!(!prompt.contains("\"kind\":\"direct\""), "direct 已移除");
         assert!(
             prompt.contains("\"kind\":\"questions\""),
             "缺少 questions schema"
@@ -1921,12 +1786,7 @@ mod tests {
         assert!(!child_prompt.contains("\"kind\":\"derive\""));
         assert!(child_prompt.contains("禁止再次派生新的子任务"));
         assert!(child_prompt.contains("接受独立验收"));
-        for role in [
-            JOB_ROLE_DIRECT,
-            JOB_ROLE_VERIFIER,
-            JOB_ROLE_ACCEPTANCE,
-            JOB_ROLE_SUMMARY,
-        ] {
+        for role in [JOB_ROLE_VERIFIER, JOB_ROLE_ACCEPTANCE, JOB_ROLE_SUMMARY] {
             assert!(!render_role(role).contains("## 任务粒度与分工"), "{role}");
         }
     }
@@ -2043,7 +1903,7 @@ mod tests {
         let verifier = render(&data);
         assert!(verifier.contains("本轮确认仍未解决的完整缺口"));
         assert!(verifier.contains("已解决项仅在证据中记录，不继续列入 issues"));
-        assert!(verifier.contains("pass=true、issues=[]"));
+        assert!(verifier.contains("result=pass、issues=[]"));
         assert!(verifier.contains("完整核验全部验收标准"));
     }
 
@@ -2052,7 +1912,7 @@ mod tests {
         let artifacts = serde_json::json!({
             "items": [{"path": "shared.cpp", "task_id": "previous-task"}]
         });
-        for role in [JOB_ROLE_EXECUTOR, JOB_ROLE_DIRECT] {
+        for role in [JOB_ROLE_EXECUTOR] {
             let mut data = sample_data(role);
             let git = artifact_context(&data, &artifacts);
             assert!(git.contains("前序任务产物"));
@@ -2139,7 +1999,6 @@ mod tests {
     fn each_role_states_readonly_and_commit_boundaries() {
         for role in [
             JOB_ROLE_ANALYSIS,
-            JOB_ROLE_DIRECT,
             JOB_ROLE_EXECUTOR,
             JOB_ROLE_VERIFIER,
             JOB_ROLE_ACCEPTANCE,
@@ -2180,18 +2039,16 @@ mod tests {
         assert!(prompt.contains("human_required"), "缺少人工待办口径");
         assert!(!prompt.contains("不写项目报告"));
         assert!(prompt.contains("同时撰写项目报告"));
-        assert!(prompt.contains("不因 unmet 或 unverifiable 自动选择重规划"));
+        assert!(!prompt.contains("不因 unmet 或 unverifiable 自动选择重规划"));
     }
 
     #[test]
     fn summary_prompt_includes_acceptance_result() {
         let mut data = sample_data(JOB_ROLE_SUMMARY);
-        data.acceptance_result = Some(
-            r#"{"kind":"project_acceptance","criteria":[{"id":"A1","verdict":"met"}]}"#.into(),
-        );
+        data.acceptance_result = Some(r#"{"result":"deliver","report":"报告"}"#.into());
         let prompt = render(&data);
         assert!(prompt.contains("项目验收结论"), "缺少验收结论标题");
-        assert!(prompt.contains("\"verdict\":\"met\""), "缺少验收结论内容");
+        assert!(prompt.contains("deliver"), "缺少验收结论内容");
         assert!(
             prompt.contains("报告必须与项目验收结论一致"),
             "缺少一致性约束"
@@ -2246,9 +2103,6 @@ mod tests {
         data.confirm_mode = CONFIRM_AUTO.into();
         let prompt = render(&data);
         assert!(prompt.contains("自动确认模式"), "缺少自动确认说明");
-        assert!(
-            prompt.contains("skip_confirmation 设为 true"),
-            "缺少跳过确认说明"
-        );
+        assert!(prompt.contains("方案返回即视为确认"), "缺少自动确认说明");
     }
 }

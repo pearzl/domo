@@ -141,22 +141,6 @@ export function ProposalCard({
             <div ref={listEndRef} />
           </ol>
         );
-      case "plan":
-        return (
-          <ol>
-            {proposal.plan.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ol>
-        );
-      case "verification":
-        return (
-          <ul>
-            {proposal.verification.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        );
     }
   }
 
@@ -187,28 +171,20 @@ export function ProposalCard({
   }
 
   const isReplan = Boolean(proposal.replan_impact);
-  const confirmLabel = proposal.kind === "direct" ? "确认并直接完成" : "确认方案，开始执行";
+  const confirmLabel = "确认方案，开始执行";
 
   return (
     <article className="proposal-card" data-proposal-kind={proposal.kind}>
       <header className="proposal-card-head">
-        <span
-          className={`proposal-kind${
-            proposal.kind === "direct" ? " proposal-kind-direct" : ""
-          }`}
-        >
+        <span className="proposal-kind">
           {isReplan
             ? proposal.replan_impact?.high_impact
               ? "高影响重规划草稿"
               : "低影响重规划草稿"
-            : proposal.kind === "direct"
-              ? "建议直接完成"
-              : "项目方案"}
+            : "项目方案"}
         </span>
         <span className="proposal-kind-scope muted">
-          {proposal.kind === "direct"
-            ? "不拆分任务"
-            : `${proposal.tasks.length} 个任务 · ${proposal.plan.length} 步执行`}
+          {proposal.tasks.length} 个任务
         </span>
       </header>
       <div className="proposal-card-summary">

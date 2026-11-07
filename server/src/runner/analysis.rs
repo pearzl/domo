@@ -73,17 +73,13 @@ pub(super) async fn handle_analysis_questions(
 
 /// Loads the keys that still occupy the project's unique-key namespace.
 /// Canceled tasks are excluded because their keys may be reused.
-pub(super) async fn load_task_keys<'e, E>(executor: E, project_id: &str) -> Result<HashSet<String>>
+pub(super) async fn load_task_keys<'e, E>(executor: E, _project_id: &str) -> Result<HashSet<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM tasks WHERE project_id = ? AND COALESCE(status, '') != ?",
-    )
-    .bind(project_id)
-    .bind(STATUS_CANCELED)
-    .fetch_all(executor)
-    .await?;
+    let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM tasks WHERE project_id = ?")
+        .fetch_all(executor)
+        .await?;
     Ok(keys.into_iter().collect())
 }
 
@@ -231,7 +227,7 @@ pub(crate) async fn apply_analysis_plan_locked(
         "UPDATE projects SET goal = CASE WHEN replan_active != 0 THEN goal ELSE ? END, \
          proposal = ?, stage = ?, \
          status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-         blocked_reason = NULL, report = NULL, report_feedback = NULL, completion_mode = ?, \
+         blocked_reason = NULL, report = NULL, report_feedback = NULL, \
          acceptance = NULL, acceptance_passed = 0, acceptance_at = NULL, \
          replan_active = 0, replan_proposal = NULL, replan_previous_stage = NULL, \
          replan_previous_goal = NULL, goal_locked_at = COALESCE(goal_locked_at, ?), \
@@ -241,7 +237,6 @@ pub(crate) async fn apply_analysis_plan_locked(
     .bind(proposal_json)
     .bind(STAGE_EXECUTING)
     .bind(STATUS_RUNNING)
-    .bind(COMPLETION_TASKS)
     .bind(&timestamp)
     .bind(&timestamp)
     .bind(&timestamp)
@@ -334,7 +329,6 @@ pub(super) async fn handle_analysis_plan(
     assumptions: &[String],
     acceptance: &[String],
     tasks: &[domain::NormalizedTask],
-    skip_confirmation: bool,
 ) -> Result<()> {
     let goal = goal
         .map(str::trim)
@@ -357,7 +351,7 @@ pub(super) async fn handle_analysis_plan(
     };
     let (tasks, _) = domain::reserve_plan_keys(tasks.to_vec(), &taken);
     let replan_impact = if project.replan_active != 0 {
-        Some(crate::replan::impact(state, project, "plan", acceptance, &[], &tasks).await?)
+        Some(crate::replan::impact(state, project, acceptance, &tasks).await?)
     } else {
         None
     };
@@ -377,15 +371,12 @@ pub(super) async fn handle_analysis_plan(
                 deps: task.deps.clone(),
             })
             .collect(),
-        plan: Vec::new(),
-        verification: Vec::new(),
-        skip_confirmation,
         replan_impact,
     };
     let proposal_json = serde_json::to_string(&proposal)?;
     let confirm_mode = latest_confirm_mode(state, &project.id).await?;
     // 首次分析和重规划使用相同的确认策略。
-    let auto = skip_confirmation && confirm_mode == CONFIRM_AUTO;
+    let auto = confirm_mode == CONFIRM_AUTO;
     if project.replan_active != 0
         && !crate::replan::store_draft(state, project, &proposal_json).await?
     {
@@ -468,13 +459,12 @@ pub(super) async fn handle_analysis_plan(
         sqlx::query(
             "UPDATE projects SET goal = ?, proposal = ?, stage = ?, \
              status = CASE WHEN status IN ('pausing', 'paused', 'archived') THEN status ELSE ? END, \
-             completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+             blocked_reason = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(&goal)
         .bind(&proposal_json)
         .bind(STAGE_ANALYSIS)
         .bind(STATUS_BLOCKED)
-        .bind(COMPLETION_TASKS)
         .bind(now())
         .bind(&project.id)
         .execute(&state.db)
@@ -497,187 +487,6 @@ pub(super) async fn handle_analysis_plan(
         },
     )
     .await;
-    Ok(())
-}
-
-pub(super) async fn handle_analysis_direct(
-    state: &AppState,
-    project: &ProjectRow,
-    summary: &str,
-    goal: Option<&str>,
-    plan: &[String],
-    verification: &[String],
-    skip_confirmation: bool,
-) -> Result<()> {
-    let goal = goal
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(project.goal.trim())
-        .to_string();
-    if project.goal_locked_at.is_some() && goal.trim() != project.goal.trim() {
-        return crate::replan::reject_goal_change(state, project).await;
-    }
-    let replan_impact = if project.replan_active != 0 {
-        Some(crate::replan::impact(state, project, "direct", &[], verification, &[]).await?)
-    } else {
-        None
-    };
-    let proposal = AnalysisProposal {
-        kind: "direct".into(),
-        summary: summary.to_string(),
-        goal: Some(goal.clone()),
-        assumptions: Vec::new(),
-        acceptance: Vec::new(),
-        tasks: Vec::new(),
-        plan: plan.to_vec(),
-        verification: verification.to_vec(),
-        skip_confirmation,
-        replan_impact,
-    };
-    let proposal_json = serde_json::to_string(&proposal)?;
-    let confirm_mode = latest_confirm_mode(state, &project.id).await?;
-    let auto = skip_confirmation && confirm_mode == CONFIRM_AUTO;
-    let content =
-        analysis_proposal_content(summary, Some(&goal), &[], &[], &[], plan, verification);
-    if project.replan_active != 0
-        && !crate::replan::store_draft(state, project, &proposal_json).await?
-    {
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "plan_ignored",
-            "重规划代际已变化，忽略过期直接完成方案",
-        )
-        .await;
-        return Ok(());
-    }
-    if auto && project.replan_active != 0 {
-        let _guard = state.schedule_lock.lock().await;
-        if !crate::replan::analysis_is_current(state, project).await? {
-            return Ok(());
-        }
-        crate::replan::apply_direct_locked(state, project, &proposal_json).await?;
-        insert_message(&state.db, &project.id, "planner", &content).await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "replan_applied",
-            "重规划草稿已自动应用，开始直接完成",
-        )
-        .await;
-        return Ok(());
-    }
-    let _guard = state.schedule_lock.lock().await;
-    if !crate::replan::analysis_is_current(state, project).await? {
-        return Ok(());
-    }
-    let current = crate::replan::load_project(&state.db, &project.id)
-        .await?
-        .unwrap_or_else(|| project.clone());
-    if current.goal_locked_at.is_some()
-        && (current.replan_generation != project.replan_generation
-            || current.goal != project.goal
-            || goal.trim() != current.goal.trim())
-    {
-        let reason = "已确认目标只能通过主动修改目标入口变更；草稿已失效";
-        sqlx::query(
-            "UPDATE projects SET replan_proposal = NULL, status = ?, blocked_reason = ?, \
-             updated_at = ? WHERE id = ?",
-        )
-        .bind(STATUS_BLOCKED)
-        .bind(reason)
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "plan_invalid",
-            reason,
-        )
-        .await;
-        return Ok(());
-    }
-    insert_message(&state.db, &project.id, "planner", &content).await?;
-    if auto {
-        sqlx::query(
-            "UPDATE projects SET goal = ?, proposal = ?, confirmed_at = ?, stage = ?, \
-             status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, \
-             goal_locked_at = COALESCE(goal_locked_at, ?), updated_at = ? WHERE id = ?",
-        )
-        .bind(&goal)
-        .bind(&proposal_json)
-        .bind(now())
-        .bind(STAGE_EXECUTING)
-        .bind(STATUS_RUNNING)
-        .bind(COMPLETION_DIRECT)
-        .bind(now())
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "analysis_auto_confirmed",
-            "方案已由自动确认通过，开始直接完成",
-        )
-        .await;
-    } else if project.replan_active != 0 {
-        sqlx::query(
-            "UPDATE projects SET replan_proposal = ?, status = CASE WHEN status IN \
-             ('pausing', 'paused', 'archived') THEN status ELSE 'blocked' END, \
-             blocked_reason = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(&proposal_json)
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "analysis_direct",
-            "重规划直接完成草稿等待人工确认",
-        )
-        .await;
-    } else {
-        sqlx::query(
-            "UPDATE projects SET goal = ?, proposal = ?, stage = ?, \
-             status = CASE WHEN status IN ('pausing', 'paused', 'archived') \
-             THEN status ELSE ? END, completion_mode = ?, blocked_reason = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(&goal)
-        .bind(&proposal_json)
-        .bind(STAGE_ANALYSIS)
-        .bind(STATUS_BLOCKED)
-        .bind(COMPLETION_TASKS)
-        .bind(now())
-        .bind(&project.id)
-        .execute(&state.db)
-        .await?;
-        emit(
-            &state.db,
-            &state.bus,
-            Some(&project.id),
-            None,
-            "analysis_direct",
-            "规划者建议直接完成，等待人工确认",
-        )
-        .await;
-    }
     Ok(())
 }
 

@@ -42,6 +42,25 @@ pub(super) async fn run(state: &AppState, job: &JobRow) -> Result<()> {
         ],
     )
     .await;
+    if initial.is_err() {
+        let conflicts = git::run_git(&cwd, &["diff", "--name-only", "--diff-filter=U"])
+            .await
+            .unwrap_or_default();
+        let files: Vec<String> = conflicts
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        sqlx::query(
+            "UPDATE merge_operations SET conflicts = ? WHERE project_id = ? \
+             AND phase NOT IN ('completed', 'rolled_back')",
+        )
+        .bind(json!(files).to_string())
+        .bind(&project.id)
+        .execute(&state.db)
+        .await?;
+    }
     let prompt = crate::prompts::merge_prompt(
         &project.name,
         &project.base_branch,

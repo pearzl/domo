@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use tokio::fs;
 
 use crate::agents::{self, AgentSpec};
-use crate::domain::{self, now, parse_result, short_id, ParsedResult};
+use crate::domain::{self, now, parse_result, ParsedResult};
 use crate::events::emit_job;
 use crate::git;
 use crate::models::*;
@@ -19,7 +19,6 @@ use crate::state::AppState;
 mod agent;
 mod analysis;
 mod common;
-mod direct;
 mod executor;
 mod failure;
 mod lifecycle;
@@ -30,16 +29,87 @@ mod verifier;
 mod worktree;
 
 use self::agent::{append_log_separator, continuation_allowed, merge_usage, run_agent_job};
+
+async fn validate_ref_snapshot(
+    cwd: &std::path::Path,
+    job_dir: &std::path::Path,
+    task: Option<&TaskRow>,
+) -> Result<()> {
+    let snapshot_path = job_dir.join("refs.snapshot");
+    if !snapshot_path.exists() {
+        return Ok(());
+    }
+    let expected = fs::read_to_string(&snapshot_path).await?;
+    let current = git::run_git(cwd, &["for-each-ref", "--format=%(refname) %(objectname)"]).await?;
+    let allowed = task
+        .and_then(|task| task.branch.as_deref())
+        .map(|branch| format!("refs/heads/{branch}"));
+    for line in current.lines() {
+        let Some((name, _)) = line.split_once(' ') else {
+            continue;
+        };
+        if Some(name.to_string()) == allowed {
+            continue;
+        }
+        if !expected.lines().any(|old| old == line) {
+            return Err(anyhow!("作业改写了非任务分支的引用：{name}"));
+        }
+    }
+    for line in expected.lines() {
+        let Some((name, _)) = line.split_once(' ') else {
+            continue;
+        };
+        if Some(name.to_string()) == allowed {
+            continue;
+        }
+        if !current.lines().any(|new| new == line) {
+            return Err(anyhow!("作业删除了非任务分支的引用：{name}"));
+        }
+    }
+    let config_path = job_dir.join("config.snapshot");
+    if config_path.exists() {
+        let expected = fs::read_to_string(config_path).await?;
+        let current = git::run_git(cwd, &["config", "--local", "--list"]).await?;
+        if expected != current {
+            return Err(anyhow!("作业修改了仓库本地配置"));
+        }
+    }
+    let start_path = job_dir.join("start.commit");
+    if start_path.exists() {
+        let start = fs::read_to_string(start_path).await?;
+        let start = start.trim();
+        let head = git::commit_of(cwd, "HEAD").await?;
+        if head != start && !git::is_ancestor(cwd, start, &head).await? {
+            return Err(anyhow!("任务分支历史被改写，HEAD 不是作业起点的后代"));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_worktree_branch(cwd: &std::path::Path, task: Option<&TaskRow>) -> Result<()> {
+    if let Some(task) = task {
+        if let Some(branch) = task.branch.as_deref() {
+            let current = git::current_branch(cwd).await?;
+            if current != branch {
+                return Err(anyhow!("工作区不在任务分支 {branch} 上，实际为 {current}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn commit_worktree(cwd: &std::path::Path, message: &str) -> Result<bool> {
+    if git::status_porcelain(cwd).await?.trim().is_empty() {
+        return Ok(false);
+    }
+    git::commit_all(cwd, message).await.map_err(Into::into)
+}
 pub(crate) use self::analysis::apply_analysis_plan_locked;
-use self::analysis::{
-    handle_analysis_direct, handle_analysis_failure, handle_analysis_plan,
-    handle_analysis_questions,
-};
+use self::analysis::{handle_analysis_failure, handle_analysis_plan, handle_analysis_questions};
 pub(crate) use self::common::{analysis_needs_dispatch, insert_message};
 use self::common::{
     load_job, load_project, load_task, parsed_error, result_is_failure, role_label,
 };
-use self::direct::{handle_direct_failure, handle_direct_success};
 pub(crate) use self::executor::cleanup_task_artifacts;
 use self::executor::{
     handle_executor_derive, handle_executor_failure, handle_executor_success,
@@ -47,7 +117,8 @@ use self::executor::{
 };
 use self::lifecycle::{fail_runtime, finish_job, mark_archived_job, mark_canceled_job};
 use self::project::{
-    handle_acceptance_failure, handle_project_acceptance, handle_report, handle_summary_failure,
+    handle_acceptance_failure, handle_project_acceptance, handle_report, handle_report_plan,
+    handle_summary_failure,
 };
 use self::prompt::{build_context, build_prompt_data};
 pub(crate) use self::verifier::handoff_merge_conflict_unlocked;
@@ -56,7 +127,11 @@ pub(crate) use self::worktree::task_merge_target;
 use self::worktree::{ensure_worktree_root, prepare_task_worktree, prepare_verify_worktree};
 
 /// Missing or invalid results get up to five correction rounds in the same job.
-const MAX_CONTINUATIONS: usize = 5;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CorrectionKind {
+    Missing,
+    Protocol,
+}
 /// Automatic recovery and manual continuation share this additional-round cap.
 /// Each automatic recovery starts a fresh run window; protocol correction has
 /// its own bound and does not reset the continuation count.
@@ -169,7 +244,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         job_dir.clone()
     } else if project.is_git() {
         match job.role.as_str() {
-            JOB_ROLE_ANALYSIS | JOB_ROLE_DIRECT | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
+            JOB_ROLE_ANALYSIS | JOB_ROLE_ACCEPTANCE | JOB_ROLE_SUMMARY => {
                 paths::project_repo(&workspace)
             }
             JOB_ROLE_EXECUTOR => prepare_task_worktree(state, &project, task.as_ref()).await?,
@@ -183,6 +258,18 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         PathBuf::from(&project.repo_path)
     };
     ensure_worktree_root(&cwd, project.is_git() && !review).await?;
+    if !collect && project.is_git() && job.role == JOB_ROLE_EXECUTOR {
+        let refs =
+            git::run_git(&cwd, &["for-each-ref", "--format=%(refname) %(objectname)"]).await?;
+        fs::write(job_dir.join("refs.snapshot"), refs).await?;
+        fs::write(
+            job_dir.join("start.commit"),
+            git::commit_of(&cwd, "HEAD").await?,
+        )
+        .await?;
+        let config = git::run_git(&cwd, &["config", "--local", "--list"]).await?;
+        fs::write(job_dir.join("config.snapshot"), config).await?;
+    }
 
     let prompt_data = build_prompt_data(state, &project, task.as_ref(), &job, &cwd).await?;
     let artifact_version = if collect {
@@ -299,7 +386,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         role: job.role.clone(),
         cwd: cwd.clone(),
         job_dir: job_dir.clone(),
-        writable_dirs: if matches!(job.role.as_str(), JOB_ROLE_EXECUTOR | JOB_ROLE_DIRECT) {
+        writable_dirs: if job.role == JOB_ROLE_EXECUTOR {
             std::iter::once(project_resources)
                 .chain(task_resources)
                 .collect()
@@ -315,7 +402,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         continuation: resume,
         progress: progress.clone(),
     };
-    let mut continuations = resumed.as_ref().map_or(0, |r| r.protocol_rounds);
+    let mut missing_rounds = resumed.as_ref().map_or(0, |r| r.missing_rounds);
+    let mut protocol_rounds = resumed.as_ref().map_or(0, |r| r.protocol_rounds);
     if !collect {
         crate::continuation::starting(
             &agent,
@@ -323,7 +411,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             &job_dir,
             resumed.as_ref().map(|r| r.session.as_str()),
             timeout_continuations,
-            continuations,
+            missing_rounds,
+            protocol_rounds,
         )
         .await?;
     }
@@ -383,7 +472,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 &run,
                 raw.as_deref(),
                 timeout_continuations,
-                continuations,
+                missing_rounds,
+                protocol_rounds,
             )
             .await?;
             let retryable = record.as_ref().is_some_and(|r| {
@@ -394,7 +484,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 .await?
                 .is_none();
             if retryable
-                && continuations < MAX_CONTINUATIONS
                 && timeout_continuations < MAX_TIMEOUT_CONTINUATIONS
                 && continuation_allowed(state, &job, &project, task.as_ref()).await?
             {
@@ -434,7 +523,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     &job_dir,
                     spec.session_id.as_deref(),
                     timeout_continuations,
-                    continuations,
+                    missing_rounds,
+                    protocol_rounds,
                 )
                 .await?;
                 let next =
@@ -459,9 +549,17 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             break;
         }
         let current_result = fs::read_to_string(&result_path).await.ok();
+        let mut correction_kind = CorrectionKind::Protocol;
         let mut protocol_error = match current_result.as_deref() {
-            None => Some("Agent 没有写 result.json".to_string()),
+            None => {
+                correction_kind = CorrectionKind::Missing;
+                Some("Agent 没有写 result.json".to_string())
+            }
             Some(raw) if result_is_failure(&job.role, raw) => None,
+            Some(raw) if crate::domain::extract_json(raw).is_none() => {
+                correction_kind = CorrectionKind::Missing;
+                Some("结果文件不是合法 JSON".to_string())
+            }
             Some(raw) => match parse_result(&job.role, raw) {
                 Err(error) => Some(error),
                 Ok(ParsedResult::ExecutorDerive { tasks, .. }) => {
@@ -481,52 +579,20 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     &artifact_version,
                 )
                 .err(),
-                Ok(_) if job.role == JOB_ROLE_ACCEPTANCE => {
-                    crate::delivery::validate_project_evidence(
-                        raw,
-                        &contract,
-                        &prompt_data.acceptance_criteria,
-                        &artifact_version,
-                    )
-                    .err()
-                }
                 Ok(_) => None,
             },
         };
-        if protocol_error.is_none() {
-            if let Some(raw) = current_result.as_deref() {
-                protocol_error = crate::user_action::validate_live(&job.role, raw).err();
-            }
-        }
         if protocol_error.is_none() && !review {
             if let Some(raw) = current_result.as_deref() {
                 if matches!(
                     parse_result(&job.role, raw),
-                    Ok(ParsedResult::ExecutorDone { .. }
-                        | ParsedResult::ExecutorDerive { .. }
-                        | ParsedResult::DirectDone { .. })
+                    Ok(ParsedResult::ExecutorDone { .. } | ParsedResult::ExecutorDerive { .. })
                 ) {
-                    protocol_error = match crate::domain::commit_files(raw) {
-                        Err(error) => Some(error),
-                        Ok(files) if project.is_git() => {
-                            let _guard = state.git_lock.lock().await;
-                            git::validate_commit_files(&cwd, &files)
-                                .await
-                                .err()
-                                .map(|e| e.to_string())
-                        }
-                        Ok(_) => None,
-                    };
-                    if protocol_error.is_none() {
-                        protocol_error = crate::resources::validate_delivery_artifacts(
-                            raw,
-                            &cwd,
-                            project.is_git(),
-                        )
-                        .await
-                        .err()
-                        .map(|error| format!("artifacts 声明不合法：{error:#}"));
-                    }
+                    protocol_error =
+                        crate::resources::validate_delivery_artifacts(raw, &cwd, project.is_git())
+                            .await
+                            .err()
+                            .map(|error| format!("artifacts 声明不合法：{error:#}"));
                 }
             }
         }
@@ -535,31 +601,20 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 if let Some(value) =
                     crate::domain::extract_json(raw).and_then(|v| v.get("shared_updates").cloned())
                 {
-                    match serde_json::from_value::<Vec<crate::resources::SharedInput>>(value) {
-                        Ok(records) => {
-                            if let Err(error) = crate::resources::publish(
-                                state,
-                                &project,
-                                job.task_id.as_deref(),
-                                Some(&job.id),
-                                &records,
-                            )
-                            .await
-                            {
-                                protocol_error = Some(format!(
-                                    "共享记录提交冲突，请提交者修正后重试：{error:#}"
-                                ));
-                            }
-                        }
-                        Err(error) => {
-                            protocol_error = Some(format!("shared_updates 格式错误：{error}"))
-                        }
+                    if let Err(error) =
+                        serde_json::from_value::<Vec<crate::resources::SharedInput>>(value)
+                    {
+                        protocol_error = Some(format!("shared_updates 格式错误：{error}"));
                     }
                 }
             }
         }
+        let (used_rounds, limit_rounds) = match correction_kind {
+            CorrectionKind::Missing => (missing_rounds, crate::continuation::MAX_MISSING),
+            CorrectionKind::Protocol => (protocol_rounds, crate::continuation::MAX_PROTOCOL),
+        };
         if protocol_error.is_none()
-            || continuations >= MAX_CONTINUATIONS
+            || used_rounds >= limit_rounds
             || !continuation_allowed(state, &job, &project, task.as_ref()).await?
         {
             break;
@@ -569,17 +624,25 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             break;
         }
         let protocol_error = protocol_error.unwrap_or_default();
-        let follow_up = if current_result.is_none() {
-            prompts::missing_result_continuation(&prompt_data, &spec.original_prompt)
-        } else {
-            prompts::invalid_result_continuation(
+        let follow_up = match correction_kind {
+            CorrectionKind::Missing => {
+                prompts::missing_result_continuation(&prompt_data, &spec.original_prompt)
+            }
+            CorrectionKind::Protocol => prompts::invalid_result_continuation(
                 &prompt_data,
                 &protocol_error,
                 &spec.original_prompt,
-            )
+            ),
         };
         fs::write(
-            job_dir.join(format!("continuation-{}.md", continuations + 1)),
+            job_dir.join(format!(
+                "continuation-{}-{}.md",
+                match correction_kind {
+                    CorrectionKind::Missing => "missing",
+                    CorrectionKind::Protocol => "protocol",
+                },
+                used_rounds + 1
+            )),
             &follow_up,
         )
         .await?;
@@ -597,21 +660,29 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(&job.id),
             "job_continued",
             format!(
-                "{}作业结果协议校验失败（{}），已追加第 {} 轮继续提示",
+                "{}作业结果校验未通过（{}），已追加第 {} 轮{}续写提示",
                 role_label(&job.role),
                 protocol_error,
-                continuations + 1
+                used_rounds + 1,
+                match correction_kind {
+                    CorrectionKind::Missing => "结果缺失",
+                    CorrectionKind::Protocol => "内容不合规",
+                }
             ),
         )
         .await;
-        continuations += 1;
+        match correction_kind {
+            CorrectionKind::Missing => missing_rounds += 1,
+            CorrectionKind::Protocol => protocol_rounds += 1,
+        }
         crate::continuation::starting(
             &agent,
             &job,
             &job_dir,
             spec.session_id.as_deref(),
             timeout_continuations,
-            continuations,
+            missing_rounds,
+            protocol_rounds,
         )
         .await?;
         let next =
@@ -661,7 +732,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             &interruption_run,
             raw_result.as_deref(),
             timeout_continuations,
-            continuations,
+            missing_rounds,
+            protocol_rounds,
         )
         .await?
     } else {
@@ -759,13 +831,11 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         (JOB_STATUS_FAILED, raw_result.clone(), Some(reported))
     } else if let Some(raw) = &raw_result {
         match parse_result(&job.role, raw) {
-            Ok(parsed) => {
-                let status = match &parsed {
-                    ParsedResult::ExecutorFailed { .. } => JOB_STATUS_FAILED,
-                    _ => JOB_STATUS_SUCCEEDED,
-                };
-                (status, Some(raw.clone()), parsed_error(&parsed))
-            }
+            Ok(parsed) => (
+                JOB_STATUS_SUCCEEDED,
+                Some(raw.clone()),
+                parsed_error(&parsed),
+            ),
             Err(parse_error) => (
                 JOB_STATUS_FAILED,
                 Some(raw.clone()),
@@ -774,8 +844,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 } else {
                     format!(
                         "结果协议不合法{}: {parse_error}",
-                        if continuations >= MAX_CONTINUATIONS {
-                            "，协议继续次数用尽"
+                        if protocol_rounds >= crate::continuation::MAX_PROTOCOL {
+                            "，内容纠正次数用尽"
                         } else {
                             ""
                         }
@@ -800,35 +870,21 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
     };
     if matches!(
         parsed,
-        Some(
-            ParsedResult::ExecutorDone { .. }
-                | ParsedResult::ExecutorDerive { .. }
-                | ParsedResult::DirectDone { .. }
-        )
+        Some(ParsedResult::ExecutorDone { .. } | ParsedResult::ExecutorDerive { .. })
     ) {
-        let mut validation =
-            match crate::domain::commit_files(result_text.as_deref().unwrap_or_default()) {
-                Ok(files) if project.is_git() => git::validate_commit_files(&cwd, &files)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Ok(_) => Ok(()),
-                Err(error) => Err(error),
-            };
-        if validation.is_ok() {
-            validation = crate::resources::validate_delivery_artifacts(
-                result_text.as_deref().unwrap_or_default(),
-                &cwd,
-                project.is_git(),
-            )
-            .await
-            .map_err(|error| format!("artifacts 声明不合法：{error:#}"));
-        }
+        let validation = crate::resources::validate_delivery_artifacts(
+            result_text.as_deref().unwrap_or_default(),
+            &cwd,
+            project.is_git(),
+        )
+        .await
+        .map_err(|error| format!("artifacts 声明不合法：{error:#}"));
         if let Err(reason) = validation {
             status = JOB_STATUS_FAILED;
             error = Some(format!(
                 "结果协议不合法{}：{reason}",
-                if continuations >= MAX_CONTINUATIONS {
-                    "，协议继续次数用尽"
+                if protocol_rounds >= crate::continuation::MAX_PROTOCOL {
+                    "，内容纠正次数用尽"
                 } else {
                     ""
                 }
@@ -842,21 +898,8 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             .and_then(crate::domain::extract_json)
             .and_then(|v| v.get("shared_updates").cloned())
         {
-            let outcome = match serde_json::from_value::<Vec<crate::resources::SharedInput>>(value)
+            if let Err(reason) = serde_json::from_value::<Vec<crate::resources::SharedInput>>(value)
             {
-                Ok(records) => {
-                    crate::resources::publish(
-                        state,
-                        &project,
-                        job.task_id.as_deref(),
-                        Some(&job.id),
-                        &records,
-                    )
-                    .await
-                }
-                Err(error) => Err(error.into()),
-            };
-            if let Err(reason) = outcome {
                 status = JOB_STATUS_FAILED;
                 parsed = None;
                 error = Some(format!(
@@ -875,20 +918,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                     .as_ref()
                     .map(|task| task.acceptance.clone())
                     .unwrap_or_default(),
-                &artifact_version,
-            ) {
-                status = JOB_STATUS_FAILED;
-                parsed = None;
-                error = Some(format!("结果协议不合法，协议继续次数用尽：{reason}"));
-            }
-        }
-    }
-    if status == JOB_STATUS_SUCCEEDED && job.role == JOB_ROLE_ACCEPTANCE {
-        if let Some(raw) = result_text.as_deref() {
-            if let Err(reason) = crate::delivery::validate_project_evidence(
-                raw,
-                &contract,
-                &prompt_data.acceptance_criteria,
                 &artifact_version,
             ) {
                 status = JOB_STATUS_FAILED;
@@ -1029,86 +1058,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
     }
 
-    if job.role == JOB_ROLE_DIRECT && status == JOB_STATUS_SUCCEEDED {
-        if let Some(ParsedResult::DirectDone { summary, report }) = parsed.clone() {
-            let message = format!("domo(direct): {} ({})", project.name, short_id(&job.id));
-            let commit = if project.is_git() {
-                let _guard = state.git_lock.lock().await;
-                git::commit_files(
-                    &cwd,
-                    &message,
-                    &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
-                        .map_err(anyhow::Error::msg)?,
-                )
-                .await
-            } else {
-                Ok(false)
-            };
-            if let Err(commit_error) = commit {
-                let error_text = format!("提交直接完成结果失败: {commit_error:#}");
-                let transition =
-                    handle_direct_failure(state, &project, &error_text, None, false).await;
-                let finished = finish_job(
-                    state,
-                    &job,
-                    JOB_STATUS_FAILED,
-                    result_text,
-                    &run,
-                    Some(&error_text),
-                    None,
-                )
-                .await?;
-                if finished {
-                    transition?;
-                }
-                return Ok(());
-            }
-            if let Err(error) = crate::resources::settle_artifacts(
-                state,
-                &project,
-                &job,
-                &cwd,
-                result_text.as_deref().unwrap_or_default(),
-            )
-            .await
-            {
-                finish_job(
-                    state,
-                    &job,
-                    JOB_STATUS_FAILED,
-                    result_text,
-                    &run,
-                    Some(&format!("工作区交付检查未通过：{error:#}")),
-                    None,
-                )
-                .await?;
-                crate::resources::block_workspace(
-                    state,
-                    &project,
-                    &job,
-                    &format!("工作区交付检查未通过：{error:#}"),
-                )
-                .await?;
-                return Ok(());
-            }
-            let transition = handle_direct_success(state, &project, &summary, &report).await;
-            let finished = finish_job(
-                state,
-                &job,
-                JOB_STATUS_SUCCEEDED,
-                result_text,
-                &run,
-                None,
-                None,
-            )
-            .await?;
-            if finished {
-                transition?;
-            }
-            return Ok(());
-        }
-    }
-
     if job.role == JOB_ROLE_EXECUTOR && status == JOB_STATUS_SUCCEEDED {
         match parsed.clone() {
             Some(ParsedResult::ExecutorReplan { reason }) => {
@@ -1137,13 +1086,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 );
                 let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
-                    git::commit_files(
-                        &cwd,
-                        &message,
-                        &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
-                            .map_err(anyhow::Error::msg)?,
-                    )
-                    .await
+                    validate_worktree_branch(&cwd, Some(task)).await?;
+                    validate_ref_snapshot(&cwd, &job_dir, Some(task)).await?;
+                    commit_worktree(&cwd, &message).await
                 } else {
                     Ok(false)
                 };
@@ -1228,13 +1173,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 );
                 let commit = if project.is_git() {
                     let _guard = state.git_lock.lock().await;
-                    git::commit_files(
-                        &cwd,
-                        &message,
-                        &crate::domain::commit_files(result_text.as_deref().unwrap_or_default())
-                            .map_err(anyhow::Error::msg)?,
-                    )
-                    .await
+                    validate_worktree_branch(&cwd, Some(task)).await?;
+                    validate_ref_snapshot(&cwd, &job_dir, Some(task)).await?;
+                    commit_worktree(&cwd, &message).await
                 } else {
                     Ok(false)
                 };
@@ -1325,7 +1266,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 assumptions,
                 acceptance,
                 tasks,
-                skip_confirmation,
             }),
         ) => {
             handle_analysis_plan(
@@ -1336,28 +1276,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 assumptions,
                 acceptance,
                 tasks,
-                *skip_confirmation,
-            )
-            .await
-        }
-        (
-            JOB_ROLE_ANALYSIS,
-            Some(ParsedResult::AnalysisDirect {
-                summary,
-                goal,
-                plan,
-                verification,
-                skip_confirmation,
-            }),
-        ) => {
-            handle_analysis_direct(
-                state,
-                &project,
-                summary,
-                goal.as_deref(),
-                plan,
-                verification,
-                *skip_confirmation,
             )
             .await
         }
@@ -1367,17 +1285,6 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
                 state,
                 &project,
                 error.as_deref().unwrap_or("项目分析失败"),
-                Some(&agent),
-                process_failure,
-            )
-            .await
-        }
-        (JOB_ROLE_DIRECT, _) => {
-            let process_failure = agent_failure;
-            handle_direct_failure(
-                state,
-                &project,
-                error.as_deref().unwrap_or("直接完成失败"),
                 Some(&agent),
                 process_failure,
             )
@@ -1393,13 +1300,7 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         (JOB_ROLE_EXECUTOR, Some(ParsedResult::ExecutorReplan { .. })) => Ok(()),
         (JOB_ROLE_EXECUTOR, _) => {
             if let Some(task) = task.as_ref() {
-                let reason = error
-                    .as_deref()
-                    .or(match &parsed {
-                        Some(ParsedResult::ExecutorFailed { reason }) => Some(reason.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("执行失败");
+                let reason = error.as_deref().unwrap_or("执行失败");
                 let kind = domain::classify_job_failure(
                     &job.role,
                     result_text.as_deref(),
@@ -1433,12 +1334,23 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
             Some(ParsedResult::ProjectAcceptance {
                 summary,
                 criteria,
+                issues,
                 replan_reason,
                 action,
+                plan,
             }),
         ) => {
-            handle_project_acceptance(state, &project, summary, criteria, replan_reason, action)
-                .await
+            handle_project_acceptance(
+                state,
+                &project,
+                summary,
+                criteria,
+                issues,
+                replan_reason,
+                action,
+                plan,
+            )
+            .await
         }
         (JOB_ROLE_ACCEPTANCE, _) => {
             let process_failure = agent_failure;
@@ -1453,6 +1365,9 @@ async fn run_job(state: &AppState, job_id: &str) -> Result<()> {
         }
         (JOB_ROLE_SUMMARY, Some(ParsedResult::Report { summary })) => {
             handle_report(state, &project, summary).await
+        }
+        (JOB_ROLE_SUMMARY, Some(ParsedResult::ReportPlan { plan })) => {
+            handle_report_plan(state, &project, plan).await
         }
         (JOB_ROLE_SUMMARY, _) => {
             let process_failure = agent_failure;

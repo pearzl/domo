@@ -1,4 +1,4 @@
-export type AgentKind = "mock" | "opencode" | "cli" | "codex" | "workbuddy";
+export type AgentKind = "mock" | "opencode" | "cli" | "codex" | "codebuddy";
 export type Role = "planner" | "executor" | "verifier";
 export type UsageMetric = "tokens" | "input_tokens" | "output_tokens" | "cost";
 export type UsageWindowKind = "day" | "month";
@@ -74,6 +74,9 @@ export interface UsageGroup extends UsageTotals {
   agent_id: string | null;
   agent_name: string | null;
   role: string | null;
+  task_id?: string | null;
+  task_key?: string | null;
+  model?: string | null;
 }
 
 export interface UsageReport {
@@ -242,7 +245,6 @@ export interface ProjectSummary {
   replan_reason: string | null;
   replan_source: string | null;
   confirm_mode: "manual" | "auto";
-  completion_mode: "tasks" | "direct";
   merged_at: string | null;
   merged_commit: string | null;
   created_at: string;
@@ -250,7 +252,6 @@ export interface ProjectSummary {
 }
 
 export interface Project {
-  user_action?: UserAction | null;
   acceptance?: string | null;
   acceptance_passed?: number;
   id: string;
@@ -273,23 +274,18 @@ export interface Project {
   replan_active?: number;
   confirm_mode: "manual" | "auto";
   confirmed_at: string | null;
-  completion_mode: "tasks" | "direct";
+  accepted_commit?: string | null;
+  accept_reason?: string | null;
   merged_at: string | null;
   merged_commit: string | null;
+  merge_rebased?: number;
+  merge_agent_resolved?: number;
+  merge_conflicts?: string[];
   created_at: string;
   updated_at: string;
 }
 
-export interface UserAction {
-  summary: string;
-  why: string;
-  owner: string;
-  steps: string[];
-  after: string;
-}
-
 export interface Task {
-  user_action?: UserAction | null;
   id: string;
   project_id: string;
   seq: number;
@@ -423,7 +419,7 @@ export interface JobActivitySummary {
 }
 
 export interface JobActivity {
-  format: "opencode" | "codex" | "workbuddy" | "text";
+  format: "opencode" | "codex" | "codebuddy" | "text";
   bytes: number;
   items: JobActivityItem[];
   summary: JobActivitySummary;
@@ -466,15 +462,12 @@ export interface ReplanImpact {
 }
 
 export interface AnalysisProposal {
-  kind: "plan" | "direct";
+  kind: "plan";
   summary: string;
   goal: string | null;
   assumptions: string[];
   acceptance: string[];
   tasks: ProposalTask[];
-  plan: string[];
-  verification: string[];
-  skip_confirmation: boolean;
   replan_impact?: ReplanImpact | null;
 }
 
@@ -530,7 +523,6 @@ export interface ArbitrationJob {
 }
 
 export interface ArbitrationTask {
-  user_action?: UserAction | null;
   id: string;
   key: string;
   title: string;
@@ -540,6 +532,7 @@ export interface ArbitrationTask {
   failure_summary: FailureSummary | null;
   attempts: number;
   rejections: number;
+  merge_conflicts?: number;
   milestone: boolean;
   human_gate: string | null;
   forced_agent_id: string | null;
@@ -571,15 +564,6 @@ export interface CreateProjectInput {
   goal?: string;
   workspace_type?: WorkspaceType;
   confirm_mode?: "manual" | "auto";
-}
-
-export interface CreateTaskInput {
-  key: string;
-  title: string;
-  description: string;
-  acceptance?: string[];
-  deps?: string[];
-  milestone?: boolean;
 }
 
 export interface AgentInput {

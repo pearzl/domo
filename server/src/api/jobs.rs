@@ -351,9 +351,6 @@ pub(super) async fn restart_job(
         None => {
             let stage_matches = match job.role.as_str() {
                 JOB_ROLE_ANALYSIS => project.stage == STAGE_ANALYSIS,
-                JOB_ROLE_DIRECT => {
-                    project.stage == STAGE_EXECUTING && project.completion_mode == COMPLETION_DIRECT
-                }
                 JOB_ROLE_ACCEPTANCE => {
                     project.stage == STAGE_SUMMARIZING
                         && project.report.is_none()

@@ -241,10 +241,7 @@ export function projectGuidance(input: ProjectStatusInput): ProjectGuidance {
     if (project.status === "blocked") {
       return blockedGuidance(input);
     }
-    return executingGuidance(
-      input,
-      projectHasRunningJob(input.jobs, "direct"),
-    );
+    return executingGuidance(input);
   }
 
   if (project.status === "blocked") {
@@ -335,10 +332,7 @@ function analysisGuidance(
   const proposal = input.proposal;
 
   if (proposal) {
-    const detail =
-      proposal.kind === "direct"
-        ? "方案建议直接完成：确认后开始直接完成，或回复规划者继续讨论。"
-        : "方案已生成：确认后开始执行，或回复规划者继续讨论。";
+    const detail = "方案已生成：确认后开始执行，或回复规划者继续讨论。";
     return guidance("success", "待确认", "确认或继续讨论方案", detail, null, {
       tab: "analysis",
       action: "去确认方案",
@@ -364,28 +358,7 @@ function analysisGuidance(
   );
 }
 
-function executingGuidance(
-  input: ProjectStatusInput,
-  directRunning: boolean,
-): ProjectGuidance {
-  const { project } = input;
-  if (project.completion_mode === "direct") {
-    if (directRunning) {
-      return guidance(
-        "info",
-        "执行中",
-        "等待直接完成",
-        "规划者正在直接完成实现与自检，完成后进入总结。",
-      );
-    }
-    return guidance(
-      "info",
-      "执行中",
-      "执行中",
-      "直接完成作业尚未派发或已结束，等待调度推进。",
-    );
-  }
-
+function executingGuidance(input: ProjectStatusInput): ProjectGuidance {
   const tasks = executionTaskGroups(input.tasks);
   const count =
     tasks.running.length + tasks.queued.length + tasks.starting.length;

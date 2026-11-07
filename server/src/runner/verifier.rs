@@ -113,8 +113,15 @@ pub(super) async fn handle_verdict(
                 .await?;
             }
             Err(error) => {
-                handoff_merge_conflict_unlocked(state, project, task, &error, Some(&agent.id))
-                    .await?;
+                handoff_merge_conflict_unlocked(
+                    state,
+                    project,
+                    task,
+                    &error,
+                    Some(&agent.id),
+                    Some(job),
+                )
+                .await?;
             }
         }
     } else {
@@ -152,7 +159,7 @@ pub(super) async fn handle_verdict(
         .bind(&current_issues)
         .bind(format!("{reason}\n处理指导：{}", action.guidance))
         .bind(&agent.id)
-        .bind((!execute).then_some(action.user_action.as_ref().map(|action| action.summary.as_str()).unwrap_or("等待验证条件，请查看处理说明")))
+        .bind((!execute).then_some(reason.as_str()))
         .bind(now())
         .bind(&task.id)
         .execute(&state.db)
@@ -222,6 +229,7 @@ async fn complete_verified_task(
     agent: &AgentRow,
     message: String,
 ) -> Result<()> {
+    publish_task_memory(state, project, task).await?;
     sqlx::query(
         "UPDATE tasks SET stage = ?, status = NULL, agent_id = ?, last_error = NULL, attempts = 0, \
           human_gate = NULL, verifier_issues = '[]', forced_agent_id = NULL, forced_agent_role = NULL, \
@@ -246,6 +254,29 @@ async fn complete_verified_task(
     Ok(())
 }
 
+/// Publishes the executor's memory candidates only after the task has passed
+/// acceptance. Rejected work never reaches the project knowledge base.
+async fn publish_task_memory(state: &AppState, project: &ProjectRow, task: &TaskRow) -> Result<()> {
+    let job: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, result FROM jobs WHERE task_id = ? AND role = ? AND status = 'succeeded' \
+         AND result IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(&task.id)
+    .bind(ROLE_EXECUTOR)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((job_id, raw)) = job else {
+        return Ok(());
+    };
+    let Some(value) = domain::extract_json(&raw).and_then(|v| v.get("shared_updates").cloned())
+    else {
+        return Ok(());
+    };
+    let records: Vec<crate::resources::SharedInput> = serde_json::from_value(value)
+        .map_err(|error| anyhow!("shared_updates 格式错误：{error}"))?;
+    crate::resources::publish(state, project, Some(&task.id), Some(&job_id), &records).await
+}
+
 /// A rejected verdict returns the task to the executor with verifier issues and
 /// counts against the rejection limit. A merge conflict uses the same handoff
 /// path but keeps the rejection count intact: the executor only resolves the
@@ -258,10 +289,52 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
     task: &TaskRow,
     merge_error: &git::GitError,
     agent_id: Option<&str>,
+    job: Option<&JobRow>,
 ) -> Result<()> {
     let reason = format!("验收通过但合并失败：{merge_error:#}");
     if matches!(merge_error, git::GitError::DirtyMergeTarget { .. }) {
         return block_task_after_merge_failure(state, project, task, &reason).await;
+    }
+    let merge_conflicts = task.merge_conflicts + 1;
+    if merge_conflicts >= 3 {
+        let reason = format!(
+            "合入冲突已达 3 次，停止自动重试；请规划者/父任务判断是否调整任务或交付范围。最近一次：{merge_error:#}"
+        );
+        if let Some(job) = job {
+            crate::replan_review::submit_locked(
+                state,
+                job,
+                &reason,
+                "merge_conflict",
+                TASK_STAGE_EXECUTING,
+            )
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE tasks SET stage = ?, status = ?, merge_conflicts = ?, human_gate = NULL, \
+                 waiting_reason = ?, last_error = ?, verifier_issues = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(TASK_STAGE_EXECUTING)
+            .bind(STATUS_BLOCKED)
+            .bind(merge_conflicts)
+            .bind(&reason)
+            .bind(&reason)
+            .bind(models_list_json(std::slice::from_ref(&reason)))
+            .bind(now())
+            .bind(&task.id)
+            .execute(&state.db)
+            .await?;
+        }
+        emit(
+            &state.db,
+            &state.bus,
+            Some(&project.id),
+            Some(&task.id),
+            "merge_conflict_limit",
+            format!("任务 {} 合入冲突已达 3 次，已交给上级判断", task.key),
+        )
+        .await;
+        return Ok(());
     }
     let target = task_merge_target(state, project, task).await?;
     let worktree = match prepare_task_worktree(state, project, Some(task)).await {
@@ -310,11 +383,13 @@ pub(crate) async fn handoff_merge_conflict_unlocked(
     let pause = task_pause_intent(state, &task.id).await?;
     let issues = models_list_json(std::slice::from_ref(&issue));
     sqlx::query(
-        "UPDATE tasks SET stage = ?, status = ?, verifier_issues = ?, last_error = ?, agent_id = ?, \
-          human_gate = NULL, waiting_reason = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE tasks SET stage = ?, status = ?, merge_conflicts = ?, verifier_issues = ?, \
+          last_error = ?, agent_id = ?, human_gate = NULL, waiting_reason = NULL, updated_at = ? \
+          WHERE id = ?",
     )
     .bind(TASK_STAGE_EXECUTING)
     .bind(pause.unwrap_or(STATUS_QUEUED))
+    .bind(merge_conflicts)
     .bind(&issues)
     .bind(&issue)
     .bind(agent_id)

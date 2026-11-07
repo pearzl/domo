@@ -24,8 +24,8 @@ const CODEX_JSONL: &str = concat!(
     "\"reasoning_output_tokens\":89}}\n"
 );
 
-/// JSONL a WorkBuddy CLI emits for one turn. Token and cost values match the
-/// workbuddy case in tests/test_agent_adapters.py.
+/// JSONL a CodeBuddy CLI emits for one turn. Token and cost values match the
+/// codebuddy case in tests/test_agent_adapters.py.
 const WORKBUDDY_JSONL: &str = concat!(
     "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"session-agts\"}\n",
     "{\"type\":\"assistant\",\"session_id\":\"session-agts\",",
@@ -44,7 +44,7 @@ const ADAPTER_SOURCES: [&str; 5] = [
     include_str!("opencode.rs"),
     include_str!("cli.rs"),
     include_str!("codex.rs"),
-    include_str!("workbuddy.rs"),
+    include_str!("codebuddy.rs"),
 ];
 
 fn is_uuid_shape(value: &str) -> bool {
@@ -76,7 +76,7 @@ fn registry_matches_adapter_kinds_in_declared_order() {
         <MockAdapter as AgentAdapter>::KIND,
         <OpencodeAdapter as AgentAdapter>::KIND,
         <CodexAdapter as AgentAdapter>::KIND,
-        <WorkbuddyAdapter as AgentAdapter>::KIND,
+        <CodebuddyAdapter as AgentAdapter>::KIND,
         <CliAdapter as AgentAdapter>::KIND,
     ];
     assert_eq!(
@@ -187,8 +187,8 @@ fn recovery_and_diagnostics_are_owned_by_registered_adapters() {
         ),
         (
             AGENT_WORKBUDDY,
-            r#"{"type":"system","subtype":"init","session_id":"actual-workbuddy"}"#,
-            "actual-workbuddy",
+            r#"{"type":"system","subtype":"init","session_id":"actual-codebuddy"}"#,
+            "actual-codebuddy",
         ),
     ] {
         let agent = AgentRow::test_fixture(kind);
@@ -352,7 +352,6 @@ fn runner_defers_session_and_usage_decisions_to_the_registry() {
         include_str!("../runner/agent.rs"),
         include_str!("../runner/analysis.rs"),
         include_str!("../runner/common.rs"),
-        include_str!("../runner/direct.rs"),
         include_str!("../runner/executor.rs"),
         include_str!("../runner/failure.rs"),
         include_str!("../runner/lifecycle.rs"),
@@ -386,8 +385,8 @@ fn codex_fixture_matches_the_end_to_end_usage_expectations() {
 }
 
 #[test]
-fn workbuddy_fixture_matches_the_end_to_end_usage_expectations() {
-    let usage = super::workbuddy::parse_workbuddy_usage(WORKBUDDY_JSONL).expect("workbuddy usage");
+fn codebuddy_fixture_matches_the_end_to_end_usage_expectations() {
+    let usage = super::codebuddy::parse_codebuddy_usage(WORKBUDDY_JSONL).expect("codebuddy usage");
     assert_eq!(usage.input_tokens, Some(2048));
     assert_eq!(usage.output_tokens, Some(512));
     assert_eq!(usage.cache_read_tokens, Some(200));
@@ -395,7 +394,7 @@ fn workbuddy_fixture_matches_the_end_to_end_usage_expectations() {
     assert_eq!(usage.reasoning_tokens, None);
     assert_eq!(usage.cost, Some(0.0123));
     assert_eq!(
-        super::workbuddy::parse_workbuddy_session_id(WORKBUDDY_JSONL).as_deref(),
+        super::codebuddy::parse_codebuddy_session_id(WORKBUDDY_JSONL).as_deref(),
         Some("session-agts")
     );
 }

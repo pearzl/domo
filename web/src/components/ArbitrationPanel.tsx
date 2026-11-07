@@ -4,7 +4,6 @@ import { api, errorMessage } from "../api";
 import { InputBox } from "./InputBox";
 import { useDraftValue } from "./useDraft";
 import { RichContent } from "./RichContent";
-import { UserActionNotice } from "./UserActionNotice";
 import {
   ROLE_LABELS,
   failureSummaryLabel,
@@ -98,13 +97,16 @@ export function ArbitrationPanel({
       ) : null}
       {context ? (
         <>
-          <UserActionNotice
-            action={context.task.user_action}
-            details={context.decision_reason ?? context.task.last_error}
-            guidance={context.agent_guidance}
-            fallback={context.replan_request && context.replan_request.state !== "waiting"
-              ? "AI 正在处理请求，无需你操作。" : undefined}
-          />
+          <div className="blocked-banner">
+            <p><strong>阻塞原因</strong></p>
+            <RichContent content={context.decision_reason ?? context.task.last_error ?? "等待人工处理"} />
+          </div>
+          {context.agent_guidance ? (
+            <details className="reference-fold">
+              <summary>Agent 执行指导</summary>
+              <RichContent content={context.agent_guidance} />
+            </details>
+          ) : null}
           <details className="reference-fold"><summary>运行状态与作业记录</summary>
           <div className="kv">
             <span>阶段</span>
