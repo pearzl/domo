@@ -10,7 +10,7 @@ export function AgentAdvice({ roles }: { roles?: ProjectRolePool[] }) {
   const [error, setError] = useState("");
   useEffect(() => { let active = true; resourceRequest<Advice>("/api/agents/recommendations").then(value => { if (active) setData(value); }).catch(err => { if (active) setError(errorMessage(err)); }); return () => { active = false; }; }, []);
   const members = roles ? new Set(roles.flatMap(role => role.entries.map(entry => entry.agent_id))) : null;
-  return <details className="panel"><summary>Agent 配置建议与依据（仅供用户决策，不自动修改池）</summary>
+  return <details className="agent-advice"><summary>Agent 配置建议与依据（仅供用户决策，不自动修改池）</summary>
     <p>{data?.limitations}</p>
     {data?.items.filter(item => !members || members.has(item.agent_id)).map(item => <details key={item.agent_id}>
       <summary>{item.agent_name} · 完成关联任务 {item.completed_tasks} · 验收拒绝 {item.rejections}</summary>
@@ -45,8 +45,7 @@ export function GlobalQueue({ agents = [] }: { agents?: Agent[] }) {
     const task = detail?.tasks.find(task => task.id === item.task_id);
     return `${detail?.project.name ?? ("project_name" in item ? item.project_name : "项目作业")} · ${task ? `${task.key} ${task.title}` : ROLE_LABELS[item.role] ?? item.role}`;
   }
-  return <section className="panel global-queue"><div className="panel-head"><h2>Agent 全局队列</h2><div className="badge-row"><Badge tone="info">运行 {data?.running.length ?? "—"}</Badge><Badge>排队 {data?.queued.length ?? "—"}</Badge></div></div>
-    <details className="queue-details"><summary>查看调度与运行作业</summary><p className="muted">所有项目共享队列；按人工顺序派发，不自动按关键路径重排。暂停的项目或任务保留顺序但不占用派发资格。</p>
+  return <section className="panel global-queue"><details className="queue-details"><summary><h2>Agent 全局队列</h2><span className="badge-row"><Badge tone="info">运行 {data?.running.length ?? "—"}</Badge><Badge>排队 {data?.queued.length ?? "—"}</Badge></span></summary><p className="muted">所有项目共享队列；按人工顺序派发，不自动按关键路径重排。暂停的项目或任务保留顺序但不占用派发资格。</p>
     {[...groups].map(agent => <section className="queue-agent" key={agent ?? "unassigned"}><h3 title={agent ?? undefined}>{agents.find(item => item.id === agent)?.name ?? (agent ? "Agent（名称暂不可用）" : "等待候选 Agent")}</h3>
       {data?.running.filter(item => item.agent_id === agent).map(item => <div className="queue-entry" key={item.id}>
         <div className="queue-entry-title"><Badge tone="info">运行中</Badge><a title={item.id} href={`/projects/${item.project_id}${item.task_id ? `?tab=tasks&task=${item.task_id}` : `?tab=info&job=${item.id}`}`}>{contextLabel(item)}</a><span className="muted">{ROLE_LABELS[item.role] ?? (item.role === "merge_conflict" ? "合入冲突处理" : item.role)}</span></div>

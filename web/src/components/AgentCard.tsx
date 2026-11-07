@@ -53,27 +53,7 @@ export function AgentCard({
       data-agent-status={failureStatus ? "failure" : "ok"}
     >
       <div className="agent-head">
-        <div>
-          <h2>{agent.name}</h2>
-          <div className="badge-row">
-            <Badge tone="info">{agent.kind}</Badge>
-            <Badge tone={agent.enabled ? "success" : "muted"}>
-              {agent.enabled ? "全局已启用" : "全局已停用"}
-            </Badge>
-            <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
-            {agent.allow_priority_fallback ? (
-              <Badge
-                tone="info"
-                title="该 Agent 并发已满时，新作业交给同角色下一优先级 Agent"
-              >
-                可让位
-              </Badge>
-            ) : null}
-            {agent.usage_window?.exceeded ? (
-              <Badge tone="danger">用量限额已触发</Badge>
-            ) : null}
-          </div>
-        </div>
+        <h2>{agent.name}</h2>
         <div className="button-row">
           <button className="ghost" onClick={onEdit}>
             编辑
@@ -88,6 +68,33 @@ export function AgentCard({
           <button className="ghost danger-text" disabled={busy} onClick={onRemove}>
             删除
           </button>
+        </div>
+        <div className="badge-row">
+          <Badge tone="info">{agent.kind}</Badge>
+          <Badge tone={agent.enabled ? "success" : "muted"}>
+            {agent.enabled ? "全局已启用" : "全局已停用"}
+          </Badge>
+          <Badge tone="muted">并发 {agent.max_concurrency}</Badge>
+          {agent.allow_priority_fallback ? (
+            <Badge
+              tone="info"
+              title="该 Agent 并发已满时，新作业交给同角色下一优先级 Agent"
+            >
+              可让位
+            </Badge>
+          ) : null}
+          {agent.usage_window?.exceeded ? (
+            <Badge tone="danger">用量限额已触发</Badge>
+          ) : null}
+          <div className="agent-status">
+            {failureStatus ? (
+              <Badge tone={failureStatus.tone} title={failureStatus.title}>
+                {failureStatus.label}
+              </Badge>
+            ) : (
+              <Badge tone="success">运行正常</Badge>
+            )}
+          </div>
         </div>
       </div>
       <div className="agent-meta">
@@ -130,15 +137,6 @@ export function AgentCard({
           </button>
         </div>
       ) : null}
-      <div className="agent-status">
-        {failureStatus ? (
-          <Badge tone={failureStatus.tone} title={failureStatus.title}>
-            {failureStatus.label}
-          </Badge>
-        ) : (
-          <Badge tone="success">运行正常</Badge>
-        )}
-      </div>
       {agent.last_error ? (
         <details className="raw-error">
           <summary>查看原始错误</summary>

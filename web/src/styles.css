@@ -3113,12 +3113,12 @@ button.dag-fit-btn {
 
 button.agent-pool-tab {
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
   max-width: 100%;
-  padding: 6px 12px;
+  padding: 5px 11px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #fcfdff;
@@ -3157,10 +3157,10 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
 
 .agent-pool-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 22px minmax(0, 1fr) auto auto;
+  gap: 6px 10px;
   align-items: center;
-  padding: 8px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #fcfdff;
@@ -3214,9 +3214,9 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  min-width: 0;
   align-items: center;
   justify-content: flex-end;
-  grid-column: 2 / -1;
 }
 
 .agent-pool-actions button {
@@ -3224,11 +3224,49 @@ button.agent-pool-tab.active .agent-pool-tab-counts {
   padding: 4px 8px;
 }
 
+.agent-pool-row > .badge-row {
+  min-width: 0;
+}
+
 .agent-pool-reason {
   grid-column: 2 / -1;
   font-size: 0.78rem;
 }
 
+/* 池面板作为页面区块时收紧留白；标题、说明与建议折叠行保持单行高度。 */
+.agent-pool {
+  padding: 16px 18px;
+}
+
+.agent-pool > summary {
+  font-weight: 600;
+}
+
+.agent-pool > .subtitle {
+  margin: 4px 0 0;
+  max-width: none;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.agent-advice {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.agent-advice > summary {
+  cursor: pointer;
+}
+
+.agent-advice > p,
+.agent-advice details {
+  margin-top: 6px;
+}
 
 .jobs {
   display: flex;
@@ -4422,27 +4460,33 @@ button.event-job-title:hover:not(:disabled) {
 .team-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  overflow: hidden;
 }
 
 .team-summary > div {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 18px 20px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 16px;
+}
+
+.team-summary > div + div {
+  border-left: 1px solid var(--line);
 }
 
 .team-summary strong {
-  font-size: 1.8rem;
-  line-height: 1.2;
+  font-size: 1.15rem;
+  line-height: 1.3;
   font-variant-numeric: tabular-nums;
 }
 
 .team-summary small {
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 400;
   color: var(--muted);
 }
@@ -4451,11 +4495,17 @@ button.event-job-title:hover:not(:disabled) {
   grid-column: 1 / -1;
 }
 
+/* Agent 团队页各区块之间略收紧，卡片内部已自带留白。 */
+.agents-page {
+  gap: 14px;
+}
+
 .agent-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
+  padding: 14px 16px 16px;
   border-top: 3px solid #a8bce8;
 }
 
@@ -4464,7 +4514,7 @@ button.event-job-title:hover:not(:disabled) {
   display: flex;
   align-items: center;
   min-width: 0;
-  min-height: 24px;
+  margin-left: auto;
 }
 
 .agent-status .badge {
@@ -4497,53 +4547,54 @@ button.event-job-title:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.agent-card .agent-head > div:first-child {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
 .agent-card.disabled {
   background: var(--surface-soft);
   border-style: dashed;
 }
 
 .agent-head {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
 }
 
 .agent-head > .button-row {
-  width: 100%;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-  gap: 4px;
+  justify-content: flex-end;
+  gap: 2px;
 }
 
 .agent-head > .button-row > .danger-text {
-  margin-left: auto;
+  margin-left: 0;
+}
+
+.agent-head > .badge-row {
+  grid-column: 1 / -1;
 }
 
 .agent-head h2 {
-  margin-bottom: 6px;
+  margin: 0;
   overflow-wrap: anywhere;
 }
 
 .agent-meta {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 0.85rem;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+  font-size: 0.82rem;
   color: var(--muted);
 }
 
 .agent-meta > div {
-  display: flex;
-  gap: 8px;
+  display: inline-flex;
+  min-width: 0;
+  gap: 6px;
   align-items: baseline;
-  justify-content: space-between;
+}
+
+.agent-meta > div > span:not(.meta-label) {
+  color: var(--text);
 }
 
 summary {
@@ -6118,6 +6169,53 @@ summary {
   margin-top: 8px;
 }
 
+/* 队列标题本身是展开入口：收起时只占一行，展开后才出现调度说明与作业列表。 */
+.global-queue {
+  padding: 12px 18px;
+}
+
+.global-queue > .queue-details {
+  margin-top: 0;
+}
+
+.global-queue > .queue-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 0;
+  list-style: none;
+}
+
+.global-queue > .queue-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.global-queue > .queue-details > summary::after {
+  content: "▸";
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.global-queue > .queue-details[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.global-queue > .queue-details > summary > h2 {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.global-queue > .queue-details > summary > .badge-row {
+  flex: none;
+}
+
+.global-queue > .queue-details[open] > summary {
+  margin-bottom: 4px;
+}
+
 .queue-agent {
   margin-top: 14px;
 }
@@ -6370,5 +6468,35 @@ summary {
   button.dag-zoom-btn,
   .agent-form-section > summary::before {
     transition: none;
+  }
+}
+
+/* 概览条与卡片头部在窄屏下的补充布局：概览保持分段连通，卡片标题与操作分行。 */
+@media (max-width: 840px) {
+  .team-summary > div:nth-child(odd) {
+    border-left: 0;
+  }
+
+  .team-summary > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 560px) {
+  .team-summary {
+    gap: 0;
+  }
+
+  .team-summary > div {
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .agent-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-head > .button-row {
+    justify-content: flex-start;
   }
 }

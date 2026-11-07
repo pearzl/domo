@@ -201,7 +201,7 @@ export function AgentsPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page agents-page">
       <PageHeader icon="agents" eyebrow="工作空间 / 团队与调度" title="Agent 团队"
         description="配置团队分工、调度顺序与用量边界，让合适的 Agent 完成合适的工作。"
         guide="同一 Agent 可扮演多个角色。卡片启停是影响所有项目与任务的全局开关；默认团队决定新项目的初始 Agent 池。可用时段按本地时区生效，用量达到限额后自动跳过，新窗口开始后恢复。"
