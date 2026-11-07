@@ -1,10 +1,15 @@
 import type { Message } from "../types";
 
+/// 规划者回复超过该字符数时默认折叠并提供内部滚动。
+export const ANALYSIS_LONG_CHARS = 1200;
+
 /// 分析对话中规划者消息的展示状态；用户反馈之后，先前的分析结果收起。
 export interface AnalysisMessageItem {
   message: Message;
   /// 已被后续用户反馈取代的规划者分析结果。
   folded: boolean;
+  /// 内容超过一屏，需要折叠与区域滚动的规划者回复。
+  long: boolean;
 }
 
 /// 等待规划者回复的场景：首次提交目标后等待开始分析，
@@ -41,6 +46,9 @@ export function analysisThread(messages: Message[]): AnalysisThread {
         message.role === "planner" &&
         lastUserIndex >= 0 &&
         index < lastUserIndex,
+      long:
+        message.role === "planner" &&
+        Array.from(message.content).length >= ANALYSIS_LONG_CHARS,
     })),
     waiting,
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "../types";
-import { analysisThread } from "./analysisThread";
+import { ANALYSIS_LONG_CHARS, analysisThread } from "./analysisThread";
 import projectPageSource from "../pages/ProjectPage.tsx?raw";
 
 function message(id: string, role: string, content = id): Message {
@@ -88,6 +88,21 @@ describe("项目分析对话折叠", () => {
     expect(thread.messages.map((item) => item.message.id)).toEqual(["m1", "m2"]);
     expect(thread.waiting).toBeNull();
   });
+
+  it("标记超长规划者回复以便折叠和区域滚动", () => {
+    const long = analysisThread([
+      message("m1", "planner", "x".repeat(ANALYSIS_LONG_CHARS)),
+    ]);
+    expect(long.messages[0]?.long).toBe(true);
+
+    const short = analysisThread([message("m1", "planner", "短回复")]);
+    expect(short.messages[0]?.long).toBe(false);
+
+    const user = analysisThread([
+      message("m1", "user", "x".repeat(ANALYSIS_LONG_CHARS)),
+    ]);
+    expect(user.messages[0]?.long).toBe(false);
+  });
 });
 
 describe("项目分析区块", () => {
@@ -101,12 +116,20 @@ describe("项目分析区块", () => {
     );
   });
 
-  it("自动确认使用开关行，方案使用带确认底部的方案卡片", () => {
+  it("自动确认始终使用复选框行，方案使用带确认底部的方案卡片", () => {
     expect(projectPageSource).toContain("<AutoConfirmRow");
     expect(projectPageSource).toContain("mode={project.confirm_mode}");
     expect(projectPageSource).toContain("<ProposalCard");
     expect(projectPageSource).not.toContain("goal-policy");
     // 自动确认语义仍由确认模式驱动，未引入额外的绕过路径。
     expect(projectPageSource).toContain("api.updateAnalysisPolicy(project.id, mode)");
+    expect(projectPageSource).not.toContain("project.replan_active === 1 ? null");
+  });
+
+  it("长回复可折叠并在区域内滚动，方案讨论使用统一的讨论入口", () => {
+    expect(projectPageSource).toContain("message-scroll");
+    expect(projectPageSource).toContain("当前分析结果 · 内容较长");
+    expect(projectPageSource).toContain("向规划者提问或讨论方案");
+    expect(projectPageSource).not.toContain("发送修改意见");
   });
 });

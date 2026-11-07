@@ -10,7 +10,7 @@ import {
   type ProposalSectionKey,
 } from "../presentation/proposalView";
 
-/// 自动确认策略行：状态文字 + 说明 + 明确开关；开启时整行带提示色。
+/// 自动确认策略行：状态文字、说明与复选框；开启时整行带提示色。
 export function AutoConfirmRow({
   mode,
   busy,
@@ -27,13 +27,19 @@ export function AutoConfirmRow({
   const label = confirmModeRow(mode);
   const descriptionId = useId();
   return (
-    <div
+    <label
       className={`policy-row${label.enabled ? " policy-row-on" : ""}`}
       data-confirm-mode={mode}
     >
-      <span className="policy-row-icon" aria-hidden="true">
-        {label.enabled ? "✓" : "✕"}
-      </span>
+      <input
+        type="checkbox"
+        className="policy-checkbox"
+        checked={label.enabled}
+        aria-label="自动确认方案"
+        aria-describedby={descriptionId}
+        disabled={busy || disabled}
+        onChange={() => onChange(label.enabled ? "manual" : "auto")}
+      />
       <span className="policy-row-text">
         <strong className="policy-row-title">{label.title}</strong>
         <span className="policy-row-desc" id={descriptionId}>
@@ -41,19 +47,7 @@ export function AutoConfirmRow({
         </span>
         {note ? <span className="policy-row-note muted">{note}</span> : null}
       </span>
-      <button
-        type="button"
-        role="switch"
-        className="switch"
-        aria-checked={label.enabled}
-        aria-label="自动确认方案"
-        aria-describedby={descriptionId}
-        disabled={busy || disabled}
-        onClick={() => onChange(label.enabled ? "manual" : "auto")}
-      >
-        <span className="switch-thumb" aria-hidden="true" />
-      </button>
-    </div>
+    </label>
   );
 }
 
@@ -171,7 +165,9 @@ export function ProposalCard({
   }
 
   const isReplan = Boolean(proposal.replan_impact);
-  const confirmLabel = "确认方案，开始执行";
+  const confirmLabel = isReplan
+    ? "确认草稿，应用重规划"
+    : "确认方案，开始执行";
 
   return (
     <article className="proposal-card" data-proposal-kind={proposal.kind}>
@@ -204,26 +200,22 @@ export function ProposalCard({
           <span className="muted">{impact.note}</span>
         </div>
         <div className="proposal-actions">
-          {isReplan ? (
-            <span className="muted">
-              {confirming ? "正在应用重规划…" : "重规划草稿由 DOMO 自动应用"}
-            </span>
-          ) : (
-            <>
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || disabled || confirmDisabledReason !== null}
-                title={confirmDisabledReason ?? undefined}
-                onClick={onConfirm}
-              >
-                {confirming ? "确认中…" : confirmLabel}
-              </button>
-              {confirmDisabledReason ? (
-                <span className="muted">{confirmDisabledReason}</span>
-              ) : null}
-            </>
-          )}
+          <button
+            type="button"
+            className="primary"
+            disabled={busy || disabled || confirmDisabledReason !== null}
+            title={confirmDisabledReason ?? undefined}
+            onClick={onConfirm}
+          >
+            {confirming
+              ? isReplan
+                ? "应用中…"
+                : "确认中…"
+              : confirmLabel}
+          </button>
+          {confirmDisabledReason ? (
+            <span className="muted">{confirmDisabledReason}</span>
+          ) : null}
         </div>
       </footer>
     </article>

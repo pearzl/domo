@@ -10,7 +10,7 @@
  * 5. 方向键在选项卡内左右切换，Home/End 跳到首尾；每项徽标随任务、方案与报告状态更新。
  * 6. 概览里的用量摘要显示作业数、token、费用、时长与覆盖；没有记录的指标显示“—”，
  *    “查看用量明细”带着项目过滤跳到用量页；项目页不再有独立的用量面板。
- * 7. 自动确认开关行显示当前状态；方案卡片的各小节可折叠，确认按钮与“确认后”影响摘要同处卡片底部。
+ * 7. 自动确认复选框显示当前状态；方案卡片的各小节可折叠，确认按钮与“确认后”影响摘要同处卡片底部。
  *
  * 人工核对清单（动效）：
  * 1. 依次切换全部选项卡：面板淡入上移约 4px，上方选项卡与下方 Agent 池位置不动，无布局跳动。
@@ -19,6 +19,7 @@
  * 4. 概览用量摘要与页头进度在数值变化时逐位滚动，刷新后首次展示保持静态。
  * 5. 开启系统“减少动效”：以上动画全部只淡入不位移，状态点与骨架不再循环。
  */
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { DeliveryPanel } from "../components/DeliveryPanel";
 import { ResourcePanel } from "../components/ResourcePanel";
@@ -47,6 +48,7 @@ import { TaskDrawer } from "../components/TaskDrawer";
 import { useProjectPageController } from "../presentation/projectPageController";
 import { projectPageView } from "../presentation/projectPageView";
 import { projectBlockOrder, projectTabBadge } from "../presentation/projectLayout";
+import type { AnalysisMessageItem } from "../presentation/analysisThread";
 import type { GuidanceTab } from "../presentation/projectStatus";
 import {
   Badge,
@@ -56,6 +58,55 @@ import {
 
 export { LiveActivitySummary } from "../components/LiveActivitySummary";
 export { TaskDrawer } from "../components/TaskDrawer";
+
+/// 规划者长回复默认展开，用户折叠后保持折叠，不被页面轮询重置。
+function AnalysisMessage({ item }: { item: AnalysisMessageItem }) {
+  const [open, setOpen] = useState(!item.folded);
+  useEffect(() => {
+    setOpen(!item.folded);
+  }, [item.folded]);
+
+  const collapsible =
+    item.message.role === "planner" && (item.folded || item.long);
+  if (!collapsible) {
+    return (
+      <div className={`message message-${item.message.role}`}>
+        <div className="message-role">
+          {item.message.role === "user" ? "你" : "规划者"}
+        </div>
+        <RichContent
+          content={item.message.content}
+          className="message-content"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <details
+      className={`message message-planner message-collapsible${
+        item.folded ? " message-folded" : ""
+      }`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span className="message-role">规划者</span>
+        <span className="muted">
+          {item.folded
+            ? "上一条分析结果 · 已折叠，点击展开"
+            : "当前分析结果 · 内容较长，可折叠并在区域内滚动查看"}
+        </span>
+      </summary>
+      <div className="message-scroll">
+        <RichContent
+          content={item.message.content}
+          className="message-content"
+        />
+      </div>
+    </details>
+  );
+}
 
 function replanSourceLabel(source: string | null): string {
   return source === "executor" ? "执行者" : source === "human" ? "人工" : "未知";
@@ -203,48 +254,19 @@ export function ProjectPage({
           <span className="muted">旧目标、任务、报告和验收口径仍保留；恢复后继续原计划派发。</span>
         </div>
       ) : null}
-      {project.replan_active === 1 ? null : (
-        <AutoConfirmRow
-          mode={project.confirm_mode}
-          busy={busy}
-          disabled={autoConfirmLocked(project.status)}
-          note={confirmModeRuntimeNote(!!analysisJob)}
-          onChange={(mode) =>
-            void run(() => api.updateAnalysisPolicy(project.id, mode))
-          }
-        />
-      )}
+      <AutoConfirmRow
+        mode={project.confirm_mode}
+        busy={busy}
+        disabled={autoConfirmLocked(project.status)}
+        note={confirmModeRuntimeNote(!!analysisJob)}
+        onChange={(mode) =>
+          void run(() => api.updateAnalysisPolicy(project.id, mode))
+        }
+      />
       <div className="messages">
-        {analysisConversation.messages.map((item) =>
-          item.folded ? (
-            <details
-              key={item.message.id}
-              className="message message-planner message-folded"
-            >
-              <summary>
-                <span className="message-role">规划者</span>
-                <span className="muted">上一条分析结果 · 已折叠，点击展开</span>
-              </summary>
-              <RichContent
-                content={item.message.content}
-                className="message-content"
-              />
-            </details>
-          ) : (
-            <div
-              key={item.message.id}
-              className={`message message-${item.message.role}`}
-            >
-              <div className="message-role">
-                {item.message.role === "user" ? "你" : "规划者"}
-              </div>
-              <RichContent
-                content={item.message.content}
-                className="message-content"
-              />
-            </div>
-          ),
-        )}
+        {analysisConversation.messages.map((item) => (
+          <AnalysisMessage key={item.message.id} item={item} />
+        ))}
         {analysisConversation.waiting && project.status !== "blocked" ? (
           <div className="message-waiting" role="status">
             <span className="message-role">规划者</span>
@@ -293,7 +315,7 @@ export function ProjectPage({
               disabled={busy || paused || archived}
               rows={3}
               maxAutoGrowChars={520}
-              placeholder="对方案有不同意见时在这里补充，规划者会给出新的方案。"
+              placeholder="向规划者提问或讨论方案，规划者会回复或给出新的方案。"
               actions={
                 <div className="button-row">
                   <button
@@ -301,7 +323,7 @@ export function ProjectPage({
                     disabled={busy || paused || archived || !message.trim()}
                     onClick={sendAnalysis}
                   >
-                    发送修改意见
+                    讨论
                   </button>
                 </div>
               }

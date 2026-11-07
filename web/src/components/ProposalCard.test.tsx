@@ -52,25 +52,24 @@ function renderRow(mode: "manual" | "auto", note?: string) {
   );
 }
 
-describe("自动确认开关行", () => {
-  it("auto 时渲染“自动确认已开启”的开关元素", () => {
+describe("自动确认复选框行", () => {
+  it("auto 时勾选“自动确认已开启”的复选框", () => {
     const markup = renderRow("auto");
     expect(markup).toContain("自动确认已开启");
     expect(markup).not.toContain("自动确认已关闭");
-    expect(markup).toContain('role="switch"');
-    expect(markup).toContain('aria-checked="true"');
+    expect(markup).toContain('type="checkbox"');
+    expect(markup).toContain('checked=""');
+    expect(markup).not.toContain('role="switch"');
     expect(markup).toContain("policy-row-on");
     expect(markup).toContain('data-confirm-mode="auto"');
-    // 开关元素本身就是可操作控件，不再使用复选框。
-    expect(markup).toContain("<button");
-    expect(markup).not.toContain('type="checkbox"');
   });
 
-  it("manual 时文案相反且不带提示色", () => {
+  it("manual 时复选框未勾选且不带提示色", () => {
     const markup = renderRow("manual");
     expect(markup).toContain("自动确认已关闭");
     expect(markup).not.toContain("自动确认已开启");
-    expect(markup).toContain('aria-checked="false"');
+    expect(markup).toContain('type="checkbox"');
+    expect(markup).not.toContain('checked=""');
     expect(markup).not.toContain("policy-row-on");
   });
 
@@ -87,7 +86,7 @@ describe("自动确认开关行", () => {
     expect(confirmModeRow("manual").description).not.toBe("");
   });
 
-  it("运行中切换给出下一轮生效说明且开关保持可操作", () => {
+  it("运行中切换给出下一轮生效说明且复选框保持可操作", () => {
     const markup = renderRow("auto", confirmModeRuntimeNote(true) ?? undefined);
     expect(markup).toContain("将在下一轮分析生效");
     expect(markup).toContain("policy-row-note");
@@ -243,7 +242,7 @@ describe("确认后影响摘要", () => {
 
 
 
-  it("高影响重规划展示影响并由 DOMO 自动应用，不提供确认入口", () => {
+  it("高影响重规划展示影响，并在两种确认方式下都提供确认入口", () => {
     const draft = proposal({
       replan_impact: {
         high_impact: true,
@@ -253,27 +252,32 @@ describe("确认后影响摘要", () => {
         acceptance_changed: true,
       },
     });
-    const impact = confirmImpact(draft, [], "auto");
-    expect(impact.items.join(" ")).toContain("取消 1 个未完成任务（T2）");
-    expect(impact.items.join(" ")).toContain("扩大任务范围（T3）");
-    expect(impact.items.join(" ")).toContain("修改项目或任务验收标准");
-    expect(impact.items.join(" ")).toContain("已确认目标保持不变");
-    expect(impact.items.join(" ")).not.toContain("修改项目目标");
-    expect(impact.note).toContain("DOMO 自动应用");
-    const markup = renderToStaticMarkup(
-      <ProposalCard
-        proposal={draft}
-        activeTasks={[]}
-        mode="auto"
-        busy={false}
-        confirming={false}
-        disabled={false}
-        confirmDisabledReason={null}
-        onConfirm={() => {}}
-      />,
-    );
-    expect(markup).toContain("高影响重规划草稿");
-    expect(markup).toContain("重规划草稿由 DOMO 自动应用");
-    expect(markup).not.toContain("确认并应用重规划");
+    const autoImpact = confirmImpact(draft, [], "auto");
+    expect(autoImpact.items.join(" ")).toContain("取消 1 个未完成任务（T2）");
+    expect(autoImpact.items.join(" ")).toContain("扩大任务范围（T3）");
+    expect(autoImpact.items.join(" ")).toContain("修改项目或任务验收标准");
+    expect(autoImpact.items.join(" ")).toContain("已确认目标保持不变");
+    expect(autoImpact.items.join(" ")).not.toContain("修改项目目标");
+    expect(autoImpact.note).toContain("自动应用");
+    expect(confirmImpact(draft, [], "manual").note).toContain("确认后才会");
+
+    for (const mode of ["manual", "auto"] as const) {
+      const markup = renderToStaticMarkup(
+        <ProposalCard
+          proposal={draft}
+          activeTasks={[]}
+          mode={mode}
+          busy={false}
+          confirming={false}
+          disabled={false}
+          confirmDisabledReason={null}
+          onConfirm={() => {}}
+        />,
+      );
+      expect(markup).toContain("高影响重规划草稿");
+      expect(markup).toContain("确认草稿，应用重规划");
+      expect(markup).toContain("<button");
+      expect(markup).not.toContain("重规划草稿由 DOMO 自动应用");
+    }
   });
 });

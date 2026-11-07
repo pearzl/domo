@@ -23,7 +23,7 @@ export function ReplanPanel({
     <section className="panel">
       <h2>重新规划</h2>
       <p className="subtitle">
-        提交后暂停旧任务派发并生成方案草稿，旧任务、报告和验收口径在分析期间保持可恢复。草稿生成后由 DOMO 自动应用：取消未完成任务、保留已完成任务并原子切换计划；应用前可以放弃重规划。请说明需要重新规划的原因。
+        提交后暂停旧任务派发并生成方案草稿，旧任务、报告和验收口径在分析期间保持可恢复。草稿生成后按项目的确认方式处理：自动确认时直接应用，人工确认时等待你确认后应用。应用时取消未完成任务、保留已完成任务并原子切换计划；应用前可以放弃重规划。请说明需要重新规划的原因。
       </p>
       <div className="replan-preview">
         <div className="replan-preview-group">

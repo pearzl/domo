@@ -2220,24 +2220,28 @@ small {
   margin-bottom: 4px;
 }
 
-/* 用户反馈后，先前的规划者分析结果收起为一行摘要。 */
-.message-folded {
+/* 规划者长回复折叠为摘要，展开后在固定高度区域内滚动。 */
+.message-collapsible {
   padding: 0;
 }
 
-.message-folded > summary {
+.message-collapsible > summary {
   display: flex;
   align-items: baseline;
   gap: 8px;
   padding: 10px 12px;
+  cursor: pointer;
 }
 
-.message-folded > summary .message-role {
+.message-collapsible > summary .message-role {
   margin-bottom: 0;
 }
 
-.message-folded > .message-content {
+.message-collapsible > .message-scroll {
+  max-height: 360px;
+  overflow: auto;
   padding: 0 12px 10px;
+  overscroll-behavior: contain;
 }
 
 .message-waiting {
@@ -5395,7 +5399,7 @@ summary {
   }
 }
 
-/* 自动确认策略行：状态文字、说明与开关同处一行，开启时整行提示色。 */
+/* 自动确认策略行：复选框、状态文字与说明同处一行，开启时整行提示色。 */
 .policy-row {
   display: flex;
   align-items: center;
@@ -5405,6 +5409,7 @@ summary {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface-soft);
+  cursor: pointer;
   transition:
     background-color 160ms ease,
     border-color 160ms ease;
@@ -5415,23 +5420,18 @@ summary {
   background: var(--success-soft);
 }
 
-.policy-row-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
+.policy-checkbox {
   flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--success);
+  cursor: pointer;
 }
 
-.policy-row-on .policy-row-icon {
-  border-color: var(--success);
-  color: var(--success);
+.policy-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .policy-row-text {
@@ -5459,51 +5459,6 @@ summary {
 .policy-row-note {
   font-size: 0.78rem;
   line-height: 1.45;
-}
-
-.switch {
-  position: relative;
-  flex: none;
-  width: 42px;
-  height: 24px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
-  background: #8996a8;
-  cursor: pointer;
-  transition:
-    background-color 180ms ease,
-    border-color 180ms ease;
-}
-
-.switch[aria-checked="true"] {
-  background: var(--success);
-  border-color: var(--success);
-}
-
-.switch:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.switch:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.switch-thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 180ms ease;
-}
-
-.switch[aria-checked="true"] .switch-thumb {
-  transform: translateX(18px);
 }
 
 /* 方案卡片：六节折叠小节 + 底部确认与影响摘要。 */
@@ -5661,8 +5616,6 @@ summary {
 
 @media (prefers-reduced-motion: reduce) {
   .policy-row,
-  .switch,
-  .switch-thumb,
   .proposal-section > summary::before {
     transition: none;
   }
