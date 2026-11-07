@@ -5,7 +5,7 @@ use crate::domain::{MAX_DERIVED_TASKS, MAX_PLAN_TASKS};
 use crate::models::{
     MessageRow, JOB_ROLE_ACCEPTANCE, JOB_ROLE_ANALYSIS, JOB_ROLE_EXECUTOR, JOB_ROLE_REPLAN_REVIEW,
     JOB_ROLE_SUMMARY, JOB_ROLE_VERIFIER, REPLAN_SOURCE_ACCEPTANCE, REPLAN_SOURCE_EXECUTOR,
-    REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE,
+    REPLAN_SOURCE_HUMAN, REPORT_MESSAGE_ROLE, STATUS_CANCELED, TASK_STAGE_COMPLETED,
 };
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,17 @@ pub struct SummaryTaskInfo {
     pub key: String,
     pub title: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskStateInfo {
+    pub key: String,
+    pub title: String,
+    pub status: Option<String>,
+    pub stage: String,
+    pub deps: Vec<String>,
+    pub summary: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +72,7 @@ pub struct PromptData {
     pub summary_tasks: Vec<SummaryTaskInfo>,
     pub completed_tasks: Vec<SummaryTaskInfo>,
     pub canceled_tasks: Vec<SummaryTaskInfo>,
+    pub task_states: Vec<TaskStateInfo>,
     pub diff_stat: String,
     pub job_dir: String,
     pub project_resources_dir: String,
@@ -75,6 +87,42 @@ pub struct PromptData {
     pub project_summary: Option<String>,
     pub project_assumptions: Vec<String>,
     pub confirm_mode: String,
+}
+
+const MAX_HISTORY_CHARS: usize = 10_000;
+const MAX_MESSAGE_CHARS: usize = 2_000;
+const MAX_PLANNER_DIGEST_CHARS: usize = 800;
+const MAX_TASK_STATE_CHARS: usize = 8_000;
+const MAX_TASK_SUMMARY_CHARS: usize = 240;
+const MAX_PROJECT_SUMMARY_CHARS: usize = 1_200;
+
+fn clip(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut clipped: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        clipped.push('…');
+    }
+    clipped
+}
+
+fn joined(items: &[String], limit: usize) -> String {
+    let mut lines = String::new();
+    let mut omitted = 0;
+    for (index, line) in items.iter().enumerate() {
+        if lines.chars().count() + line.chars().count() + 3 > limit {
+            omitted = items.len() - index;
+            break;
+        }
+        lines.push_str("- ");
+        lines.push_str(line);
+        lines.push('\n');
+    }
+    if omitted > 0 {
+        lines.push_str(&format!(
+            "- （其余 {omitted} 项省略，完整内容见任务记录与作业快照）\n"
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -107,7 +155,10 @@ pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> 
         prompt.push_str(user_report_rules());
     }
     if let Some(inputs) = inputs {
-        prompt.push_str(&format!("\n## 交付契约快照\n{}\n", inputs.contract));
+        prompt.push_str(&format!(
+            "\n## 交付契约\n{}\n",
+            contract_context(inputs.contract)
+        ));
         prompt.push_str(&shared_context(data, inputs.shared));
         prompt.push_str(&artifact_context(data, inputs.artifacts));
         if let Some(review) = inputs.review {
@@ -116,6 +167,35 @@ pub fn render_with_inputs(data: &PromptData, inputs: Option<&JobInputs<'_>>) -> 
     }
     prompt.push_str(&result_rules(data, &result_schema(data, inputs)));
     prompt
+}
+
+/// The contract is a versioned snapshot, but only its stable project-level parts
+/// belong in the prompt. Task text and status come from the task records, so the
+/// historical task list and replan impact must not compete with them.
+fn contract_context(contract: &serde_json::Value) -> String {
+    let proposal = contract.get("proposal");
+    let acceptance = proposal
+        .and_then(|value| value.get("acceptance"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let assumptions = proposal
+        .and_then(|value| value.get("assumptions"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let mut snapshot = serde_json::json!({
+        "id": contract.get("id"),
+        "goal": contract.get("goal"),
+        "acceptance": acceptance,
+        "assumptions": assumptions,
+    });
+    if proposal.is_none_or(|value| value.is_null()) {
+        snapshot["note"] = serde_json::json!(
+            "当前契约未包含方案正文；按项目目标与任务记录核实，不推断既有验收结论。"
+        );
+    }
+    format!(
+        "当前版本契约，仅含项目目标、项目级验收和关键假设；任务描述、任务验收与依赖以任务记录为准，历史任务清单和重规划影响不再重复注入：\n{snapshot}"
+    )
 }
 
 /// Resource indexes locate important results; role, task scope and explicit user
@@ -505,23 +585,66 @@ pub fn merge_prompt(
     format!("# 本次作业\n合入冲突处理者：完成用户已授权的项目合入，不创建任务或改变交付范围。\n\n## 输入\n- 项目：{project_name}\n- 项目原提交：{original}\n- 目标分支：{target_branch} @ {base}\n- 隔离工作目录：{cwd}\n- DOMO 尝试 rebase 的结果：{initial}\n\n## 运行权限与工作要求\n- 检查隔离目录当前 rebase 状态；已完成时核对结果，未完成时逐步解决冲突，保留项目与目标的有效修改及线性历史。\n- 只修改隔离目录的冲突文件；允许对明确解决的文件执行 git add，并使用 git -c core.editor=true rebase --continue 继续。不得修改其他工作区、切换分支、推送或重置历史。\n- 运行与冲突涉及行为相关的安全检查，说明实际结果和未验证项；无法继续时保留现场并报告具体阻塞。\n- DOMO 核对引用后直接继续合入，本流程不另行派发验收或确认；不要把此流程描述成已完成独立验收。\n{}{}\n## 结果文件\n用文件工具向 {result_path} 写入一个完整 JSON 对象并确认可读取，stdout 不作为结果协议。二选一：\n{{\"kind\":\"done\",\"summary\":\"解决的冲突、检查结果与风险\"}}\n{{\"kind\":\"failed\",\"reason\":\"具体阻塞与解除条件\"}}\n", long_command_rules(), output_boundary_rules())
 }
 
+/// Conversation messages are display records, not a prompt format. A planner
+/// message repeats the whole confirmed plan, so only its summary is useful here;
+/// the current task state and contract carry the plan itself.
 fn conversation_history(data: &PromptData) -> String {
-    let mut history = String::new();
+    let mut blocks: Vec<String> = Vec::new();
     for message in &data.messages {
-        history.push_str(&format!(
-            "\n[{}]\n{}\n",
-            if message.role == "user" {
-                "用户"
-            } else {
-                "规划者"
-            },
-            message.content
-        ));
+        let block = if message.role == "user" {
+            format!(
+                "\n[用户]\n{}\n",
+                clip(message.content.trim(), MAX_MESSAGE_CHARS)
+            )
+        } else if message.role == "planner" {
+            format!("\n[规划者]\n{}\n", planner_message_digest(&message.content))
+        } else {
+            continue;
+        };
+        blocks.push(block);
     }
-    if history.is_empty() {
-        history.push_str("\n（暂无对话）\n");
+    let block_count = blocks.len();
+    let total: usize = blocks.iter().map(|block| block.chars().count()).sum();
+    let mut kept = Vec::new();
+    if total > MAX_HISTORY_CHARS {
+        let mut used = 0;
+        for block in blocks.iter().rev() {
+            let size = block.chars().count();
+            if used + size > MAX_HISTORY_CHARS {
+                break;
+            }
+            used += size;
+            kept.push(block.clone());
+        }
+        kept.reverse();
+    } else {
+        kept = blocks;
     }
+    if kept.is_empty() {
+        return "\n（暂无对话）\n".into();
+    }
+    let mut history = String::new();
+    if kept.len() < block_count {
+        history.push_str("（较早对话已省略，仅保留最近记录；完整原文见作业快照。）\n");
+    }
+    history.extend(kept);
     history
+}
+
+fn planner_message_digest(content: &str) -> String {
+    let trimmed = content.trim();
+    let is_plan = trimmed.contains("\n\n任务：") || trimmed.contains("\n\n目标：");
+    if !is_plan {
+        return clip(trimmed, MAX_MESSAGE_CHARS);
+    }
+    let first = trimmed.split("\n\n").next().unwrap_or(trimmed).trim();
+    let mut digest = clip(first, MAX_PLANNER_DIGEST_CHARS);
+    if digest != trimmed {
+        digest.push_str(
+            "\n（其余规划正文与任务清单已省略；当前任务、验收与依赖以“当前状态”和交付契约为准。）",
+        );
+    }
+    digest
 }
 
 /// One policy for initial plans, replacement plans and executor-owned delegation.
@@ -539,6 +662,7 @@ fn task_decomposition_rules() -> &'static str {
 
 fn analysis_prompt(data: &PromptData) -> String {
     let replan = replan_section(data);
+    let state = current_state_section(data);
     format!(
         "\n## 分析要求\n\
          - 根据目标调查相关文件、接口和环境，区分已核实的现状与待确认事项，给出方案取舍、交付物、范围边界和风险；\n\
@@ -550,8 +674,10 @@ fn analysis_prompt(data: &PromptData) -> String {
          {}\
          {}\
          {}\
+         {}\
          \n## 项目分析对话\n{}\n",
         replan,
+        state,
         task_decomposition_rules(),
         confirmation_rules(data),
         conversation_history(data),
@@ -573,59 +699,92 @@ fn replan_section(data: &PromptData) -> String {
         Some(REPLAN_SOURCE_HUMAN) => "人工",
         _ => "未知",
     };
-    let completed = if data.completed_tasks.is_empty() {
-        "（没有已完成任务）".to_string()
-    } else {
-        data.completed_tasks
-            .iter()
-            .map(|task| {
-                format!(
-                    "- {} {}：{}",
-                    task.key,
-                    task.title,
-                    if task.summary.is_empty() {
-                        "已完成"
-                    } else {
-                        &task.summary
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let canceled = if data.canceled_tasks.is_empty() {
-        "（没有被取消的任务）".to_string()
-    } else {
-        data.canceled_tasks
-            .iter()
-            .map(|task| {
-                format!(
-                    "- {} {}：{}",
-                    task.key,
-                    task.title,
-                    if task.summary.is_empty() {
-                        "已取消"
-                    } else {
-                        &task.summary
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     format!(
-        "\n## 重规划上下文\n\
-         重规划原因（来源：{source}）：\n{reason}\n\
-         \n已完成任务及保留成果：\n{completed}\n\
-         \n不保留任务（未完成任务及随父任务取消的整个子任务族）：\n{canceled}\n\
-         \n## 重规划约束\n\
-         - 必须沿用当前项目目标，重规划不得修改目标；只有用户主动提交新目标才能改变它；\n\
-         - 新计划只包含仍需完成的工作，保留并复用已完成成果；发现实际缺陷可安排针对性修复，不重复已满足的交付；\n\
-         - 新计划最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段推进，本次只规划距离关键进展最近的一批，后续再通过重规划派发新任务；\n\
-         - deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n\
-         - 可以复用当前未完成或已取消任务的 key；\n\
-         - 如果重规划原因表明原计划存在事实错误，必须在新计划中修正；\n\
-         - 不得降低项目级验收口径；如需调整范围，必须在方案摘要中说明原因和影响。\n"
+        "\n## 重规划上下文\n重规划原因（来源：{source}）：\n{reason}\n\n保留与取消范围见“当前状态”；已完成任务的成果摘要只作定位线索，不代替当前文件与版本核对。\n\n## 重规划约束\n- 必须沿用当前项目目标，重规划不得修改目标；只有用户主动提交新目标才能改变它；\n- 新计划只包含仍需完成的工作，保留并复用已完成成果；发现实际缺陷可安排针对性修复，不重复已满足的交付；\n- 新计划最多包含 {MAX_PLAN_TASKS} 个任务；大型项目按阶段推进，本次只规划距离关键进展最近的一批，后续再通过重规划派发新任务；\n- deps 只能引用新计划里的任务 key，不得引用已完成或已取消的旧任务；\n- 可以复用当前未完成或已取消任务的 key；\n- 如果重规划原因表明原计划存在事实错误，必须在新计划中修正；\n- 不得降低项目级验收口径；如需调整范围，必须在方案摘要中说明原因和影响。\n"
+    )
+}
+
+/// The single source of task status. Completed results are reduced to one line,
+/// unfinished work is separated from canceled work, and each line keeps enough
+/// status and dependency data to plan without replaying full execution reports.
+fn current_state_section(data: &PromptData) -> String {
+    let mut completed = Vec::new();
+    let mut partial = Vec::new();
+    let mut remaining = Vec::new();
+    let mut canceled = Vec::new();
+    for task in &data.task_states {
+        let label = format!("{} {}", task.key, task.title);
+        let deps = if task.deps.is_empty() {
+            "无依赖".to_string()
+        } else {
+            format!("依赖：{}", task.deps.join("、"))
+        };
+        let summary = task.summary.trim();
+        let cancellation_only = summary.is_empty() || summary == "已取消" || summary == "未保留";
+        if task.stage == TASK_STAGE_COMPLETED {
+            let result = if summary.is_empty() {
+                "已完成".to_string()
+            } else {
+                clip(summary, MAX_TASK_SUMMARY_CHARS)
+            };
+            completed.push(format!("{label}（{deps}）：{result}"));
+        } else if task.status.as_deref() == Some(STATUS_CANCELED) && cancellation_only {
+            canceled.push(label);
+        } else if !summary.is_empty() {
+            let status = task.status.as_deref().unwrap_or("未开始");
+            partial.push(format!(
+                "{label}（状态：{status}；{deps}）：{}",
+                clip(task.summary.trim(), MAX_TASK_SUMMARY_CHARS)
+            ));
+        } else {
+            let status = task.status.as_deref().unwrap_or("未开始");
+            let note = task.last_error.as_deref().unwrap_or("尚无结果");
+            remaining.push(format!(
+                "{label}（状态：{status}；{deps}）：{}",
+                clip(note, MAX_TASK_SUMMARY_CHARS)
+            ));
+        }
+    }
+    if completed.is_empty() && partial.is_empty() && remaining.is_empty() && canceled.is_empty() {
+        return String::new();
+    }
+    let mut body = String::new();
+    if let Some(summary) = data
+        .project_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!(
+            "上一版方案摘要（用于理解取舍，不代表当前任务状态）：\n{}\n\n",
+            clip(summary, MAX_PROJECT_SUMMARY_CHARS)
+        ));
+    }
+    if !remaining.is_empty() {
+        body.push_str(&format!(
+            "未完成任务（{}，应用新计划时会取消，需要重新安排；可复用其 key）：\n",
+            remaining.len()
+        ));
+        body.push_str(&joined(&remaining, MAX_TASK_STATE_CHARS / 3));
+    }
+    if !partial.is_empty() {
+        body.push_str(&format!(
+            "\n失败或部分完成（{}，旧结论不保留；新计划需先核实并复用可行部分）：\n",
+            partial.len()
+        ));
+        body.push_str(&joined(&partial, MAX_TASK_STATE_CHARS / 4));
+    }
+    if !completed.is_empty() {
+        body.push_str(&format!("\n已完成任务（{}）：\n", completed.len()));
+        body.push_str(&joined(&completed, MAX_TASK_STATE_CHARS / 3));
+    }
+    if !canceled.is_empty() {
+        body.push_str(&format!("\n已取消任务（{}，不再需要）：\n", canceled.len()));
+        body.push_str(&joined(&canceled, MAX_TASK_STATE_CHARS / 8));
+    }
+    format!(
+        "\n## 当前状态\n任务记录是规划的事实基线；结果摘要只用于定位成果，完整内容见作业目录 context.json、任务结果与工作区。\n{}",
+        clip(&body, MAX_TASK_STATE_CHARS)
     )
 }
 
@@ -1125,6 +1284,26 @@ mod tests {
                 title: "旧任务".into(),
                 summary: "已取消".into(),
             }],
+            task_states: vec![
+                TaskStateInfo {
+                    key: "T1".into(),
+                    title: "整理结果".into(),
+                    status: Some("succeeded".into()),
+                    stage: TASK_STAGE_COMPLETED.into(),
+                    deps: Vec::new(),
+                    summary: "已完成".into(),
+                    last_error: None,
+                },
+                TaskStateInfo {
+                    key: "T2".into(),
+                    title: "旧任务".into(),
+                    status: Some(STATUS_CANCELED.into()),
+                    stage: "pending".into(),
+                    deps: Vec::new(),
+                    summary: "已取消".into(),
+                    last_error: None,
+                },
+            ],
             diff_stat: "1 file changed".into(),
             job_dir: "/workspace/jobs/job-1".into(),
             project_resources_dir: "/workspace/resources/project".into(),
@@ -1272,14 +1451,14 @@ mod tests {
             for heading in [
                 "# 本次作业",
                 "## 只读边界与运行权限",
-                "## 交付契约快照",
+                "## 交付契约",
                 "## 输入与产物边界",
                 "## 输出内容与消费边界",
                 "## 结果文件（必须执行）",
             ] {
                 assert_eq!(prompt.matches(heading).count(), 1, "{role}: {heading}");
             }
-            assert!(prompt.find("## 交付契约快照") < prompt.find("## 结果文件（必须执行）"));
+            assert!(prompt.find("## 交付契约") < prompt.find("## 结果文件（必须执行）"));
             let schema = result_schema(&data, Some(&inputs));
             assert!(prompt.ends_with(&format!("{schema}\n")));
             for line in schema.lines().filter(|line| line.starts_with('{')) {
@@ -1296,7 +1475,7 @@ mod tests {
                 invalid_result_continuation(&data, "specific-error", &prompt),
             ] {
                 assert!(retry.ends_with(&prompt));
-                assert_eq!(retry.matches("## 交付契约快照").count(), 1);
+                assert_eq!(retry.matches("## 交付契约").count(), 1);
                 assert_eq!(retry.matches("不得对外发布研究资料").count(), 1);
                 if role != JOB_ROLE_EXECUTOR {
                     assert!(!retry.contains("派生子任务的 deps"));
@@ -2104,5 +2283,154 @@ mod tests {
         let prompt = render(&data);
         assert!(prompt.contains("自动确认模式"), "缺少自动确认说明");
         assert!(prompt.contains("方案返回即视为确认"), "缺少自动确认说明");
+    }
+
+    #[test]
+    fn planner_plan_messages_are_reduced_to_a_digest() {
+        let mut data = sample_data(JOB_ROLE_ANALYSIS);
+        let summary = format!("首版方案摘要。{}", "长".repeat(1_500));
+        data.messages.push(MessageRow {
+            id: "msg-2".into(),
+            project_id: "proj-1".into(),
+            role: "planner".into(),
+            content: format!(
+                "{summary}\n\n目标：不应重复的目标\n\n任务：\n- T18 实现地图探索（依赖：无）\n  - 验收：不应进入对话正文"
+            ),
+            created_at: "2026-01-01T00:01:00Z".into(),
+        });
+        let prompt = render(&data);
+        assert!(prompt.contains("首版方案摘要。"), "缺少方案摘要");
+        assert!(
+            prompt.contains("其余规划正文与任务清单已省略"),
+            "缺少方案正文省略说明"
+        );
+        assert!(!prompt.contains("T18 实现地图探索"), "任务清单不应进入对话");
+        assert!(!prompt.contains("不应重复的目标"), "目标不应在对话中重复");
+    }
+
+    #[test]
+    fn planner_questions_remain_in_history() {
+        let mut data = sample_data(JOB_ROLE_ANALYSIS);
+        data.messages.push(MessageRow {
+            id: "msg-3".into(),
+            project_id: "proj-1".into(),
+            role: "planner".into(),
+            content: "需要确认采集范围。\n\n- 是否允许在隔离副本运行原版？".into(),
+            created_at: "2026-01-01T00:02:00Z".into(),
+        });
+        let prompt = render(&data);
+        assert!(
+            prompt.contains("是否允许在隔离副本运行原版"),
+            "规划者提问不应被摘要省略"
+        );
+    }
+
+    #[test]
+    fn contract_snapshot_keeps_only_project_level_fields() {
+        let data = sample_data(JOB_ROLE_ANALYSIS);
+        let contract = serde_json::json!({
+            "id": 7,
+            "goal": "当前目标契约",
+            "proposal": {
+                "summary": "方案摘要不应进入契约",
+                "acceptance": ["项目验收条款"],
+                "assumptions": ["关键假设条款"],
+                "tasks": [{
+                    "key": "T99",
+                    "title": "不应注入的任务标题",
+                    "description": "历史任务描述",
+                    "acceptance": ["历史任务验收"],
+                    "deps": []
+                }],
+                "replan_impact": {"canceled_task_keys": ["T17"], "high_impact": true}
+            }
+        });
+        let artifacts = serde_json::json!({"root": "/workspace", "items": []});
+        let shared = serde_json::json!({});
+        let version = serde_json::json!("commit");
+        let prompt = render_with_inputs(
+            &data,
+            Some(&JobInputs {
+                contract: &contract,
+                artifact_version: &version,
+                shared: &shared,
+                artifacts: &artifacts,
+                review: None,
+            }),
+        );
+        assert!(prompt.contains("当前目标契约"));
+        assert!(prompt.contains("项目验收条款"));
+        assert!(prompt.contains("关键假设条款"));
+        assert!(!prompt.contains("不应注入的任务标题"));
+        assert!(!prompt.contains("方案摘要不应进入契约"));
+        assert!(!prompt.contains("replan_impact"));
+        assert!(!prompt.contains("canceled_task_keys"));
+    }
+
+    #[test]
+    fn current_state_separates_task_status_and_dependencies() {
+        let mut data = sample_data(JOB_ROLE_ANALYSIS);
+        data.task_states.push(TaskStateInfo {
+            key: "T3".into(),
+            title: "接入渲染".into(),
+            status: Some("queued".into()),
+            stage: "pending".into(),
+            deps: vec!["T1".into()],
+            summary: String::new(),
+            last_error: Some("缺少 GPU 环境".into()),
+        });
+        data.task_states.push(TaskStateInfo {
+            key: "T4".into(),
+            title: "对话虚拟机".into(),
+            status: Some("blocked".into()),
+            stage: "pending".into(),
+            deps: Vec::new(),
+            summary: "已将 41 项内存测试跑通，但质量门未通过".into(),
+            last_error: None,
+        });
+        data.task_states.push(TaskStateInfo {
+            key: "T5".into(),
+            title: "战斗虚拟机".into(),
+            status: Some(STATUS_CANCELED.into()),
+            stage: "pending".into(),
+            deps: Vec::new(),
+            summary: "8 项单元测试通过，但真实首战脚本与质量门未核验".into(),
+            last_error: None,
+        });
+        let prompt = render(&data);
+        assert!(prompt.contains("## 当前状态"), "缺少当前状态标题");
+        assert!(prompt.contains("已完成任务（1）"));
+        assert!(prompt.contains("未完成任务（1"));
+        assert!(prompt.contains("失败或部分完成（2"));
+        assert!(prompt.contains("状态：queued"));
+        assert!(prompt.contains("依赖：T1"));
+        assert!(prompt.contains("缺少 GPU 环境"));
+        assert!(prompt.contains("41 项内存测试跑通"));
+        assert!(prompt.contains("已取消任务（1"));
+    }
+
+    #[test]
+    fn long_conversation_history_is_bounded() {
+        let mut data = sample_data(JOB_ROLE_ANALYSIS);
+        for index in 0..12 {
+            data.messages.push(MessageRow {
+                id: format!("msg-{index}"),
+                project_id: "proj-1".into(),
+                role: "user".into(),
+                content: "用户要求".repeat(800),
+                created_at: format!("2026-01-01T00:{index:02}:00Z"),
+            });
+        }
+        let prompt = render(&data);
+        assert!(prompt.contains("较早对话已省略"), "超长对话应保留省略说明");
+        let start = prompt.find("## 项目分析对话").unwrap();
+        let end = prompt[start..]
+            .find("\n\n## ")
+            .map(|offset| start + offset)
+            .unwrap_or(prompt.len());
+        assert!(
+            prompt[start..end].chars().count() < 12_000,
+            "对话正文超出预算"
+        );
     }
 }

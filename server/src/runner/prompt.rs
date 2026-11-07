@@ -6,7 +6,9 @@ use serde_json::json;
 use crate::git;
 use crate::models::*;
 use crate::paths;
-use crate::prompts::{DependencyInfo, DerivedTaskInfo, PromptData, SummaryTaskInfo, TaskInfo};
+use crate::prompts::{
+    DependencyInfo, DerivedTaskInfo, PromptData, SummaryTaskInfo, TaskInfo, TaskStateInfo,
+};
 use crate::state::AppState;
 
 use super::common::{load_task, parse_json_list};
@@ -108,16 +110,18 @@ pub(super) async fn build_prompt_data(
             .bind(&project.id)
             .fetch_all(&state.db)
             .await?;
-    for row in rows
+    let task_states: Vec<TaskStateInfo> = rows
         .iter()
-        .filter(|row| row.status.as_deref() == Some(STATUS_CANCELED))
-    {
-        canceled_tasks.push(SummaryTaskInfo {
+        .map(|row| TaskStateInfo {
             key: row.key.clone(),
             title: row.title.clone(),
-            summary: row.last_error.clone().unwrap_or_default(),
-        });
-    }
+            status: row.status.clone(),
+            stage: row.stage.clone(),
+            deps: parse_json_list(&row.deps),
+            summary: row.result_summary.clone().unwrap_or_default(),
+            last_error: row.last_error.clone(),
+        })
+        .collect();
     let partition = crate::replan::partition_tasks(rows);
     for row in &partition.retained {
         summary_tasks.push(SummaryTaskInfo {
@@ -137,7 +141,7 @@ pub(super) async fn build_prompt_data(
         canceled_tasks.push(SummaryTaskInfo {
             key: row.key,
             title: row.title,
-            summary: row.result_summary.unwrap_or_default(),
+            summary: row.result_summary.or(row.last_error).unwrap_or_default(),
         });
     }
     let workspace = PathBuf::from(&project.workspace);
@@ -206,6 +210,7 @@ pub(super) async fn build_prompt_data(
         summary_tasks,
         completed_tasks,
         canceled_tasks,
+        task_states,
         diff_stat,
         job_dir: job_dir.to_string_lossy().to_string(),
         project_resources_dir: paths::project_resources(&workspace)
@@ -303,6 +308,11 @@ pub(super) fn build_context(
         })).collect::<Vec<_>>(),
         "canceled_tasks": data.canceled_tasks.iter().map(|task| json!({
             "key": task.key, "title": task.title, "summary": task.summary,
+        })).collect::<Vec<_>>(),
+        "task_states": data.task_states.iter().map(|task| json!({
+            "key": task.key, "title": task.title, "status": task.status,
+            "stage": task.stage, "deps": task.deps, "summary": task.summary,
+            "last_error": task.last_error,
         })).collect::<Vec<_>>(),
         "diff_stat": data.diff_stat,
         "acceptance_criteria": data.acceptance_criteria,
